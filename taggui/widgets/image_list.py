@@ -141,6 +141,7 @@ class ImageListView(QListView):
         self.delegate = ImageDelegate(self)
         self.setItemDelegate(self.delegate)
         self.setWordWrap(True)
+        self.setDragEnabled(True)
         # If the actual height of the image is greater than 3 times the width,
         # the image will be scaled down to fit.
         self.setIconSize(QSize(image_width, image_width * 3))
@@ -478,3 +479,4 @@ class ImageList(QDockWidget):
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
         return self.list_view.get_selected_image_indices()
+
