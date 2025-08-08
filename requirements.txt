@@ -3,6 +3,7 @@ bitsandbytes==0.45.5
 ExifRead==3.3.1
 imagesize==1.4.1
 pillow==11.2.1
+pillow-jxl-plugin~=1.3.4
 pyparsing==3.2.1
 PySide6==6.9.0
 transformers==4.48.3

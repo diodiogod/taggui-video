@@ -12,28 +12,36 @@ import exifread
 import imagesize
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
                             QRect, QSize, Qt, QUrl, Signal, Slot)
-from PySide6.QtGui import QIcon, QImageReader, QPixmap
+from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox
+import pillow_jxl
+from PIL import Image as pilimage  # Import Pillow's Image class
+
 
 from utils.image import Image, ImageMarking, Marking
+from utils.jxlutil import get_jxl_size
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
 
 UNDO_STACK_SIZE = 32
 
+def pil_to_qimage(pil_image):
+    """Convert PIL image to QImage properly"""
+    pil_image = pil_image.convert("RGBA")
+    data = pil_image.tobytes("raw", "RGBA")
+    qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
+    return qimage
 
 def get_file_paths(directory_path: Path) -> set[Path]:
     """
-    Recursively get all file paths in a directory, including those in
+    Recursively get all file paths in a directory, including
     subdirectories.
     """
     file_paths = set()
-    for path in directory_path.iterdir():
+    for path in directory_path.rglob("*"):  # Use rglob for recursive search
         if path.is_file():
             file_paths.add(path)
-        elif path.is_dir():
-            file_paths.update(get_file_paths(path))
     return file_paths
 
 
@@ -85,7 +93,7 @@ class ImageListModel(QAbstractListModel):
     def rowCount(self, parent=None) -> int:
         return len(self.images)
 
-    def data(self, index, role=None) -> Image | str | QIcon | QSize:
+    def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
         image = self.images[index.row()]
         if role == Qt.ItemDataRole.UserRole:
             return image
@@ -101,21 +109,37 @@ class ImageListModel(QAbstractListModel):
             # it. Otherwise, generate a thumbnail and save it to the image.
             if image.thumbnail:
                 return image.thumbnail
-            image_reader = QImageReader(str(image.path))
-            # Rotate the image based on the orientation tag.
-            image_reader.setAutoTransform(True)
-            if image.crop:
-                crop = image.crop
-            else:
-                crop = QRect(QPoint(0, 0), image_reader.size())
-            if crop.height() > crop.width()*3:
-                # keep it reasonable, higher than 3x the width doesn't make sense
-                crop.setTop((crop.height() - crop.width()*3)//2) # center crop
-                crop.setHeight(crop.width()*3)
-            image_reader.setClipRect(crop)
-            pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
-                self.image_list_image_width,
-                Qt.TransformationMode.SmoothTransformation)
+            crop = image.crop
+            try:
+                if image.path.suffix.lower() == ".jxl":
+                    pil_image = pilimage.open(image.path)  # Uses pillow-jxl
+                    qimage = pil_to_qimage(pil_image)
+                    if not crop:
+                        crop = QRect(QPoint(0, 0), qimage.size())
+                    if crop.height() > crop.width()*3:
+                        # keep it reasonable, higher than 3x the width doesn't make sense
+                        crop.setTop((crop.height() - crop.width()*3)//2) # center crop
+                        crop.setHeight(crop.width()*3)
+
+                    pixmap = QPixmap.fromImage(qimage).scaledToWidth(
+                        self.image_list_image_width,
+                        Qt.TransformationMode.SmoothTransformation)
+                else:
+                    image_reader = QImageReader(str(image.path))
+                    # Rotate the image based on the orientation tag.
+                    image_reader.setAutoTransform(True)
+                    if not crop:
+                        crop = QRect(QPoint(0, 0), image_reader.size())
+                    if crop.height() > crop.width()*3:
+                        # keep it reasonable, higher than 3x the width doesn't make sense
+                        crop.setTop((crop.height() - crop.width()*3)//2) # center crop
+                        crop.setHeight(crop.width()*3)
+                    image_reader.setClipRect(crop)
+                    pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
+                        self.image_list_image_width,
+                        Qt.TransformationMode.SmoothTransformation)
+            except Exception as e:
+                print(f"Error loading image {image.path}: {e}")
             thumbnail = QIcon(pixmap)
             image.thumbnail = thumbnail
             return thumbnail
@@ -167,9 +191,10 @@ class ImageListModel(QAbstractListModel):
                                   if path.suffix == '.json'}
         for image_path in image_paths:
             try:
-                dimensions = imagesize.get(image_path)
-                # Check the Exif orientation tag and rotate the dimensions if
-                # necessary.
+                if str(image_path).endswith('jxl'):
+                    dimensions = get_jxl_size(image_path)
+                else:
+                    dimensions = pilimage.open(image_path).size
                 with open(image_path, 'rb') as image_file:
                     try:
                         exif_tags = exifread.process_file(

@@ -2,13 +2,14 @@ import re
 from math import ceil, floor, sqrt
 from PySide6.QtCore import (QModelIndex, QPersistentModelIndex, QPoint, QPointF,
                             QRect, QRectF, QSize, Qt, Signal, Slot)
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage,
                            QPainter, QPainterPath, QPen, QPixmap, QTransform,
                            QMouseEvent)
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsLineItem,
                                QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsTextItem, QGraphicsScene, QGraphicsView,
                                QMenu, QVBoxLayout, QWidget)
+from PIL import Image as pilimage
 from utils.settings import settings
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image, ImageMarking, Marking
@@ -672,7 +673,18 @@ class ImageViewer(QWidget):
         if is_complete:
             self.marking_items.clear()
             self.view.clear_scene()
-            pixmap = QPixmap(str(image.path))
+            if image.path.suffix.lower() == ".jxl":
+                 pil_image = pilimage.open(image.path)  # Decode JXL using Pillow
+                 pil_image = pil_image.convert("RGBA")  # Ensure RGBA format
+
+                 pixmap = QPixmap(QImage(
+                     pil_image.tobytes("raw", "RGBA"),
+                     pil_image.width,
+                     pil_image.height,
+                     QImage.Format_RGBA8888
+                 ))
+            else:
+                pixmap = QPixmap(str(image.path))
             image_item = QGraphicsPixmapItem(pixmap)
             image_item.setZValue(0)
             self.scene.setSceneRect(image_item.boundingRect()
