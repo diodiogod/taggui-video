@@ -148,7 +148,6 @@ class ImageListModel(QAbstractListModel):
         self.update_undo_and_redo_actions_requested.emit()
         error_messages: list[str] = []
         file_paths = get_file_paths(directory_path)
-        settings = get_settings()
         image_suffixes_string = settings.value(
             'image_list_file_formats',
             defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
