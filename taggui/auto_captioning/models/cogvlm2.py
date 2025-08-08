@@ -5,7 +5,7 @@ from torchvision import transforms
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
-from auto_captioning.models.cog import patch_cog_source_code
+from auto_captioning.models.cogvlm import patch_cogvlm_source_code
 from utils.enums import CaptionDevice
 from utils.image import Image
 
@@ -55,7 +55,7 @@ class Cogvlm2(AutoCaptioningModel):
         return arguments
 
     def patch_source_code(self) -> bool:
-        return patch_cog_source_code()
+        return patch_cogvlm_source_code()
 
     @staticmethod
     def get_default_prompt() -> str:
@@ -65,9 +65,9 @@ class Cogvlm2(AutoCaptioningModel):
     def format_prompt(prompt: str) -> str:
         return f'Question: {prompt} Answer:'
 
-    def get_model_inputs(self, image_prompt: str, image: Image) -> dict:
+    def get_model_inputs(self, image_prompt: str, image: Image, crop: bool) -> dict:
         text = self.get_input_text(image_prompt)
-        pil_image = self.load_image(image)
+        pil_image = self.load_image(image, crop)
         image_size = self.model.config.vision_config['image_size']
         patch_size = self.model.config.vision_config['patch_size']
         vision_tokens_count = ((image_size // patch_size // 2)
