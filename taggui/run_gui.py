@@ -18,6 +18,7 @@ def suppress_warnings():
     if environment == 'development':
         print('Running in development environment.')
         return
+    logging.getLogger('exifread').setLevel(logging.ERROR)
     logging.basicConfig(level=logging.ERROR)
     warnings.simplefilter('ignore')
     transformers.logging.set_verbosity_error()
