@@ -102,9 +102,13 @@ class ProxyImageListModel(QSortFilterProxyModel):
                         and dimension[0] == str(image.target_dimension.width())
                         and dimension[1] == str(image.target_dimension.height()))
         if filter_[1] == 'AND':
+            if len(filter_) < 3:
+                return self.does_image_match_filter(image, filter_[0])
             return (self.does_image_match_filter(image, filter_[0])
                     and self.does_image_match_filter(image, filter_[2:]))
         if filter_[1] == 'OR':
+            if len(filter_) < 3:
+                return self.does_image_match_filter(image, filter_[0])
             return (self.does_image_match_filter(image, filter_[0])
                     or self.does_image_match_filter(image, filter_[2:]))
         comparison_operator = comparison_operators[filter_[1]]
@@ -130,7 +134,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:
-        # Show all images if there is no filter.
+        # Show all images when there is no filter.
         if self.filter is None:
             return True
         image_index = self.sourceModel().index(source_row, 0)

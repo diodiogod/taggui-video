@@ -260,8 +260,11 @@ class AutoMarkings(QDockWidget):
         if self.show_alert_when_finished:
             self.marking_thread.finished.connect(self.show_alert)
         self.marking_thread.preload_model()
-        self.marking_settings_form.class_table.setRowCount(
-            len(self.marking_thread.model.names))
+        if self.marking_thread.model is None:
+            self.marking_settings_form.class_table.setRowCount(0)
+        else:
+            self.marking_settings_form.class_table.setRowCount(
+                len(self.marking_thread.model.names))
         for row, (class_id, class_name) in enumerate(
                 self.marking_thread.model.names.items()):
             self.marking_settings_form.class_table.setItem(

@@ -72,19 +72,21 @@ class TagCounterModel(QAbstractListModel):
 
     @Slot()
     def count_tags(self, images: list[Image]):
+        self.beginResetModel()
         self.tag_counter.clear()
         self.most_common_tags_filtered = None
         for image in images:
             self.tag_counter.update(image.tags)
         self.most_common_tags = self.tag_counter.most_common()
-        self.modelReset.emit()
+        self.endResetModel()
 
     @Slot()
     def count_tags_filtered(self, images: list[Image] | None):
+        self.beginResetModel()
         if images is None:
             self.most_common_tags_filtered = None
         else:
             self.most_common_tags_filtered = Counter()
             for image in images:
                 self.most_common_tags_filtered.update(image.tags)
-        self.modelReset.emit()
+        self.endResetModel()

@@ -195,10 +195,10 @@ class ImageListModel(QAbstractListModel):
                     dimensions = get_jxl_size(image_path)
                 else:
                     dimensions = pilimage.open(image_path).size
-                with open(image_path, 'rb') as image_file:
-                    try:
+                try:
+                    with open(image_path, 'rb') as image_file:
                         exif_tags = exifread.process_file(
-                            image_file, details=False,
+                            image_file, details=False, extract_thumbnail=False,
                             stop_tag='Image Orientation')
                         if 'Image Orientation' in exif_tags:
                             orientations = (exif_tags['Image Orientation']
@@ -206,9 +206,9 @@ class ImageListModel(QAbstractListModel):
                             if any(value in orientations
                                    for value in (5, 6, 7, 8)):
                                 dimensions = (dimensions[1], dimensions[0])
-                    except Exception as exception:
-                        error_messages.append(f'Failed to get Exif tags for '
-                                              f'{image_path}: {exception}')
+                except Exception as exception:
+                    error_messages.append(f'Failed to get Exif tags for '
+                                          f'{image_path}: {exception}')
             except (ValueError, OSError) as exception:
                 error_messages.append(f'Failed to get dimensions for '
                                       f'{image_path}: {exception}')
