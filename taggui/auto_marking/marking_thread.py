@@ -1,5 +1,8 @@
 from PySide6.QtCore import QModelIndex, QThread, Signal, Qt
 
+from PIL import Image as PILImage
+import pillow_jxl
+
 from ultralytics import YOLO
 
 from models.image_list_model import ImageListModel
@@ -45,7 +48,8 @@ class MarkingThread(ModelThread):
         if len(self.marking_settings['classes']) == 0:
             return 'No classes to mark selected.'
         classes = list(self.marking_settings['classes'].keys())
-        results = self.model.predict(source=image.path,
+        pil_image = PILImage.open(image.path)
+        results = self.model.predict(source=pil_image,
                                      conf=self.marking_settings['conf'],
                                      iou=self.marking_settings['iou'],
                                      max_det=self.marking_settings['max_det'],
