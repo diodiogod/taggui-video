@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
                             Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent)
-from PySide6.QtGui import QDesktopServices, QColor, QPen
+from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QVBoxLayout,
@@ -468,6 +468,36 @@ class ImageListView(QListView):
             self.setGridSize(QSize(grid_size, grid_size))
             # Force item delegate to recalculate sizes
             self.scheduleDelayedItemsLayout()
+
+    def startDrag(self, supportedActions: Qt.DropAction):
+        indices = self.selectedIndexes()
+        if not indices:
+            return
+
+        # Use mimeData from the model.
+        mime_data = self.model().mimeData(indices)
+        if not mime_data:
+            return
+
+        # The pixmap is just the icon of the first selected item.
+        # This avoids including the text.
+        icon = indices[0].data(Qt.ItemDataRole.DecorationRole)
+        pixmap = icon.pixmap(self.iconSize())
+
+        # Create a new pixmap with transparency for the drag image.
+        drag_pixmap = QPixmap(pixmap.size())
+        drag_pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(drag_pixmap)
+        painter.setOpacity(0.7)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.setPixmap(drag_pixmap)
+        drag.setHotSpot(drag_pixmap.rect().center())
+        drag.exec(supportedActions)
 
     @Slot(Grid)
     def show_crop_size(self, grid):
