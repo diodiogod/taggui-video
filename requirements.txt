@@ -19,7 +19,7 @@ torchvision==0.21.0
 xformers==0.0.29.post3
 
 # InternLM-XComposer2
-#gptqmodel this is trash.
+#gptqmodel optional. 
 numpy==2.2.6
 
 # WD Tagger
