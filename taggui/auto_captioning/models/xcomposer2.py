@@ -19,16 +19,17 @@ except ImportError:
     BaseGPTQModel = object
 
 
-class InternLMXComposer2GPTQ(BaseGPTQModel):
-    base_modules = ['vit', 'vision_proj', 'model.tok_embeddings', 'model.norm',
-                    'output']
-    layers_node = 'model.layers'
-    layer_modules = [
-        ['attention.wqkv.linear'],
-        ['attention.wo.linear'],
-        ['feed_forward.w1.linear', 'feed_forward.w3.linear'],
-        ['feed_forward.w2.linear'],
-    ]
+if HAS_GPTQ:
+    class InternLMXComposer2GPTQ(BaseGPTQModel):
+        base_modules = ['vit', 'vision_proj', 'model.tok_embeddings', 'model.norm',
+                        'output']
+        layers_node = 'model.layers'
+        layer_modules = [
+            ['attention.wqkv.linear'],
+            ['attention.wo.linear'],
+            ['feed_forward.w1.linear', 'feed_forward.w3.linear'],
+            ['feed_forward.w2.linear'],
+        ]
 
 
 class Xcomposer2(AutoCaptioningModel):
