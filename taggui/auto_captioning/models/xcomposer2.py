@@ -4,7 +4,12 @@ from contextlib import redirect_stdout
 import numpy as np
 import torch
 from PIL import Image as PilImage
-from gptqmodel.models import BaseGPTQModel
+try:
+    from gptqmodel.models import BaseGPTQModel
+    hasgptqmodel = True
+except:
+    hasgptqmodel = False
+    print("if you can install gptqmodel, please do. otherwise screw it. I cant get it installed.")
 from torchvision.transforms import functional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -13,16 +18,17 @@ from utils.enums import CaptionDevice
 from utils.image import Image
 
 
-class InternLMXComposer2GPTQ(BaseGPTQModel):
-    base_modules = ['vit', 'vision_proj', 'model.tok_embeddings', 'model.norm',
-                    'output']
-    layers_node = 'model.layers'
-    layer_modules = [
-        ['attention.wqkv.linear'],
-        ['attention.wo.linear'],
-        ['feed_forward.w1.linear', 'feed_forward.w3.linear'],
-        ['feed_forward.w2.linear'],
-    ]
+if hasgptqmodel:
+    class InternLMXComposer2GPTQ(BaseGPTQModel):
+        base_modules = ['vit', 'vision_proj', 'model.tok_embeddings', 'model.norm',
+                        'output']
+        layers_node = 'model.layers'
+        layer_modules = [
+            ['attention.wqkv.linear'],
+            ['attention.wo.linear'],
+            ['feed_forward.w1.linear', 'feed_forward.w3.linear'],
+            ['feed_forward.w2.linear'],
+        ]
 
 
 class Xcomposer2(AutoCaptioningModel):
