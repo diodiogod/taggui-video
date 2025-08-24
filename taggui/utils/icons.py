@@ -3,7 +3,7 @@ from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter, QPen, Qt, QPainterPath, QImage
 from PySide6.QtCore import QRect
 
-from taggui.utils.utils import get_resource_path
+from utils.utils import get_resource_path
 
 ICON_PATH = Path('images/icon.ico')
 TOGGLE_MARKING_ICON_PATH = Path('images/toggle_marking.png')
