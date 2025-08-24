@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.models.wd_tagger import WdTagger
+from auto_captioning.models.remote import RemoteGen
 from auto_captioning.models_list import MODELS, get_model_class
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 from models.image_list_model import ImageListModel
@@ -66,6 +67,12 @@ class CaptionSettingsForm(QVBoxLayout):
         self.model_combo_box.setEditable(True)
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
+        
+        #remote only:
+        self.remote_address_line_edit = SettingsLineEdit(key='remote_address', default='http://localhost:5000')
+        self.api_key_line_edit = SettingsLineEdit(key='api_key', default='')
+
+
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
         set_text_edit_height(self.prompt_text_edit, 4)
         self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
@@ -115,6 +122,8 @@ class CaptionSettingsForm(QVBoxLayout):
         remove_tag_separators_layout.addWidget(
             self.remove_tag_separators_check_box)
         basic_settings_form.addRow('Model', self.model_combo_box)
+        basic_settings_form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
+        basic_settings_form.addRow('API Key', self.api_key_line_edit)
         self.prompt_label = QLabel('Prompt')
         basic_settings_form.addRow(self.prompt_label, self.prompt_text_edit)
         self.caption_start_label = QLabel('Start caption with')
@@ -300,8 +309,15 @@ class CaptionSettingsForm(QVBoxLayout):
         is_wd_tagger_model = get_model_class(model_id) == WdTagger
         for widget in wd_tagger_widgets:
             widget.setVisible(is_wd_tagger_model)
+            self.remote_address_line_edit.setVisible(False)
+            self.api_key_line_edit.setVisible(False)
         for widget in non_wd_tagger_widgets:
+            self.remote_address_line_edit.setVisible(False)
+            self.api_key_line_edit.setVisible(False)
             widget.setVisible(not is_wd_tagger_model)
+        if get_model_class(model_id) == RemoteGen:
+            self.remote_address_line_edit.setVisible(True)
+            self.api_key_line_edit.setVisible(True)
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
     @Slot(str)
@@ -329,6 +345,8 @@ class CaptionSettingsForm(QVBoxLayout):
     def get_caption_settings(self) -> dict:
         return {
             'model_id': self.model_combo_box.currentText(),
+            'api_url': self.remote_address_line_edit.text(),
+            'api_key': self.api_key_line_edit.text(),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),
