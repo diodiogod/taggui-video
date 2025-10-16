@@ -4,13 +4,19 @@ from contextlib import redirect_stdout
 import numpy as np
 import torch
 from PIL import Image as PilImage
-from gptqmodel.models import BaseGPTQModel
 from torchvision.transforms import functional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.enums import CaptionDevice
 from utils.image import Image
+
+try:
+    from gptqmodel.models import BaseGPTQModel
+    HAS_GPTQ = True
+except ImportError:
+    HAS_GPTQ = False
+    BaseGPTQModel = object
 
 
 class InternLMXComposer2GPTQ(BaseGPTQModel):
@@ -46,6 +52,11 @@ class Xcomposer2(AutoCaptioningModel):
 
     def load_model(self, model_load_arguments: dict):
         if self.load_in_4_bit:
+            if not HAS_GPTQ:
+                raise ImportError(
+                    "gptqmodel is required for 4-bit models. "
+                    "Install it with: pip install gptqmodel"
+                )
             with self.model_load_context_manager:
                 model = InternLMXComposer2GPTQ.from_quantized(
                     self.model_id, trust_remote_code=True,
