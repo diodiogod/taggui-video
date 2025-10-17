@@ -7,10 +7,18 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
 class LoopSlider(QSlider):
     """Custom slider with visual loop markers."""
 
+    loop_start_changed = Signal(int)
+    loop_end_changed = Signal(int)
+
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
         self.loop_start = None
         self.loop_end = None
+        self._dragging_marker = None  # 'start', 'end', or None
+        self._marker_size = 20  # Click detection radius
+
+        # Set minimum height to show markers above slider
+        self.setMinimumHeight(30)
 
     def set_loop_markers(self, start, end):
         """Set loop marker positions."""
@@ -32,38 +40,39 @@ class LoopSlider(QSlider):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Calculate positions
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
         groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
 
-        # Draw loop markers as triangles
-        marker_size = 10
+        # Draw loop markers as triangles ABOVE the groove (pointing UP at it)
+        marker_width = 18  # Width of triangle base
+        marker_height = 14  # Height of triangle
 
         if self.loop_start is not None:
-            # Start marker (pink/magenta triangle pointing down)
+            # Start marker (pink/magenta triangle pointing UP to groove)
             pos = self._value_to_position(self.loop_start, groove)
             triangle = QPolygonF([
-                QPointF(pos, groove.top() - 2),
-                QPointF(pos - marker_size // 2, groove.top() - marker_size - 2),
-                QPointF(pos + marker_size // 2, groove.top() - marker_size - 2)
+                QPointF(pos, groove.top() - 2),  # Point at bottom (touching groove top)
+                QPointF(pos - marker_width / 2, groove.top() - marker_height - 2),  # Left corner
+                QPointF(pos + marker_width / 2, groove.top() - marker_height - 2)   # Right corner
             ])
+            painter.setPen(QPen(QColor(255, 255, 255), 2))  # White outline
             painter.setBrush(QColor(255, 0, 128))  # Pink/Magenta
-            painter.setPen(QPen(QColor(200, 0, 100), 2))
             painter.drawPolygon(triangle)
 
         if self.loop_end is not None:
-            # End marker (orange triangle pointing down)
+            # End marker (orange triangle pointing UP to groove)
             pos = self._value_to_position(self.loop_end, groove)
             triangle = QPolygonF([
-                QPointF(pos, groove.top() - 2),
-                QPointF(pos - marker_size // 2, groove.top() - marker_size - 2),
-                QPointF(pos + marker_size // 2, groove.top() - marker_size - 2)
+                QPointF(pos, groove.top() - 2),  # Point at bottom (touching groove top)
+                QPointF(pos - marker_width / 2, groove.top() - marker_height - 2),  # Left corner
+                QPointF(pos + marker_width / 2, groove.top() - marker_height - 2)   # Right corner
             ])
+            painter.setPen(QPen(QColor(255, 255, 255), 2))  # White outline
             painter.setBrush(QColor(255, 140, 0))  # Orange
-            painter.setPen(QPen(QColor(200, 100, 0), 2))
             painter.drawPolygon(triangle)
 
     def _value_to_position(self, value, groove_rect):
@@ -74,6 +83,95 @@ class LoopSlider(QSlider):
         ratio = (value - self.minimum()) / (self.maximum() - self.minimum())
         return int(groove_rect.left() + ratio * groove_rect.width())
 
+    def _position_to_value(self, x_pos, groove_rect):
+        """Convert pixel position to slider value."""
+        if groove_rect.width() == 0:
+            return self.minimum()
+
+        ratio = (x_pos - groove_rect.left()) / groove_rect.width()
+        ratio = max(0, min(1, ratio))
+        return int(self.minimum() + ratio * (self.maximum() - self.minimum()))
+
+    def _is_near_marker(self, pos, marker_value, groove_rect):
+        """Check if position is near a marker."""
+        if marker_value is None:
+            return False
+        marker_x = self._value_to_position(marker_value, groove_rect)
+        return abs(pos.x() - marker_x) < self._marker_size
+
+    def mousePressEvent(self, event):
+        """Handle mouse press for marker dragging and position jumping."""
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
+
+        # Check if clicking near a marker
+        if self._is_near_marker(event.pos(), self.loop_start, groove):
+            self._dragging_marker = 'start'
+            event.accept()
+            return
+        elif self._is_near_marker(event.pos(), self.loop_end, groove):
+            self._dragging_marker = 'end'
+            event.accept()
+            return
+
+        # Jump to clicked position on slider, then allow dragging
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Use the same calculation as _position_to_value for consistency
+            new_value = self._position_to_value(event.pos().x(), groove)
+
+            # Calculate where the handle will be for this value
+            handle_pos = self._value_to_position(new_value, groove)
+
+            # Create a modified event at the handle position so super() doesn't recalculate
+            from PySide6.QtGui import QMouseEvent
+            from PySide6.QtCore import QPointF
+            modified_event = QMouseEvent(
+                event.type(),
+                QPointF(handle_pos, event.pos().y()),
+                event.globalPosition(),
+                event.button(),
+                event.buttons(),
+                event.modifiers()
+            )
+
+            self.setValue(new_value)
+            # Pass modified event to super so it thinks we clicked on the handle
+            super().mousePressEvent(modified_event)
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for marker dragging."""
+        if self._dragging_marker:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
+
+            new_value = self._position_to_value(event.pos().x(), groove)
+
+            if self._dragging_marker == 'start':
+                self.loop_start = new_value
+                self.loop_start_changed.emit(new_value)
+            elif self._dragging_marker == 'end':
+                self.loop_end = new_value
+                self.loop_end_changed.emit(new_value)
+
+            self.update()
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release."""
+        if self._dragging_marker:
+            self._dragging_marker = None
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
 
 class VideoControlsWidget(QWidget):
     """Video playback controls with frame-accurate navigation - overlay widget."""
@@ -82,6 +180,8 @@ class VideoControlsWidget(QWidget):
     play_pause_requested = Signal()
     stop_requested = Signal()
     frame_changed = Signal(int)  # Frame number
+    skip_backward_requested = Signal()  # Skip 1 second backward
+    skip_forward_requested = Signal()  # Skip 1 second forward
     loop_start_set = Signal()
     loop_end_set = Signal()
     loop_reset = Signal()
@@ -96,6 +196,20 @@ class VideoControlsWidget(QWidget):
         palette.setColor(self.backgroundRole(), Qt.GlobalColor.black)
         self.setPalette(palette)
         self.setWindowOpacity(0.8)
+
+        # Enable mouse tracking for cursor updates
+        self.setMouseTracking(True)
+
+        # For dragging the controls
+        self._dragging = False
+        self._drag_start_pos = None
+
+        # For resizing the controls
+        self._resizing = False
+        self._resize_start_pos = None
+        self._resize_start_width = None
+        self._resize_start_x = None
+        self._resize_handle_width = 10  # Width of resize area on edges
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -131,6 +245,17 @@ class VideoControlsWidget(QWidget):
         self.next_frame_btn.setMaximumWidth(40)
         self.next_frame_btn.clicked.connect(self._next_frame)
 
+        # 1-second skip buttons
+        self.skip_back_btn = QPushButton('<<')
+        self.skip_back_btn.setToolTip('Skip 1 Second Backward')
+        self.skip_back_btn.setMaximumWidth(40)
+        self.skip_back_btn.clicked.connect(self.skip_backward_requested.emit)
+
+        self.skip_forward_btn = QPushButton('>>')
+        self.skip_forward_btn.setToolTip('Skip 1 Second Forward')
+        self.skip_forward_btn.setMaximumWidth(40)
+        self.skip_forward_btn.clicked.connect(self.skip_forward_requested.emit)
+
         # Frame number input
         self.frame_label = QLabel('Frame:')
         self.frame_spinbox = QSpinBox()
@@ -144,8 +269,10 @@ class VideoControlsWidget(QWidget):
         controls_layout.addWidget(self.play_pause_btn)
         controls_layout.addWidget(self.stop_btn)
         controls_layout.addSpacing(20)
+        controls_layout.addWidget(self.skip_back_btn)
         controls_layout.addWidget(self.prev_frame_btn)
         controls_layout.addWidget(self.next_frame_btn)
+        controls_layout.addWidget(self.skip_forward_btn)
         controls_layout.addSpacing(20)
         controls_layout.addWidget(self.frame_label)
         controls_layout.addWidget(self.frame_spinbox)
@@ -158,6 +285,9 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.setMinimum(0)
         self.timeline_slider.setMaximum(0)
         self.timeline_slider.valueChanged.connect(self._slider_changed)
+        # Connect marker dragging signals
+        self.timeline_slider.loop_start_changed.connect(self._on_loop_start_dragged)
+        self.timeline_slider.loop_end_changed.connect(self._on_loop_end_dragged)
         slider_layout.addWidget(self.timeline_slider)
 
         # Bottom row: Info display + Loop controls
@@ -188,8 +318,25 @@ class VideoControlsWidget(QWidget):
         self.loop_end_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
         self.loop_end_btn.clicked.connect(self._set_loop_end)
 
-        self.loop_checkbox = QCheckBox('Loop')
+        self.loop_checkbox = QPushButton('LOOP')
+        self.loop_checkbox.setCheckable(True)
         self.loop_checkbox.setToolTip('Enable/Disable Loop Playback')
+        self.loop_checkbox.setMaximumWidth(50)
+        self.loop_checkbox.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 10px;
+                padding: 2px 4px;
+                border: 2px solid #666;
+                background-color: #333;
+                color: #999;
+            }
+            QPushButton:checked {
+                background-color: #4CAF50;
+                color: white;
+                border: 2px solid #45a049;
+            }
+        """)
         self.loop_checkbox.toggled.connect(self._toggle_loop)
 
         self.loop_reset_btn = QPushButton('✕')
@@ -223,6 +370,84 @@ class VideoControlsWidget(QWidget):
 
         # Hide by default
         self.hide()
+
+    def _apply_scaling(self):
+        """Apply scaling to internal elements based on current width."""
+        width = self.width()
+
+        # Ideal size is 800px - only scale DOWN when smaller, never scale up
+        ideal_width = 800
+        scale = min(1.0, max(0.5, width / ideal_width))
+
+        # Scale button sizes
+        button_size = int(40 * scale)
+        for btn in [self.play_pause_btn, self.stop_btn, self.prev_frame_btn,
+                    self.next_frame_btn, self.skip_back_btn, self.skip_forward_btn]:
+            btn.setMaximumWidth(button_size)
+            btn.setMaximumHeight(button_size)
+
+        # Scale loop control buttons
+        loop_btn_size = int(30 * scale)
+        for btn in [self.loop_start_btn, self.loop_end_btn, self.loop_reset_btn]:
+            btn.setMaximumWidth(loop_btn_size)
+            btn.setMaximumHeight(loop_btn_size)
+            font_size = int(18 * scale)
+            btn.setStyleSheet(f"QPushButton {{ font-size: {font_size}px; padding: 2px; }}")
+
+        # Scale loop checkbox
+        loop_checkbox_width = int(50 * scale)
+        font_size_loop = int(10 * scale)
+        self.loop_checkbox.setMaximumWidth(loop_checkbox_width)
+        self.loop_checkbox.setStyleSheet(f"""
+            QPushButton {{
+                font-weight: bold;
+                font-size: {font_size_loop}px;
+                padding: 2px 4px;
+                border: 2px solid #666;
+                background-color: #333;
+                color: #999;
+            }}
+            QPushButton:checked {{
+                background-color: #4CAF50;
+                color: white;
+                border: 2px solid #45a049;
+            }}
+        """)
+
+        # Scale frame spinbox
+        spinbox_width = int(80 * scale)
+        self.frame_spinbox.setMaximumWidth(spinbox_width)
+        # Scale spinbox font (bigger base size: 12pt)
+        spinbox_font = self.frame_spinbox.font()
+        spinbox_font.setPointSize(max(9, int(12 * scale)))
+        self.frame_spinbox.setFont(spinbox_font)
+
+        # Scale label fonts (bigger base size: 11pt)
+        label_font = self.frame_label.font()
+        label_font.setPointSize(max(8, int(11 * scale)))
+        for label in [self.frame_label, self.time_label, self.fps_label,
+                      self.frame_count_label, self.frame_total_label]:
+            label.setFont(label_font)
+
+        # Scale slider minimum height
+        slider_height = int(30 * scale)
+        self.timeline_slider.setMinimumHeight(slider_height)
+
+        # Scale margins and spacing
+        margin = int(8 * scale)
+        spacing = int(8 * scale)
+        self.layout().setContentsMargins(margin, int(4 * scale), margin, int(4 * scale))
+        self.layout().setSpacing(spacing)
+
+    def resizeEvent(self, event):
+        """Scale all controls based on available width."""
+        super().resizeEvent(event)
+
+        # Don't interfere with manual resizing
+        if self._resizing:
+            return
+
+        self._apply_scaling()
 
     @Slot()
     def _prev_frame(self):
@@ -356,3 +581,120 @@ class VideoControlsWidget(QWidget):
         self.frame_total_label.setText('/ 0')
         self.set_playing(False)
         self._reset_loop()
+
+    @Slot(int)
+    def _on_loop_start_dragged(self, frame):
+        """Handle loop start marker being dragged."""
+        self.loop_start_frame = frame
+        self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
+        self.loop_start_set.emit()
+
+    @Slot(int)
+    def _on_loop_end_dragged(self, frame):
+        """Handle loop end marker being dragged."""
+        self.loop_end_frame = frame
+        self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
+        self.loop_end_set.emit()
+
+    def mousePressEvent(self, event):
+        """Start dragging or resizing the controls widget."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Check if near left or right edge for resize
+            if event.pos().x() <= self._resize_handle_width:
+                # Left edge resize
+                self._resizing = 'left'
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_width = self.width()
+                self._resize_start_x = self.x()
+                event.accept()
+                return
+            elif event.pos().x() >= self.width() - self._resize_handle_width:
+                # Right edge resize
+                self._resizing = 'right'
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_width = self.width()
+                event.accept()
+                return
+
+            # Otherwise, start dragging
+            self._dragging = True
+            self._drag_start_pos = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        """Drag or resize the controls widget, and update cursor."""
+        # Update cursor based on position
+        if not self._dragging and not self._resizing:
+            if event.pos().x() <= self._resize_handle_width or event.pos().x() >= self.width() - self._resize_handle_width:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        if self._resizing:
+            delta = event.globalPosition().toPoint() - self._resize_start_pos
+            parent_rect = self.parent().rect()
+
+            if self._resizing == 'left':
+                # Resize from left edge
+                new_width = self._resize_start_width - delta.x()
+                new_x = self._resize_start_x + delta.x()
+                # Clamp width (min 400px, max parent width)
+                new_width = max(400, min(new_width, parent_rect.width()))
+                # Adjust x to maintain right edge position
+                new_x = self._resize_start_x + (self._resize_start_width - new_width)
+                # Clamp x position
+                new_x = max(0, min(new_x, parent_rect.width() - new_width))
+                self.setGeometry(new_x, self.y(), new_width, self.height())
+            elif self._resizing == 'right':
+                # Resize from right edge
+                new_width = self._resize_start_width + delta.x()
+                # Clamp width (min 400px, max fits in parent)
+                max_width = parent_rect.width() - self.x()
+                new_width = max(400, min(new_width, max_width))
+                self.setGeometry(self.x(), self.y(), new_width, self.height())
+            event.accept()
+        elif self._dragging:
+            new_pos = event.globalPosition().toPoint() - self._drag_start_pos
+            # Keep within parent bounds
+            parent_rect = self.parent().rect()
+            new_pos.setX(max(0, min(new_pos.x(), parent_rect.width() - self.width())))
+            new_pos.setY(max(0, min(new_pos.y(), parent_rect.height() - self.height())))
+            self.move(new_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        """Stop dragging or resizing the controls widget."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_resizing = self._resizing
+            current_width = self.width()  # Save width before changing _resizing flag
+            self._dragging = False
+            self._resizing = False
+
+            # Trigger scaling update after resize is done
+            if was_resizing:
+                # Apply scaling to internal elements without changing widget width
+                self._apply_scaling()
+                # Adjust height to fit content, keeping width the same
+                self.adjustSize()
+                self.resize(current_width, self.sizeHint().height())
+                # Force complete layout recalculation
+                self.layout().invalidate()
+                self.layout().activate()
+                # Force slider to recalculate its internal geometry
+                self.timeline_slider.update()
+                # Repaint everything
+                self.update()
+
+            # Save position and width as percentage of parent dimensions
+            from utils.settings import settings
+            if self.parent():
+                parent_width = self.parent().width()
+                parent_height = self.parent().height()
+                if parent_width > 0 and parent_height > 0:
+                    x_percent = self.x() / parent_width
+                    y_percent = self.y() / parent_height
+                    width_percent = self.width() / parent_width
+                    settings.setValue('video_controls_x_percent', x_percent)
+                    settings.setValue('video_controls_y_percent', y_percent)
+                    settings.setValue('video_controls_width_percent', width_percent)
+            event.accept()
