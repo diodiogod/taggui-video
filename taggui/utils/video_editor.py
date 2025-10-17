@@ -331,13 +331,14 @@ class VideoEditor:
             segment2 = temp_dir / 'after.mp4'
             concat_list = temp_dir / 'concat.txt'
 
-            # Extract segment before frame (frames 0 to frame_num-1)
-            if frame_num > 0:
+            # Extract segment before frame (frames 0 to frame_num inclusive)
+            if frame_num >= 0:
                 # Use frame count instead of time for precision
+                # Include the frame we're repeating in segment1
                 cmd1 = [
                     'ffmpeg',
                     '-i', str(input_path),
-                    '-frames:v', str(frame_num),  # Exact frame count
+                    '-frames:v', str(frame_num + 1),  # Exact frame count (inclusive)
                     '-c', 'copy',
                     '-y',
                     str(segment1)
