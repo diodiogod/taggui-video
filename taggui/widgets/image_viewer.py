@@ -800,6 +800,16 @@ class ImageViewer(QWidget):
         self._controls_visible = True
         self._position_video_controls()
 
+    @Slot(bool)
+    def set_always_show_controls(self, always_show: bool):
+        """Toggle always-show mode for video controls."""
+        self.video_controls_auto_hide = not always_show
+        if always_show and self._is_video_loaded:
+            self._show_controls_permanent()
+        elif self._is_video_loaded:
+            # Re-enable auto-hide, show temporarily
+            self._show_controls_temporarily()
+
     @Slot()
     def load_image(self, proxy_image_index: QModelIndex, is_complete = True):
         persistent_image_index = QPersistentModelIndex(proxy_image_index)

@@ -131,6 +131,50 @@ class MainWindow(QMainWindow):
         self.add_show_marking_latent_action.setCheckable(True)
         self.add_show_marking_latent_action.setChecked(True)
         self.toolbar.addAction(self.add_show_marking_latent_action)
+
+        # Video editing controls
+        self.toolbar.addSeparator()
+
+        # Always show player controls toggle
+        self.always_show_controls_action = QAction(QIcon.fromTheme('video-display'),
+            'Always show video controls', self)
+        self.always_show_controls_action.setCheckable(True)
+        self.toolbar.addAction(self.always_show_controls_action)
+
+        # Fixed marker size
+        from PySide6.QtWidgets import QSpinBox
+        marker_size_widget = QWidget()
+        marker_size_layout = QHBoxLayout(marker_size_widget)
+        marker_size_layout.setContentsMargins(4, 0, 4, 0)
+        marker_size_layout.setSpacing(4)
+        marker_size_label = QLabel('Marker size:')
+        self.fixed_marker_size_spinbox = QSpinBox()
+        self.fixed_marker_size_spinbox.setMinimum(1)
+        self.fixed_marker_size_spinbox.setMaximum(9999)
+        self.fixed_marker_size_spinbox.setValue(31)
+        self.fixed_marker_size_spinbox.setSuffix(' frames')
+        self.fixed_marker_size_spinbox.setToolTip('Fixed frame count for auto markers')
+        marker_size_layout.addWidget(marker_size_label)
+        marker_size_layout.addWidget(self.fixed_marker_size_spinbox)
+        self.toolbar.addWidget(marker_size_widget)
+
+        # Video edit buttons
+        self.extract_range_action = QAction(QIcon.fromTheme('document-save'),
+            'Extract range to new video', self)
+        self.toolbar.addAction(self.extract_range_action)
+
+        self.remove_range_action = QAction(QIcon.fromTheme('edit-cut'),
+            'Remove range from video', self)
+        self.toolbar.addAction(self.remove_range_action)
+
+        self.remove_frame_action = QAction(QIcon.fromTheme('edit-delete'),
+            'Remove current frame', self)
+        self.toolbar.addAction(self.remove_frame_action)
+
+        self.repeat_frame_action = QAction(QIcon.fromTheme('edit-copy'),
+            'Repeat current frame', self)
+        self.toolbar.addAction(self.repeat_frame_action)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
@@ -809,6 +853,14 @@ class MainWindow(QMainWindow):
             lambda: self._update_loop_state())
         video_controls.loop_reset.connect(
             lambda: video_player.set_loop(False, None, None))
+
+        # Connect toolbar video editing controls
+        self.fixed_marker_size_spinbox.valueChanged.connect(
+            lambda value: setattr(video_controls, 'fixed_marker_size', value))
+
+        # Always show controls toggle
+        self.always_show_controls_action.toggled.connect(
+            lambda checked: self.image_viewer.set_always_show_controls(checked))
 
     def _update_loop_state(self):
         """Update video player loop state from controls."""
