@@ -410,14 +410,24 @@ class ImageList(QDockWidget):
                              | Qt.DockWidgetArea.RightDockWidgetArea)
 
         self.filter_line_edit = FilterLineEdit()
-        selection_mode_layout = QHBoxLayout()
-        selection_mode_label = QLabel('Selection mode')
+
+        # Selection mode and Sort on same row
+        selection_sort_layout = QHBoxLayout()
+        selection_mode_label = QLabel('Selection')
         self.selection_mode_combo_box = SettingsComboBox(
             key='image_list_selection_mode')
         self.selection_mode_combo_box.addItems(list(SelectionMode))
-        selection_mode_layout.addWidget(selection_mode_label)
-        selection_mode_layout.addWidget(self.selection_mode_combo_box,
-                                        stretch=1)
+
+        sort_label = QLabel('Sort')
+        self.sort_combo_box = SettingsComboBox(key='image_list_sort_by')
+        self.sort_combo_box.addItems(['Name', 'Modified', 'Created',
+                                       'Size', 'Type', 'Random'])
+
+        selection_sort_layout.addWidget(selection_mode_label)
+        selection_sort_layout.addWidget(self.selection_mode_combo_box, stretch=1)
+        selection_sort_layout.addWidget(sort_label)
+        selection_sort_layout.addWidget(self.sort_combo_box, stretch=1)
+
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)
         self.image_index_label = QLabel()
@@ -425,7 +435,7 @@ class ImageList(QDockWidget):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.filter_line_edit)
-        layout.addLayout(selection_mode_layout)
+        layout.addLayout(selection_sort_layout)
         layout.addWidget(self.list_view)
         layout.addWidget(self.image_index_label)
         self.setWidget(container)
@@ -433,6 +443,9 @@ class ImageList(QDockWidget):
         self.selection_mode_combo_box.currentTextChanged.connect(
             self.set_selection_mode)
         self.set_selection_mode(self.selection_mode_combo_box.currentText())
+
+        # Connect sort signal
+        self.sort_combo_box.currentTextChanged.connect(self._on_sort_changed)
 
     def set_selection_mode(self, selection_mode: str):
         if selection_mode == SelectionMode.DEFAULT:
@@ -492,4 +505,53 @@ class ImageList(QDockWidget):
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
         return self.list_view.get_selected_image_indices()
+
+    @Slot(str)
+    def _on_sort_changed(self, sort_by: str):
+        """Sort images when sort option changes."""
+        # Get the source model
+        source_model = self.proxy_image_list_model.sourceModel()
+        if not source_model or not hasattr(source_model, 'images'):
+            return
+
+        # Natural sort key function for filenames (handles numbers correctly)
+        def natural_sort_key(text):
+            import re
+            return [int(c) if c.isdigit() else c.lower()
+                    for c in re.split(r'(\d+)', text)]
+
+        # Safe file stat getter with fallback
+        def safe_stat(img, attr, default=0):
+            try:
+                return getattr(img.path.stat(), attr)
+            except (OSError, AttributeError):
+                return default
+
+        # Sort the images list
+        try:
+            # Emit layoutAboutToBeChanged before sorting
+            source_model.layoutAboutToBeChanged.emit()
+
+            if sort_by == 'Name':
+                source_model.images.sort(key=lambda img: natural_sort_key(img.path.name))
+            elif sort_by == 'Modified':
+                source_model.images.sort(key=lambda img: safe_stat(img, 'st_mtime'), reverse=True)
+            elif sort_by == 'Created':
+                source_model.images.sort(key=lambda img: safe_stat(img, 'st_ctime'), reverse=True)
+            elif sort_by == 'Size':
+                source_model.images.sort(key=lambda img: safe_stat(img, 'st_size'), reverse=True)
+            elif sort_by == 'Type':
+                source_model.images.sort(key=lambda img: (img.path.suffix.lower(), natural_sort_key(img.path.name)))
+            elif sort_by == 'Random':
+                import random
+                random.shuffle(source_model.images)
+
+            # Emit layoutChanged after sorting
+            source_model.layoutChanged.emit()
+        except Exception as e:
+            import traceback
+            print(f"Sort error: {e}")
+            traceback.print_exc()
+            # Ensure layoutChanged is emitted even on error
+            source_model.layoutChanged.emit()
 
