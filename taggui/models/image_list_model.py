@@ -34,6 +34,20 @@ def pil_to_qimage(pil_image):
     qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
     return qimage
 
+def natural_sort_key(path: Path):
+    """
+    Generate a key for natural/alphanumeric sorting.
+    Converts 'file1', 'file2', 'file11' to sort naturally instead of lexicographically.
+    """
+    import re
+    parts = []
+    for part in re.split(r'(\d+)', str(path)):
+        if part.isdigit():
+            parts.append(int(part))
+        else:
+            parts.append(part.lower())
+    return parts
+
 def get_file_paths(directory_path: Path) -> set[Path]:
     """
     Recursively get all file paths in a directory, including
@@ -63,6 +77,10 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         duration = frame_count / fps if fps > 0 else 0
 
+        # Get SAR (Sample Aspect Ratio)
+        sar_num = cap.get(cv2.CAP_PROP_SAR_NUM)
+        sar_den = cap.get(cv2.CAP_PROP_SAR_DEN)
+
         # Read first frame
         ret, frame = cap.read()
         cap.release()
@@ -81,7 +99,9 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
             'fps': fps,
             'duration': duration,
             'frame_count': frame_count,
-            'current_frame': 0
+            'current_frame': 0,
+            'sar_num': sar_num if sar_num > 0 else 1,
+            'sar_den': sar_den if sar_den > 0 else 1
         }
 
         return (width, height), video_metadata, pixmap
@@ -334,7 +354,7 @@ class ImageListModel(QAbstractListModel):
                                               f'"{meta.get('version')}" in '
                                               f'"{json_file_path}"')
             self.images.append(image)
-        self.images.sort(key=lambda image_: image_.path)
+        self.images.sort(key=lambda image_: natural_sort_key(image_.path))
         self.modelReset.emit()
         if len(error_messages) > 0:
             print('\n'.join(error_messages), file=sys.stderr)

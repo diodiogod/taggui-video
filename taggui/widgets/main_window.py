@@ -202,9 +202,9 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.repeat_frame_action)
 
         # Fix selected button - styled button with orange highlight
-        self.fix_frame_count_btn = QPushButton('Fix')
+        self.fix_frame_count_btn = QPushButton('N*4+1')
         self.fix_frame_count_btn.setToolTip('Fix N*4+1 for selected videos')
-        self.fix_frame_count_btn.setMaximumWidth(40)
+        self.fix_frame_count_btn.setMaximumWidth(50)
         self.fix_frame_count_btn.setMaximumHeight(32)
         self.fix_frame_count_btn.setStyleSheet("""
             QPushButton {
@@ -246,6 +246,52 @@ class MainWindow(QMainWindow):
             }
         """)
         self.toolbar.addWidget(self.fix_all_folder_btn)
+
+        # SAR fix buttons - styled button with red highlight
+        self.fix_sar_btn = QPushButton('SAR')
+        self.fix_sar_btn.setToolTip('Fix non-square pixels (SAR) for selected videos')
+        self.fix_sar_btn.setMaximumWidth(40)
+        self.fix_sar_btn.setMaximumHeight(32)
+        self.fix_sar_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 4px;
+                color: #ccc;
+            }
+            QPushButton:hover {
+                border-color: #FF5722;
+                background-color: #353535;
+                color: #FF5722;
+            }
+        """)
+        self.toolbar.addWidget(self.fix_sar_btn)
+
+        # Fix all SAR folder button - styled button with red highlight
+        self.fix_all_sar_btn = QPushButton('SAR*')
+        self.fix_all_sar_btn.setToolTip('Fix SAR for all videos in folder')
+        self.fix_all_sar_btn.setMaximumWidth(45)
+        self.fix_all_sar_btn.setMaximumHeight(32)
+        self.fix_all_sar_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 4px;
+                color: #ccc;
+            }
+            QPushButton:hover {
+                border-color: #FF5722;
+                background-color: #353535;
+                color: #FF5722;
+            }
+        """)
+        self.toolbar.addWidget(self.fix_all_sar_btn)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -955,6 +1001,8 @@ class MainWindow(QMainWindow):
         self.repeat_frame_action.triggered.connect(self._repeat_video_frame)
         self.fix_frame_count_btn.clicked.connect(self._fix_video_frame_count)
         self.fix_all_folder_btn.clicked.connect(self._fix_all_folder_frame_count)
+        self.fix_sar_btn.clicked.connect(self._fix_sar_selected)
+        self.fix_all_sar_btn.clicked.connect(self._fix_all_sar_folder)
 
     def _update_loop_state(self):
         """Update video player loop state from controls."""
@@ -1422,6 +1470,171 @@ class MainWindow(QMainWindow):
 
         if error_count > 0:
             QMessageBox.warning(self, "Batch Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.reload_directory()
+
+    def _fix_sar_selected(self):
+        """Fix non-square pixels (SAR) for selected videos."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtCore import Qt
+        from utils.video_editor import VideoEditor
+
+        # Get selected videos from image list
+        selected_indices = self.image_list.get_selected_image_indices()
+
+        if not selected_indices:
+            QMessageBox.warning(self, "No Selection", "Please select one or more videos to fix.")
+            return
+
+        # Filter to only videos
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = []
+        for idx in selected_indices:
+            image = self.image_list_model.data(idx, Qt.ItemDataRole.UserRole)
+            if image.path.suffix.lower() in video_extensions:
+                video_paths.append(image.path)
+
+        if not video_paths:
+            QMessageBox.warning(self, "No Videos", "No videos in selection.")
+            return
+
+        # Scan for non-square SAR videos
+        non_square_videos = []
+        for video_path in video_paths:
+            sar_num, sar_den, dims = VideoEditor.check_sar(video_path)
+            if sar_num and sar_den and sar_num != sar_den:
+                non_square_videos.append((video_path, sar_num, sar_den))
+
+        if not non_square_videos:
+            QMessageBox.information(self, "No Issues", "All selected videos have square pixels (SAR 1:1).")
+            return
+
+        # Confirm batch operation
+        sar_list = "\n".join([f"• {v[0].name} (SAR {v[1]}:{v[2]})" for v in non_square_videos[:5]])
+        if len(non_square_videos) > 5:
+            sar_list += f"\n... and {len(non_square_videos) - 5} more"
+
+        reply = QMessageBox.question(
+            self, "Fix SAR",
+            f"Found {len(non_square_videos)} video(s) with non-square pixels:\n\n{sar_list}\n\n"
+            f"Fix these videos?\nOriginals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count, error_count, errors = VideoEditor.batch_fix_sar(
+            [v[0] for v in non_square_videos],
+            progress_callback=lambda current, total, name: (
+                progress.setLabelText(f"Processing {name}..."),
+                progress.setValue(current),
+                progress.wasCanceled()
+            )
+        )
+
+        progress.setValue(len(non_square_videos))
+
+        # Show results
+        result_msg = f"Processed {len(non_square_videos)} video(s):\n"
+        result_msg += f"✓ Success: {success_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self, "SAR Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.reload_directory()
+
+    def _fix_all_sar_folder(self):
+        """Fix SAR for all videos in the current folder."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtCore import Qt
+        from utils.video_editor import VideoEditor
+
+        if not self.directory_path:
+            QMessageBox.warning(self, "No Directory", "No directory is loaded.")
+            return
+
+        # Find all videos in directory
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = [f for f in self.directory_path.iterdir()
+                      if f.is_file() and f.suffix.lower() in video_extensions]
+
+        if not video_paths:
+            QMessageBox.warning(self, "No Videos", "No videos found in current directory.")
+            return
+
+        # Scan for non-square SAR videos
+        non_square_videos = VideoEditor.scan_directory_for_non_square_sar(
+            self.directory_path, video_extensions
+        )
+
+        if not non_square_videos:
+            QMessageBox.information(self, "No Issues",
+                f"All {len(video_paths)} video(s) in folder have square pixels (SAR 1:1).")
+            return
+
+        # Confirm batch operation
+        sar_list = "\n".join([f"• {v[0].name} (SAR {v[1]}:{v[2]})" for v in non_square_videos[:5]])
+        if len(non_square_videos) > 5:
+            sar_list += f"\n... and {len(non_square_videos) - 5} more"
+
+        reply = QMessageBox.question(
+            self, "Fix All SAR",
+            f"Found {len(non_square_videos)}/{len(video_paths)} video(s) with non-square pixels:\n\n{sar_list}\n\n"
+            f"Fix these videos?\nOriginals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count, error_count, errors = VideoEditor.batch_fix_sar(
+            [v[0] for v in non_square_videos],
+            progress_callback=lambda current, total, name: (
+                progress.setLabelText(f"Processing {name}..."),
+                progress.setValue(current),
+                progress.wasCanceled()
+            )
+        )
+
+        progress.setValue(len(non_square_videos))
+
+        # Show results
+        result_msg = f"Processed {len(non_square_videos)} video(s):\n"
+        result_msg += f"✓ Success: {success_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self, "SAR Fix Complete", result_msg)
         else:
             QMessageBox.information(self, "Success", result_msg)
 
