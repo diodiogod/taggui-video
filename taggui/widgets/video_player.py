@@ -187,12 +187,20 @@ class VideoPlayerWidget(QWidget):
         # Clamp to extended range
         self.playback_speed = max(-8.0, min(8.0, speed))
 
+        # If speed is zero or very close, stop timer but stay in play mode
+        if abs(self.playback_speed) < 0.01:
+            if self.is_playing:
+                self.timer.stop()  # Stop timer but keep is_playing = True
+            return
+
         # Update timer interval if currently playing
         if self.is_playing and self.fps > 0:
             # Use absolute value for timer calculation
             abs_speed = abs(self.playback_speed)
             interval_ms = int(1000 / (self.fps * abs_speed))
+            self.timer.stop()
             self.timer.setInterval(interval_ms)
+            self.timer.start()  # Restart timer with new interval
 
     def cleanup(self):
         """Release video resources."""
