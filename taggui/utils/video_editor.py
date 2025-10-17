@@ -268,13 +268,17 @@ class VideoEditor:
                 if segment2.exists():
                     f.write(f"file '{segment2}'\n")
 
-            # Concatenate all segments
+            # Concatenate all segments with re-encoding to fix timing issues
             cmd5 = [
                 'ffmpeg',
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', str(concat_list),
-                '-c', 'copy',
+                '-c:v', 'libx264',
+                '-crf', '18',
+                '-preset', 'slow',
+                '-c:a', 'aac',
+                '-r', str(fps),  # Force consistent frame rate
                 '-y',
                 str(output_path)
             ]

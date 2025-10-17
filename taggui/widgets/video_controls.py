@@ -301,6 +301,7 @@ class VideoControlsWidget(QWidget):
         self.frame_spinbox.valueChanged.connect(self.frame_changed.emit)
 
         self.frame_total_label = QLabel('/ 0')
+        self.frame_total_label.setMinimumWidth(60)  # Make room for "last" text
 
         # Playback speed slider with extended range support (rubberband effect)
         self.speed_label = QLabel('Speed:')
@@ -716,6 +717,12 @@ class VideoControlsWidget(QWidget):
         self.fps_label.setText(f'{fps:.2f} fps')
         self.frame_count_label.setText(f'{frame_count} frames')
 
+        # Update frame total label initially
+        if frame_count > 0:
+            self.frame_total_label.setText(f'/ {frame_count}')
+        else:
+            self.frame_total_label.setText('/ 0')
+
         # Format duration as mm:ss.mmm
         minutes = int(duration // 60)
         seconds = int(duration % 60)
@@ -734,6 +741,18 @@ class VideoControlsWidget(QWidget):
         self.frame_spinbox.setValue(frame)
         self.timeline_slider.setValue(frame)
         self._updating_slider = False
+
+        # Update frame total label with "last" indicator
+        total_frames = self.frame_spinbox.maximum() + 1  # Convert from 0-based max to total count
+        if total_frames > 0:
+            is_last = frame == self.frame_spinbox.maximum()
+            if is_last:
+                frame_display = "last"
+            else:
+                frame_display = str(total_frames)
+            self.frame_total_label.setText(f'/ {frame_display}')
+        else:
+            self.frame_total_label.setText('/ 0')
 
         # Update time display
         time_seconds = time_ms / 1000.0

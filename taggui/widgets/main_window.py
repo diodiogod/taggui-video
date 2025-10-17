@@ -1081,10 +1081,13 @@ class MainWindow(QMainWindow):
         input_path = Path(video_player.video_path)
 
         # Ask how many times to repeat
+        max_frame = video_player.get_total_frames() - 1
+        is_last_frame = current_frame == max_frame
+        frame_desc = f"{current_frame} (last)" if is_last_frame else str(current_frame)
         repeat_count, ok = QInputDialog.getInt(
             self, "Repeat Frame",
-            f"How many times to repeat frame {current_frame}?",
-            value=1, min=1, max=100
+            f"How many times to repeat frame {frame_desc}?",
+            value=1, minValue=1, maxValue=100
         )
 
         if not ok:
