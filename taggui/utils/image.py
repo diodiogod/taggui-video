@@ -32,3 +32,5 @@ class Image:
     markings: list[Marking] = field(default_factory=list)
     rating: float = 0.0
     thumbnail: QIcon | None = None
+    is_video: bool = False
+    video_metadata: dict | None = None  # fps, duration, frame_count, current_frame

@@ -8,6 +8,9 @@ pyparsing==3.2.1
 PySide6==6.9.0
 transformers==4.48.3
 
+# Video support
+opencv-python==4.10.0.84
+
 # CogAgent
 timm==1.0.15
 
