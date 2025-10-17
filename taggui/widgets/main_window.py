@@ -1185,11 +1185,11 @@ class MainWindow(QMainWindow):
             upper_target = (current_n + 1) * 4 + 1
 
             # Calculate frames needed for each option
-            frames_to_lower = current_frames - lower_target  # Always >= 0
-            frames_to_upper = upper_target - current_frames  # Always > 0
+            frames_to_remove_for_lower = max(0, current_frames - lower_target)  # Frames to remove to reach lower target
+            frames_to_add_for_upper = upper_target - current_frames  # Frames to add to reach upper target
 
             # Choose the option requiring fewer frame changes
-            if frames_to_lower <= frames_to_upper:
+            if frames_to_remove_for_lower <= frames_to_add_for_upper:
                 target_frames = lower_target
             else:
                 target_frames = upper_target
