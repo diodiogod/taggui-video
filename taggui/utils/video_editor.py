@@ -226,16 +226,19 @@ class VideoEditor:
                     return False, f"Target frame count {target_frames} does not follow N*4+1 rule"
                 final_target = target_frames
             else:
-                # Find nearest valid N*4+1
+                # Find nearest valid N*4+1 with minimal changes
                 if (current_frames - 1) % 4 == 0:
                     return True, f"Video already has {current_frames} frames (valid N*4+1)"
-                # Try to go down first (remove frames), then up (add frames)
                 current_n = (current_frames - 1) // 4
                 lower_target = current_n * 4 + 1
                 upper_target = (current_n + 1) * 4 + 1
 
-                # Prefer lower target if it's not too much smaller
-                if lower_target >= current_frames * 0.9:  # Don't remove more than 10%
+                # Calculate frames needed for each option
+                frames_to_remove_for_lower = max(0, current_frames - lower_target)
+                frames_to_add_for_upper = upper_target - current_frames
+
+                # Choose the option requiring fewer frame changes
+                if frames_to_remove_for_lower <= frames_to_add_for_upper:
                     final_target = lower_target
                 else:
                     final_target = upper_target
@@ -287,6 +290,31 @@ class VideoEditor:
             Tuple of (success: bool, message: str)
         """
         try:
+            # Get current frame count first
+            probe_cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(input_path)
+            ]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if probe_result.returncode != 0:
+                return False, f"Failed to probe video: {probe_result.stderr}"
+
+            import json
+            probe_data = json.loads(probe_result.stdout)
+            current_frames = None
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    current_frames = stream.get('nb_frames')
+                    break
+
+            if current_frames is None:
+                return False, "Could not determine frame count"
+
+            current_frames = int(current_frames)
+
             # Create backup of original
             if not VideoEditor._create_backup(input_path):
                 return False, "Failed to create backup"
@@ -303,12 +331,13 @@ class VideoEditor:
             segment2 = temp_dir / 'after.mp4'
             concat_list = temp_dir / 'concat.txt'
 
-            # Extract segment before frame
+            # Extract segment before frame (frames 0 to frame_num-1)
             if frame_num > 0:
+                # Use frame count instead of time for precision
                 cmd1 = [
                     'ffmpeg',
                     '-i', str(input_path),
-                    '-t', str(frame_time),
+                    '-frames:v', str(frame_num),  # Exact frame count
                     '-c', 'copy',
                     '-y',
                     str(segment1)
@@ -326,7 +355,7 @@ class VideoEditor:
             ]
             subprocess.run(cmd2, capture_output=True, check=True)
 
-            # Create video from repeated frame with high quality
+            # Create video from repeated frame with high quality - use frame count instead of duration
             cmd3 = [
                 'ffmpeg',
                 '-loop', '1',
@@ -334,7 +363,7 @@ class VideoEditor:
                 '-c:v', 'libx264',
                 '-crf', '18',  # High quality (18 = visually lossless)
                 '-preset', 'slow',  # Better compression
-                '-t', str(repeat_duration),
+                '-frames:v', str(repeat_count),  # Exact frame count
                 '-pix_fmt', 'yuv420p',
                 '-r', str(fps),
                 '-y',
@@ -342,25 +371,28 @@ class VideoEditor:
             ]
             subprocess.run(cmd3, capture_output=True, check=True)
 
-            # Extract segment after frame
+            # Extract segment after frame (if any frames remain)
             next_frame_time = (frame_num + 1) / fps
-            cmd4 = [
-                'ffmpeg',
-                '-i', str(input_path),
-                '-ss', str(next_frame_time),
-                '-c', 'copy',
-                '-y',
-                str(segment2)
-            ]
-            subprocess.run(cmd4, capture_output=True, check=True)
+            # Check if there are frames after the repeated frame
+            if frame_num + 1 < current_frames:
+                cmd4 = [
+                    'ffmpeg',
+                    '-i', str(input_path),
+                    '-ss', str(next_frame_time),
+                    '-c', 'copy',
+                    '-y',
+                    str(segment2)
+                ]
+                subprocess.run(cmd4, capture_output=True, check=True)
+            # If no frames after, segment2 remains empty (which is fine)
 
-            # Create concat list
+            # Create concat list - only include segments that exist and have content
             with open(concat_list, 'w') as f:
-                if frame_num > 0 and segment1.exists():
+                if frame_num > 0 and segment1.exists() and segment1.stat().st_size > 0:
                     f.write(f"file '{segment1}'\n")
-                if repeated.exists():
+                if repeated.exists() and repeated.stat().st_size > 0:
                     f.write(f"file '{repeated}'\n")
-                if segment2.exists():
+                if segment2.exists() and segment2.stat().st_size > 0:
                     f.write(f"file '{segment2}'\n")
 
             # Concatenate all segments with re-encoding to fix timing issues
