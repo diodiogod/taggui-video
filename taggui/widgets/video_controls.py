@@ -14,8 +14,9 @@ class LoopSlider(QSlider):
         super().__init__(orientation, parent)
         self.loop_start = None
         self.loop_end = None
-        self._dragging_marker = None  # 'start', 'end', or None
+        self._dragging_marker = None  # 'start', 'end', 'both', or None
         self._marker_size = 20  # Click detection radius
+        self._marker_gap = 0  # Distance between markers when dragging both
 
         # Set minimum height to show markers above slider
         self.setMinimumHeight(30)
@@ -106,11 +107,23 @@ class LoopSlider(QSlider):
         groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
 
         # Check if clicking near a marker
-        if self._is_near_marker(event.pos(), self.loop_start, groove):
+        near_start = self._is_near_marker(event.pos(), self.loop_start, groove)
+        near_end = self._is_near_marker(event.pos(), self.loop_end, groove)
+
+        # Check if Shift is pressed and both markers exist
+        shift_pressed = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
+
+        if shift_pressed and self.loop_start is not None and self.loop_end is not None and (near_start or near_end):
+            # Drag both markers together
+            self._dragging_marker = 'both'
+            self._marker_gap = self.loop_end - self.loop_start
+            event.accept()
+            return
+        elif near_start:
             self._dragging_marker = 'start'
             event.accept()
             return
-        elif self._is_near_marker(event.pos(), self.loop_end, groove):
+        elif near_end:
             self._dragging_marker = 'end'
             event.accept()
             return
@@ -156,6 +169,17 @@ class LoopSlider(QSlider):
             elif self._dragging_marker == 'end':
                 self.loop_end = new_value
                 self.loop_end_changed.emit(new_value)
+            elif self._dragging_marker == 'both':
+                # Move both markers maintaining the gap
+                max_val = self.maximum()
+                # Clamp the start position
+                new_start = max(self.minimum(), min(new_value, max_val - self._marker_gap))
+                new_end = new_start + self._marker_gap
+
+                self.loop_start = new_start
+                self.loop_end = new_end
+                self.loop_start_changed.emit(new_start)
+                self.loop_end_changed.emit(new_end)
 
             self.update()
             event.accept()
@@ -368,6 +392,9 @@ class VideoControlsWidget(QWidget):
         self.loop_end_frame = None
         self.is_looping = False
 
+        # Fixed marker size (set from main window)
+        self.fixed_marker_size = 31
+
         # Hide by default
         self.hide()
 
@@ -526,8 +553,17 @@ class VideoControlsWidget(QWidget):
 
     @Slot()
     def _set_loop_start(self):
-        """Set loop start at current frame."""
+        """Set loop start at current frame, and auto-set end if fixed marker size is enabled."""
         self.loop_start_frame = self.frame_spinbox.value()
+
+        # Auto-set end marker based on fixed marker size
+        if self.fixed_marker_size > 0:
+            max_frame = self.frame_spinbox.maximum()
+            self.loop_end_frame = min(self.loop_start_frame + self.fixed_marker_size - 1, max_frame)
+            # Update end button color too
+            self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
+            self.loop_end_set.emit()
+
         self.loop_start_set.emit()
         # Update button color to match pink marker
         self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
