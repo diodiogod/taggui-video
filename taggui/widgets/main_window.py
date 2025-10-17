@@ -141,6 +141,9 @@ class MainWindow(QMainWindow):
         self.always_show_controls_btn.setToolTip('Always show video controls')
         self.always_show_controls_btn.setMaximumWidth(32)
         self.always_show_controls_btn.setMaximumHeight(32)
+        # Load saved state
+        always_show = settings.value('video_always_show_controls', False, type=bool)
+        self.always_show_controls_btn.setChecked(always_show)
         self.always_show_controls_btn.setStyleSheet("""
             QPushButton {
                 font-size: 16px;
@@ -198,9 +201,51 @@ class MainWindow(QMainWindow):
             'Repeat current frame', self)
         self.toolbar.addAction(self.repeat_frame_action)
 
-        self.fix_frame_count_action = QAction(QIcon.fromTheme('tools-check-spelling'),
-            'Fix frame count to N*4+1', self)
-        self.toolbar.addAction(self.fix_frame_count_action)
+        # Fix selected button - styled button with orange highlight
+        self.fix_frame_count_btn = QPushButton('Fix')
+        self.fix_frame_count_btn.setToolTip('Fix N*4+1 for selected videos')
+        self.fix_frame_count_btn.setMaximumWidth(40)
+        self.fix_frame_count_btn.setMaximumHeight(32)
+        self.fix_frame_count_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 4px;
+                color: #ccc;
+            }
+            QPushButton:hover {
+                border-color: #FF9800;
+                background-color: #353535;
+                color: #FF9800;
+            }
+        """)
+        self.toolbar.addWidget(self.fix_frame_count_btn)
+
+        # Fix all folder button - styled button with orange highlight
+        self.fix_all_folder_btn = QPushButton('ALL')
+        self.fix_all_folder_btn.setToolTip('Fix N*4+1 for all videos in folder')
+        self.fix_all_folder_btn.setMaximumWidth(40)
+        self.fix_all_folder_btn.setMaximumHeight(32)
+        self.fix_all_folder_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 4px;
+                color: #ccc;
+            }
+            QPushButton:hover {
+                border-color: #FF9800;
+                background-color: #353535;
+                color: #FF9800;
+            }
+        """)
+        self.toolbar.addWidget(self.fix_all_folder_btn)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -892,15 +937,19 @@ class MainWindow(QMainWindow):
             lambda value: self._on_marker_size_changed(value))
 
         # Always show controls toggle
-        self.always_show_controls_btn.toggled.connect(
-            lambda checked: self.image_viewer.set_always_show_controls(checked))
+        def on_always_show_toggled(checked):
+            self.image_viewer.set_always_show_controls(checked)
+            settings.setValue('video_always_show_controls', checked)
+
+        self.always_show_controls_btn.toggled.connect(on_always_show_toggled)
 
         # Connect video editing buttons
         self.extract_range_action.triggered.connect(self._extract_video_range)
         self.remove_range_action.triggered.connect(self._remove_video_range)
         self.remove_frame_action.triggered.connect(self._remove_video_frame)
         self.repeat_frame_action.triggered.connect(self._repeat_video_frame)
-        self.fix_frame_count_action.triggered.connect(self._fix_video_frame_count)
+        self.fix_frame_count_btn.clicked.connect(self._fix_video_frame_count)
+        self.fix_all_folder_btn.clicked.connect(self._fix_all_folder_frame_count)
 
     def _update_loop_state(self):
         """Update video player loop state from controls."""
@@ -1039,7 +1088,8 @@ class MainWindow(QMainWindow):
         )
 
         if success:
-            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+            QMessageBox.information(self, "Success", message)
+            self.reload_directory()
         else:
             QMessageBox.critical(self, "Error", message)
 
@@ -1077,7 +1127,8 @@ class MainWindow(QMainWindow):
         )
 
         if success:
-            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+            QMessageBox.information(self, "Success", message)
+            self.reload_directory()
         else:
             QMessageBox.critical(self, "Error", message)
 
@@ -1128,119 +1179,249 @@ class MainWindow(QMainWindow):
         )
 
         if success:
-            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+            QMessageBox.information(self, "Success", message)
+            self.reload_directory()
         else:
             QMessageBox.critical(self, "Error", message)
 
     def _fix_video_frame_count(self):
-        """Fix video frame count to follow N*4+1 rule."""
+        """Fix video frame count to follow N*4+1 rule for selected videos."""
         from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
+        from PySide6.QtCore import Qt
         from utils.video_editor import VideoEditor
+        import subprocess
+        import json
 
-        video_player = self.image_viewer.video_player
+        # Get selected videos from image list
+        selected_indices = self.image_list.get_selected_image_indices()
 
-        if not video_player.video_path:
-            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
+        if not selected_indices:
+            QMessageBox.warning(self, "No Selection", "Please select one or more videos to fix.")
             return
 
-        # Check current frame count
-        fps = video_player.get_fps()
-        current_frames = video_player.get_total_frames()
+        # Filter to only videos
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = []
+        for idx in selected_indices:
+            image = self.image_list_model.data(idx, Qt.ItemDataRole.UserRole)
+            if image.path.suffix.lower() in video_extensions:
+                video_paths.append(image.path)
 
-        # Check if already valid
-        if (current_frames - 1) % 4 == 0:
-            QMessageBox.information(self, "Already Valid",
-                f"Video already has {current_frames} frames, which follows N*4+1 rule.")
+        if not video_paths:
+            QMessageBox.warning(self, "No Videos", "No videos in selection.")
             return
 
-        # Ask for target frame count or auto-calculate
-        target_input, ok = QInputDialog.getText(
-            self, "Fix Frame Count",
-            f"Current: {current_frames} frames\n\n"
-            "Enter target frame count (must be N*4+1) or leave empty for auto:",
-            text=""
-        )
-
-        if not ok:
-            return
-
-        target_frames = None
-        if target_input.strip():
-            try:
-                target_frames = int(target_input.strip())
-                if (target_frames - 1) % 4 != 0:
-                    QMessageBox.warning(self, "Invalid Target",
-                        f"Target frame count {target_frames} does not follow N*4+1 rule.\n"
-                        "Valid examples: 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61...")
-                    return
-            except ValueError:
-                QMessageBox.warning(self, "Invalid Input", "Please enter a valid number or leave empty for auto.")
-                return
-
-        # Calculate target if not specified - find optimal target with minimal changes
-        if target_frames is None:
-            current_n = (current_frames - 1) // 4
-            lower_target = current_n * 4 + 1
-            upper_target = (current_n + 1) * 4 + 1
-
-            # Calculate frames needed for each option
-            frames_to_remove_for_lower = max(0, current_frames - lower_target)  # Frames to remove to reach lower target
-            frames_to_add_for_upper = upper_target - current_frames  # Frames to add to reach upper target
-
-            # Choose the option requiring fewer frame changes
-            if frames_to_remove_for_lower <= frames_to_add_for_upper:
-                target_frames = lower_target
-            else:
-                target_frames = upper_target
-
-        # Determine operation
-        if current_frames < target_frames:
-            operation = "add"
-            frames_diff = target_frames - current_frames
-            method_options = ["Repeat last frame", "Repeat first frame"]
-        else:
-            operation = "remove"
-            frames_diff = current_frames - target_frames
-            method_options = ["Remove last frames", "Remove first frames"]
-
-        # Ask user preference for method
+        # Ask for method preference once for all videos
         choice, ok = QInputDialog.getItem(
             self, "Fix Frame Count",
-            f"Current: {current_frames} frames\nTarget: {target_frames} frames\n"
-            f"Will {operation} {frames_diff} frames by:",
-            method_options, 0, False
+            f"Fix {len(video_paths)} video(s) to N*4+1 pattern.\n\nMethod:",
+            ["Auto (use last frame)", "Auto (use first frame)"], 0, False
         )
 
         if not ok:
             return
 
-        repeat_last = (choice in ["Repeat last frame", "Remove last frames"])
+        repeat_last = "last" in choice
 
-        # Confirm action
-        action_desc = "repeating" if operation == "add" else "removing"
-        location_desc = "last" if repeat_last else "first"
+        # Confirm batch operation
         reply = QMessageBox.question(
             self, "Fix Frame Count",
-            f"Fix frame count from {current_frames} to {target_frames}?\n\n"
-            f"Method: {action_desc} {location_desc} {'frame' if frames_diff == 1 else 'frames'}\n\n"
-            f"Original will be saved as {Path(video_player.video_path).name}.backup",
+            f"Fix frame count for {len(video_paths)} video(s)?\n\n"
+            f"Originals will be saved as .backup files",
             QMessageBox.Yes | QMessageBox.No
         )
 
         if reply != QMessageBox.Yes:
             return
 
-        # Perform the fix
-        input_path = Path(video_player.video_path)
-        success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
-            input_path, input_path, fps, repeat_last, target_frames
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing video frame counts...", "Cancel", 0, len(video_paths), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count = 0
+        error_count = 0
+        errors = []
+
+        for i, video_path in enumerate(video_paths):
+            if progress.wasCanceled():
+                break
+
+            progress.setLabelText(f"Processing {video_path.name}...")
+            progress.setValue(i)
+
+            # Get FPS from video
+            probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(video_path)]
+            try:
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+                probe_data = json.loads(probe_result.stdout)
+                fps = None
+                for stream in probe_data.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        fps_str = stream.get('r_frame_rate', '0/1')
+                        num, denom = map(float, fps_str.split('/'))
+                        fps = num / denom if denom != 0 else 0
+                        break
+
+                if not fps:
+                    errors.append(f"{video_path.name}: Could not determine FPS")
+                    error_count += 1
+                    continue
+
+                # Fix frame count
+                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+                    video_path, video_path, fps, repeat_last, None
+                )
+
+                if success:
+                    success_count += 1
+                else:
+                    errors.append(f"{video_path.name}: {message}")
+                    error_count += 1
+
+            except Exception as e:
+                errors.append(f"{video_path.name}: {str(e)}")
+                error_count += 1
+
+        progress.setValue(len(video_paths))
+
+        # Show results
+        result_msg = f"Processed {len(video_paths)} video(s):\n"
+        result_msg += f"✓ Success: {success_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self, "Batch Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.reload_directory()
+
+    def _fix_all_folder_frame_count(self):
+        """Fix N*4+1 frame count for all videos in the current folder."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
+        from PySide6.QtCore import Qt
+        from utils.video_editor import VideoEditor
+        import subprocess
+        import json
+
+        if not self.directory_path:
+            QMessageBox.warning(self, "No Directory", "No directory is loaded.")
+            return
+
+        # Find all videos in directory
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = [f for f in self.directory_path.iterdir()
+                      if f.is_file() and f.suffix.lower() in video_extensions]
+
+        if not video_paths:
+            QMessageBox.warning(self, "No Videos", "No videos found in current directory.")
+            return
+
+        # Ask for method preference
+        choice, ok = QInputDialog.getItem(
+            self, "Fix All Videos",
+            f"Fix {len(video_paths)} video(s) in folder to N*4+1 pattern.\n\nMethod:",
+            ["Auto (use last frame)", "Auto (use first frame)"], 0, False
         )
 
-        if success:
-            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+        if not ok:
+            return
+
+        repeat_last = "last" in choice
+
+        # Confirm batch operation
+        reply = QMessageBox.question(
+            self, "Fix All Videos",
+            f"Fix frame count for all {len(video_paths)} video(s) in folder?\n\n"
+            f"Originals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing video frame counts...", "Cancel", 0, len(video_paths), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count = 0
+        skip_count = 0
+        error_count = 0
+        errors = []
+
+        for i, video_path in enumerate(video_paths):
+            if progress.wasCanceled():
+                break
+
+            progress.setLabelText(f"Processing {video_path.name}...")
+            progress.setValue(i)
+
+            # Get FPS from video
+            probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(video_path)]
+            try:
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+                probe_data = json.loads(probe_result.stdout)
+                fps = None
+                for stream in probe_data.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        fps_str = stream.get('r_frame_rate', '0/1')
+                        num, denom = map(float, fps_str.split('/'))
+                        fps = num / denom if denom != 0 else 0
+                        break
+
+                if not fps:
+                    errors.append(f"{video_path.name}: Could not determine FPS")
+                    error_count += 1
+                    continue
+
+                # Fix frame count
+                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+                    video_path, video_path, fps, repeat_last, None
+                )
+
+                if success:
+                    if "already" in message.lower():
+                        skip_count += 1
+                    else:
+                        success_count += 1
+                else:
+                    errors.append(f"{video_path.name}: {message}")
+                    error_count += 1
+
+            except Exception as e:
+                errors.append(f"{video_path.name}: {str(e)}")
+                error_count += 1
+
+        progress.setValue(len(video_paths))
+
+        # Show results
+        result_msg = f"Processed {len(video_paths)} video(s):\n"
+        result_msg += f"✓ Fixed: {success_count}\n"
+        result_msg += f"⊘ Already valid: {skip_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self, "Batch Fix Complete", result_msg)
         else:
-            QMessageBox.critical(self, "Error", message)
+            QMessageBox.information(self, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.reload_directory()
 
     def restore(self):
         # Restore the window geometry and state.

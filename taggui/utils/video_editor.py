@@ -380,6 +380,9 @@ class VideoEditor:
             filter_complex = ''.join(filter_parts)
 
             # Run ffmpeg with complex filter
+            # Use temp output if input == output to avoid "same as Input" error
+            temp_output = output_path.parent / f'.temp_output_{output_path.name}'
+
             cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
@@ -393,14 +396,21 @@ class VideoEditor:
                 '-c:a', 'aac',
                 '-r', str(fps),
                 '-y',
-                str(output_path)
+                str(temp_output)
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True)
 
+            # If successful and input == output, replace input with temp
+            if result.returncode == 0 and input_path == output_path:
+                import shutil
+                shutil.move(str(temp_output), str(output_path))
+
             # Cleanup
             if frame_png.exists():
                 frame_png.unlink()
+            if temp_output.exists():
+                temp_output.unlink()
             if temp_dir.exists():
                 try:
                     temp_dir.rmdir()
