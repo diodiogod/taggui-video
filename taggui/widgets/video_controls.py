@@ -599,6 +599,10 @@ class VideoControlsWidget(QWidget):
                         self.speed_slider.setValue(int(clamped_value * 100.0))
                         self.speed_slider.blockSignals(False)
 
+                        # If we're back in normal range, sync extended speed with slider
+                        if 0.0 <= self._extended_speed <= 2.0:
+                            self._extended_speed = clamped_value
+
                         # Update display and emit signal
                         self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
                         self.speed_changed.emit(self._extended_speed)
