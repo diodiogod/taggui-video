@@ -400,7 +400,7 @@ class VideoControlsWidget(QWidget):
         # N*4+1 frame rule indicator
         self.frame_rule_label = QLabel('')
         self.frame_rule_label.setMinimumWidth(60)
-        self.frame_rule_label.setStyleSheet("QLabel { color: #FF9800; font-weight: bold; font-size: 10px; }")
+        self.frame_rule_label.setStyleSheet("QLabel { color: #FF9800; font-weight: bold; }")
 
         # Loop controls - smaller buttons with text labels
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
@@ -735,10 +735,10 @@ class VideoControlsWidget(QWidget):
             is_valid = (frame_count - 1) % 4 == 0
             if is_valid:
                 self.frame_rule_label.setText('✓N*4+1')
-                self.frame_rule_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 10px; }")
+                self.frame_rule_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
             else:
                 self.frame_rule_label.setText('✗N*4+1')
-                self.frame_rule_label.setStyleSheet("QLabel { color: #F44336; font-weight: bold; font-size: 10px; }")
+                self.frame_rule_label.setStyleSheet("QLabel { color: #F44336; font-weight: bold; }")
         else:
             self.frame_rule_label.setText('')
 
