@@ -174,6 +174,70 @@ class VideoEditor:
         return VideoEditor.remove_range(input_path, output_path, frame_num, frame_num, fps)
 
     @staticmethod
+    def fix_frame_count_to_n4_plus_1(input_path: Path, output_path: Path,
+                                    fps: float, repeat_last: bool = True) -> Tuple[bool, str]:
+        """
+        Adjust video frame count to follow N*4+1 rule by repeating frames.
+        If repeat_last=True, repeats the last frame. If False, repeats the first frame.
+
+        Args:
+            input_path: Input video file path
+            output_path: Output video file path
+            fps: Video frames per second
+            repeat_last: Whether to repeat the last frame (True) or first frame (False)
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            # Get current frame count
+            import subprocess
+            probe_cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(input_path)
+            ]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if probe_result.returncode != 0:
+                return False, f"Failed to probe video: {probe_result.stderr}"
+
+            import json
+            probe_data = json.loads(probe_result.stdout)
+            current_frames = None
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    current_frames = stream.get('nb_frames')
+                    break
+
+            if current_frames is None:
+                return False, "Could not determine frame count"
+
+            current_frames = int(current_frames)
+
+            # Check if already valid
+            if (current_frames - 1) % 4 == 0:
+                return True, f"Video already has {current_frames} frames (valid N*4+1)"
+
+            # Calculate target frame count (next valid N*4+1)
+            target_frames = ((current_frames // 4) + 1) * 4 + 1
+            frames_to_add = target_frames - current_frames
+
+            if repeat_last:
+                # Repeat the last frame
+                frame_to_repeat = current_frames - 1
+            else:
+                # Repeat the first frame
+                frame_to_repeat = 0
+
+            # Use existing repeat_frame method
+            return VideoEditor.repeat_frame(input_path, output_path, frame_to_repeat, frames_to_add, fps)
+
+        except Exception as e:
+            return False, f"Error: {str(e)}"
+
+    @staticmethod
     def repeat_frame(input_path: Path, output_path: Path,
                      frame_num: int, repeat_count: int, fps: float) -> Tuple[bool, str]:
         """

@@ -198,6 +198,10 @@ class MainWindow(QMainWindow):
             'Repeat current frame', self)
         self.toolbar.addAction(self.repeat_frame_action)
 
+        self.fix_frame_count_action = QAction(QIcon.fromTheme('tools-check-spelling'),
+            'Fix frame count to N*4+1', self)
+        self.toolbar.addAction(self.fix_frame_count_action)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
@@ -896,6 +900,7 @@ class MainWindow(QMainWindow):
         self.remove_range_action.triggered.connect(self._remove_video_range)
         self.remove_frame_action.triggered.connect(self._remove_video_frame)
         self.repeat_frame_action.triggered.connect(self._repeat_video_frame)
+        self.fix_frame_count_action.triggered.connect(self._fix_video_frame_count)
 
     def _update_loop_state(self):
         """Update video player loop state from controls."""
@@ -1120,6 +1125,68 @@ class MainWindow(QMainWindow):
         success, message = VideoEditor.repeat_frame(
             input_path, input_path,
             current_frame, repeat_count, fps
+        )
+
+        if success:
+            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+        else:
+            QMessageBox.critical(self, "Error", message)
+
+    def _fix_video_frame_count(self):
+        """Fix video frame count to follow N*4+1 rule."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        from utils.video_editor import VideoEditor
+
+        video_player = self.image_viewer.video_player
+
+        if not video_player.video_path:
+            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
+            return
+
+        # Check current frame count
+        fps = video_player.get_fps()
+        current_frames = video_player.get_total_frames()
+
+        # Check if already valid
+        if (current_frames - 1) % 4 == 0:
+            QMessageBox.information(self, "Already Valid",
+                f"Video already has {current_frames} frames, which follows N*4+1 rule.")
+            return
+
+        # Calculate target
+        target_frames = ((current_frames // 4) + 1) * 4 + 1
+        frames_to_add = target_frames - current_frames
+
+        # Ask user preference
+        items = ["Repeat last frame", "Repeat first frame"]
+        choice, ok = QInputDialog.getItem(
+            self, "Fix Frame Count",
+            f"Current: {current_frames} frames\nTarget: {target_frames} frames\nAdd {frames_to_add} frames by:",
+            items, 0, False
+        )
+
+        if not ok:
+            return
+
+        repeat_last = (choice == "Repeat last frame")
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self, "Fix Frame Count",
+            f"Fix frame count from {current_frames} to {target_frames}?\n\n"
+            f"Method: {'Repeat last frame' if repeat_last else 'Repeat first frame'}\n\n"
+            f"Original will be saved as {Path(video_player.video_path).name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Perform the fix
+        input_path = Path(video_player.video_path)
+        success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+            input_path, input_path, fps, repeat_last
         )
 
         if success:
