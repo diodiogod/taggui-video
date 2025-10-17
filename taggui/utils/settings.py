@@ -3,8 +3,8 @@ from PySide6.QtCore import QSettings, Signal
 # Defaults for settings that are accessed from multiple places.
 DEFAULT_SETTINGS = {
     'font_size': 16,
-    # Common image formats that are supported in PySide6, as well as JPEG XL.
-    'image_list_file_formats': 'bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp',
+    # Common image formats that are supported in PySide6, as well as JPEG XL and video formats.
+    'image_list_file_formats': 'bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp, mp4, avi, mov, mkv, webm',
     'image_list_image_width': 200,
     'tag_separator': ',',
     'insert_space_after_tag_separator': True,

@@ -8,6 +8,7 @@ from math import floor, ceil
 from pathlib import Path
 import json
 
+import cv2
 import exifread
 import imagesize
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
@@ -43,6 +44,50 @@ def get_file_paths(directory_path: Path) -> set[Path]:
         if path.is_file():
             file_paths.add(path)
     return file_paths
+
+
+def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict | None, QPixmap | None]:
+    """
+    Extract metadata and first frame from a video file.
+    Returns: (dimensions, video_metadata, first_frame_pixmap)
+    """
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None, None, None
+
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration = frame_count / fps if fps > 0 else 0
+
+        # Read first frame
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            return (width, height), None, None
+
+        # Convert BGR to RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame_rgb.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qt_image)
+
+        video_metadata = {
+            'fps': fps,
+            'duration': duration,
+            'frame_count': frame_count,
+            'current_frame': 0
+        }
+
+        return (width, height), video_metadata, pixmap
+    except Exception as e:
+        print(f"Error extracting video info from {video_path}: {e}")
+        return None, None, None
 
 
 @dataclass
@@ -111,7 +156,18 @@ class ImageListModel(QAbstractListModel):
                 return image.thumbnail
             crop = image.crop
             try:
-                if image.path.suffix.lower() == ".jxl":
+                if image.is_video:
+                    # For videos, extract first frame as thumbnail
+                    _, _, first_frame_pixmap = extract_video_info(image.path)
+                    if first_frame_pixmap:
+                        pixmap = first_frame_pixmap.scaledToWidth(
+                            self.image_list_image_width,
+                            Qt.TransformationMode.SmoothTransformation)
+                    else:
+                        # Fallback to a placeholder if extraction fails
+                        pixmap = QPixmap(self.image_list_image_width, self.image_list_image_width)
+                        pixmap.fill(Qt.gray)
+                elif image.path.suffix.lower() == ".jxl":
                     pil_image = pilimage.open(image.path)  # Uses pillow-jxl
                     qimage = pil_to_qimage(pil_image)
                     if not crop:
@@ -139,7 +195,7 @@ class ImageListModel(QAbstractListModel):
                         self.image_list_image_width,
                         Qt.TransformationMode.SmoothTransformation)
             except Exception as e:
-                print(f"Error loading image {image.path}: {e}")
+                print(f"Error loading image/video {image.path}: {e}")
             thumbnail = QIcon(pixmap)
             image.thumbnail = thumbnail
             return thumbnail
@@ -189,26 +245,43 @@ class ImageListModel(QAbstractListModel):
                                   if path.suffix == '.txt'}
         json_file_path_strings = {str(path) for path in file_paths
                                   if path.suffix == '.json'}
+        # Define video extensions
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+
         for image_path in image_paths:
+            is_video = image_path.suffix.lower() in video_extensions
+            video_metadata = None
+            first_frame_pixmap = None
+
             try:
-                if str(image_path).endswith('jxl'):
+                if is_video:
+                    # Handle video files
+                    dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
+                    if dimensions is None:
+                        error_messages.append(f'Failed to extract video info from '
+                                            f'{image_path}')
+                        continue
+                elif str(image_path).endswith('jxl'):
                     dimensions = get_jxl_size(image_path)
                 else:
                     dimensions = pilimage.open(image_path).size
-                try:
-                    with open(image_path, 'rb') as image_file:
-                        exif_tags = exifread.process_file(
-                            image_file, details=False, extract_thumbnail=False,
-                            stop_tag='Image Orientation')
-                        if 'Image Orientation' in exif_tags:
-                            orientations = (exif_tags['Image Orientation']
-                                            .values)
-                            if any(value in orientations
-                                   for value in (5, 6, 7, 8)):
-                                dimensions = (dimensions[1], dimensions[0])
-                except Exception as exception:
-                    error_messages.append(f'Failed to get Exif tags for '
-                                          f'{image_path}: {exception}')
+
+                if not is_video:
+                    # Only get EXIF for images, not videos
+                    try:
+                        with open(image_path, 'rb') as image_file:
+                            exif_tags = exifread.process_file(
+                                image_file, details=False, extract_thumbnail=False,
+                                stop_tag='Image Orientation')
+                            if 'Image Orientation' in exif_tags:
+                                orientations = (exif_tags['Image Orientation']
+                                                .values)
+                                if any(value in orientations
+                                       for value in (5, 6, 7, 8)):
+                                    dimensions = (dimensions[1], dimensions[0])
+                    except Exception as exception:
+                        error_messages.append(f'Failed to get Exif tags for '
+                                              f'{image_path}: {exception}')
             except (ValueError, OSError) as exception:
                 error_messages.append(f'Failed to get dimensions for '
                                       f'{image_path}: {exception}')
@@ -224,7 +297,8 @@ class ImageListModel(QAbstractListModel):
                     tags = caption.split(self.tag_separator)
                     tags = [tag.strip() for tag in tags]
                     tags = [tag for tag in tags if tag]
-            image = Image(image_path, dimensions, tags)
+            image = Image(image_path, dimensions, tags, is_video=is_video,
+                         video_metadata=video_metadata)
             json_file_path = image_path.with_suffix('.json')
             if (str(json_file_path) in json_file_path_strings and
                 json_file_path.stat().st_size > 0):
