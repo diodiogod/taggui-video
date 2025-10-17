@@ -1,10 +1,11 @@
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout)
+                               QLineEdit, QPushButton, QVBoxLayout, QComboBox)
 
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox)
+from utils.grammar_checker import GrammarCheckMode
 
 
 class SettingsDialog(QDialog):
@@ -31,6 +32,10 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(QLabel('Auto-captioning models directory'), 6, 0,
                               Qt.AlignmentFlag.AlignRight)
         grid_layout.addWidget(QLabel('Auto-marking models directory'), 8, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Enable spell checking'), 10, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Grammar check mode'), 11, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         font_size_spin_box = SettingsSpinBox(
@@ -86,6 +91,29 @@ class SettingsDialog(QDialog):
         marking_models_directory_button.clicked.connect(
             self.set_marking_models_directory_path)
 
+        # Spell checking and grammar checking settings
+        self.spell_check_enabled = SettingsBigCheckBox(
+            key='spell_check_enabled',
+            default_value=True)
+        self.spell_check_enabled.stateChanged.connect(self.show_restart_warning)
+
+        self.grammar_check_mode_combo = QComboBox()
+        self.grammar_check_mode_combo.addItem('Disabled', GrammarCheckMode.DISABLED.value)
+        self.grammar_check_mode_combo.addItem('Free API (20 req/min)', GrammarCheckMode.FREE_API.value)
+        self.grammar_check_mode_combo.addItem('Local Server (requires Java)', GrammarCheckMode.LOCAL_SERVER.value)
+
+        # Load current grammar check mode
+        current_mode = settings.value('grammar_check_mode',
+                                     defaultValue=GrammarCheckMode.FREE_API.value,
+                                     type=str)
+        for i in range(self.grammar_check_mode_combo.count()):
+            if self.grammar_check_mode_combo.itemData(i) == current_mode:
+                self.grammar_check_mode_combo.setCurrentIndex(i)
+                break
+
+        self.grammar_check_mode_combo.currentIndexChanged.connect(
+            lambda: self._save_grammar_mode())
+
         grid_layout.addWidget(font_size_spin_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(file_types_line_edit, 1, 1,
@@ -105,6 +133,10 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(self.marking_models_directory_line_edit, 8, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(marking_models_directory_button, 9, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(self.spell_check_enabled, 10, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(self.grammar_check_mode_combo, 11, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 
@@ -180,3 +212,10 @@ class SettingsDialog(QDialog):
             dir=initial_directory_path)
         if marking_models_directory_path:
             self.marking_models_directory_line_edit.setText(marking_models_directory_path)
+
+    @Slot()
+    def _save_grammar_mode(self):
+        """Save the selected grammar check mode to settings."""
+        mode_value = self.grammar_check_mode_combo.currentData()
+        settings.setValue('grammar_check_mode', mode_value)
+        self.show_restart_warning()

@@ -849,10 +849,8 @@ class ImageViewer(QWidget):
                         if image.video_metadata:
                             self.video_controls.set_video_info(image.video_metadata)
 
-                        # Show controls initially, then auto-hide
-                        if self.video_controls_auto_hide:
-                            self._show_controls_temporarily()
-                        else:
+                        # Only show controls if always-show is enabled
+                        if not self.video_controls_auto_hide:
                             self._show_controls_permanent()
 
                         # Auto-play if enabled (do this AFTER setting up controls to avoid signal conflicts)

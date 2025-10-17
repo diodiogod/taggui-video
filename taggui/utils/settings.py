@@ -29,7 +29,9 @@ DEFAULT_SETTINGS = {
     'export_separate_newline': 'Create additional line',
     'export_directory_path': '',
     'export_keep_dir_structure': False,
-    'export_filter_hashtag': True
+    'export_filter_hashtag': True,
+    'spell_check_enabled': True,
+    'grammar_check_mode': 'free_api'
 }
 
 
