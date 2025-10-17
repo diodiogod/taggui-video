@@ -6,7 +6,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
 from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
-                               QLabel)
+                               QLabel, QPushButton)
 
 from transformers import AutoTokenizer
 
@@ -135,11 +135,31 @@ class MainWindow(QMainWindow):
         # Video editing controls
         self.toolbar.addSeparator()
 
-        # Always show player controls toggle
-        self.always_show_controls_action = QAction(QIcon.fromTheme('video-display'),
-            'Always show video controls', self)
-        self.always_show_controls_action.setCheckable(True)
-        self.toolbar.addAction(self.always_show_controls_action)
+        # Always show player controls toggle - styled button
+        self.always_show_controls_btn = QPushButton('👁')
+        self.always_show_controls_btn.setCheckable(True)
+        self.always_show_controls_btn.setToolTip('Always show video controls')
+        self.always_show_controls_btn.setMaximumWidth(32)
+        self.always_show_controls_btn.setMaximumHeight(32)
+        self.always_show_controls_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 16px;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                border-color: #777;
+                background-color: #353535;
+            }
+            QPushButton:checked {
+                border-color: #4CAF50;
+                background-color: #2d5a2d;
+                box-shadow: 0 0 8px #4CAF50;
+            }
+        """)
+        self.toolbar.addWidget(self.always_show_controls_btn)
 
         # Fixed marker size
         from PySide6.QtWidgets import QSpinBox
@@ -854,24 +874,44 @@ class MainWindow(QMainWindow):
         video_controls.loop_reset.connect(
             lambda: video_player.set_loop(False, None, None))
 
+        # Connect speed control
+        video_controls.speed_changed.connect(
+            video_player.set_playback_speed)
+
         # Connect toolbar video editing controls
         self.fixed_marker_size_spinbox.valueChanged.connect(
             lambda value: setattr(video_controls, 'fixed_marker_size', value))
 
         # Always show controls toggle
-        self.always_show_controls_action.toggled.connect(
+        self.always_show_controls_btn.toggled.connect(
             lambda checked: self.image_viewer.set_always_show_controls(checked))
+
+        # Connect video editing buttons
+        self.extract_range_action.triggered.connect(self._extract_video_range)
+        self.remove_range_action.triggered.connect(self._remove_video_range)
+        self.remove_frame_action.triggered.connect(self._remove_video_frame)
+        self.repeat_frame_action.triggered.connect(self._repeat_video_frame)
 
     def _update_loop_state(self):
         """Update video player loop state from controls."""
         video_controls = self.image_viewer.video_controls
         video_player = self.image_viewer.video_player
 
+        if not video_controls.is_looping:
+            video_player.set_loop(False, None, None)
+            return
+
         loop_range = video_controls.get_loop_range()
-        if loop_range and video_controls.is_looping:
+        if loop_range:
+            # Loop between markers
             video_player.set_loop(True, loop_range[0], loop_range[1])
         else:
-            video_player.set_loop(False, None, None)
+            # Loop whole video when no markers set
+            total_frames = video_player.get_total_frames()
+            if total_frames > 0:
+                video_player.set_loop(True, 0, total_frames - 1)
+            else:
+                video_player.set_loop(False, None, None)
 
     def _skip_video(self, backward: bool):
         """Skip 1 second backward or forward in video."""
@@ -891,6 +931,185 @@ class MainWindow(QMainWindow):
                           current_frame + frame_offset)
 
         video_player.seek_to_frame(new_frame)
+
+    def _extract_video_range(self):
+        """Extract the marked range to a new video file."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        from utils.video_editor import VideoEditor
+
+        video_player = self.image_viewer.video_player
+        video_controls = self.image_viewer.video_controls
+
+        # Check if we have a video loaded
+        if not video_player.video_path:
+            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
+            return
+
+        # Check if markers are set
+        loop_range = video_controls.get_loop_range()
+        if not loop_range:
+            QMessageBox.warning(self, "No Markers", "Please set loop markers first.")
+            return
+
+        start_frame, end_frame = loop_range
+        fps = video_player.get_fps()
+
+        # Ask for output filename
+        input_path = Path(video_player.video_path)
+        default_name = f"{input_path.stem}_extract_{start_frame}-{end_frame}{input_path.suffix}"
+
+        filename, ok = QInputDialog.getText(
+            self, "Extract Video Range",
+            "Output filename:",
+            text=default_name
+        )
+
+        if not ok or not filename:
+            return
+
+        output_path = input_path.parent / filename
+
+        # Perform extraction
+        success, message = VideoEditor.extract_range(
+            input_path, output_path,
+            start_frame, end_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self, "Success", message)
+        else:
+            QMessageBox.critical(self, "Error", message)
+
+    def _remove_video_range(self):
+        """Remove the marked range from the video."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox
+        from utils.video_editor import VideoEditor
+
+        video_player = self.image_viewer.video_player
+        video_controls = self.image_viewer.video_controls
+
+        if not video_player.video_path:
+            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
+            return
+
+        loop_range = video_controls.get_loop_range()
+        if not loop_range:
+            QMessageBox.warning(self, "No Markers", "Please set loop markers first.")
+            return
+
+        start_frame, end_frame = loop_range
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self, "Remove Range",
+            f"Remove frames {start_frame}-{end_frame}?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Remove range (overwrites original, creates backup)
+        success, message = VideoEditor.remove_range(
+            input_path, input_path,
+            start_frame, end_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+        else:
+            QMessageBox.critical(self, "Error", message)
+
+    def _remove_video_frame(self):
+        """Remove the current frame from the video."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox
+        from utils.video_editor import VideoEditor
+
+        video_player = self.image_viewer.video_player
+
+        if not video_player.video_path:
+            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
+            return
+
+        current_frame = video_player.get_current_frame_number()
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self, "Remove Frame",
+            f"Remove frame {current_frame}?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Remove frame
+        success, message = VideoEditor.remove_frame(
+            input_path, input_path,
+            current_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+        else:
+            QMessageBox.critical(self, "Error", message)
+
+    def _repeat_video_frame(self):
+        """Repeat the current frame multiple times."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        from utils.video_editor import VideoEditor
+
+        video_player = self.image_viewer.video_player
+
+        if not video_player.video_path:
+            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
+            return
+
+        current_frame = video_player.get_current_frame_number()
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Ask how many times to repeat
+        repeat_count, ok = QInputDialog.getInt(
+            self, "Repeat Frame",
+            f"How many times to repeat frame {current_frame}?",
+            value=1, min=1, max=100
+        )
+
+        if not ok:
+            return
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self, "Repeat Frame",
+            f"Repeat frame {current_frame} {repeat_count} times?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Repeat frame
+        success, message = VideoEditor.repeat_frame(
+            input_path, input_path,
+            current_frame, repeat_count, fps
+        )
+
+        if success:
+            QMessageBox.information(self, "Success", message + "\n\nReload the video to see changes.")
+        else:
+            QMessageBox.critical(self, "Error", message)
 
     def restore(self):
         # Restore the window geometry and state.

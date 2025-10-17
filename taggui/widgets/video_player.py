@@ -27,6 +27,9 @@ class VideoPlayerWidget(QWidget):
         self.loop_start = None
         self.loop_end = None
 
+        # Playback speed multiplier
+        self.playback_speed = 1.0
+
         # Playback timer
         self.timer = QTimer()
         self.timer.timeout.connect(self._play_next_frame)
@@ -64,9 +67,9 @@ class VideoPlayerWidget(QWidget):
             return
 
         self.is_playing = True
-        # Calculate frame interval in milliseconds
+        # Calculate frame interval in milliseconds, adjusted by playback speed
         if self.fps > 0:
-            interval_ms = int(1000 / self.fps)
+            interval_ms = int(1000 / (self.fps * self.playback_speed))
             self.timer.start(interval_ms)
 
     def pause(self):
@@ -88,21 +91,36 @@ class VideoPlayerWidget(QWidget):
 
     @Slot()
     def _play_next_frame(self):
-        """Play next frame during playback."""
-        # Check if we're at the end of loop or video
-        end_frame = self.loop_end if (self.loop_enabled and self.loop_end is not None) else self.total_frames - 1
+        """Play next frame during playback (supports backwards playback)."""
+        if self.playback_speed < 0:
+            # Backwards playback
+            start_frame = self.loop_start if (self.loop_enabled and self.loop_start is not None) else 0
 
-        if self.current_frame >= end_frame:
-            if self.loop_enabled and self.loop_start is not None:
-                # Loop back to start
-                self.seek_to_frame(self.loop_start)
-            else:
-                # Reached end of video
-                self.pause()
-                self.playback_finished.emit()
-            return
+            if self.current_frame <= start_frame:
+                if self.loop_enabled and self.loop_end is not None:
+                    # Loop back to end
+                    self.seek_to_frame(self.loop_end)
+                else:
+                    # Reached start of video, stop
+                    self.pause()
+                return
 
-        self.seek_to_frame(self.current_frame + 1)
+            self.seek_to_frame(self.current_frame - 1)
+        else:
+            # Forward playback
+            end_frame = self.loop_end if (self.loop_enabled and self.loop_end is not None) else self.total_frames - 1
+
+            if self.current_frame >= end_frame:
+                if self.loop_enabled and self.loop_start is not None:
+                    # Loop back to start
+                    self.seek_to_frame(self.loop_start)
+                else:
+                    # Reached end of video
+                    self.pause()
+                    self.playback_finished.emit()
+                return
+
+            self.seek_to_frame(self.current_frame + 1)
 
     def seek_to_frame(self, frame_number: int):
         """Seek to a specific frame."""
@@ -157,6 +175,24 @@ class VideoPlayerWidget(QWidget):
         self.loop_enabled = enabled
         self.loop_start = start_frame
         self.loop_end = end_frame
+
+    def set_playback_speed(self, speed: float):
+        """
+        Set playback speed multiplier (-8.0 to 8.0).
+        Negative speeds play backwards (frame-by-frame, no audio).
+        """
+        was_backwards = self.playback_speed < 0
+        is_now_backwards = speed < 0
+
+        # Clamp to extended range
+        self.playback_speed = max(-8.0, min(8.0, speed))
+
+        # Update timer interval if currently playing
+        if self.is_playing and self.fps > 0:
+            # Use absolute value for timer calculation
+            abs_speed = abs(self.playback_speed)
+            interval_ms = int(1000 / (self.fps * abs_speed))
+            self.timer.setInterval(interval_ms)
 
     def cleanup(self):
         """Release video resources."""
