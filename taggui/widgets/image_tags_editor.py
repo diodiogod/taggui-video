@@ -1,9 +1,9 @@
 from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QIcon
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
-                               QPlainTextEdit, QPushButton, QStyle, QVBoxLayout, QWidget)
+                               QPushButton, QStyle, QToolButton, QVBoxLayout, QWidget)
 from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
@@ -13,6 +13,7 @@ from utils.settings import DEFAULT_SETTINGS, settings
 from utils.text_edit_item_delegate import TextEditItemDelegate
 from utils.utils import get_confirmation_dialog_reply
 from widgets.image_list import ImageList
+from widgets.descriptive_text_edit import DescriptiveTextEdit
 
 MAX_TOKEN_COUNT = 75
 
@@ -160,6 +161,31 @@ class ImageTagsEditor(QDockWidget):
         self.descriptive_mode_checkbox = QCheckBox('Desc')
         self.descriptive_mode_checkbox.setToolTip('Descriptive Mode')
 
+        # Grammar check button (hidden by default, shown in descriptive mode)
+        self.grammar_check_button = QPushButton('✓')
+        self.grammar_check_button.setToolTip('Check Grammar')
+        self.grammar_check_button.setMaximumSize(24, 20)
+        self.grammar_check_button.setFlat(True)
+        self.grammar_check_button.setStyleSheet("""
+            QPushButton {
+                font-size: 16px;
+                font-weight: bold;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #3a3a3a;
+                padding: 2px;
+                color: #4CAF50;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #4CAF50;
+            }
+            QPushButton:pressed {
+                background-color: #2a2a2a;
+            }
+        """)
+        self.grammar_check_button.hide()
+
         # Don't connect signals yet - will do it after creating all widgets
 
         # Create float and close buttons
@@ -178,6 +204,7 @@ class ImageTagsEditor(QDockWidget):
         title_layout.addWidget(title_label)
         title_layout.addStretch()
         title_layout.addWidget(self.descriptive_mode_checkbox)
+        title_layout.addWidget(self.grammar_check_button)
         title_layout.addWidget(float_button)
         title_layout.addWidget(close_button)
 
@@ -188,8 +215,8 @@ class ImageTagsEditor(QDockWidget):
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
 
-        # Descriptive text editor (hidden by default)
-        self.descriptive_text_edit = QPlainTextEdit()
+        # Descriptive text editor with spell/grammar checking (hidden by default)
+        self.descriptive_text_edit = DescriptiveTextEdit()
         self.descriptive_text_edit.setPlaceholderText('Enter descriptive text with commas...')
         self.descriptive_text_edit.textChanged.connect(self.on_descriptive_text_changed)
         self.descriptive_text_edit.hide()
@@ -220,6 +247,9 @@ class ImageTagsEditor(QDockWidget):
         # Now connect descriptive mode signals and load persistent state
         self.descriptive_mode_checkbox.toggled.connect(self.toggle_display_mode)
         self.descriptive_mode_checkbox.toggled.connect(self.save_descriptive_mode_state)
+
+        # Connect grammar check button
+        self.grammar_check_button.clicked.connect(self.descriptive_text_edit.check_grammar)
 
         # Load persistent state after all widgets are created and signals connected
         desc_mode_enabled = settings.value('descriptive_mode_enabled', False, type=bool)
@@ -312,10 +342,16 @@ class ImageTagsEditor(QDockWidget):
             self.tag_input_box.hide()
             self.image_tags_list.hide()
             self.descriptive_text_edit.show()
+
+            # Show grammar check button if grammar checker is available
+            if (self.descriptive_text_edit.grammar_checker and
+                self.descriptive_text_edit.grammar_checker.is_available()):
+                self.grammar_check_button.show()
         else:
             # Switch to tag mode
-            # Hide text edit, show tag list and input
+            # Hide text edit and grammar button, show tag list and input
             self.descriptive_text_edit.hide()
+            self.grammar_check_button.hide()
             self.tag_input_box.show()
             self.image_tags_list.show()
 
