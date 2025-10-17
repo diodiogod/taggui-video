@@ -558,9 +558,14 @@ class ImageGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        # Notify parent to show video controls
+        # Notify parent to show video controls if hovering near them
         if self.image_viewer._is_video_loaded and self.image_viewer.video_controls_auto_hide:
-            self.image_viewer._show_controls_temporarily()
+            # Map event position to parent widget coordinates
+            parent_pos = self.mapTo(self.image_viewer, event.pos())
+            controls_rect = self.image_viewer.video_controls.geometry()
+            detection_rect = controls_rect.adjusted(-20, -20, 20, 20)
+            if detection_rect.contains(parent_pos):
+                self.image_viewer._show_controls_temporarily()
 
         scene_pos = self.mapToScene(event.position().toPoint())
         items = self.scene().items(scene_pos)
@@ -680,39 +685,91 @@ class ImageViewer(QWidget):
         self._controls_hide_timer.setSingleShot(True)
         self._controls_hide_timer.timeout.connect(self._hide_controls)
 
-        # Position controls at bottom as overlay
+        # Position controls (will restore saved position if exists)
         self._position_video_controls()
+
+        # Restore saved X,Y position and width percentages if exists
+        saved_x_percent = settings.value('video_controls_x_percent', type=float)
+        saved_y_percent = settings.value('video_controls_y_percent', type=float)
+        saved_width_percent = settings.value('video_controls_width_percent', type=float)
+        if saved_x_percent is not None and saved_y_percent is not None and self.width() > 0 and self.height() > 0:
+            controls_height = self.video_controls.sizeHint().height()
+            # Use saved width if available, otherwise use sizeHint
+            if saved_width_percent is not None:
+                controls_width = int(saved_width_percent * self.width())
+                controls_width = max(400, min(controls_width, self.width()))  # Clamp
+            else:
+                controls_width = self.video_controls.sizeHint().width()
+            x_pos = int(saved_x_percent * self.width())
+            y_pos = int(saved_y_percent * self.height())
+            # Clamp to valid range
+            x_pos = max(0, min(x_pos, self.width() - controls_width))
+            y_pos = max(0, min(y_pos, self.height() - controls_height))
+            self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
 
         # Enable mouse tracking for auto-hide
         self.setMouseTracking(True)
         self.view.setMouseTracking(True)
         self.view.viewport().setMouseTracking(True)
 
-    def _position_video_controls(self):
-        """Position video controls overlay at bottom of viewer."""
+    def _position_video_controls(self, force_bottom=False):
+        """Position video controls overlay at saved position."""
         if not self.video_controls:
             return
 
-        # Position at bottom with full width
         controls_height = self.video_controls.sizeHint().height()
-        self.video_controls.setGeometry(
-            0,
-            self.height() - controls_height,
-            self.width(),
-            controls_height
-        )
+
+        # Check if we have saved percentage positions and width
+        saved_x_percent = settings.value('video_controls_x_percent', type=float)
+        saved_y_percent = settings.value('video_controls_y_percent', type=float)
+        saved_width_percent = settings.value('video_controls_width_percent', type=float)
+
+        if force_bottom or saved_x_percent is None or saved_y_percent is None:
+            # Position at bottom center with default width
+            controls_width = self.video_controls.sizeHint().width()
+            x_pos = (self.width() - controls_width) // 2
+            y_pos = self.height() - controls_height
+            self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+        else:
+            # Use saved percentages to calculate position and width
+            if self.width() > 0 and self.height() > 0:
+                # Calculate width
+                if saved_width_percent is not None:
+                    controls_width = int(saved_width_percent * self.width())
+                    controls_width = max(400, min(controls_width, self.width()))
+                else:
+                    controls_width = self.video_controls.sizeHint().width()
+
+                x_pos = int(saved_x_percent * self.width())
+                y_pos = int(saved_y_percent * self.height())
+                # Clamp to valid range
+                x_pos = max(0, min(x_pos, self.width() - controls_width))
+                y_pos = max(0, min(y_pos, self.height() - controls_height))
+                self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+
         # Raise to ensure it's on top
         self.video_controls.raise_()
 
     def resizeEvent(self, event):
         """Reposition controls when viewer is resized."""
         super().resizeEvent(event)
+        # Store visibility state
+        was_visible = self.video_controls.isVisible()
         self._position_video_controls()
+        # Restore visibility after resize (force controls to update)
+        if was_visible:
+            self.video_controls.setVisible(True)
+            self.video_controls.raise_()
 
     def mouseMoveEvent(self, event):
-        """Show controls on mouse movement over video."""
+        """Show controls when hovering over their position."""
         if self._is_video_loaded and self.video_controls_auto_hide:
-            self._show_controls_temporarily()
+            # Check if mouse is near the controls position
+            controls_rect = self.video_controls.geometry()
+            # Expand detection area slightly
+            detection_rect = controls_rect.adjusted(-20, -20, 20, 20)
+            if detection_rect.contains(event.pos()):
+                self._show_controls_temporarily()
         super().mouseMoveEvent(event)
 
     def _show_controls_temporarily(self):
@@ -727,10 +784,14 @@ class ImageViewer(QWidget):
         self._controls_hide_timer.start(2000)
 
     def _hide_controls(self):
-        """Hide controls after timeout."""
+        """Hide controls after timeout, but only if mouse is not over them."""
         if self.video_controls_auto_hide and self._is_video_loaded:
-            self.video_controls.setVisible(False)
-            self._controls_visible = False
+            # Check if mouse is still over controls
+            mouse_pos = self.mapFromGlobal(self.cursor().pos())
+            controls_rect = self.video_controls.geometry()
+            if not controls_rect.contains(mouse_pos):
+                self.video_controls.setVisible(False)
+                self._controls_visible = False
 
     def _show_controls_permanent(self):
         """Show controls permanently (not auto-hide)."""

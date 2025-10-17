@@ -787,6 +787,10 @@ class MainWindow(QMainWindow):
             video_player.stop)
         video_controls.frame_changed.connect(
             video_player.seek_to_frame)
+        video_controls.skip_backward_requested.connect(
+            lambda: self._skip_video(backward=True))
+        video_controls.skip_forward_requested.connect(
+            lambda: self._skip_video(backward=False))
 
         # Connect video player updates to video controls
         video_player.frame_changed.connect(
@@ -816,6 +820,25 @@ class MainWindow(QMainWindow):
             video_player.set_loop(True, loop_range[0], loop_range[1])
         else:
             video_player.set_loop(False, None, None)
+
+    def _skip_video(self, backward: bool):
+        """Skip 1 second backward or forward in video."""
+        video_player = self.image_viewer.video_player
+        fps = video_player.get_fps()
+        if fps == 0:
+            return
+
+        # Calculate frame offset for 1 second
+        frame_offset = int(fps)
+        current_frame = video_player.get_current_frame_number()
+
+        if backward:
+            new_frame = max(0, current_frame - frame_offset)
+        else:
+            new_frame = min(video_player.get_total_frames() - 1,
+                          current_frame + frame_offset)
+
+        video_player.seek_to_frame(new_frame)
 
     def restore(self):
         # Restore the window geometry and state.
