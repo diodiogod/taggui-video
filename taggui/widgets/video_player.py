@@ -141,6 +141,19 @@ class VideoPlayerWidget(QWidget):
 
         # Convert BGR to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Correct for non-square pixel aspect ratio (SAR)
+        # Get SAR from video metadata (defaults to 1:1 if not available)
+        sar_num = self.cap.get(cv2.CAP_PROP_SAR_NUM)
+        sar_den = self.cap.get(cv2.CAP_PROP_SAR_DEN)
+
+        # Apply SAR correction if present and valid
+        if sar_num > 0 and sar_den > 0 and sar_num != sar_den:
+            h, w = frame_rgb.shape[:2]
+            # Calculate display width: storage_width * (sar_num / sar_den)
+            display_width = int(w * sar_num / sar_den)
+            frame_rgb = cv2.resize(frame_rgb, (display_width, h), interpolation=cv2.INTER_LINEAR)
+
         h, w, ch = frame_rgb.shape
         bytes_per_line = ch * w
         qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)

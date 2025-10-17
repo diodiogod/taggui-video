@@ -402,6 +402,12 @@ class VideoControlsWidget(QWidget):
         self.frame_rule_label.setMinimumWidth(60)
         self.frame_rule_label.setStyleSheet("QLabel { color: #FF9800; font-weight: bold; }")
 
+        # SAR warning indicator (only shown for non-square pixel videos)
+        self.sar_warning_label = QLabel('')
+        self.sar_warning_label.setMinimumWidth(80)
+        self.sar_warning_label.setStyleSheet("QLabel { color: #FF5722; font-weight: bold; }")
+        self.sar_warning_label.setToolTip('Video has non-square pixels (SAR != 1:1)\nMay cause issues with training tools that ignore SAR')
+
         # Loop controls - smaller buttons with text labels
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
         self.loop_start_btn.setToolTip('Set Loop Start at current frame (Pink marker)')
@@ -447,6 +453,7 @@ class VideoControlsWidget(QWidget):
         info_layout.addWidget(self.frame_count_label)
         info_layout.addWidget(self.marker_range_label)
         info_layout.addWidget(self.frame_rule_label)
+        info_layout.addWidget(self.sar_warning_label)
         info_layout.addStretch()
         info_layout.addWidget(self.loop_reset_btn)
         info_layout.addWidget(self.loop_start_btn)
@@ -548,7 +555,7 @@ class VideoControlsWidget(QWidget):
         label_font.setPointSize(max(8, int(11 * scale)))
         for label in [self.frame_label, self.time_label, self.fps_label,
                       self.frame_count_label, self.marker_range_label, self.frame_total_label,
-                      self.frame_rule_label, self.speed_label, self.speed_value_label]:
+                      self.frame_rule_label, self.sar_warning_label, self.speed_label, self.speed_value_label]:
             label.setFont(label_font)
 
         # Scale speed slider - only set minimum width, let it expand
@@ -716,6 +723,8 @@ class VideoControlsWidget(QWidget):
         fps = metadata.get('fps', 0)
         frame_count = metadata.get('frame_count', 0)
         duration = metadata.get('duration', 0)
+        sar_num = metadata.get('sar_num', 1)
+        sar_den = metadata.get('sar_den', 1)
 
         # Update frame controls
         self.frame_spinbox.setMaximum(frame_count - 1 if frame_count > 0 else 0)
@@ -744,6 +753,19 @@ class VideoControlsWidget(QWidget):
                 self.frame_rule_label.setStyleSheet("QLabel { color: #F44336; font-weight: bold; }")
         else:
             self.frame_rule_label.setText('')
+
+        # Update SAR warning indicator (only show if SAR != 1:1)
+        if sar_num > 0 and sar_den > 0 and sar_num != sar_den:
+            sar_ratio = sar_num / sar_den
+            self.sar_warning_label.setText(f'⚠SAR {sar_num}:{sar_den}')
+            self.sar_warning_label.setToolTip(
+                f'Video has non-square pixels (SAR {sar_num}:{sar_den} = {sar_ratio:.3f})\n'
+                f'Training tools like musubi-tuner may ignore SAR and use wrong dimensions.\n'
+                f'Consider re-encoding with square pixels (SAR 1:1) before training.'
+            )
+        else:
+            self.sar_warning_label.setText('')
+            self.sar_warning_label.setToolTip('')
 
         # Format duration as mm:ss.mmm
         minutes = int(duration // 60)
