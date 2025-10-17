@@ -210,6 +210,7 @@ class VideoControlsWidget(QWidget):
     loop_end_set = Signal()
     loop_reset = Signal()
     loop_toggled = Signal(bool)
+    speed_changed = Signal(float)  # Playback speed multiplier
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -290,6 +291,51 @@ class VideoControlsWidget(QWidget):
 
         self.frame_total_label = QLabel('/ 0')
 
+        # Playback speed slider with extended range support (rubberband effect)
+        self.speed_label = QLabel('Speed:')
+        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.speed_slider.setMinimum(0)  # 0.0x (visual range)
+        self.speed_slider.setMaximum(200)  # 2.0x (visual range)
+        self.speed_slider.setValue(100)  # 1.0x
+        self.speed_slider.setTickInterval(25)
+        self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.speed_slider.setMaximumWidth(100)
+        self.speed_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #555;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #4CAF50;
+                border: 1px solid #45a049;
+                width: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #5FBF60;
+            }
+        """)
+
+        # Extended speed tracking for rubberband effect
+        self._extended_speed = 1.0  # Actual speed (can be -8.0 to 8.0)
+        self._is_dragging_speed = False
+        self._last_mouse_pos = None
+        self._drag_start_value = 100
+
+        # Install event filter for mouse tracking
+        self.speed_slider.installEventFilter(self)
+
+        # Connect slider signals
+        self.speed_slider.valueChanged.connect(self._on_speed_slider_changed)
+        self.speed_slider.sliderPressed.connect(self._on_speed_slider_pressed)
+        self.speed_slider.sliderReleased.connect(self._on_speed_slider_released)
+
+        self.speed_value_label = QLabel('1.00x')
+        self.speed_value_label.setMinimumWidth(45)
+        self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
+
         controls_layout.addWidget(self.play_pause_btn)
         controls_layout.addWidget(self.stop_btn)
         controls_layout.addSpacing(20)
@@ -301,6 +347,10 @@ class VideoControlsWidget(QWidget):
         controls_layout.addWidget(self.frame_label)
         controls_layout.addWidget(self.frame_spinbox)
         controls_layout.addWidget(self.frame_total_label)
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(self.speed_label)
+        controls_layout.addWidget(self.speed_slider)
+        controls_layout.addWidget(self.speed_value_label)
         controls_layout.addStretch()
 
         # Timeline slider with loop markers
@@ -328,6 +378,11 @@ class VideoControlsWidget(QWidget):
         # Frame count display
         self.frame_count_label = QLabel('0 frames')
         self.frame_count_label.setMinimumWidth(80)
+
+        # Marker range frame count display
+        self.marker_range_label = QLabel('')
+        self.marker_range_label.setMinimumWidth(90)
+        self.marker_range_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
 
         # Loop controls - smaller buttons with text labels
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
@@ -372,6 +427,7 @@ class VideoControlsWidget(QWidget):
         info_layout.addWidget(self.time_label)
         info_layout.addWidget(self.fps_label)
         info_layout.addWidget(self.frame_count_label)
+        info_layout.addWidget(self.marker_range_label)
         info_layout.addStretch()
         info_layout.addWidget(self.loop_start_btn)
         info_layout.addWidget(self.loop_end_btn)
@@ -453,8 +509,13 @@ class VideoControlsWidget(QWidget):
         label_font = self.frame_label.font()
         label_font.setPointSize(max(8, int(11 * scale)))
         for label in [self.frame_label, self.time_label, self.fps_label,
-                      self.frame_count_label, self.frame_total_label]:
+                      self.frame_count_label, self.marker_range_label, self.frame_total_label,
+                      self.speed_label, self.speed_value_label]:
             label.setFont(label_font)
+
+        # Scale speed slider
+        speed_slider_width = int(100 * scale)
+        self.speed_slider.setMaximumWidth(speed_slider_width)
 
         # Scale slider minimum height
         slider_height = int(30 * scale)
@@ -495,6 +556,84 @@ class VideoControlsWidget(QWidget):
         """Sync spinbox when slider moves."""
         if not self._updating_slider:
             self.frame_spinbox.setValue(value)
+
+    def eventFilter(self, obj, event):
+        """Event filter for speed slider mouse tracking."""
+        if obj == self.speed_slider:
+            from PySide6.QtCore import QEvent
+            from PySide6.QtGui import QCursor
+
+            if event.type() == QEvent.Type.MouseMove and self._is_dragging_speed:
+                current_mouse = QCursor.pos()
+
+                if self._last_mouse_pos is not None:
+                    # Calculate delta movement
+                    delta_x = current_mouse.x() - self._last_mouse_pos.x()
+
+                    # Calculate base sensitivity based on slider width
+                    slider_width = self.speed_slider.width()
+                    if slider_width > 0:
+                        base_sensitivity = 2.0 / slider_width  # 2.0 is normal range
+
+                        # Calculate acceleration based on how far we are from normal bounds
+                        acceleration = 1.0
+                        if self._extended_speed < 0.0:
+                            # Left side acceleration: more negative = faster
+                            out_of_bounds = abs(self._extended_speed)
+                            acceleration = 1.0 + (out_of_bounds * 3.0)
+                        elif self._extended_speed > 2.0:
+                            # Right side acceleration: higher above 2.0 = faster
+                            out_of_bounds = self._extended_speed - 2.0
+                            acceleration = 1.0 + (out_of_bounds * 2.5)
+
+                        # Apply accelerated sensitivity
+                        sensitivity = base_sensitivity * acceleration
+                        self._extended_speed += delta_x * sensitivity
+
+                        # Clamp to absolute limits (-8.0 to 8.0)
+                        self._extended_speed = max(-8.0, min(8.0, self._extended_speed))
+
+                        # Update slider position (clamped to visual range 0.0-2.0)
+                        clamped_value = max(0.0, min(2.0, self._extended_speed))
+                        self.speed_slider.blockSignals(True)
+                        self.speed_slider.setValue(int(clamped_value * 100.0))
+                        self.speed_slider.blockSignals(False)
+
+                        # Update display and emit signal
+                        self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+                        self.speed_changed.emit(self._extended_speed)
+
+                self._last_mouse_pos = current_mouse
+
+        return super().eventFilter(obj, event)
+
+    @Slot()
+    def _on_speed_slider_pressed(self):
+        """Handle speed slider press - start extended drag tracking."""
+        self._is_dragging_speed = True
+        self._extended_speed = self.speed_slider.value() / 100.0
+        self._drag_start_value = self.speed_slider.value()
+        from PySide6.QtGui import QCursor
+        self._last_mouse_pos = QCursor.pos()
+
+    @Slot()
+    def _on_speed_slider_released(self):
+        """Handle speed slider release - reset to slider value."""
+        self._is_dragging_speed = False
+        self._last_mouse_pos = None
+        # Force sync when drag ends
+        self._extended_speed = self.speed_slider.value() / 100.0
+        self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+        self.speed_changed.emit(self._extended_speed)
+
+    @Slot(int)
+    def _on_speed_slider_changed(self, value):
+        """Handle playback speed slider change (normal mode only)."""
+        if not self._is_dragging_speed:
+            # Normal slider input (not during extended drag)
+            self._extended_speed = value / 100.0
+            self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+            self.speed_changed.emit(self._extended_speed)
 
     @Slot(dict)
     def set_video_info(self, metadata: dict):
@@ -551,6 +690,14 @@ class VideoControlsWidget(QWidget):
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-start'))
             self.play_pause_btn.setToolTip('Play (Space)')
 
+    def _update_marker_range_display(self):
+        """Update the marker range frame count display."""
+        if self.loop_start_frame is not None and self.loop_end_frame is not None:
+            frame_count = abs(self.loop_end_frame - self.loop_start_frame) + 1
+            self.marker_range_label.setText(f'[{frame_count} frames]')
+        else:
+            self.marker_range_label.setText('')
+
     @Slot()
     def _set_loop_start(self):
         """Set loop start at current frame, and auto-set end if fixed marker size is enabled."""
@@ -569,6 +716,8 @@ class VideoControlsWidget(QWidget):
         self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
         # Update timeline markers
         self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
+        # Update range display
+        self._update_marker_range_display()
 
     @Slot()
     def _set_loop_end(self):
@@ -579,6 +728,8 @@ class VideoControlsWidget(QWidget):
         self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
         # Update timeline markers
         self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
+        # Update range display
+        self._update_marker_range_display()
 
     @Slot(bool)
     def _toggle_loop(self, enabled: bool):
@@ -599,6 +750,8 @@ class VideoControlsWidget(QWidget):
         self.loop_end_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
         # Clear timeline markers
         self.timeline_slider.clear_loop_markers()
+        # Clear range display
+        self._update_marker_range_display()
 
     def get_loop_range(self):
         """Get current loop range (start, end) or None if not set."""
@@ -624,6 +777,8 @@ class VideoControlsWidget(QWidget):
         self.loop_start_frame = frame
         self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
         self.loop_start_set.emit()
+        # Update range display
+        self._update_marker_range_display()
 
     @Slot(int)
     def _on_loop_end_dragged(self, frame):
@@ -631,6 +786,8 @@ class VideoControlsWidget(QWidget):
         self.loop_end_frame = frame
         self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
         self.loop_end_set.emit()
+        # Update range display
+        self._update_marker_range_display()
 
     def mousePressEvent(self, event):
         """Start dragging or resizing the controls widget."""
