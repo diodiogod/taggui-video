@@ -676,7 +676,9 @@ class ImageViewer(QWidget):
         self.current_video_item = None
         self.video_controls = VideoControlsWidget(self)
         self.video_controls.setVisible(False)
-        self.video_controls_auto_hide = True  # Enable auto-hide by default
+        # Load auto-hide setting (inverted from always_show setting)
+        always_show = settings.value('video_always_show_controls', False, type=bool)
+        self.video_controls_auto_hide = not always_show
         self._controls_visible = False
         self._is_video_loaded = False
 
@@ -779,9 +781,9 @@ class ImageViewer(QWidget):
             self._controls_visible = True
             self._position_video_controls()
 
-        # Reset hide timer (2 seconds)
+        # Reset hide timer (0.8 seconds)
         self._controls_hide_timer.stop()
-        self._controls_hide_timer.start(2000)
+        self._controls_hide_timer.start(800)
 
     def _hide_controls(self):
         """Hide controls after timeout, but only if mouse is not over them."""
@@ -852,6 +854,10 @@ class ImageViewer(QWidget):
                             self._show_controls_temporarily()
                         else:
                             self._show_controls_permanent()
+
+                        # Auto-play if enabled (do this AFTER setting up controls to avoid signal conflicts)
+                        if self.video_controls.should_auto_play():
+                            self.video_player.play()
                     else:
                         print(f"Video loaded but no frame available: {image.path}")
                         return
