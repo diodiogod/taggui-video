@@ -397,6 +397,11 @@ class VideoControlsWidget(QWidget):
         self.marker_range_label.setMinimumWidth(90)
         self.marker_range_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
 
+        # N*4+1 frame rule indicator
+        self.frame_rule_label = QLabel('')
+        self.frame_rule_label.setMinimumWidth(60)
+        self.frame_rule_label.setStyleSheet("QLabel { color: #FF9800; font-weight: bold; font-size: 10px; }")
+
         # Loop controls - smaller buttons with text labels
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
         self.loop_start_btn.setToolTip('Set Loop Start at current frame (Pink marker)')
@@ -441,6 +446,7 @@ class VideoControlsWidget(QWidget):
         info_layout.addWidget(self.fps_label)
         info_layout.addWidget(self.frame_count_label)
         info_layout.addWidget(self.marker_range_label)
+        info_layout.addWidget(self.frame_rule_label)
         info_layout.addStretch()
         info_layout.addWidget(self.loop_reset_btn)
         info_layout.addWidget(self.loop_start_btn)
@@ -539,7 +545,7 @@ class VideoControlsWidget(QWidget):
         label_font.setPointSize(max(8, int(11 * scale)))
         for label in [self.frame_label, self.time_label, self.fps_label,
                       self.frame_count_label, self.marker_range_label, self.frame_total_label,
-                      self.speed_label, self.speed_value_label]:
+                      self.frame_rule_label, self.speed_label, self.speed_value_label]:
             label.setFont(label_font)
 
         # Scale speed slider - only set minimum width, let it expand
@@ -723,6 +729,19 @@ class VideoControlsWidget(QWidget):
         else:
             self.frame_total_label.setText('/ 0')
 
+        # Update N*4+1 frame rule indicator
+        if frame_count > 0:
+            # Check if frame count follows N*4+1 rule
+            is_valid = (frame_count - 1) % 4 == 0
+            if is_valid:
+                self.frame_rule_label.setText('✓N*4+1')
+                self.frame_rule_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 10px; }")
+            else:
+                self.frame_rule_label.setText('✗N*4+1')
+                self.frame_rule_label.setStyleSheet("QLabel { color: #F44336; font-weight: bold; font-size: 10px; }")
+        else:
+            self.frame_rule_label.setText('')
+
         # Format duration as mm:ss.mmm
         minutes = int(duration // 60)
         seconds = int(duration % 60)
@@ -879,6 +898,7 @@ class VideoControlsWidget(QWidget):
         self.fps_label.setText('0.00 fps')
         self.frame_count_label.setText('0 frames')
         self.frame_total_label.setText('/ 0')
+        self.frame_rule_label.setText('')
         self.set_playing(False)
         self._reset_loop()
 
