@@ -1,9 +1,9 @@
 from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import (QAbstractItemView, QCompleter, QDockWidget,
-                               QLabel, QLineEdit, QListView, QMessageBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
+                               QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
+                               QPlainTextEdit, QPushButton, QStyle, QVBoxLayout, QWidget)
 from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
@@ -149,16 +149,57 @@ class ImageTagsEditor(QDockWidget):
         self.setWindowTitle('Image Tags')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
+
+        # Create custom title bar with checkbox and standard buttons
+        title_widget = QWidget()
+        title_layout = QHBoxLayout(title_widget)
+        title_layout.setContentsMargins(6, 2, 6, 2)
+        title_layout.setSpacing(4)
+
+        title_label = QLabel('Image Tags')
+        self.descriptive_mode_checkbox = QCheckBox('Desc')
+        self.descriptive_mode_checkbox.setToolTip('Descriptive Mode')
+        self.descriptive_mode_checkbox.toggled.connect(self.toggle_display_mode)
+
+        # Create float and close buttons
+        float_button = QPushButton()
+        float_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton))
+        float_button.setFlat(True)
+        float_button.setMaximumSize(16, 16)
+        float_button.clicked.connect(lambda: self.setFloating(not self.isFloating()))
+
+        close_button = QPushButton()
+        close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+        close_button.setFlat(True)
+        close_button.setMaximumSize(16, 16)
+        close_button.clicked.connect(self.close)
+
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        title_layout.addWidget(self.descriptive_mode_checkbox)
+        title_layout.addWidget(float_button)
+        title_layout.addWidget(close_button)
+
+        self.setTitleBarWidget(title_widget)
+
         self.tag_input_box = TagInputBox(self.image_tag_list_model,
                                          tag_counter_model, image_list,
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
+
+        # Descriptive text editor (hidden by default)
+        self.descriptive_text_edit = QPlainTextEdit()
+        self.descriptive_text_edit.setPlaceholderText('Enter descriptive text with commas...')
+        self.descriptive_text_edit.textChanged.connect(self.on_descriptive_text_changed)
+        self.descriptive_text_edit.hide()
+
         self.token_count_label = QLabel()
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.tag_input_box)
         layout.addWidget(self.image_tags_list)
+        layout.addWidget(self.descriptive_text_edit)
         layout.addWidget(self.token_count_label)
         self.setWidget(container)
 
@@ -216,6 +257,12 @@ class ImageTagsEditor(QDockWidget):
             return
         self.image_tag_list_model.setStringList(image.tags)
         self.count_tokens()
+        # Update descriptive text if in descriptive mode
+        if self.descriptive_mode_checkbox.isChecked():
+            tags_text = self.tag_separator.join(image.tags)
+            self.descriptive_text_edit.blockSignals(True)
+            self.descriptive_text_edit.setPlainText(tags_text)
+            self.descriptive_text_edit.blockSignals(False)
         if self.image_tags_list.hasFocus():
             self.select_first_tag()
 
@@ -232,3 +279,41 @@ class ImageTagsEditor(QDockWidget):
             proxy_image_index = self.proxy_image_list_model.mapFromSource(
                 self.image_index)
             self.load_image_tags(proxy_image_index)
+
+    @Slot(bool)
+    def toggle_display_mode(self, descriptive_mode: bool):
+        """Switch between tag list view and descriptive text view."""
+        if descriptive_mode:
+            # Switch to descriptive mode
+            # Convert tag list to comma-separated text
+            tags_text = self.tag_separator.join(
+                self.image_tag_list_model.stringList())
+            # Block signals to avoid triggering textChanged
+            self.descriptive_text_edit.blockSignals(True)
+            self.descriptive_text_edit.setPlainText(tags_text)
+            self.descriptive_text_edit.blockSignals(False)
+            # Hide tag list and input, show text edit
+            self.tag_input_box.hide()
+            self.image_tags_list.hide()
+            self.descriptive_text_edit.show()
+        else:
+            # Switch to tag mode
+            # Hide text edit, show tag list and input
+            self.descriptive_text_edit.hide()
+            self.tag_input_box.show()
+            self.image_tags_list.show()
+
+    @Slot()
+    def on_descriptive_text_changed(self):
+        """Sync changes from descriptive text back to tag list model."""
+        if not self.descriptive_mode_checkbox.isChecked():
+            return
+        text = self.descriptive_text_edit.toPlainText()
+        # Split by separator to get tags
+        # Don't strip or filter - preserve exact user input
+        if text:
+            tags = text.split(self.tag_separator)
+        else:
+            tags = []
+        # Update the model - this will trigger dataChanged and save to disk
+        self.image_tag_list_model.setStringList(tags)
