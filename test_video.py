@@ -7,8 +7,8 @@ try:
     import json
     print('Imports successful')
 
-    input_path = Path('J:/train/video_loras/Male pants down/16fps_converted/pants (18).mp4.backup')
-    output_path = Path('J:/train/video_loras/Male pants down/16fps_converted/pants (18)_test.mp4')
+    input_path = Path('J:/train/video_loras/Male pants down/16fps_converted/pants (21).mp4')
+    output_path = Path('J:/train/video_loras/Male pants down/16fps_converted/pants (21)_test.mp4')
 
     print(f'Input exists: {input_path.exists()}')
     print(f'Input size: {input_path.stat().st_size if input_path.exists() else "N/A"}')
