@@ -1154,28 +1154,76 @@ class MainWindow(QMainWindow):
                 f"Video already has {current_frames} frames, which follows N*4+1 rule.")
             return
 
-        # Calculate target
-        target_frames = ((current_frames // 4) + 1) * 4 + 1
-        frames_to_add = target_frames - current_frames
-
-        # Ask user preference
-        items = ["Repeat last frame", "Repeat first frame"]
-        choice, ok = QInputDialog.getItem(
+        # Ask for target frame count or auto-calculate
+        target_input, ok = QInputDialog.getText(
             self, "Fix Frame Count",
-            f"Current: {current_frames} frames\nTarget: {target_frames} frames\nAdd {frames_to_add} frames by:",
-            items, 0, False
+            f"Current: {current_frames} frames\n\n"
+            "Enter target frame count (must be N*4+1) or leave empty for auto:",
+            text=""
         )
 
         if not ok:
             return
 
-        repeat_last = (choice == "Repeat last frame")
+        target_frames = None
+        if target_input.strip():
+            try:
+                target_frames = int(target_input.strip())
+                if (target_frames - 1) % 4 != 0:
+                    QMessageBox.warning(self, "Invalid Target",
+                        f"Target frame count {target_frames} does not follow N*4+1 rule.\n"
+                        "Valid examples: 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61...")
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Input", "Please enter a valid number or leave empty for auto.")
+                return
+
+        # Calculate target if not specified - find optimal target with minimal changes
+        if target_frames is None:
+            current_n = (current_frames - 1) // 4
+            lower_target = current_n * 4 + 1
+            upper_target = (current_n + 1) * 4 + 1
+
+            # Calculate frames needed for each option
+            frames_to_lower = current_frames - lower_target  # Always >= 0
+            frames_to_upper = upper_target - current_frames  # Always > 0
+
+            # Choose the option requiring fewer frame changes
+            if frames_to_lower <= frames_to_upper:
+                target_frames = lower_target
+            else:
+                target_frames = upper_target
+
+        # Determine operation
+        if current_frames < target_frames:
+            operation = "add"
+            frames_diff = target_frames - current_frames
+            method_options = ["Repeat last frame", "Repeat first frame"]
+        else:
+            operation = "remove"
+            frames_diff = current_frames - target_frames
+            method_options = ["Remove last frames", "Remove first frames"]
+
+        # Ask user preference for method
+        choice, ok = QInputDialog.getItem(
+            self, "Fix Frame Count",
+            f"Current: {current_frames} frames\nTarget: {target_frames} frames\n"
+            f"Will {operation} {frames_diff} frames by:",
+            method_options, 0, False
+        )
+
+        if not ok:
+            return
+
+        repeat_last = (choice in ["Repeat last frame", "Remove last frames"])
 
         # Confirm action
+        action_desc = "repeating" if operation == "add" else "removing"
+        location_desc = "last" if repeat_last else "first"
         reply = QMessageBox.question(
             self, "Fix Frame Count",
             f"Fix frame count from {current_frames} to {target_frames}?\n\n"
-            f"Method: {'Repeat last frame' if repeat_last else 'Repeat first frame'}\n\n"
+            f"Method: {action_desc} {location_desc} {'frame' if frames_diff == 1 else 'frames'}\n\n"
             f"Original will be saved as {Path(video_player.video_path).name}.backup",
             QMessageBox.Yes | QMessageBox.No
         )
@@ -1186,7 +1234,7 @@ class MainWindow(QMainWindow):
         # Perform the fix
         input_path = Path(video_player.video_path)
         success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
-            input_path, input_path, fps, repeat_last
+            input_path, input_path, fps, repeat_last, target_frames
         )
 
         if success:
