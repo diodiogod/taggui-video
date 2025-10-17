@@ -171,7 +171,9 @@ class MainWindow(QMainWindow):
         self.fixed_marker_size_spinbox = QSpinBox()
         self.fixed_marker_size_spinbox.setMinimum(0)
         self.fixed_marker_size_spinbox.setMaximum(9999)
-        self.fixed_marker_size_spinbox.setValue(31)
+        # Load marker size from settings, default to 0 (Custom)
+        marker_size = settings.value('fixed_marker_size', defaultValue=0, type=int)
+        self.fixed_marker_size_spinbox.setValue(marker_size)
         self.fixed_marker_size_spinbox.setSpecialValueText('Custom')
         self.fixed_marker_size_spinbox.setSuffix(' frames')
         self.fixed_marker_size_spinbox.setToolTip('Fixed frame count for auto markers (0 = Custom allows manual marker setting)')
@@ -355,6 +357,8 @@ class MainWindow(QMainWindow):
         """Save the window geometry and state before closing."""
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
+        # Save marker size setting
+        settings.setValue('fixed_marker_size', self.fixed_marker_size_spinbox.value())
         super().closeEvent(event)
 
     def set_font_size(self):
@@ -881,7 +885,7 @@ class MainWindow(QMainWindow):
 
         # Connect toolbar video editing controls
         self.fixed_marker_size_spinbox.valueChanged.connect(
-            lambda value: setattr(video_controls, 'fixed_marker_size', value))
+            lambda value: self._on_marker_size_changed(value))
 
         # Always show controls toggle
         self.always_show_controls_btn.toggled.connect(
@@ -932,6 +936,14 @@ class MainWindow(QMainWindow):
                           current_frame + frame_offset)
 
         video_player.seek_to_frame(new_frame)
+
+    def _on_marker_size_changed(self, value):
+        """Handle marker size changes and save to settings."""
+        # Update video controls
+        video_controls = self.image_viewer.video_controls
+        setattr(video_controls, 'fixed_marker_size', value)
+        # Save to settings
+        settings.setValue('fixed_marker_size', value)
 
     def _extract_video_range(self):
         """Extract the marked range to a new video file."""
