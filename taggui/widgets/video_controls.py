@@ -470,6 +470,9 @@ class VideoControlsWidget(QWidget):
         # Fixed marker size (set from main window)
         self.fixed_marker_size = 31
 
+        # Auto-play state (persists across video changes)
+        self.auto_play_enabled = False
+
         # Load persistent settings
         self._load_persistent_settings()
 
@@ -752,6 +755,10 @@ class VideoControlsWidget(QWidget):
         if self.is_looping:
             self.loop_toggled.emit(True)
 
+    def should_auto_play(self) -> bool:
+        """Check if auto-play should trigger for the next video."""
+        return self.auto_play_enabled
+
     @Slot(int, float)
     def update_position(self, frame: int, time_ms: float):
         """Update display when playback position changes."""
@@ -784,12 +791,23 @@ class VideoControlsWidget(QWidget):
         self.time_label.setText(f'{minutes:02d}:{seconds:02d}.{milliseconds:03d} / {total_time}')
 
     @Slot(bool)
-    def set_playing(self, playing: bool):
-        """Update play/pause button state."""
+    def set_playing(self, playing: bool, update_auto_play: bool = False):
+        """Update play/pause button state.
+
+        Args:
+            playing: Whether video is playing
+            update_auto_play: If True, updates auto-play state (for manual user toggles)
+        """
         self.is_playing = playing
+
+        # Only update auto-play state on manual user toggles
+        if update_auto_play:
+            self.auto_play_enabled = playing
+
         if playing:
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-pause'))
-            self.play_pause_btn.setToolTip('Pause (Space)')
+            tooltip = 'Pause (Space) - Auto-play ON' if self.auto_play_enabled else 'Pause (Space) - Auto-play OFF'
+            self.play_pause_btn.setToolTip(tooltip)
             # Green glow when playing
             self.play_pause_btn.setStyleSheet("""
                 QPushButton {
@@ -804,7 +822,8 @@ class VideoControlsWidget(QWidget):
             """)
         else:
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-start'))
-            self.play_pause_btn.setToolTip('Play (Space)')
+            tooltip = 'Play (Space) - Auto-play ON' if self.auto_play_enabled else 'Play (Space) - Auto-play OFF'
+            self.play_pause_btn.setToolTip(tooltip)
             # Normal state when paused
             self.play_pause_btn.setStyleSheet("""
                 QPushButton {

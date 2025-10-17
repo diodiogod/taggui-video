@@ -899,8 +899,13 @@ class MainWindow(QMainWindow):
         video_controls = self.image_viewer.video_controls
 
         # Connect video controls to video player
-        video_controls.play_pause_requested.connect(
-            video_player.toggle_play_pause)
+        def on_play_pause_requested():
+            """Handle manual play/pause toggle from user."""
+            video_player.toggle_play_pause()
+            # Update UI and auto-play state based on new player state
+            video_controls.set_playing(video_player.is_playing, update_auto_play=True)
+
+        video_controls.play_pause_requested.connect(on_play_pause_requested)
         video_controls.stop_requested.connect(
             video_player.stop)
         video_controls.frame_changed.connect(
