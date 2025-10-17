@@ -793,7 +793,7 @@ class VideoControlsWidget(QWidget):
         """Set loop start at current frame, and auto-set end if fixed marker size is enabled."""
         self.loop_start_frame = self.frame_spinbox.value()
 
-        # Auto-set end marker based on fixed marker size
+        # Auto-set end marker based on fixed marker size (only if not Custom/0)
         if self.fixed_marker_size > 0:
             max_frame = self.frame_spinbox.maximum()
             self.loop_end_frame = min(self.loop_start_frame + self.fixed_marker_size - 1, max_frame)
