@@ -275,9 +275,8 @@ class VideoEditor:
     def repeat_frame(input_path: Path, output_path: Path,
                      frame_num: int, repeat_count: int, fps: float) -> Tuple[bool, str]:
         """
-        Repeat a single frame multiple times.
-        Creates .backup of original. Re-encoding required for repeated segment,
-        using high quality settings (CRF 18).
+        Repeat a single frame multiple times using ffmpeg select filter.
+        Creates .backup of original. Uses filter-based duplication for frame accuracy.
 
         Args:
             input_path: Input video file path
@@ -318,106 +317,95 @@ class VideoEditor:
             # Create backup of original
             if not VideoEditor._create_backup(input_path):
                 return False, "Failed to create backup"
-            frame_time = frame_num / fps
-            repeat_duration = repeat_count / fps
 
-            # Create temp directory
+            # Use split filter to create multiple segments and concat them
+            # This is more reliable than select for frame duplication
+            # Strategy:
+            # 1. Split into 3 parts: before, repeated frame, after
+            # 2. Extract single frame as separate input
+            # 3. Concat all parts together
+
             temp_dir = output_path.parent / '.temp_segments'
             temp_dir.mkdir(exist_ok=True)
 
-            segment1 = temp_dir / 'before.mp4'
-            frame_img = temp_dir / 'frame.png'
-            repeated = temp_dir / 'repeated.mp4'
-            segment2 = temp_dir / 'after.mp4'
-            concat_list = temp_dir / 'concat.txt'
+            frame_png = temp_dir / f'frame_{frame_num}.png'
 
-            # Extract segment before frame (frames 0 to frame_num-1)
-            if frame_num > 0:
-                # Use frame count instead of time for precision
-                cmd1 = [
-                    'ffmpeg',
-                    '-i', str(input_path),
-                    '-frames:v', str(frame_num),  # Exact frame count (0 to frame_num-1)
-                    '-c', 'copy',
-                    '-y',
-                    str(segment1)
-                ]
-                subprocess.run(cmd1, capture_output=True, check=True)
-
-            # Extract the frame as image
-            cmd2 = [
+            # Extract the frame to repeat as a PNG
+            extract_cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
-                '-vf', f'select=eq(n\\,{frame_num})',  # Select exact frame by number
+                '-vf', f'select=eq(n\\,{frame_num})',
                 '-vframes', '1',
                 '-y',
-                str(frame_img)
+                str(frame_png)
             ]
-            subprocess.run(cmd2, capture_output=True, check=True)
+            subprocess.run(extract_cmd, capture_output=True, check=True)
 
-            # Create video from repeated frame with high quality - use duration
-            repeat_duration = repeat_count / fps
-            cmd3 = [
+            # Build complex filter to split video and insert repeated frames
+            # trimmed_before: frames 0 to frame_num-1
+            # trimmed_at: frame frame_num (from original)
+            # repeated: frame_num repeated repeat_count times (from PNG)
+            # trimmed_after: frames frame_num+1 to end
+
+            filter_parts = []
+
+            # Split the input
+            if frame_num > 0:
+                # Frames before
+                filter_parts.append(f'[0:v]trim=start_frame=0:end_frame={frame_num},setpts=PTS-STARTPTS[before];')
+
+            # Original frame at position
+            filter_parts.append(f'[0:v]trim=start_frame={frame_num}:end_frame={frame_num+1},setpts=PTS-STARTPTS[at];')
+
+            # Repeated frames from PNG
+            for i in range(repeat_count):
+                filter_parts.append(f'[1:v]copy[repeat{i}];')
+
+            # Frames after (if any)
+            if frame_num < current_frames - 1:
+                filter_parts.append(f'[0:v]trim=start_frame={frame_num+1},setpts=PTS-STARTPTS[after];')
+
+            # Concatenate all parts
+            concat_inputs = []
+            if frame_num > 0:
+                concat_inputs.append('[before]')
+            concat_inputs.append('[at]')
+            for i in range(repeat_count):
+                concat_inputs.append(f'[repeat{i}]')
+            if frame_num < current_frames - 1:
+                concat_inputs.append('[after]')
+
+            filter_parts.append(f'{"".join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[outv]')
+
+            filter_complex = ''.join(filter_parts)
+
+            # Run ffmpeg with complex filter
+            cmd = [
                 'ffmpeg',
-                '-f', 'image2',
-                '-loop', '1',  # Loop the image
-                '-i', str(frame_img),
-                '-c:v', 'libx264',
-                '-crf', '18',  # High quality (18 = visually lossless)
-                '-preset', 'slow',  # Better compression
-                '-t', str(repeat_duration),  # Exact duration
-                '-pix_fmt', 'yuv420p',
-                '-r', str(fps),
-                '-y',
-                str(repeated)
-            ]
-            subprocess.run(cmd3, capture_output=True, check=True)
-
-            # Extract segment after frame (if any frames remain)
-            next_frame_time = (frame_num + 1) / fps
-            # Check if there are frames after the repeated frame
-            if frame_num + 1 < current_frames:
-                cmd4 = [
-                    'ffmpeg',
-                    '-i', str(input_path),
-                    '-ss', str(next_frame_time),
-                    '-c', 'copy',
-                    '-y',
-                    str(segment2)
-                ]
-                subprocess.run(cmd4, capture_output=True, check=True)
-            # If no frames after, segment2 remains empty (which is fine)
-
-            # Create concat list - only include segments that exist and have content
-            with open(concat_list, 'w') as f:
-                if frame_num > 0 and segment1.exists() and segment1.stat().st_size > 0:
-                    f.write(f"file '{segment1}'\n")
-                if repeated.exists() and repeated.stat().st_size > 0:
-                    f.write(f"file '{repeated}'\n")
-                if segment2.exists() and segment2.stat().st_size > 0:
-                    f.write(f"file '{segment2}'\n")
-
-            # Concatenate all segments with re-encoding to fix timing issues
-            cmd5 = [
-                'ffmpeg',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', str(concat_list),
+                '-i', str(input_path),
+                '-i', str(frame_png),
+                '-filter_complex', filter_complex,
+                '-map', '[outv]',
+                '-map', '0:a?',  # Include audio if present
                 '-c:v', 'libx264',
                 '-crf', '18',
                 '-preset', 'slow',
                 '-c:a', 'aac',
-                '-r', str(fps),  # Force consistent frame rate
+                '-r', str(fps),
                 '-y',
                 str(output_path)
             ]
-            result = subprocess.run(cmd5, capture_output=True, text=True)
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
             # Cleanup
-            for f in [segment1, frame_img, repeated, segment2, concat_list]:
-                if f.exists():
-                    f.unlink()
-            temp_dir.rmdir()
+            if frame_png.exists():
+                frame_png.unlink()
+            if temp_dir.exists():
+                try:
+                    temp_dir.rmdir()
+                except:
+                    pass
 
             if result.returncode == 0:
                 return True, f"Successfully repeated frame {frame_num} {repeat_count} times"
