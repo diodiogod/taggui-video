@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
-                            Signal, Slot, QPersistentModelIndex)
+                            Signal, Slot, QPersistentModelIndex, QProcess)
 from PySide6.QtGui import QDesktopServices, QColor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -181,6 +181,8 @@ class ImageListView(QListView):
         self.open_image_action = self.addAction('Open Image in Default App')
         self.open_image_action.setShortcut('Ctrl+O')
         self.open_image_action.triggered.connect(self.open_image)
+        self.open_folder_action = self.addAction('Open on Windows Explorer')
+        self.open_folder_action.triggered.connect(self.open_folder)
 
         self.context_menu = QMenu(self)
         self.context_menu.addAction('Select All Images', self.selectAll,
@@ -196,6 +198,7 @@ class ImageListView(QListView):
         self.context_menu.addAction(self.copy_images_action)
         self.context_menu.addAction(self.delete_images_action)
         self.context_menu.addAction(self.open_image_action)
+        self.context_menu.addAction(self.open_folder_action)
         self.selectionModel().selectionChanged.connect(
             self.update_context_menu_actions)
 
@@ -365,6 +368,15 @@ class ImageListView(QListView):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(image_path)))
 
     @Slot()
+    def open_folder(self):
+        selected_images = self.get_selected_images()
+        if selected_images:
+            folder_path = selected_images[0].path.parent
+            file_path = selected_images[0].path
+            # Use explorer.exe with /select flag to highlight the file
+            QProcess.startDetached('explorer.exe', ['/select,', str(file_path)])
+
+    @Slot()
     def update_context_menu_actions(self):
         selected_image_count = len(self.selectedIndexes())
         copy_file_names_action_name = (
@@ -383,6 +395,7 @@ class ImageListView(QListView):
         self.copy_images_action.setText(copy_images_action_name)
         self.delete_images_action.setText(delete_images_action_name)
         self.open_image_action.setVisible(selected_image_count == 1)
+        self.open_folder_action.setVisible(selected_image_count >= 1)
 
 
 class ImageList(QDockWidget):
