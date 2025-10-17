@@ -1,7 +1,7 @@
 import re
 from math import ceil, floor, sqrt
 from PySide6.QtCore import (QModelIndex, QPersistentModelIndex, QPoint, QPointF,
-                            QRect, QRectF, QSize, Qt, Signal, Slot)
+                            QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage,
                            QPainter, QPainterPath, QPen, QPixmap, QTransform,
                            QMouseEvent)
@@ -18,6 +18,8 @@ from utils.grid import Grid
 from utils.rect import (change_rect, change_rect_to_match_size,
                         flip_rect_position, get_rect_position,
                         map_rect_position_to_cursor, RectPosition)
+from widgets.video_player import VideoPlayerWidget
+from widgets.video_controls import VideoControlsWidget
 
 # The (inverse) golden ratio for showing hints during cropping
 golden_ratio = 2 / (1 + sqrt(5))
@@ -452,6 +454,7 @@ class ImageGraphicsView(QGraphicsView):
         self.image_viewer = image_viewer
         MarkingItem.image_view = self
         self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.last_pos = None
         self.clear_scene()
 
@@ -555,6 +558,10 @@ class ImageGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        # Notify parent to show video controls
+        if self.image_viewer._is_video_loaded and self.image_viewer.video_controls_auto_hide:
+            self.image_viewer._show_controls_temporarily()
+
         scene_pos = self.mapToScene(event.position().toPoint())
         items = self.scene().items(scene_pos)
         cursor = None
@@ -650,6 +657,7 @@ class ImageViewer(QWidget):
         settings.change.connect(self.setting_change)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.view)
         self.setLayout(layout)
 
@@ -657,6 +665,79 @@ class ImageViewer(QWidget):
         self.marking_items: list[MarkingItem] = []
 
         self.view.wheelEvent = self.wheelEvent
+
+        # Video player and controls
+        self.video_player = VideoPlayerWidget()
+        self.current_video_item = None
+        self.video_controls = VideoControlsWidget(self)
+        self.video_controls.setVisible(False)
+        self.video_controls_auto_hide = True  # Enable auto-hide by default
+        self._controls_visible = False
+        self._is_video_loaded = False
+
+        # Timer for auto-hiding controls
+        self._controls_hide_timer = QTimer(self)
+        self._controls_hide_timer.setSingleShot(True)
+        self._controls_hide_timer.timeout.connect(self._hide_controls)
+
+        # Position controls at bottom as overlay
+        self._position_video_controls()
+
+        # Enable mouse tracking for auto-hide
+        self.setMouseTracking(True)
+        self.view.setMouseTracking(True)
+        self.view.viewport().setMouseTracking(True)
+
+    def _position_video_controls(self):
+        """Position video controls overlay at bottom of viewer."""
+        if not self.video_controls:
+            return
+
+        # Position at bottom with full width
+        controls_height = self.video_controls.sizeHint().height()
+        self.video_controls.setGeometry(
+            0,
+            self.height() - controls_height,
+            self.width(),
+            controls_height
+        )
+        # Raise to ensure it's on top
+        self.video_controls.raise_()
+
+    def resizeEvent(self, event):
+        """Reposition controls when viewer is resized."""
+        super().resizeEvent(event)
+        self._position_video_controls()
+
+    def mouseMoveEvent(self, event):
+        """Show controls on mouse movement over video."""
+        if self._is_video_loaded and self.video_controls_auto_hide:
+            self._show_controls_temporarily()
+        super().mouseMoveEvent(event)
+
+    def _show_controls_temporarily(self):
+        """Show controls and start hide timer."""
+        if not self._controls_visible:
+            self.video_controls.setVisible(True)
+            self._controls_visible = True
+            self._position_video_controls()
+
+        # Reset hide timer (2 seconds)
+        self._controls_hide_timer.stop()
+        self._controls_hide_timer.start(2000)
+
+    def _hide_controls(self):
+        """Hide controls after timeout."""
+        if self.video_controls_auto_hide and self._is_video_loaded:
+            self.video_controls.setVisible(False)
+            self._controls_visible = False
+
+    def _show_controls_permanent(self):
+        """Show controls permanently (not auto-hide)."""
+        self._controls_hide_timer.stop()
+        self.video_controls.setVisible(True)
+        self._controls_visible = True
+        self._position_video_controls()
 
     @Slot()
     def load_image(self, proxy_image_index: QModelIndex, is_complete = True):
@@ -673,26 +754,67 @@ class ImageViewer(QWidget):
         if is_complete:
             self.marking_items.clear()
             self.view.clear_scene()
-            if image.path.suffix.lower() == ".jxl":
-                 pil_image = pilimage.open(image.path)  # Decode JXL using Pillow
-                 pil_image = pil_image.convert("RGBA")  # Ensure RGBA format
 
-                 pixmap = QPixmap(QImage(
-                     pil_image.tobytes("raw", "RGBA"),
-                     pil_image.width,
-                     pil_image.height,
-                     QImage.Format_RGBA8888
-                 ))
+            # Check if this is a video
+            if image.is_video:
+                # Create a pixmap item for video frames BEFORE cleanup
+                image_item = QGraphicsPixmapItem()
+                image_item.setZValue(0)
+                self.scene.addItem(image_item)
+                self.current_video_item = image_item
+
+                # Now load video and display first frame
+                if self.video_player.load_video(image.path, image_item):
+                    # Update scene rect after video loads
+                    if image_item.pixmap() and not image_item.pixmap().isNull():
+                        self.scene.setSceneRect(image_item.boundingRect()
+                                              .adjusted(-1, -1, 1, 1))
+                        MarkingItem.image_size = image_item.boundingRect().toRect()
+
+                        # Show video controls
+                        self._is_video_loaded = True
+                        if image.video_metadata:
+                            self.video_controls.set_video_info(image.video_metadata)
+
+                        # Show controls initially, then auto-hide
+                        if self.video_controls_auto_hide:
+                            self._show_controls_temporarily()
+                        else:
+                            self._show_controls_permanent()
+                    else:
+                        print(f"Video loaded but no frame available: {image.path}")
+                        return
+                else:
+                    # Failed to load video, show error
+                    print(f"Failed to load video: {image.path}")
+                    return
             else:
-                pixmap = QPixmap(str(image.path))
-            image_item = QGraphicsPixmapItem(pixmap)
-            image_item.setZValue(0)
-            self.scene.setSceneRect(image_item.boundingRect()
-                                    .adjusted(-1, -1, 1, 1)) # space for rect border
-            self.scene.addItem(image_item)
-            MarkingItem.image_size = image_item.boundingRect().toRect()
-            self.zoom_fit()
+                # Hide video controls for static images
+                self._is_video_loaded = False
+                self._controls_hide_timer.stop()
+                self.video_controls.setVisible(False)
+                self._controls_visible = False
+                # Load static image
+                if image.path.suffix.lower() == ".jxl":
+                     pil_image = pilimage.open(image.path)  # Decode JXL using Pillow
+                     pil_image = pil_image.convert("RGBA")  # Ensure RGBA format
 
+                     pixmap = QPixmap(QImage(
+                         pil_image.tobytes("raw", "RGBA"),
+                         pil_image.width,
+                         pil_image.height,
+                         QImage.Format_RGBA8888
+                     ))
+                else:
+                    pixmap = QPixmap(str(image.path))
+                image_item = QGraphicsPixmapItem(pixmap)
+                image_item.setZValue(0)
+                self.scene.setSceneRect(image_item.boundingRect()
+                                        .adjusted(-1, -1, 1, 1)) # space for rect border
+                self.scene.addItem(image_item)
+                MarkingItem.image_size = image_item.boundingRect().toRect()
+
+            self.zoom_fit()
             self.hud_item = ResizeHintHUD(MarkingItem.image_size, image_item)
         else:
             for item in self.marking_items:

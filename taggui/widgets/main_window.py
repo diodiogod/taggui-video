@@ -222,6 +222,7 @@ class MainWindow(QMainWindow):
         self.connect_all_tags_editor_signals()
         self.connect_auto_captioner_signals()
         self.connect_auto_markings_signals()
+        self.connect_video_controls_signals()
         # Forward any unhandled image changing key presses to the image list.
         key_press_forwarder = KeyPressForwarder(
             parent=self, target=self.image_list.list_view,
@@ -773,6 +774,48 @@ class MainWindow(QMainWindow):
         self.auto_markings.visibilityChanged.connect(
             lambda: self.toggle_auto_markings_action.setChecked(
                 self.auto_markings.isVisible()))
+
+    def connect_video_controls_signals(self):
+        """Connect video player and controls signals (embedded in ImageViewer)."""
+        video_player = self.image_viewer.video_player
+        video_controls = self.image_viewer.video_controls
+
+        # Connect video controls to video player
+        video_controls.play_pause_requested.connect(
+            video_player.toggle_play_pause)
+        video_controls.stop_requested.connect(
+            video_player.stop)
+        video_controls.frame_changed.connect(
+            video_player.seek_to_frame)
+
+        # Connect video player updates to video controls
+        video_player.frame_changed.connect(
+            video_controls.update_position)
+
+        # Update play/pause button state
+        video_player.frame_changed.connect(
+            lambda frame, time_ms: video_controls.set_playing(video_player.is_playing))
+
+        # Connect loop controls
+        video_controls.loop_toggled.connect(
+            lambda enabled: self._update_loop_state())
+        video_controls.loop_start_set.connect(
+            lambda: self._update_loop_state())
+        video_controls.loop_end_set.connect(
+            lambda: self._update_loop_state())
+        video_controls.loop_reset.connect(
+            lambda: video_player.set_loop(False, None, None))
+
+    def _update_loop_state(self):
+        """Update video player loop state from controls."""
+        video_controls = self.image_viewer.video_controls
+        video_player = self.image_viewer.video_player
+
+        loop_range = video_controls.get_loop_range()
+        if loop_range and video_controls.is_looping:
+            video_player.set_loop(True, loop_range[0], loop_range[1])
+        else:
+            video_player.set_loop(False, None, None)
 
     def restore(self):
         # Restore the window geometry and state.
