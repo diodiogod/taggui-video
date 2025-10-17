@@ -175,16 +175,19 @@ class VideoEditor:
 
     @staticmethod
     def fix_frame_count_to_n4_plus_1(input_path: Path, output_path: Path,
-                                    fps: float, repeat_last: bool = True) -> Tuple[bool, str]:
+                                    fps: float, repeat_last: bool = True,
+                                    target_frames: Optional[int] = None) -> Tuple[bool, str]:
         """
-        Adjust video frame count to follow N*4+1 rule by repeating frames.
-        If repeat_last=True, repeats the last frame. If False, repeats the first frame.
+        Adjust video frame count to follow N*4+1 rule by adding or removing frames.
+        If target_frames is specified, adjusts to that exact count (must be N*4+1).
+        Otherwise, finds the nearest valid N*4+1 count.
 
         Args:
             input_path: Input video file path
             output_path: Output video file path
             fps: Video frames per second
-            repeat_last: Whether to repeat the last frame (True) or first frame (False)
+            repeat_last: Whether to repeat/remove the last frame (True) or first frame (False)
+            target_frames: Optional exact target frame count (must be N*4+1)
 
         Returns:
             Tuple of (success: bool, message: str)
@@ -216,23 +219,51 @@ class VideoEditor:
 
             current_frames = int(current_frames)
 
-            # Check if already valid
-            if (current_frames - 1) % 4 == 0:
-                return True, f"Video already has {current_frames} frames (valid N*4+1)"
-
-            # Calculate target frame count (next valid N*4+1)
-            target_frames = ((current_frames // 4) + 1) * 4 + 1
-            frames_to_add = target_frames - current_frames
-
-            if repeat_last:
-                # Repeat the last frame
-                frame_to_repeat = current_frames - 1
+            # Determine target frame count
+            if target_frames is not None:
+                # Validate target
+                if (target_frames - 1) % 4 != 0:
+                    return False, f"Target frame count {target_frames} does not follow N*4+1 rule"
+                final_target = target_frames
             else:
-                # Repeat the first frame
-                frame_to_repeat = 0
+                # Find nearest valid N*4+1
+                if (current_frames - 1) % 4 == 0:
+                    return True, f"Video already has {current_frames} frames (valid N*4+1)"
+                # Try to go down first (remove frames), then up (add frames)
+                current_n = (current_frames - 1) // 4
+                lower_target = current_n * 4 + 1
+                upper_target = (current_n + 1) * 4 + 1
 
-            # Use existing repeat_frame method
-            return VideoEditor.repeat_frame(input_path, output_path, frame_to_repeat, frames_to_add, fps)
+                # Prefer lower target if it's not too much smaller
+                if lower_target >= current_frames * 0.9:  # Don't remove more than 10%
+                    final_target = lower_target
+                else:
+                    final_target = upper_target
+
+            # Check if already at target
+            if current_frames == final_target:
+                return True, f"Video already has {current_frames} frames"
+
+            if current_frames < final_target:
+                # Need to add frames
+                frames_to_add = final_target - current_frames
+                if repeat_last:
+                    frame_to_repeat = current_frames - 1
+                else:
+                    frame_to_repeat = 0
+                return VideoEditor.repeat_frame(input_path, output_path, frame_to_repeat, frames_to_add, fps)
+            else:
+                # Need to remove frames
+                frames_to_remove = current_frames - final_target
+                if repeat_last:
+                    # Remove from end
+                    start_frame = current_frames - frames_to_remove
+                    end_frame = current_frames - 1
+                else:
+                    # Remove from beginning
+                    start_frame = 0
+                    end_frame = frames_to_remove - 1
+                return VideoEditor.remove_range(input_path, output_path, start_frame, end_frame, fps)
 
         except Exception as e:
             return False, f"Error: {str(e)}"
