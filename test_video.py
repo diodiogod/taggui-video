@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys
 print('=== Starting Video Editor Test ===')
 try:
     from taggui.utils.video_editor import VideoEditor
@@ -7,8 +8,12 @@ try:
     import json
     print('Imports successful')
 
-    input_path = Path('J:/train/video_loras/Male pants down/16fps_converted/pants (21).mp4')
-    output_path = Path('J:/train/video_loras/Male pants down/16fps_converted/pants (21)_test.mp4')
+    if len(sys.argv) < 2:
+        print('Usage: python test_video.py <input_video_path>')
+        sys.exit(1)
+
+    input_path = Path(sys.argv[1])
+    output_path = input_path.parent / f"{input_path.stem}_test{input_path.suffix}"
 
     print(f'Input exists: {input_path.exists()}')
     print(f'Input size: {input_path.stat().st_size if input_path.exists() else "N/A"}')
@@ -46,8 +51,8 @@ try:
     print(f'Final target: {final_target}')
     print(f'Operation: add {final_target - current_frames} frames')
 
-    print('Testing repeat_frame directly...')
-    result = VideoEditor.repeat_frame(input_path, output_path, current_frames - 1, 1, 16.0)
+    print('Testing fix_frame_count_to_n4_plus_1...')
+    result = VideoEditor.fix_frame_count_to_n4_plus_1(input_path, output_path, 16.0, True, None)
     print(f'Result: {result}')
 
     print(f'Output exists: {output_path.exists()}')
@@ -61,8 +66,8 @@ try:
             probe_data2 = json.loads(probe_result2.stdout)
             output_frames = int([s for s in probe_data2['streams'] if s['codec_type'] == 'video'][0]['nb_frames'])
             print(f'Output frames: {output_frames}')
-            print(f'Expected: {current_frames + 1}')
-            print(f'Difference: {output_frames - (current_frames + 1)}')
+            print(f'Expected: 81')
+            print(f'Difference: {output_frames - 81}')
         else:
             print('Failed to probe output')
 
