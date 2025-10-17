@@ -159,7 +159,8 @@ class ImageTagsEditor(QDockWidget):
         title_label = QLabel('Image Tags')
         self.descriptive_mode_checkbox = QCheckBox('Desc')
         self.descriptive_mode_checkbox.setToolTip('Descriptive Mode')
-        self.descriptive_mode_checkbox.toggled.connect(self.toggle_display_mode)
+
+        # Don't connect signals yet - will do it after creating all widgets
 
         # Create float and close buttons
         float_button = QPushButton()
@@ -215,6 +216,16 @@ class ImageTagsEditor(QDockWidget):
         # is emitted when a tag is added.
         self.image_tag_list_model.modelReset.connect(self.count_tokens)
         self.image_tag_list_model.dataChanged.connect(self.count_tokens)
+
+        # Now connect descriptive mode signals and load persistent state
+        self.descriptive_mode_checkbox.toggled.connect(self.toggle_display_mode)
+        self.descriptive_mode_checkbox.toggled.connect(self.save_descriptive_mode_state)
+
+        # Load persistent state after all widgets are created and signals connected
+        desc_mode_enabled = settings.value('descriptive_mode_enabled', False, type=bool)
+        if desc_mode_enabled:
+            # Setting checked will trigger toggle_display_mode via the signal
+            self.descriptive_mode_checkbox.setChecked(True)
 
     @Slot()
     def count_tokens(self):
@@ -279,6 +290,11 @@ class ImageTagsEditor(QDockWidget):
             proxy_image_index = self.proxy_image_list_model.mapFromSource(
                 self.image_index)
             self.load_image_tags(proxy_image_index)
+
+    @Slot(bool)
+    def save_descriptive_mode_state(self, enabled: bool):
+        """Save descriptive mode state to settings."""
+        settings.setValue('descriptive_mode_enabled', enabled)
 
     @Slot(bool)
     def toggle_display_mode(self, descriptive_mode: bool):

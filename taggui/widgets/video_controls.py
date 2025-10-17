@@ -249,6 +249,17 @@ class VideoControlsWidget(QWidget):
         self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-start'))
         self.play_pause_btn.setToolTip('Play/Pause (Space)')
         self.play_pause_btn.setMaximumWidth(40)
+        self.play_pause_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b2b;
+                border: 2px solid #555;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #666;
+            }
+        """)
         self.play_pause_btn.clicked.connect(self.play_pause_requested.emit)
 
         self.stop_btn = QPushButton()
@@ -299,7 +310,8 @@ class VideoControlsWidget(QWidget):
         self.speed_slider.setValue(100)  # 1.0x
         self.speed_slider.setTickInterval(25)
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.speed_slider.setMaximumWidth(100)
+        self.speed_slider.setMinimumWidth(100)  # Minimum width
+        # No maximum width - let it expand to fill available space
         self.speed_slider.setStyleSheet("""
             QSlider::groove:horizontal {
                 height: 4px;
@@ -334,7 +346,8 @@ class VideoControlsWidget(QWidget):
 
         self.speed_value_label = QLabel('1.00x')
         self.speed_value_label.setMinimumWidth(45)
-        self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
+        self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; cursor: pointer; }")
+        self.speed_value_label.mousePressEvent = self._reset_speed
 
         controls_layout.addWidget(self.play_pause_btn)
         controls_layout.addWidget(self.stop_btn)
@@ -349,9 +362,8 @@ class VideoControlsWidget(QWidget):
         controls_layout.addWidget(self.frame_total_label)
         controls_layout.addSpacing(20)
         controls_layout.addWidget(self.speed_label)
-        controls_layout.addWidget(self.speed_slider)
+        controls_layout.addWidget(self.speed_slider, 1)  # Stretch factor 1 - expands to fill space
         controls_layout.addWidget(self.speed_value_label)
-        controls_layout.addStretch()
 
         # Timeline slider with loop markers
         slider_layout = QHBoxLayout()
@@ -429,10 +441,10 @@ class VideoControlsWidget(QWidget):
         info_layout.addWidget(self.frame_count_label)
         info_layout.addWidget(self.marker_range_label)
         info_layout.addStretch()
+        info_layout.addWidget(self.loop_reset_btn)
         info_layout.addWidget(self.loop_start_btn)
         info_layout.addWidget(self.loop_end_btn)
         info_layout.addWidget(self.loop_checkbox)
-        info_layout.addWidget(self.loop_reset_btn)
 
         # Add all layouts to main
         main_layout.addLayout(controls_layout)
@@ -451,8 +463,24 @@ class VideoControlsWidget(QWidget):
         # Fixed marker size (set from main window)
         self.fixed_marker_size = 31
 
+        # Load persistent settings
+        self._load_persistent_settings()
+
         # Hide by default
         self.hide()
+
+    def _load_persistent_settings(self):
+        """Load persistent settings from config."""
+        from utils.settings import settings
+
+        # Load loop enabled state
+        loop_enabled = settings.value('video_loop_enabled', False, type=bool)
+        # Block signals temporarily to avoid emission during init
+        self.loop_checkbox.blockSignals(True)
+        self.loop_checkbox.setChecked(loop_enabled)
+        self.loop_checkbox.blockSignals(False)
+        # Set internal state (signal will be emitted when video loads)
+        self.is_looping = loop_enabled
 
     def _apply_scaling(self):
         """Apply scaling to internal elements based on current width."""
@@ -513,9 +541,10 @@ class VideoControlsWidget(QWidget):
                       self.speed_label, self.speed_value_label]:
             label.setFont(label_font)
 
-        # Scale speed slider
-        speed_slider_width = int(100 * scale)
-        self.speed_slider.setMaximumWidth(speed_slider_width)
+        # Scale speed slider - only set minimum width, let it expand
+        speed_slider_min_width = int(100 * scale)
+        self.speed_slider.setMinimumWidth(speed_slider_min_width)
+        # Don't set maximum width - let it fill available space
 
         # Scale slider minimum height
         slider_height = int(30 * scale)
@@ -622,11 +651,31 @@ class VideoControlsWidget(QWidget):
 
     @Slot()
     def _on_speed_slider_released(self):
-        """Handle speed slider release - reset to slider value."""
+        """Handle speed slider release - clamp to visual range."""
         self._is_dragging_speed = False
         self._last_mouse_pos = None
-        # Force sync when drag ends
-        self._extended_speed = self.speed_slider.value() / 100.0
+
+        # If extended speed is outside the visual range (0.0-2.0), clamp to edges
+        # But for negative speeds, clamp to -2.0 (minimum backward speed) instead of 0.0
+        if self._extended_speed < 0.0:
+            # Was in negative range, clamp to minimum backward speed (-2.0x)
+            # This corresponds to slider position 0 showing as minimum speed
+            self._extended_speed = max(-2.0, self._extended_speed)
+            # Map -2.0 to slider position 0
+            slider_pos = 0
+        elif self._extended_speed > 2.0:
+            # Was above max, clamp to maximum (2.0x)
+            self._extended_speed = 2.0
+            slider_pos = 200
+        else:
+            # Within range, sync with slider value
+            self._extended_speed = self.speed_slider.value() / 100.0
+            slider_pos = int(self._extended_speed * 100.0)
+
+        # Update slider and display
+        self.speed_slider.blockSignals(True)
+        self.speed_slider.setValue(slider_pos)
+        self.speed_slider.blockSignals(False)
         self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
         self.speed_changed.emit(self._extended_speed)
 
@@ -638,6 +687,15 @@ class VideoControlsWidget(QWidget):
             self._extended_speed = value / 100.0
             self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
             self.speed_changed.emit(self._extended_speed)
+
+    def _reset_speed(self, event):
+        """Reset playback speed to 1.0x when label is clicked."""
+        self._extended_speed = 1.0
+        self.speed_slider.blockSignals(True)
+        self.speed_slider.setValue(100)
+        self.speed_slider.blockSignals(False)
+        self.speed_value_label.setText('1.00x')
+        self.speed_changed.emit(1.0)
 
     @Slot(dict)
     def set_video_info(self, metadata: dict):
@@ -663,6 +721,10 @@ class VideoControlsWidget(QWidget):
         seconds = int(duration % 60)
         milliseconds = int((duration % 1) * 1000)
         self.time_label.setText(f'00:00.000 / {minutes:02d}:{seconds:02d}.{milliseconds:03d}')
+
+        # Restore loop state after video loads
+        if self.is_looping:
+            self.loop_toggled.emit(True)
 
     @Slot(int, float)
     def update_position(self, frame: int, time_ms: float):
@@ -690,9 +752,33 @@ class VideoControlsWidget(QWidget):
         if playing:
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-pause'))
             self.play_pause_btn.setToolTip('Pause (Space)')
+            # Green glow when playing
+            self.play_pause_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3a1a;
+                    border: 2px solid #4CAF50;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #254a25;
+                    border-color: #5FBF60;
+                }
+            """)
         else:
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-start'))
             self.play_pause_btn.setToolTip('Play (Space)')
+            # Normal state when paused
+            self.play_pause_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2b2b2b;
+                    border: 2px solid #555;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #3a3a3a;
+                    border-color: #666;
+                }
+            """)
 
     def _update_marker_range_display(self):
         """Update the marker range frame count display."""
@@ -740,14 +826,16 @@ class VideoControlsWidget(QWidget):
         """Toggle loop playback."""
         self.is_looping = enabled
         self.loop_toggled.emit(enabled)
+        # Save loop state to settings
+        from utils.settings import settings
+        settings.setValue('video_loop_enabled', enabled)
 
     @Slot()
     def _reset_loop(self):
-        """Reset loop markers."""
+        """Reset loop markers only (keeps loop enabled/disabled state)."""
         self.loop_start_frame = None
         self.loop_end_frame = None
-        self.is_looping = False
-        self.loop_checkbox.setChecked(False)
+        # Don't change is_looping or loop_checkbox state
         self.loop_reset.emit()
         # Clear button styling
         self.loop_start_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
