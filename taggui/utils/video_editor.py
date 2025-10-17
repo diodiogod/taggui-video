@@ -103,7 +103,7 @@ class VideoEditor:
                 cmd1 = [
                     'ffmpeg',
                     '-i', str(input_path),
-                    '-t', str(start_time),
+                    '-frames:v', str(start_frame),  # Exact frame count
                     '-c', 'copy',
                     '-y',
                     str(segment1)
@@ -331,14 +331,13 @@ class VideoEditor:
             segment2 = temp_dir / 'after.mp4'
             concat_list = temp_dir / 'concat.txt'
 
-            # Extract segment before frame (frames 0 to frame_num inclusive)
-            if frame_num >= 0:
+            # Extract segment before frame (frames 0 to frame_num-1)
+            if frame_num > 0:
                 # Use frame count instead of time for precision
-                # Include the frame we're repeating in segment1
                 cmd1 = [
                     'ffmpeg',
                     '-i', str(input_path),
-                    '-frames:v', str(frame_num + 1),  # Exact frame count (inclusive)
+                    '-frames:v', str(frame_num),  # Exact frame count (0 to frame_num-1)
                     '-c', 'copy',
                     '-y',
                     str(segment1)
@@ -349,22 +348,24 @@ class VideoEditor:
             cmd2 = [
                 'ffmpeg',
                 '-i', str(input_path),
-                '-ss', str(frame_time),
+                '-vf', f'select=eq(n\\,{frame_num})',  # Select exact frame by number
                 '-vframes', '1',
                 '-y',
                 str(frame_img)
             ]
             subprocess.run(cmd2, capture_output=True, check=True)
 
-            # Create video from repeated frame with high quality - use frame count instead of duration
+            # Create video from repeated frame with high quality - use duration
+            repeat_duration = repeat_count / fps
             cmd3 = [
                 'ffmpeg',
-                '-loop', '1',
+                '-f', 'image2',
+                '-loop', '1',  # Loop the image
                 '-i', str(frame_img),
                 '-c:v', 'libx264',
                 '-crf', '18',  # High quality (18 = visually lossless)
                 '-preset', 'slow',  # Better compression
-                '-frames:v', str(repeat_count),  # Exact frame count
+                '-t', str(repeat_duration),  # Exact duration
                 '-pix_fmt', 'yuv420p',
                 '-r', str(fps),
                 '-y',
