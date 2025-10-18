@@ -18,6 +18,13 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `__init__.py`: Package initialization
 - `run_gui.py`: Main GUI application entry point
 
+### Controllers (controllers/)
+- `__init__.py`: Controllers subpackage init
+- `video_editing_controller.py`: Video editing operations (extract, remove, repeat, fix frame count, SAR fix)
+- `toolbar_manager.py`: Toolbar creation and management
+- `menu_manager.py`: Menu bar creation and management
+- `signal_manager.py`: Signal connection management
+
 ### Auto Captioning (auto_captioning/)
 - `__init__.py`: Subpackage init
 - `auto_captioning_model.py`: Base class for captioning models
@@ -76,7 +83,15 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `target_dimension.py`: Dimension calculation utilities
 - `text_edit_item_delegate.py`: Text editing delegate
 - `utils.py`: General utility functions
-- `video_editor.py`: Video editing operations
+- `video_editor.py`: Video editing compatibility shim (delegates to utils/video/)
+
+#### Video Utilities (utils/video/)
+- `__init__.py`: Video subpackage init
+- `common.py`: Common utilities (backup creation)
+- `frame_editor.py`: Frame-level editing (extract, remove, repeat, N*4+1 fix) - 400 lines
+- `sar_fixer.py`: SAR (Sample Aspect Ratio) fixing operations - 155 lines
+- `batch_processor.py`: Batch video processing - 45 lines
+- `video_editor.py`: Unified interface (backward compatibility wrapper) - 78 lines
 
 ### Widgets (widgets/)
 - `__init__.py`: Widgets subpackage init
@@ -86,9 +101,9 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `descriptive_text_edit.py`: Text editor with spell/grammar checking support
 - `image_list.py`: Image list widget
 - `image_tags_editor.py`: Image tags editor widget with descriptive mode
-- `image_viewer.py`: Image display and marking widget
-- `main_window.py`: Main application window
-- `video_controls.py`: Video playback controls
+- `image_viewer.py`: Image display and marking widget (1172 lines - needs refactoring)
+- `main_window.py`: Main application window (460 lines - refactored from 1661)
+- `video_controls.py`: Video playback controls (1065 lines - needs refactoring)
 - `video_player.py`: Video player widget
 
 ## Resources

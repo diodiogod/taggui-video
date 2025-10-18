@@ -1,0 +1,566 @@
+"""Controller for video editing operations."""
+
+from pathlib import Path
+from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
+from PySide6.QtCore import Qt
+
+from utils.video_editor import VideoEditor
+import subprocess
+import json
+
+
+class VideoEditingController:
+    """Handles all video editing operations."""
+
+    def __init__(self, main_window):
+        """Initialize controller with reference to main window."""
+        self.main_window = main_window
+
+    def extract_video_range(self):
+        """Extract the marked range to a new video file."""
+        video_player = self.main_window.image_viewer.video_player
+        video_controls = self.main_window.image_viewer.video_controls
+
+        # Check if we have a video loaded
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        # Check if markers are set
+        loop_range = video_controls.get_loop_range()
+        if not loop_range:
+            QMessageBox.warning(self.main_window, "No Markers", "Please set loop markers first.")
+            return
+
+        start_frame, end_frame = loop_range
+        fps = video_player.get_fps()
+
+        # Ask for output filename
+        input_path = Path(video_player.video_path)
+        default_name = f"{input_path.stem}_extract_{start_frame}-{end_frame}{input_path.suffix}"
+
+        filename, ok = QInputDialog.getText(
+            self.main_window, "Extract Video Range",
+            "Output filename:",
+            text=default_name
+        )
+
+        if not ok or not filename:
+            return
+
+        output_path = input_path.parent / filename
+
+        # Perform extraction
+        success, message = VideoEditor.extract_range(
+            input_path, output_path,
+            start_frame, end_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self.main_window, "Success", message)
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)
+
+    def remove_video_range(self):
+        """Remove the marked range from the video."""
+        video_player = self.main_window.image_viewer.video_player
+        video_controls = self.main_window.image_viewer.video_controls
+
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        loop_range = video_controls.get_loop_range()
+        if not loop_range:
+            QMessageBox.warning(self.main_window, "No Markers", "Please set loop markers first.")
+            return
+
+        start_frame, end_frame = loop_range
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self.main_window, "Remove Range",
+            f"Remove frames {start_frame}-{end_frame}?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Remove range (overwrites original, creates backup)
+        success, message = VideoEditor.remove_range(
+            input_path, input_path,
+            start_frame, end_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)
+
+    def remove_video_frame(self):
+        """Remove the current frame from the video."""
+        video_player = self.main_window.image_viewer.video_player
+
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        current_frame = video_player.get_current_frame_number()
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self.main_window, "Remove Frame",
+            f"Remove frame {current_frame}?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Remove frame
+        success, message = VideoEditor.remove_frame(
+            input_path, input_path,
+            current_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)
+
+    def repeat_video_frame(self):
+        """Repeat the current frame multiple times."""
+        video_player = self.main_window.image_viewer.video_player
+
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        current_frame = video_player.get_current_frame_number()
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Ask how many times to repeat
+        max_frame = video_player.get_total_frames() - 1
+        is_last_frame = current_frame == max_frame
+        frame_desc = f"{current_frame} (last)" if is_last_frame else str(current_frame)
+        repeat_count, ok = QInputDialog.getInt(
+            self.main_window, "Repeat Frame",
+            f"How many times to repeat frame {frame_desc}?",
+            value=1, minValue=1, maxValue=100
+        )
+
+        if not ok:
+            return
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self.main_window, "Repeat Frame",
+            f"Repeat frame {current_frame} {repeat_count} times?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Repeat frame
+        success, message = VideoEditor.repeat_frame(
+            input_path, input_path,
+            current_frame, repeat_count, fps
+        )
+
+        if success:
+            QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)
+
+    def fix_video_frame_count(self):
+        """Fix video frame count to follow N*4+1 rule for selected videos."""
+        # Get selected videos from image list
+        selected_indices = self.main_window.image_list.get_selected_image_indices()
+
+        if not selected_indices:
+            QMessageBox.warning(self.main_window, "No Selection", "Please select one or more videos to fix.")
+            return
+
+        # Filter to only videos
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = []
+        for idx in selected_indices:
+            image = self.main_window.image_list_model.data(idx, Qt.ItemDataRole.UserRole)
+            if image.path.suffix.lower() in video_extensions:
+                video_paths.append(image.path)
+
+        if not video_paths:
+            QMessageBox.warning(self.main_window, "No Videos", "No videos in selection.")
+            return
+
+        # Ask for method preference once for all videos
+        choice, ok = QInputDialog.getItem(
+            self.main_window, "Fix Frame Count",
+            f"Fix {len(video_paths)} video(s) to N*4+1 pattern.\n\nMethod:",
+            ["Auto (use last frame)", "Auto (use first frame)"], 0, False
+        )
+
+        if not ok:
+            return
+
+        repeat_last = "last" in choice
+
+        # Confirm batch operation
+        reply = QMessageBox.question(
+            self.main_window, "Fix Frame Count",
+            f"Fix frame count for {len(video_paths)} video(s)?\n\n"
+            f"Originals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing video frame counts...", "Cancel", 0, len(video_paths), self.main_window)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count = 0
+        error_count = 0
+        errors = []
+
+        for i, video_path in enumerate(video_paths):
+            if progress.wasCanceled():
+                break
+
+            progress.setLabelText(f"Processing {video_path.name}...")
+            progress.setValue(i)
+
+            # Get FPS from video
+            probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(video_path)]
+            try:
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+                probe_data = json.loads(probe_result.stdout)
+                fps = None
+                for stream in probe_data.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        fps_str = stream.get('r_frame_rate', '0/1')
+                        num, denom = map(float, fps_str.split('/'))
+                        fps = num / denom if denom != 0 else 0
+                        break
+
+                if not fps:
+                    errors.append(f"{video_path.name}: Could not determine FPS")
+                    error_count += 1
+                    continue
+
+                # Fix frame count
+                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+                    video_path, video_path, fps, repeat_last, None
+                )
+
+                if success:
+                    success_count += 1
+                else:
+                    errors.append(f"{video_path.name}: {message}")
+                    error_count += 1
+
+            except Exception as e:
+                errors.append(f"{video_path.name}: {str(e)}")
+                error_count += 1
+
+        progress.setValue(len(video_paths))
+
+        # Show results
+        result_msg = f"Processed {len(video_paths)} video(s):\n"
+        result_msg += f"✓ Success: {success_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self.main_window, "Batch Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self.main_window, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.main_window.reload_directory()
+
+    def fix_all_folder_frame_count(self):
+        """Fix N*4+1 frame count for all videos in the current folder."""
+        if not self.main_window.directory_path:
+            QMessageBox.warning(self.main_window, "No Directory", "No directory is loaded.")
+            return
+
+        # Find all videos in directory
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = [f for f in self.main_window.directory_path.iterdir()
+                      if f.is_file() and f.suffix.lower() in video_extensions]
+
+        if not video_paths:
+            QMessageBox.warning(self.main_window, "No Videos", "No videos found in current directory.")
+            return
+
+        # Ask for method preference
+        choice, ok = QInputDialog.getItem(
+            self.main_window, "Fix All Videos",
+            f"Fix {len(video_paths)} video(s) in folder to N*4+1 pattern.\n\nMethod:",
+            ["Auto (use last frame)", "Auto (use first frame)"], 0, False
+        )
+
+        if not ok:
+            return
+
+        repeat_last = "last" in choice
+
+        # Confirm batch operation
+        reply = QMessageBox.question(
+            self.main_window, "Fix All Videos",
+            f"Fix frame count for all {len(video_paths)} video(s) in folder?\n\n"
+            f"Originals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing video frame counts...", "Cancel", 0, len(video_paths), self.main_window)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count = 0
+        skip_count = 0
+        error_count = 0
+        errors = []
+
+        for i, video_path in enumerate(video_paths):
+            if progress.wasCanceled():
+                break
+
+            progress.setLabelText(f"Processing {video_path.name}...")
+            progress.setValue(i)
+
+            # Get FPS from video
+            probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(video_path)]
+            try:
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+                probe_data = json.loads(probe_result.stdout)
+                fps = None
+                for stream in probe_data.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        fps_str = stream.get('r_frame_rate', '0/1')
+                        num, denom = map(float, fps_str.split('/'))
+                        fps = num / denom if denom != 0 else 0
+                        break
+
+                if not fps:
+                    errors.append(f"{video_path.name}: Could not determine FPS")
+                    error_count += 1
+                    continue
+
+                # Fix frame count
+                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+                    video_path, video_path, fps, repeat_last, None
+                )
+
+                if success:
+                    if "already" in message.lower():
+                        skip_count += 1
+                    else:
+                        success_count += 1
+                else:
+                    errors.append(f"{video_path.name}: {message}")
+                    error_count += 1
+
+            except Exception as e:
+                errors.append(f"{video_path.name}: {str(e)}")
+                error_count += 1
+
+        progress.setValue(len(video_paths))
+
+        # Show results
+        result_msg = f"Processed {len(video_paths)} video(s):\n"
+        result_msg += f"✓ Fixed: {success_count}\n"
+        result_msg += f"⊘ Already valid: {skip_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self.main_window, "Batch Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self.main_window, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.main_window.reload_directory()
+
+    def fix_sar_selected(self):
+        """Fix non-square pixels (SAR) for selected videos."""
+        # Get selected videos from image list
+        selected_indices = self.main_window.image_list.get_selected_image_indices()
+
+        if not selected_indices:
+            QMessageBox.warning(self.main_window, "No Selection", "Please select one or more videos to fix.")
+            return
+
+        # Filter to only videos
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = []
+        for idx in selected_indices:
+            image = self.main_window.image_list_model.data(idx, Qt.ItemDataRole.UserRole)
+            if image.path.suffix.lower() in video_extensions:
+                video_paths.append(image.path)
+
+        if not video_paths:
+            QMessageBox.warning(self.main_window, "No Videos", "No videos in selection.")
+            return
+
+        # Scan for non-square SAR videos
+        non_square_videos = []
+        for video_path in video_paths:
+            sar_num, sar_den, dims = VideoEditor.check_sar(video_path)
+            if sar_num and sar_den and sar_num != sar_den:
+                non_square_videos.append((video_path, sar_num, sar_den))
+
+        if not non_square_videos:
+            QMessageBox.information(self.main_window, "No Issues", "All selected videos have square pixels (SAR 1:1).")
+            return
+
+        # Confirm batch operation
+        sar_list = "\n".join([f"• {v[0].name} (SAR {v[1]}:{v[2]})" for v in non_square_videos[:5]])
+        if len(non_square_videos) > 5:
+            sar_list += f"\n... and {len(non_square_videos) - 5} more"
+
+        reply = QMessageBox.question(
+            self.main_window, "Fix SAR",
+            f"Found {len(non_square_videos)} video(s) with non-square pixels:\n\n{sar_list}\n\n"
+            f"Fix these videos?\nOriginals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self.main_window)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count, error_count, errors = VideoEditor.batch_fix_sar(
+            [v[0] for v in non_square_videos],
+            progress_callback=lambda current, total, name: (
+                progress.setLabelText(f"Processing {name}..."),
+                progress.setValue(current),
+                progress.wasCanceled()
+            )
+        )
+
+        progress.setValue(len(non_square_videos))
+
+        # Show results
+        result_msg = f"Processed {len(non_square_videos)} video(s):\n"
+        result_msg += f"✓ Success: {success_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self.main_window, "SAR Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self.main_window, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.main_window.reload_directory()
+
+    def fix_all_sar_folder(self):
+        """Fix SAR for all videos in the current folder."""
+        if not self.main_window.directory_path:
+            QMessageBox.warning(self.main_window, "No Directory", "No directory is loaded.")
+            return
+
+        # Find all videos in directory
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        video_paths = [f for f in self.main_window.directory_path.iterdir()
+                      if f.is_file() and f.suffix.lower() in video_extensions]
+
+        if not video_paths:
+            QMessageBox.warning(self.main_window, "No Videos", "No videos found in current directory.")
+            return
+
+        # Scan for non-square SAR videos
+        non_square_videos = VideoEditor.scan_directory_for_non_square_sar(
+            self.main_window.directory_path, video_extensions
+        )
+
+        if not non_square_videos:
+            QMessageBox.information(self.main_window, "No Issues",
+                f"All {len(video_paths)} video(s) in folder have square pixels (SAR 1:1).")
+            return
+
+        # Confirm batch operation
+        sar_list = "\n".join([f"• {v[0].name} (SAR {v[1]}:{v[2]})" for v in non_square_videos[:5]])
+        if len(non_square_videos) > 5:
+            sar_list += f"\n... and {len(non_square_videos) - 5} more"
+
+        reply = QMessageBox.question(
+            self.main_window, "Fix All SAR",
+            f"Found {len(non_square_videos)}/{len(video_paths)} video(s) with non-square pixels:\n\n{sar_list}\n\n"
+            f"Fix these videos?\nOriginals will be saved as .backup files",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Process videos with progress dialog
+        progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self.main_window)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        success_count, error_count, errors = VideoEditor.batch_fix_sar(
+            [v[0] for v in non_square_videos],
+            progress_callback=lambda current, total, name: (
+                progress.setLabelText(f"Processing {name}..."),
+                progress.setValue(current),
+                progress.wasCanceled()
+            )
+        )
+
+        progress.setValue(len(non_square_videos))
+
+        # Show results
+        result_msg = f"Processed {len(non_square_videos)} video(s):\n"
+        result_msg += f"✓ Success: {success_count}\n"
+        result_msg += f"✗ Errors: {error_count}"
+
+        if errors:
+            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                result_msg += f"\n... and {len(errors) - 10} more"
+
+        if error_count > 0:
+            QMessageBox.warning(self.main_window, "SAR Fix Complete", result_msg)
+        else:
+            QMessageBox.information(self.main_window, "Success", result_msg)
+
+        # Auto-reload directory to show changes
+        self.main_window.reload_directory()

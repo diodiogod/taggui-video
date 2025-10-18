@@ -10,6 +10,10 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
 
 from transformers import AutoTokenizer
 
+from controllers.video_editing_controller import VideoEditingController
+from controllers.toolbar_manager import ToolbarManager
+from controllers.menu_manager import MenuManager
+from controllers.signal_manager import SignalManager
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.export_dialog import ExportDialog
@@ -18,9 +22,7 @@ from models.image_list_model import ImageListModel
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
-from utils.icons import (taggui_icon, create_add_box_icon, toggle_marking_icon,
-                         show_markings_icon, show_labels_icon,
-                         show_marking_latent_icon)
+from utils.icons import taggui_icon
 from utils.big_widgets import BigPushButton
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
@@ -32,9 +34,8 @@ from widgets.auto_captioner import AutoCaptioner
 from widgets.auto_markings import AutoMarkings
 from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
-from widgets.image_viewer import ImageViewer, ImageMarking
+from widgets.image_viewer import ImageViewer
 
-GITHUB_REPOSITORY_URL = 'https://github.com/jhc13/taggui'
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
 
 
@@ -42,283 +43,40 @@ class MainWindow(QMainWindow):
     def __init__(self, app: QApplication):
         super().__init__()
         self.app = app
-        # The path of the currently loaded directory. This is set later when a
-        # directory is loaded.
         self.directory_path = None
         self.is_running = True
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
+
+        # Initialize models
         image_list_image_width = settings.value(
             'image_list_image_width',
             defaultValue=DEFAULT_SETTINGS['image_list_image_width'], type=int)
         tag_separator = get_tag_separator()
-        self.image_list_model = ImageListModel(image_list_image_width,
-                                               tag_separator)
-        tokenizer = AutoTokenizer.from_pretrained(
-            get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        self.image_list_model = ImageListModel(image_list_image_width, tag_separator)
+        tokenizer = AutoTokenizer.from_pretrained(get_resource_path(TOKENIZER_DIRECTORY_PATH))
         self.proxy_image_list_model = ProxyImageListModel(
             self.image_list_model, tokenizer, tag_separator)
-        self.image_list_model.proxy_image_list_model = (
-            self.proxy_image_list_model)
+        self.image_list_model.proxy_image_list_model = self.proxy_image_list_model
         self.tag_counter_model = TagCounterModel()
         self.image_tag_list_model = ImageTagListModel()
 
+        # Initialize controllers and managers
+        self.video_editing_controller = VideoEditingController(self)
+        self.toolbar_manager = ToolbarManager(self)
+        self.menu_manager = MenuManager(self)
+        self.signal_manager = SignalManager(self)
+
+        # Setup window
         self.setWindowIcon(taggui_icon())
-        # Not setting this results in some ugly colors.
         self.setPalette(self.app.style().standardPalette())
-        # The font size must be set before creating the widgets to ensure that
-        # everything has the correct font size.
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model)
         self.create_central_widget()
 
-        self.toolbar = QToolBar('Main toolbar', self)
-        self.toolbar.setObjectName('Main toolbar')
-        self.toolbar.setFloatable(True)
-        self.addToolBar(self.toolbar)
-        self.zoom_fit_best_action = QAction(QIcon.fromTheme('zoom-fit-best'),
-                                            'Zoom to fit', self)
-        self.zoom_fit_best_action.setCheckable(True)
-        self.toolbar.addAction(self.zoom_fit_best_action)
-        self.zoom_in_action = QAction(QIcon.fromTheme('zoom-in'),
-                                      'Zoom in', self)
-        self.toolbar.addAction(self.zoom_in_action)
-        self.zoom_original_action = QAction(QIcon.fromTheme('zoom-original'),
-                                            'Original size', self)
-        self.zoom_original_action.setCheckable(True)
-        self.toolbar.addAction(self.zoom_original_action)
-        self.zoom_out_action = QAction(QIcon.fromTheme('zoom-out'),
-                                       'Zoom out', self)
-        self.toolbar.addAction(self.zoom_out_action)
-        self.toolbar.addSeparator()
-        self.add_action_group = QActionGroup(self)
-        self.add_action_group.setExclusionPolicy(QActionGroup.ExclusiveOptional)
-        self.add_crop_action = QAction(create_add_box_icon(Qt.blue),
-                                       'Add crop', self.add_action_group)
-        self.add_crop_action.setCheckable(True)
-        self.toolbar.addAction(self.add_crop_action)
-        self.add_hint_action = QAction(create_add_box_icon(Qt.gray),
-                                       'Add hint', self.add_action_group)
-        self.add_hint_action.setCheckable(True)
-        self.toolbar.addAction(self.add_hint_action)
-        self.add_exclude_action = QAction(create_add_box_icon(Qt.red),
-                                          'Add exclude mask', self.add_action_group)
-        self.add_exclude_action.setCheckable(True)
-        self.toolbar.addAction(self.add_exclude_action)
-        self.add_include_action = QAction(create_add_box_icon(Qt.green),
-                                          'Add include mask', self.add_action_group)
-        self.add_include_action.setCheckable(True)
-        self.toolbar.addAction(self.add_include_action)
-        self.delete_marking_action = QAction(QIcon.fromTheme('edit-delete'),
-                                            'Delete marking', self)
-        self.delete_marking_action.setEnabled(False)
-        self.toolbar.addAction(self.delete_marking_action)
-        self.add_toggle_marking_action = QAction(toggle_marking_icon(),
-            'Change marking type', self)
-        self.add_toggle_marking_action.setEnabled(False)
-        self.toolbar.addAction(self.add_toggle_marking_action)
-        self.add_show_marking_action = QAction(show_markings_icon(),
-            'Show markings', self)
-        self.add_show_marking_action.setCheckable(True)
-        self.add_show_marking_action.setChecked(True)
-        self.toolbar.addAction(self.add_show_marking_action)
-        self.add_show_labels_action = QAction(show_labels_icon(),
-            'Show labels', self)
-        self.add_show_labels_action.setCheckable(True)
-        self.add_show_labels_action.setChecked(True)
-        self.toolbar.addAction(self.add_show_labels_action)
-        self.add_show_marking_latent_action = QAction(show_marking_latent_icon(),
-            'Show marking in latent space', self)
-        self.add_show_marking_latent_action.setCheckable(True)
-        self.add_show_marking_latent_action.setChecked(True)
-        self.toolbar.addAction(self.add_show_marking_latent_action)
-
-        # Video editing controls
-        self.toolbar.addSeparator()
-
-        # Always show player controls toggle - styled button
-        self.always_show_controls_btn = QPushButton('👁')
-        self.always_show_controls_btn.setCheckable(True)
-        self.always_show_controls_btn.setToolTip('Always show video controls')
-        self.always_show_controls_btn.setMaximumWidth(32)
-        self.always_show_controls_btn.setMaximumHeight(32)
-        # Load saved state
-        always_show = settings.value('video_always_show_controls', False, type=bool)
-        self.always_show_controls_btn.setChecked(always_show)
-        self.always_show_controls_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 4px;
-            }
-            QPushButton:hover {
-                border-color: #777;
-                background-color: #353535;
-            }
-            QPushButton:checked {
-                border-color: #4CAF50;
-                background-color: #2d5a2d;
-                box-shadow: 0 0 8px #4CAF50;
-            }
-        """)
-        self.toolbar.addWidget(self.always_show_controls_btn)
-
-        # Fixed marker size
-        from PySide6.QtWidgets import QSpinBox
-        marker_size_widget = QWidget()
-        marker_size_layout = QHBoxLayout(marker_size_widget)
-        marker_size_layout.setContentsMargins(4, 0, 4, 0)
-        marker_size_layout.setSpacing(4)
-        marker_size_label = QLabel('Marker size:')
-        self.fixed_marker_size_spinbox = QSpinBox()
-        self.fixed_marker_size_spinbox.setMinimum(0)
-        self.fixed_marker_size_spinbox.setMaximum(9999)
-        # Load marker size from settings, default to 0 (Custom)
-        marker_size = settings.value('fixed_marker_size', defaultValue=0, type=int)
-        self.fixed_marker_size_spinbox.setValue(marker_size)
-        self.fixed_marker_size_spinbox.setSpecialValueText('Custom')
-        self.fixed_marker_size_spinbox.setSuffix(' frames')
-        self.fixed_marker_size_spinbox.setToolTip('Fixed frame count for auto markers (0 = Custom allows manual marker setting)')
-        marker_size_layout.addWidget(marker_size_label)
-        marker_size_layout.addWidget(self.fixed_marker_size_spinbox)
-        self.toolbar.addWidget(marker_size_widget)
-
-        # Video edit buttons
-        self.extract_range_action = QAction(QIcon.fromTheme('document-save'),
-            'Extract range to new video', self)
-        self.toolbar.addAction(self.extract_range_action)
-
-        self.remove_range_action = QAction(QIcon.fromTheme('edit-cut'),
-            'Remove range from video', self)
-        self.toolbar.addAction(self.remove_range_action)
-
-        self.remove_frame_action = QAction(QIcon.fromTheme('edit-delete'),
-            'Remove current frame', self)
-        self.toolbar.addAction(self.remove_frame_action)
-
-        self.repeat_frame_action = QAction(QIcon.fromTheme('edit-copy'),
-            'Repeat current frame', self)
-        self.toolbar.addAction(self.repeat_frame_action)
-
-        # Fix selected button - styled button with orange highlight
-        self.fix_frame_count_btn = QPushButton('N*4+1')
-        self.fix_frame_count_btn.setToolTip('Fix N*4+1 for selected videos')
-        self.fix_frame_count_btn.setMaximumWidth(50)
-        self.fix_frame_count_btn.setMaximumHeight(32)
-        self.fix_frame_count_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                font-weight: bold;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 4px;
-                color: #ccc;
-            }
-            QPushButton:hover {
-                border-color: #FF9800;
-                background-color: #353535;
-                color: #FF9800;
-            }
-        """)
-        self.toolbar.addWidget(self.fix_frame_count_btn)
-
-        # Fix all folder button - styled button with orange highlight
-        self.fix_all_folder_btn = QPushButton('ALL')
-        self.fix_all_folder_btn.setToolTip('Fix N*4+1 for all videos in folder')
-        self.fix_all_folder_btn.setMaximumWidth(40)
-        self.fix_all_folder_btn.setMaximumHeight(32)
-        self.fix_all_folder_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                font-weight: bold;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 4px;
-                color: #ccc;
-            }
-            QPushButton:hover {
-                border-color: #FF9800;
-                background-color: #353535;
-                color: #FF9800;
-            }
-        """)
-        self.toolbar.addWidget(self.fix_all_folder_btn)
-
-        # SAR fix buttons - styled button with red highlight
-        self.fix_sar_btn = QPushButton('SAR')
-        self.fix_sar_btn.setToolTip('Fix non-square pixels (SAR) for selected videos')
-        self.fix_sar_btn.setMaximumWidth(40)
-        self.fix_sar_btn.setMaximumHeight(32)
-        self.fix_sar_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                font-weight: bold;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 4px;
-                color: #ccc;
-            }
-            QPushButton:hover {
-                border-color: #FF5722;
-                background-color: #353535;
-                color: #FF5722;
-            }
-        """)
-        self.toolbar.addWidget(self.fix_sar_btn)
-
-        # Fix all SAR folder button - styled button with red highlight
-        self.fix_all_sar_btn = QPushButton('SAR*')
-        self.fix_all_sar_btn.setToolTip('Fix SAR for all videos in folder')
-        self.fix_all_sar_btn.setMaximumWidth(45)
-        self.fix_all_sar_btn.setMaximumHeight(32)
-        self.fix_all_sar_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                font-weight: bold;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 4px;
-                color: #ccc;
-            }
-            QPushButton:hover {
-                border-color: #FF5722;
-                background-color: #353535;
-                color: #FF5722;
-            }
-        """)
-        self.toolbar.addWidget(self.fix_all_sar_btn)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(spacer)
-        star_widget = QWidget()
-        star_layout = QHBoxLayout(star_widget)
-        star_layout.setContentsMargins(0, 0, 0, 0)
-        star_layout.setSpacing(0)
-        self.rating = 0
-        self.star_labels = []
-        for i in range(6):
-            shortcut = QShortcut(QKeySequence(f'Ctrl+{i}'), self)
-            shortcut.activated.connect(lambda checked=False, rating=i:
-                                       self.set_rating(2*rating, False))
-            if i == 0:
-                continue
-            star_label = QLabel('☆', self)
-            star_label.setEnabled(False)
-            star_label.setAlignment(Qt.AlignCenter)
-            star_label.setStyleSheet('QLabel { font-size: 22px; }')
-            star_label.setToolTip(f'Ctrl+{i}')
-            star_label.mousePressEvent = lambda event, rating=i: (
-                self.set_rating(rating/5.0, True, event))
-            self.star_labels.append(star_label)
-            star_layout.addWidget(star_label)
-        self.image_viewer.rating_changed.connect(self.set_rating)
-        self.toolbar.addWidget(star_widget)
+        # Create toolbar and menus
+        self.toolbar_manager.create_toolbar()
+        self.rating = self.toolbar_manager.rating
+        self.star_labels = self.toolbar_manager.star_labels
 
         self.image_list = ImageList(self.proxy_image_list_model,
                                     tag_separator, image_list_image_width)
@@ -356,35 +114,19 @@ class MainWindow(QMainWindow):
                           self.all_tags_editor],
                          [int(image_list_image_width * 2.5)] * 3,
                          Qt.Orientation.Horizontal)
-        # Disable some widgets until a directory is loaded.
+        # Disable some widgets until a directory is loaded
         self.image_tags_editor.tag_input_box.setDisabled(True)
         self.auto_captioner.start_cancel_button.setDisabled(True)
-        self.reload_directory_action = QAction('Reload Directory', parent=self)
-        self.reload_directory_action.setDisabled(True)
-        self.undo_action = QAction('Undo', parent=self)
-        self.redo_action = QAction('Redo', parent=self)
-        self.toggle_toolbar_action = QAction('Toolbar', parent=self)
-        self.toggle_image_list_action = QAction('Images', parent=self)
-        self.toggle_image_tags_editor_action = QAction('Image Tags',
-                                                       parent=self)
-        self.toggle_all_tags_editor_action = QAction('All Tags', parent=self)
-        self.toggle_auto_captioner_action = QAction('Auto-Captioner',
-                                                    parent=self)
-        self.toggle_auto_markings_action = QAction('Auto-Markings',
-                                                    parent=self)
-        self.create_menus()
 
-        self.image_list_selection_model = (self.image_list.list_view
-                                           .selectionModel())
-        self.image_list_model.image_list_selection_model = (
-            self.image_list_selection_model)
-        self.connect_toolbar_signals()
-        self.connect_image_list_signals()
-        self.connect_image_tags_editor_signals()
-        self.connect_all_tags_editor_signals()
-        self.connect_auto_captioner_signals()
-        self.connect_auto_markings_signals()
-        self.connect_video_controls_signals()
+        # Create menus
+        self.menu_manager.create_menus()
+
+        # Setup image list selection model
+        self.image_list_selection_model = self.image_list.list_view.selectionModel()
+        self.image_list_model.image_list_selection_model = self.image_list_selection_model
+
+        # Connect all signals
+        self.signal_manager.connect_all_signals()
         # Forward any unhandled image changing key presses to the image list.
         key_press_forwarder = KeyPressForwarder(
             parent=self, target=self.image_list.list_view,
@@ -453,7 +195,7 @@ class MainWindow(QMainWindow):
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
         # Save marker size setting
-        settings.setValue('fixed_marker_size', self.fixed_marker_size_spinbox.value())
+        settings.setValue('fixed_marker_size', self.toolbar_manager.fixed_marker_size_spinbox.value())
         super().closeEvent(event)
 
     def set_font_size(self):
@@ -478,15 +220,16 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def zoom(self, factor):
+        toolbar_mgr = self.toolbar_manager
         if factor < 0:
-            self.zoom_fit_best_action.setChecked(True)
-            self.zoom_original_action.setChecked(False)
+            toolbar_mgr.zoom_fit_best_action.setChecked(True)
+            toolbar_mgr.zoom_original_action.setChecked(False)
         elif factor == 1.0:
-            self.zoom_fit_best_action.setChecked(False)
-            self.zoom_original_action.setChecked(True)
+            toolbar_mgr.zoom_fit_best_action.setChecked(False)
+            toolbar_mgr.zoom_original_action.setChecked(True)
         else:
-            self.zoom_fit_best_action.setChecked(False)
-            self.zoom_original_action.setChecked(False)
+            toolbar_mgr.zoom_fit_best_action.setChecked(False)
+            toolbar_mgr.zoom_original_action.setChecked(False)
 
     def load_directory(self, path: Path, select_index: int = 0,
                        save_path_to_settings: bool = False):
@@ -503,7 +246,7 @@ class MainWindow(QMainWindow):
         self.image_list.list_view.setCurrentIndex(
             self.proxy_image_list_model.index(select_index, 0))
         self.centralWidget().setCurrentWidget(self.image_viewer)
-        self.reload_directory_action.setDisabled(False)
+        self.menu_manager.reload_directory_action.setDisabled(False)
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
 
@@ -589,110 +332,6 @@ class MainWindow(QMainWindow):
         message_box.setText(text)
         message_box.exec()
 
-    def create_menus(self):
-        menu_bar = self.menuBar()
-
-        file_menu = menu_bar.addMenu('File')
-        load_directory_action = QAction('Load Directory...', parent=self)
-        load_directory_action.setShortcut(QKeySequence('Ctrl+L'))
-        load_directory_action.triggered.connect(self.select_and_load_directory)
-        file_menu.addAction(load_directory_action)
-        self.reload_directory_action.setShortcuts(
-            [QKeySequence('Ctrl+Shift+L'), QKeySequence('F5')])
-        self.reload_directory_action.triggered.connect(self.reload_directory)
-        file_menu.addAction(self.reload_directory_action)
-        export_action = QAction('Export...', parent=self)
-        export_action.triggered.connect(self.export_images_dialog)
-        file_menu.addAction(export_action)
-        settings_action = QAction('Settings...', parent=self)
-        settings_action.setShortcut(QKeySequence('Ctrl+Alt+S'))
-        settings_action.triggered.connect(self.show_settings_dialog)
-        file_menu.addAction(settings_action)
-        exit_action = QAction('Exit', parent=self)
-        exit_action.setShortcut(QKeySequence('Ctrl+W'))
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
-        edit_menu = menu_bar.addMenu('Edit')
-        self.undo_action.setShortcut(QKeySequence('Ctrl+Z'))
-        self.undo_action.triggered.connect(self.image_list_model.undo)
-        self.undo_action.setDisabled(True)
-        edit_menu.addAction(self.undo_action)
-        self.redo_action.setShortcut(QKeySequence('Ctrl+Y'))
-        self.redo_action.triggered.connect(self.image_list_model.redo)
-        self.redo_action.setDisabled(True)
-        edit_menu.addAction(self.redo_action)
-        find_and_replace_action = QAction('Find and Replace...', parent=self)
-        find_and_replace_action.setShortcut(QKeySequence('Ctrl+R'))
-        find_and_replace_action.triggered.connect(
-            self.show_find_and_replace_dialog)
-        edit_menu.addAction(find_and_replace_action)
-        batch_reorder_tags_action = QAction('Batch Reorder Tags...',
-                                            parent=self)
-        batch_reorder_tags_action.setShortcut(QKeySequence('Ctrl+B'))
-        batch_reorder_tags_action.triggered.connect(
-            self.show_batch_reorder_tags_dialog)
-        edit_menu.addAction(batch_reorder_tags_action)
-        remove_duplicate_tags_action = QAction('Remove Duplicate Tags',
-                                               parent=self)
-        remove_duplicate_tags_action.setShortcut(QKeySequence('Ctrl+D'))
-        remove_duplicate_tags_action.triggered.connect(
-            self.remove_duplicate_tags)
-        edit_menu.addAction(remove_duplicate_tags_action)
-        remove_empty_tags_action = QAction('Remove Empty Tags', parent=self)
-        remove_empty_tags_action.setShortcut(QKeySequence('Ctrl+E'))
-        remove_empty_tags_action.triggered.connect(
-            self.remove_empty_tags)
-        edit_menu.addAction(remove_empty_tags_action)
-
-        view_menu = menu_bar.addMenu('View')
-        self.toggle_toolbar_action.setCheckable(True)
-        self.toggle_image_list_action.setCheckable(True)
-        self.toggle_image_tags_editor_action.setCheckable(True)
-        self.toggle_all_tags_editor_action.setCheckable(True)
-        self.toggle_auto_captioner_action.setCheckable(True)
-        self.toggle_auto_markings_action.setCheckable(True)
-        self.toggle_toolbar_action.triggered.connect(
-            lambda is_checked: self.toolbar.setVisible(is_checked))
-        self.toggle_image_list_action.triggered.connect(
-            lambda is_checked: self.image_list.setVisible(is_checked))
-        self.toggle_image_tags_editor_action.triggered.connect(
-            lambda is_checked: self.image_tags_editor.setVisible(is_checked))
-        self.toggle_all_tags_editor_action.triggered.connect(
-            lambda is_checked: self.all_tags_editor.setVisible(is_checked))
-        self.toggle_auto_captioner_action.triggered.connect(
-            lambda is_checked: self.auto_captioner.setVisible(is_checked))
-        self.toggle_auto_markings_action.triggered.connect(
-            lambda is_checked: self.auto_markings.setVisible(is_checked))
-        view_menu.addAction(self.toggle_toolbar_action)
-        view_menu.addAction(self.toggle_image_list_action)
-        view_menu.addAction(self.toggle_image_tags_editor_action)
-        view_menu.addAction(self.toggle_all_tags_editor_action)
-        view_menu.addAction(self.toggle_auto_captioner_action)
-        view_menu.addAction(self.toggle_auto_markings_action)
-
-        help_menu = menu_bar.addMenu('Help')
-        open_github_repository_action = QAction('GitHub', parent=self)
-        open_github_repository_action.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPOSITORY_URL)))
-        help_menu.addAction(open_github_repository_action)
-
-    @Slot()
-    def update_undo_and_redo_actions(self):
-        if self.image_list_model.undo_stack:
-            undo_action_name = self.image_list_model.undo_stack[-1].action_name
-            self.undo_action.setText(f'Undo "{undo_action_name}"')
-            self.undo_action.setDisabled(False)
-        else:
-            self.undo_action.setText('Undo')
-            self.undo_action.setDisabled(True)
-        if self.image_list_model.redo_stack:
-            redo_action_name = self.image_list_model.redo_stack[-1].action_name
-            self.redo_action.setText(f'Redo "{redo_action_name}"')
-            self.redo_action.setDisabled(False)
-        else:
-            self.redo_action.setText('Redo')
-            self.redo_action.setDisabled(True)
 
     @Slot()
     def set_image_list_filter(self):
@@ -723,52 +362,6 @@ class MainWindow(QMainWindow):
                         else 'filtered_image_index')
         settings.setValue(settings_key, proxy_image_index.row())
 
-    def connect_toolbar_signals(self):
-        self.toolbar.visibilityChanged.connect(
-            lambda: self.toggle_toolbar_action.setChecked(
-                self.toolbar.isVisible()))
-        self.image_viewer.zoom.connect(self.zoom)
-        self.zoom_fit_best_action.triggered.connect(
-            self.image_viewer.zoom_fit)
-        self.zoom_in_action.triggered.connect(
-            self.image_viewer.zoom_in)
-        self.zoom_original_action.triggered.connect(
-            self.image_viewer.zoom_original)
-        self.zoom_out_action.triggered.connect(
-            self.image_viewer.zoom_out)
-        self.add_action_group.triggered.connect(
-            lambda action: self.image_viewer.add_marking(
-                ImageMarking.NONE if not action.isChecked() else
-                ImageMarking.CROP if action == self.add_crop_action else
-                ImageMarking.HINT if action == self.add_hint_action else
-                ImageMarking.EXCLUDE if action == self.add_exclude_action else
-                ImageMarking.INCLUDE))
-        self.image_viewer.marking.connect(lambda marking:
-            self.add_crop_action.setChecked(True) if marking == ImageMarking.CROP else
-            self.add_hint_action.setChecked(True) if marking == ImageMarking.HINT else
-            self.add_exclude_action.setChecked(True) if marking == ImageMarking.EXCLUDE else
-            self.add_include_action.setChecked(True) if marking == ImageMarking.INCLUDE else
-            self.add_action_group.checkedAction() and
-                self.add_action_group.checkedAction().setChecked(False))
-        self.image_viewer.scene.selectionChanged.connect(lambda:
-            self.is_running and self.add_toggle_marking_action.setEnabled(
-                self.image_viewer.get_selected_type() not in [ImageMarking.NONE,
-                                                              ImageMarking.CROP]))
-        self.image_viewer.accept_crop_addition.connect(self.add_crop_action.setEnabled)
-        self.image_viewer.scene.selectionChanged.connect(lambda:
-            self.is_running and self.delete_marking_action.setEnabled(
-                self.image_viewer.get_selected_type() != ImageMarking.NONE))
-        self.delete_marking_action.triggered.connect(lambda: self.image_viewer.delete_markings())
-        self.add_show_marking_action.toggled.connect(self.image_viewer.show_marking)
-        self.add_show_marking_action.toggled.connect(self.add_action_group.setEnabled)
-        self.add_show_marking_action.toggled.connect(lambda toggled:
-                self.add_toggle_marking_action.setEnabled(toggled and
-                    self.image_viewer.get_selected_type() != ImageMarking.NONE))
-        self.add_show_marking_action.toggled.connect(self.add_show_labels_action.setEnabled)
-        self.add_show_marking_action.toggled.connect(self.add_show_marking_latent_action.setEnabled)
-        self.add_toggle_marking_action.triggered.connect(lambda: self.image_viewer.change_marking())
-        self.add_show_labels_action.toggled.connect(self.image_viewer.show_label)
-        self.add_show_marking_latent_action.toggled.connect(self.image_viewer.show_marking_latent)
 
     @Slot(float)
     def set_rating(self, rating: float, interactive: bool = False,
@@ -796,49 +389,6 @@ class MainWindow(QMainWindow):
             self.image_viewer.rating_change(rating)
             self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
 
-    def connect_image_list_signals(self):
-        self.image_list.filter_line_edit.textChanged.connect(
-            self.set_image_list_filter)
-        self.image_list_selection_model.currentChanged.connect(
-            self.save_image_index)
-        self.image_list_selection_model.currentChanged.connect(
-            self.image_list.update_image_index_label)
-        self.image_list_selection_model.currentChanged.connect(
-            lambda current, previous: self.image_viewer.load_image(current))
-        self.image_list_selection_model.currentChanged.connect(
-            self.image_tags_editor.load_image_tags)
-        self.image_list_model.modelReset.connect(
-            lambda: self.tag_counter_model.count_tags(
-                self.image_list_model.images))
-        self.image_list_model.dataChanged.connect(
-            lambda: self.tag_counter_model.count_tags(
-                self.image_list_model.images))
-        self.image_list_model.dataChanged.connect(
-            self.image_tags_editor.reload_image_tags_if_changed)
-        self.image_list_model.dataChanged.connect(
-            lambda start, end, roles:
-                self.image_viewer.load_image(self.image_viewer.proxy_image_index,
-                                             False)
-                if (start.row() <= self.image_viewer.proxy_image_index.row() <= end.row()) else 0)
-        self.image_list_model.update_undo_and_redo_actions_requested.connect(
-            self.update_undo_and_redo_actions)
-        self.proxy_image_list_model.filter_changed.connect(
-            lambda: self.image_list.update_image_index_label(
-                self.image_list.list_view.currentIndex()))
-        self.proxy_image_list_model.filter_changed.connect(
-            lambda: self.tag_counter_model.count_tags_filtered(
-                self.proxy_image_list_model.get_list() if
-                len(self.proxy_image_list_model.filter or [])>0 else None))
-        self.image_list.list_view.directory_reload_requested.connect(
-            self.reload_directory)
-        self.image_list.list_view.tags_paste_requested.connect(
-            self.image_list_model.add_tags)
-        # Connecting the signal directly without `isVisible()` causes the menu
-        # item to be unchecked when the widget is an inactive tab.
-        self.image_list.visibilityChanged.connect(
-            lambda: self.toggle_image_list_action.setChecked(
-                self.image_list.isVisible()))
-        self.image_viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
 
     @Slot()
     def update_image_tags(self):
@@ -871,17 +421,6 @@ class MainWindow(QMainWindow):
                 action_name='Delete Tags', should_ask_for_confirmation=False)
         self.image_list_model.update_image_tags(image_index, new_tags)
 
-    def connect_image_tags_editor_signals(self):
-        # `rowsInserted` does not have to be connected because `dataChanged`
-        # is emitted when a tag is added.
-        self.image_tag_list_model.modelReset.connect(self.update_image_tags)
-        self.image_tag_list_model.dataChanged.connect(self.update_image_tags)
-        self.image_tag_list_model.rowsMoved.connect(self.update_image_tags)
-        self.image_tags_editor.visibilityChanged.connect(
-            lambda: self.toggle_image_tags_editor_action.setChecked(
-                self.image_tags_editor.isVisible()))
-        self.image_tags_editor.tag_input_box.tags_addition_requested.connect(
-            self.image_list_model.add_tags)
 
     @Slot()
     def set_image_list_filter_text(self, selected_tag: str):
@@ -900,746 +439,6 @@ class MainWindow(QMainWindow):
         self.image_list_model.add_tags([tag], selected_image_indices)
         self.image_tags_editor.select_last_tag()
 
-    def connect_all_tags_editor_signals(self):
-        self.all_tags_editor.clear_filter_button.clicked.connect(
-            self.image_list.filter_line_edit.clear)
-        self.tag_counter_model.tags_renaming_requested.connect(
-            self.image_list_model.rename_tags)
-        self.tag_counter_model.tags_renaming_requested.connect(
-            self.image_list.filter_line_edit.clear)
-        self.all_tags_editor.all_tags_list.image_list_filter_requested.connect(
-            self.set_image_list_filter_text)
-        self.all_tags_editor.all_tags_list.tag_addition_requested.connect(
-            self.add_tag_to_selected_images)
-        self.all_tags_editor.all_tags_list.tags_deletion_requested.connect(
-            self.image_list_model.delete_tags)
-        self.all_tags_editor.all_tags_list.tags_deletion_requested.connect(
-            self.image_list.filter_line_edit.clear)
-        self.all_tags_editor.visibilityChanged.connect(
-            lambda: self.toggle_all_tags_editor_action.setChecked(
-                self.all_tags_editor.isVisible()))
-
-    def connect_auto_captioner_signals(self):
-        self.auto_captioner.caption_generated.connect(
-            lambda image_index, _, tags:
-            self.image_list_model.update_image_tags(image_index, tags))
-        self.auto_captioner.caption_generated.connect(
-            lambda image_index, *_:
-            self.image_tags_editor.reload_image_tags_if_changed(image_index,
-                                                                image_index))
-        self.auto_captioner.visibilityChanged.connect(
-            lambda: self.toggle_auto_captioner_action.setChecked(
-                self.auto_captioner.isVisible()))
-
-    def connect_auto_markings_signals(self):
-        self.auto_markings.marking_generated.connect(
-            lambda image_index, markings:
-            self.image_list_model.add_image_markings(image_index, markings))
-        self.auto_markings.visibilityChanged.connect(
-            lambda: self.toggle_auto_markings_action.setChecked(
-                self.auto_markings.isVisible()))
-
-    def connect_video_controls_signals(self):
-        """Connect video player and controls signals (embedded in ImageViewer)."""
-        video_player = self.image_viewer.video_player
-        video_controls = self.image_viewer.video_controls
-
-        # Connect video controls to video player
-        def on_play_pause_requested():
-            """Handle manual play/pause toggle from user."""
-            video_player.toggle_play_pause()
-            # Update UI and auto-play state based on new player state
-            video_controls.set_playing(video_player.is_playing, update_auto_play=True)
-
-        video_controls.play_pause_requested.connect(on_play_pause_requested)
-        video_controls.stop_requested.connect(
-            video_player.stop)
-        video_controls.frame_changed.connect(
-            video_player.seek_to_frame)
-        video_controls.skip_backward_requested.connect(
-            lambda: self._skip_video(backward=True))
-        video_controls.skip_forward_requested.connect(
-            lambda: self._skip_video(backward=False))
-
-        # Connect video player updates to video controls
-        video_player.frame_changed.connect(
-            video_controls.update_position)
-
-        # Update play/pause button state
-        video_player.frame_changed.connect(
-            lambda frame, time_ms: video_controls.set_playing(video_player.is_playing))
-
-        # Connect loop controls
-        video_controls.loop_toggled.connect(
-            lambda enabled: self._update_loop_state())
-        video_controls.loop_start_set.connect(
-            lambda: self._update_loop_state())
-        video_controls.loop_end_set.connect(
-            lambda: self._update_loop_state())
-        video_controls.loop_reset.connect(
-            lambda: video_player.set_loop(False, None, None))
-
-        # Connect speed control
-        video_controls.speed_changed.connect(
-            video_player.set_playback_speed)
-
-        # Connect toolbar video editing controls
-        self.fixed_marker_size_spinbox.valueChanged.connect(
-            lambda value: self._on_marker_size_changed(value))
-
-        # Always show controls toggle
-        def on_always_show_toggled(checked):
-            self.image_viewer.set_always_show_controls(checked)
-            settings.setValue('video_always_show_controls', checked)
-
-        self.always_show_controls_btn.toggled.connect(on_always_show_toggled)
-
-        # Connect video editing buttons
-        self.extract_range_action.triggered.connect(self._extract_video_range)
-        self.remove_range_action.triggered.connect(self._remove_video_range)
-        self.remove_frame_action.triggered.connect(self._remove_video_frame)
-        self.repeat_frame_action.triggered.connect(self._repeat_video_frame)
-        self.fix_frame_count_btn.clicked.connect(self._fix_video_frame_count)
-        self.fix_all_folder_btn.clicked.connect(self._fix_all_folder_frame_count)
-        self.fix_sar_btn.clicked.connect(self._fix_sar_selected)
-        self.fix_all_sar_btn.clicked.connect(self._fix_all_sar_folder)
-
-    def _update_loop_state(self):
-        """Update video player loop state from controls."""
-        video_controls = self.image_viewer.video_controls
-        video_player = self.image_viewer.video_player
-
-        if not video_controls.is_looping:
-            video_player.set_loop(False, None, None)
-            return
-
-        loop_range = video_controls.get_loop_range()
-        if loop_range:
-            # Loop between markers
-            video_player.set_loop(True, loop_range[0], loop_range[1])
-        else:
-            # Loop whole video when no markers set
-            total_frames = video_player.get_total_frames()
-            if total_frames > 0:
-                video_player.set_loop(True, 0, total_frames - 1)
-            else:
-                video_player.set_loop(False, None, None)
-
-    def _skip_video(self, backward: bool):
-        """Skip 1 second backward or forward in video."""
-        video_player = self.image_viewer.video_player
-        fps = video_player.get_fps()
-        if fps == 0:
-            return
-
-        # Calculate frame offset for 1 second
-        frame_offset = int(fps)
-        current_frame = video_player.get_current_frame_number()
-
-        if backward:
-            new_frame = max(0, current_frame - frame_offset)
-        else:
-            new_frame = min(video_player.get_total_frames() - 1,
-                          current_frame + frame_offset)
-
-        video_player.seek_to_frame(new_frame)
-
-    def _on_marker_size_changed(self, value):
-        """Handle marker size changes and save to settings."""
-        # Update video controls
-        video_controls = self.image_viewer.video_controls
-        setattr(video_controls, 'fixed_marker_size', value)
-        # Save to settings
-        settings.setValue('fixed_marker_size', value)
-
-    def _extract_video_range(self):
-        """Extract the marked range to a new video file."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QInputDialog
-        from utils.video_editor import VideoEditor
-
-        video_player = self.image_viewer.video_player
-        video_controls = self.image_viewer.video_controls
-
-        # Check if we have a video loaded
-        if not video_player.video_path:
-            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
-            return
-
-        # Check if markers are set
-        loop_range = video_controls.get_loop_range()
-        if not loop_range:
-            QMessageBox.warning(self, "No Markers", "Please set loop markers first.")
-            return
-
-        start_frame, end_frame = loop_range
-        fps = video_player.get_fps()
-
-        # Ask for output filename
-        input_path = Path(video_player.video_path)
-        default_name = f"{input_path.stem}_extract_{start_frame}-{end_frame}{input_path.suffix}"
-
-        filename, ok = QInputDialog.getText(
-            self, "Extract Video Range",
-            "Output filename:",
-            text=default_name
-        )
-
-        if not ok or not filename:
-            return
-
-        output_path = input_path.parent / filename
-
-        # Perform extraction
-        success, message = VideoEditor.extract_range(
-            input_path, output_path,
-            start_frame, end_frame, fps
-        )
-
-        if success:
-            QMessageBox.information(self, "Success", message)
-        else:
-            QMessageBox.critical(self, "Error", message)
-
-    def _remove_video_range(self):
-        """Remove the marked range from the video."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox
-        from utils.video_editor import VideoEditor
-
-        video_player = self.image_viewer.video_player
-        video_controls = self.image_viewer.video_controls
-
-        if not video_player.video_path:
-            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
-            return
-
-        loop_range = video_controls.get_loop_range()
-        if not loop_range:
-            QMessageBox.warning(self, "No Markers", "Please set loop markers first.")
-            return
-
-        start_frame, end_frame = loop_range
-        fps = video_player.get_fps()
-        input_path = Path(video_player.video_path)
-
-        # Confirm action
-        reply = QMessageBox.question(
-            self, "Remove Range",
-            f"Remove frames {start_frame}-{end_frame}?\n\n"
-            f"Original will be saved as {input_path.name}.backup",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Remove range (overwrites original, creates backup)
-        success, message = VideoEditor.remove_range(
-            input_path, input_path,
-            start_frame, end_frame, fps
-        )
-
-        if success:
-            QMessageBox.information(self, "Success", message)
-            self.reload_directory()
-        else:
-            QMessageBox.critical(self, "Error", message)
-
-    def _remove_video_frame(self):
-        """Remove the current frame from the video."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox
-        from utils.video_editor import VideoEditor
-
-        video_player = self.image_viewer.video_player
-
-        if not video_player.video_path:
-            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
-            return
-
-        current_frame = video_player.get_current_frame_number()
-        fps = video_player.get_fps()
-        input_path = Path(video_player.video_path)
-
-        # Confirm action
-        reply = QMessageBox.question(
-            self, "Remove Frame",
-            f"Remove frame {current_frame}?\n\n"
-            f"Original will be saved as {input_path.name}.backup",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Remove frame
-        success, message = VideoEditor.remove_frame(
-            input_path, input_path,
-            current_frame, fps
-        )
-
-        if success:
-            QMessageBox.information(self, "Success", message)
-            self.reload_directory()
-        else:
-            QMessageBox.critical(self, "Error", message)
-
-    def _repeat_video_frame(self):
-        """Repeat the current frame multiple times."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QInputDialog
-        from utils.video_editor import VideoEditor
-
-        video_player = self.image_viewer.video_player
-
-        if not video_player.video_path:
-            QMessageBox.warning(self, "No Video", "No video is currently loaded.")
-            return
-
-        current_frame = video_player.get_current_frame_number()
-        fps = video_player.get_fps()
-        input_path = Path(video_player.video_path)
-
-        # Ask how many times to repeat
-        max_frame = video_player.get_total_frames() - 1
-        is_last_frame = current_frame == max_frame
-        frame_desc = f"{current_frame} (last)" if is_last_frame else str(current_frame)
-        repeat_count, ok = QInputDialog.getInt(
-            self, "Repeat Frame",
-            f"How many times to repeat frame {frame_desc}?",
-            value=1, minValue=1, maxValue=100
-        )
-
-        if not ok:
-            return
-
-        # Confirm action
-        reply = QMessageBox.question(
-            self, "Repeat Frame",
-            f"Repeat frame {current_frame} {repeat_count} times?\n\n"
-            f"Original will be saved as {input_path.name}.backup",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Repeat frame
-        success, message = VideoEditor.repeat_frame(
-            input_path, input_path,
-            current_frame, repeat_count, fps
-        )
-
-        if success:
-            QMessageBox.information(self, "Success", message)
-            self.reload_directory()
-        else:
-            QMessageBox.critical(self, "Error", message)
-
-    def _fix_video_frame_count(self):
-        """Fix video frame count to follow N*4+1 rule for selected videos."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
-        from PySide6.QtCore import Qt
-        from utils.video_editor import VideoEditor
-        import subprocess
-        import json
-
-        # Get selected videos from image list
-        selected_indices = self.image_list.get_selected_image_indices()
-
-        if not selected_indices:
-            QMessageBox.warning(self, "No Selection", "Please select one or more videos to fix.")
-            return
-
-        # Filter to only videos
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-        video_paths = []
-        for idx in selected_indices:
-            image = self.image_list_model.data(idx, Qt.ItemDataRole.UserRole)
-            if image.path.suffix.lower() in video_extensions:
-                video_paths.append(image.path)
-
-        if not video_paths:
-            QMessageBox.warning(self, "No Videos", "No videos in selection.")
-            return
-
-        # Ask for method preference once for all videos
-        choice, ok = QInputDialog.getItem(
-            self, "Fix Frame Count",
-            f"Fix {len(video_paths)} video(s) to N*4+1 pattern.\n\nMethod:",
-            ["Auto (use last frame)", "Auto (use first frame)"], 0, False
-        )
-
-        if not ok:
-            return
-
-        repeat_last = "last" in choice
-
-        # Confirm batch operation
-        reply = QMessageBox.question(
-            self, "Fix Frame Count",
-            f"Fix frame count for {len(video_paths)} video(s)?\n\n"
-            f"Originals will be saved as .backup files",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Process videos with progress dialog
-        progress = QProgressDialog("Fixing video frame counts...", "Cancel", 0, len(video_paths), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-
-        success_count = 0
-        error_count = 0
-        errors = []
-
-        for i, video_path in enumerate(video_paths):
-            if progress.wasCanceled():
-                break
-
-            progress.setLabelText(f"Processing {video_path.name}...")
-            progress.setValue(i)
-
-            # Get FPS from video
-            probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(video_path)]
-            try:
-                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
-                probe_data = json.loads(probe_result.stdout)
-                fps = None
-                for stream in probe_data.get('streams', []):
-                    if stream.get('codec_type') == 'video':
-                        fps_str = stream.get('r_frame_rate', '0/1')
-                        num, denom = map(float, fps_str.split('/'))
-                        fps = num / denom if denom != 0 else 0
-                        break
-
-                if not fps:
-                    errors.append(f"{video_path.name}: Could not determine FPS")
-                    error_count += 1
-                    continue
-
-                # Fix frame count
-                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
-                    video_path, video_path, fps, repeat_last, None
-                )
-
-                if success:
-                    success_count += 1
-                else:
-                    errors.append(f"{video_path.name}: {message}")
-                    error_count += 1
-
-            except Exception as e:
-                errors.append(f"{video_path.name}: {str(e)}")
-                error_count += 1
-
-        progress.setValue(len(video_paths))
-
-        # Show results
-        result_msg = f"Processed {len(video_paths)} video(s):\n"
-        result_msg += f"✓ Success: {success_count}\n"
-        result_msg += f"✗ Errors: {error_count}"
-
-        if errors:
-            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
-            if len(errors) > 10:
-                result_msg += f"\n... and {len(errors) - 10} more"
-
-        if error_count > 0:
-            QMessageBox.warning(self, "Batch Fix Complete", result_msg)
-        else:
-            QMessageBox.information(self, "Success", result_msg)
-
-        # Auto-reload directory to show changes
-        self.reload_directory()
-
-    def _fix_all_folder_frame_count(self):
-        """Fix N*4+1 frame count for all videos in the current folder."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
-        from PySide6.QtCore import Qt
-        from utils.video_editor import VideoEditor
-        import subprocess
-        import json
-
-        if not self.directory_path:
-            QMessageBox.warning(self, "No Directory", "No directory is loaded.")
-            return
-
-        # Find all videos in directory
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-        video_paths = [f for f in self.directory_path.iterdir()
-                      if f.is_file() and f.suffix.lower() in video_extensions]
-
-        if not video_paths:
-            QMessageBox.warning(self, "No Videos", "No videos found in current directory.")
-            return
-
-        # Ask for method preference
-        choice, ok = QInputDialog.getItem(
-            self, "Fix All Videos",
-            f"Fix {len(video_paths)} video(s) in folder to N*4+1 pattern.\n\nMethod:",
-            ["Auto (use last frame)", "Auto (use first frame)"], 0, False
-        )
-
-        if not ok:
-            return
-
-        repeat_last = "last" in choice
-
-        # Confirm batch operation
-        reply = QMessageBox.question(
-            self, "Fix All Videos",
-            f"Fix frame count for all {len(video_paths)} video(s) in folder?\n\n"
-            f"Originals will be saved as .backup files",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Process videos with progress dialog
-        progress = QProgressDialog("Fixing video frame counts...", "Cancel", 0, len(video_paths), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-
-        success_count = 0
-        skip_count = 0
-        error_count = 0
-        errors = []
-
-        for i, video_path in enumerate(video_paths):
-            if progress.wasCanceled():
-                break
-
-            progress.setLabelText(f"Processing {video_path.name}...")
-            progress.setValue(i)
-
-            # Get FPS from video
-            probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(video_path)]
-            try:
-                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
-                probe_data = json.loads(probe_result.stdout)
-                fps = None
-                for stream in probe_data.get('streams', []):
-                    if stream.get('codec_type') == 'video':
-                        fps_str = stream.get('r_frame_rate', '0/1')
-                        num, denom = map(float, fps_str.split('/'))
-                        fps = num / denom if denom != 0 else 0
-                        break
-
-                if not fps:
-                    errors.append(f"{video_path.name}: Could not determine FPS")
-                    error_count += 1
-                    continue
-
-                # Fix frame count
-                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
-                    video_path, video_path, fps, repeat_last, None
-                )
-
-                if success:
-                    if "already" in message.lower():
-                        skip_count += 1
-                    else:
-                        success_count += 1
-                else:
-                    errors.append(f"{video_path.name}: {message}")
-                    error_count += 1
-
-            except Exception as e:
-                errors.append(f"{video_path.name}: {str(e)}")
-                error_count += 1
-
-        progress.setValue(len(video_paths))
-
-        # Show results
-        result_msg = f"Processed {len(video_paths)} video(s):\n"
-        result_msg += f"✓ Fixed: {success_count}\n"
-        result_msg += f"⊘ Already valid: {skip_count}\n"
-        result_msg += f"✗ Errors: {error_count}"
-
-        if errors:
-            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
-            if len(errors) > 10:
-                result_msg += f"\n... and {len(errors) - 10} more"
-
-        if error_count > 0:
-            QMessageBox.warning(self, "Batch Fix Complete", result_msg)
-        else:
-            QMessageBox.information(self, "Success", result_msg)
-
-        # Auto-reload directory to show changes
-        self.reload_directory()
-
-    def _fix_sar_selected(self):
-        """Fix non-square pixels (SAR) for selected videos."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QProgressDialog
-        from PySide6.QtCore import Qt
-        from utils.video_editor import VideoEditor
-
-        # Get selected videos from image list
-        selected_indices = self.image_list.get_selected_image_indices()
-
-        if not selected_indices:
-            QMessageBox.warning(self, "No Selection", "Please select one or more videos to fix.")
-            return
-
-        # Filter to only videos
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-        video_paths = []
-        for idx in selected_indices:
-            image = self.image_list_model.data(idx, Qt.ItemDataRole.UserRole)
-            if image.path.suffix.lower() in video_extensions:
-                video_paths.append(image.path)
-
-        if not video_paths:
-            QMessageBox.warning(self, "No Videos", "No videos in selection.")
-            return
-
-        # Scan for non-square SAR videos
-        non_square_videos = []
-        for video_path in video_paths:
-            sar_num, sar_den, dims = VideoEditor.check_sar(video_path)
-            if sar_num and sar_den and sar_num != sar_den:
-                non_square_videos.append((video_path, sar_num, sar_den))
-
-        if not non_square_videos:
-            QMessageBox.information(self, "No Issues", "All selected videos have square pixels (SAR 1:1).")
-            return
-
-        # Confirm batch operation
-        sar_list = "\n".join([f"• {v[0].name} (SAR {v[1]}:{v[2]})" for v in non_square_videos[:5]])
-        if len(non_square_videos) > 5:
-            sar_list += f"\n... and {len(non_square_videos) - 5} more"
-
-        reply = QMessageBox.question(
-            self, "Fix SAR",
-            f"Found {len(non_square_videos)} video(s) with non-square pixels:\n\n{sar_list}\n\n"
-            f"Fix these videos?\nOriginals will be saved as .backup files",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Process videos with progress dialog
-        progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-
-        success_count, error_count, errors = VideoEditor.batch_fix_sar(
-            [v[0] for v in non_square_videos],
-            progress_callback=lambda current, total, name: (
-                progress.setLabelText(f"Processing {name}..."),
-                progress.setValue(current),
-                progress.wasCanceled()
-            )
-        )
-
-        progress.setValue(len(non_square_videos))
-
-        # Show results
-        result_msg = f"Processed {len(non_square_videos)} video(s):\n"
-        result_msg += f"✓ Success: {success_count}\n"
-        result_msg += f"✗ Errors: {error_count}"
-
-        if errors:
-            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
-            if len(errors) > 10:
-                result_msg += f"\n... and {len(errors) - 10} more"
-
-        if error_count > 0:
-            QMessageBox.warning(self, "SAR Fix Complete", result_msg)
-        else:
-            QMessageBox.information(self, "Success", result_msg)
-
-        # Auto-reload directory to show changes
-        self.reload_directory()
-
-    def _fix_all_sar_folder(self):
-        """Fix SAR for all videos in the current folder."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox, QProgressDialog
-        from PySide6.QtCore import Qt
-        from utils.video_editor import VideoEditor
-
-        if not self.directory_path:
-            QMessageBox.warning(self, "No Directory", "No directory is loaded.")
-            return
-
-        # Find all videos in directory
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-        video_paths = [f for f in self.directory_path.iterdir()
-                      if f.is_file() and f.suffix.lower() in video_extensions]
-
-        if not video_paths:
-            QMessageBox.warning(self, "No Videos", "No videos found in current directory.")
-            return
-
-        # Scan for non-square SAR videos
-        non_square_videos = VideoEditor.scan_directory_for_non_square_sar(
-            self.directory_path, video_extensions
-        )
-
-        if not non_square_videos:
-            QMessageBox.information(self, "No Issues",
-                f"All {len(video_paths)} video(s) in folder have square pixels (SAR 1:1).")
-            return
-
-        # Confirm batch operation
-        sar_list = "\n".join([f"• {v[0].name} (SAR {v[1]}:{v[2]})" for v in non_square_videos[:5]])
-        if len(non_square_videos) > 5:
-            sar_list += f"\n... and {len(non_square_videos) - 5} more"
-
-        reply = QMessageBox.question(
-            self, "Fix All SAR",
-            f"Found {len(non_square_videos)}/{len(video_paths)} video(s) with non-square pixels:\n\n{sar_list}\n\n"
-            f"Fix these videos?\nOriginals will be saved as .backup files",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Process videos with progress dialog
-        progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-
-        success_count, error_count, errors = VideoEditor.batch_fix_sar(
-            [v[0] for v in non_square_videos],
-            progress_callback=lambda current, total, name: (
-                progress.setLabelText(f"Processing {name}..."),
-                progress.setValue(current),
-                progress.wasCanceled()
-            )
-        )
-
-        progress.setValue(len(non_square_videos))
-
-        # Show results
-        result_msg = f"Processed {len(non_square_videos)} video(s):\n"
-        result_msg += f"✓ Success: {success_count}\n"
-        result_msg += f"✗ Errors: {error_count}"
-
-        if errors:
-            result_msg += "\n\nErrors:\n" + "\n".join(errors[:10])
-            if len(errors) > 10:
-                result_msg += f"\n... and {len(errors) - 10} more"
-
-        if error_count > 0:
-            QMessageBox.warning(self, "SAR Fix Complete", result_msg)
-        else:
-            QMessageBox.information(self, "Success", result_msg)
-
-        # Auto-reload directory to show changes
-        self.reload_directory()
 
     def restore(self):
         # Restore the window geometry and state.
