@@ -787,9 +787,11 @@ class VideoControlsWidget(QWidget):
     @Slot(int, float)
     def update_position(self, frame: int, time_ms: float):
         """Update display when playback position changes."""
-        # Update frame display
+        # Update frame display - block signals to prevent feedback loop
         self._updating_slider = True
+        self.frame_spinbox.blockSignals(True)
         self.frame_spinbox.setValue(frame)
+        self.frame_spinbox.blockSignals(False)
         self.timeline_slider.setValue(frame)
         self._updating_slider = False
 

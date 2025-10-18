@@ -1,12 +1,14 @@
 import cv2
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 
 class VideoPlayerWidget(QWidget):
-    """Video player with frame-accurate playback using OpenCV."""
+    """Hybrid video player using QMediaPlayer for playback and OpenCV for frame extraction."""
 
     # Signals
     frame_changed = Signal(int, float)  # frame_number, time_ms
@@ -15,31 +17,46 @@ class VideoPlayerWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.video_path = None
-        self.cap = None
-        self.is_playing = False
-        self.current_frame = 0
+        self.cap = None  # OpenCV capture for frame extraction
+        self.pixmap_item = None  # For displaying OpenCV frames when paused
+        self.video_item = None  # QGraphicsVideoItem for QMediaPlayer
+
+        # Video properties
         self.total_frames = 0
         self.fps = 0
-        self.pixmap_item = None  # Will be set by ImageViewer
+        self.duration_ms = 0
+
+        # Playback state
+        self.is_playing = False
+        self.current_frame = 0
+        self.playback_speed = 1.0
 
         # Loop state
         self.loop_enabled = False
         self.loop_start = None
         self.loop_end = None
 
-        # Playback speed multiplier
-        self.playback_speed = 1.0
+        # QMediaPlayer for smooth playback
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.audio_output.setMuted(True)  # Mute audio by default
+        self.media_player.setAudioOutput(self.audio_output)
 
-        # Playback timer
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._play_next_frame)
+        # Connect media player signals
+        self.media_player.positionChanged.connect(self._on_position_changed)
+        self.media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+
+        # Timer for position updates (syncs frame numbers)
+        self.position_timer = QTimer()
+        self.position_timer.setInterval(16)  # ~60 FPS update rate
+        self.position_timer.timeout.connect(self._update_frame_from_position)
 
     def load_video(self, video_path: Path, pixmap_item: QGraphicsPixmapItem):
         """Load a video file."""
-        # Stop any previous playback and cleanup
+        # Stop any previous playback
         self.pause()
 
-        # Release old capture if exists
+        # Release old OpenCV capture
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -47,39 +64,132 @@ class VideoPlayerWidget(QWidget):
         self.video_path = video_path
         self.pixmap_item = pixmap_item
 
+        # Load with OpenCV to get metadata and for frame extraction
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
             print(f"Failed to open video: {video_path}")
             return False
 
-        # Get video properties
+        # Get video properties from OpenCV (more reliable for frame count)
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.duration_ms = (self.total_frames / self.fps * 1000) if self.fps > 0 else 0
         self.current_frame = 0
 
-        # Show first frame
-        self.seek_to_frame(0)
+        # Create QGraphicsVideoItem for QMediaPlayer output
+        try:
+            if self.video_item and self.video_item.scene():
+                self.video_item.scene().removeItem(self.video_item)
+        except RuntimeError:
+            pass  # C++ object deleted
+
+        self.video_item = QGraphicsVideoItem()
+        self.video_item.setZValue(0)
+
+        # Add to same scene as pixmap_item
+        if pixmap_item.scene():
+            pixmap_item.scene().addItem(self.video_item)
+
+        # Load video into QMediaPlayer
+        self.media_player.setSource(QUrl.fromLocalFile(str(video_path)))
+        self.media_player.setVideoOutput(self.video_item)
+
+        # Show first frame using OpenCV (for frame-accurate display)
+        self._show_opencv_frame(0)
+
+        # Set video item size to match first frame
+        if self.pixmap_item and self.pixmap_item.pixmap():
+            video_size = self.pixmap_item.pixmap().size()
+            self.video_item.setSize(video_size)
+
+        # Hide video item initially (show pixmap with first frame)
+        self.video_item.hide()
+        self.pixmap_item.show()
+
         return True
 
     def play(self):
-        """Start playback."""
-        if not self.cap or self.is_playing:
+        """Start playback using QMediaPlayer (or OpenCV for negative speeds)."""
+        if not self.video_path or self.is_playing:
             return
 
         self.is_playing = True
-        # Calculate frame interval in milliseconds, adjusted by playback speed
-        if self.fps > 0:
-            interval_ms = int(1000 / (self.fps * self.playback_speed))
-            self.timer.start(interval_ms)
+
+        if self.playback_speed < 0:
+            # Use OpenCV frame-by-frame for backward playback
+            try:
+                if self.video_item:
+                    self.video_item.hide()
+            except RuntimeError:
+                pass  # C++ object deleted
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.show()
+            except RuntimeError:
+                pass  # C++ object deleted
+            # Start OpenCV playback timer
+            interval_ms = round(1000 / (self.fps * abs(self.playback_speed)))
+            self.position_timer.setInterval(interval_ms)
+            try:
+                self.position_timer.timeout.disconnect()
+            except:
+                pass  # No connections yet
+            self.position_timer.timeout.connect(self._play_next_frame_opencv)
+            self.position_timer.start()
+        else:
+            # Use QMediaPlayer for smooth forward playback
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.hide()
+            except RuntimeError:
+                pass  # C++ object deleted
+            try:
+                if self.video_item:
+                    self.video_item.show()
+            except RuntimeError:
+                pass  # C++ object deleted
+
+            # Set playback rate
+            self.media_player.setPlaybackRate(self.playback_speed)
+
+            # Start playback
+            self.media_player.play()
+
+            # Start position tracking timer
+            self.position_timer.setInterval(16)  # ~60 FPS
+            try:
+                self.position_timer.timeout.disconnect()
+            except:
+                pass  # No connections yet
+            self.position_timer.timeout.connect(self._update_frame_from_position)
+            self.position_timer.start()
 
     def pause(self):
-        """Pause playback."""
+        """Pause playback and show exact frame with OpenCV."""
         self.is_playing = False
-        self.timer.stop()
+        self.position_timer.stop()
+        self.media_player.pause()
+
+        # Switch to OpenCV frame for frame-accurate display
+        try:
+            if self.video_item:
+                self.video_item.hide()
+        except RuntimeError:
+            pass  # C++ object deleted
+
+        try:
+            if self.pixmap_item:
+                self.pixmap_item.show()
+        except RuntimeError:
+            pass  # C++ object deleted
+
+        # Show exact current frame
+        self._show_opencv_frame(self.current_frame)
 
     def stop(self):
         """Stop playback and reset to first frame."""
         self.pause()
+        self.media_player.stop()
         self.seek_to_frame(0)
 
     def toggle_play_pause(self):
@@ -89,48 +199,35 @@ class VideoPlayerWidget(QWidget):
         else:
             self.play()
 
-    @Slot()
-    def _play_next_frame(self):
-        """Play next frame during playback (supports backwards playback)."""
-        if self.playback_speed < 0:
-            # Backwards playback
-            start_frame = self.loop_start if (self.loop_enabled and self.loop_start is not None) else 0
-
-            if self.current_frame <= start_frame:
-                if self.loop_enabled and self.loop_end is not None:
-                    # Loop back to end
-                    self.seek_to_frame(self.loop_end)
-                else:
-                    # Reached start of video, stop
-                    self.pause()
-                return
-
-            self.seek_to_frame(self.current_frame - 1)
-        else:
-            # Forward playback
-            end_frame = self.loop_end if (self.loop_enabled and self.loop_end is not None) else self.total_frames - 1
-
-            if self.current_frame >= end_frame:
-                if self.loop_enabled and self.loop_start is not None:
-                    # Loop back to start
-                    self.seek_to_frame(self.loop_start)
-                else:
-                    # Reached end of video
-                    self.pause()
-                    self.playback_finished.emit()
-                return
-
-            self.seek_to_frame(self.current_frame + 1)
-
     def seek_to_frame(self, frame_number: int):
-        """Seek to a specific frame."""
-        if not self.cap or not self.pixmap_item:
+        """Seek to a specific frame (frame-accurate using OpenCV)."""
+        if not self.cap:
             return
 
         frame_number = max(0, min(frame_number, self.total_frames - 1))
         self.current_frame = frame_number
 
-        # Set frame position
+        # Calculate position in milliseconds
+        position_ms = (frame_number / self.fps * 1000) if self.fps > 0 else 0
+
+        # Seek QMediaPlayer
+        self.media_player.setPosition(int(position_ms))
+
+        # If paused, show exact frame with OpenCV
+        if not self.is_playing:
+            self._show_opencv_frame(frame_number)
+
+        # Emit frame changed signal
+        self.frame_changed.emit(frame_number, position_ms)
+
+    def _show_opencv_frame(self, frame_number: int):
+        """Extract and display exact frame using OpenCV."""
+        if not self.cap or not self.pixmap_item:
+            return
+
+        frame_number = max(0, min(frame_number, self.total_frames - 1))
+
+        # Seek to frame
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
 
         # Read frame
@@ -142,34 +239,126 @@ class VideoPlayerWidget(QWidget):
         # Convert BGR to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Correct for non-square pixel aspect ratio (SAR)
-        # Get SAR from video metadata (defaults to 1:1 if not available)
+        # Apply SAR correction if needed
         sar_num = self.cap.get(cv2.CAP_PROP_SAR_NUM)
         sar_den = self.cap.get(cv2.CAP_PROP_SAR_DEN)
 
-        # Apply SAR correction if present and valid
         if sar_num > 0 and sar_den > 0 and sar_num != sar_den:
             h, w = frame_rgb.shape[:2]
-            # Calculate display width: storage_width * (sar_num / sar_den)
             display_width = int(w * sar_num / sar_den)
             frame_rgb = cv2.resize(frame_rgb, (display_width, h), interpolation=cv2.INTER_LINEAR)
 
+        # Convert to QPixmap
         h, w, ch = frame_rgb.shape
         bytes_per_line = ch * w
         qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qt_image.copy())  # Copy to avoid data lifetime issues
+        pixmap = QPixmap.fromImage(qt_image.copy())
 
-        # Update the pixmap item - check if it's still valid
+        # Update pixmap item
         try:
             self.pixmap_item.setPixmap(pixmap)
+
+            # Update video item size to match
+            if self.video_item:
+                self.video_item.setSize(pixmap.size())
         except RuntimeError:
-            # Pixmap item was deleted
             self.pixmap_item = None
+
+    @Slot(int)
+    def _on_position_changed(self, position_ms: int):
+        """Handle QMediaPlayer position changes."""
+        # This is called during playback
+        pass
+
+    @Slot()
+    def _play_next_frame_opencv(self):
+        """Play next frame using OpenCV (for backward playback or very slow speeds)."""
+        if not self.is_playing:
             return
 
-        # Emit position update
-        time_ms = (frame_number / self.fps * 1000) if self.fps > 0 else 0
-        self.frame_changed.emit(frame_number, time_ms)
+        if self.playback_speed < 0:
+            # Backward playback
+            start_frame = self.loop_start if (self.loop_enabled and self.loop_start is not None) else 0
+
+            if self.current_frame <= start_frame:
+                if self.loop_enabled and self.loop_end is not None:
+                    # Loop back to end
+                    self.current_frame = self.loop_end
+                    self._show_opencv_frame(self.current_frame)
+                else:
+                    # Reached start, stop
+                    self.pause()
+                    return
+            else:
+                self.current_frame -= 1
+                self._show_opencv_frame(self.current_frame)
+
+            # Emit position update
+            time_ms = (self.current_frame / self.fps * 1000) if self.fps > 0 else 0
+            self.frame_changed.emit(self.current_frame, time_ms)
+        else:
+            # Forward playback (slow speeds)
+            end_frame = self.loop_end if (self.loop_enabled and self.loop_end is not None) else self.total_frames - 1
+
+            if self.current_frame >= end_frame:
+                if self.loop_enabled and self.loop_start is not None:
+                    # Loop back to start
+                    self.current_frame = self.loop_start
+                    self._show_opencv_frame(self.current_frame)
+                else:
+                    # Reached end
+                    self.pause()
+                    self.playback_finished.emit()
+                    return
+            else:
+                self.current_frame += 1
+                self._show_opencv_frame(self.current_frame)
+
+            # Emit position update
+            time_ms = (self.current_frame / self.fps * 1000) if self.fps > 0 else 0
+            self.frame_changed.emit(self.current_frame, time_ms)
+
+    @Slot()
+    def _update_frame_from_position(self):
+        """Update current frame number from QMediaPlayer position."""
+        if not self.is_playing:
+            return
+
+        position_ms = self.media_player.position()
+        playback_rate = self.media_player.playbackRate()
+
+        # Calculate current frame from position
+        if self.fps > 0:
+            frame_number = int((position_ms / 1000.0) * self.fps)
+            frame_number = max(0, min(frame_number, self.total_frames - 1))
+
+            # Only update if frame changed
+            if frame_number != self.current_frame:
+                self.current_frame = frame_number
+                self.frame_changed.emit(frame_number, float(position_ms))
+
+            # Check loop boundaries
+            if self.loop_enabled:
+                end_frame = self.loop_end if self.loop_end is not None else self.total_frames - 1
+                start_frame = self.loop_start if self.loop_start is not None else 0
+
+                if frame_number >= end_frame:
+                    # Loop back to start
+                    self.seek_to_frame(start_frame)
+                    if self.is_playing:
+                        self.media_player.play()
+
+    @Slot(QMediaPlayer.PlaybackState)
+    def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState):
+        """Handle playback state changes from QMediaPlayer."""
+        if state == QMediaPlayer.PlaybackState.StoppedState and self.is_playing:
+            # Reached end of video
+            if self.loop_enabled and self.loop_start is not None:
+                self.seek_to_frame(self.loop_start)
+                self.media_player.play()
+            else:
+                self.pause()
+                self.playback_finished.emit()
 
     def get_current_frame_number(self):
         """Get current frame number."""
@@ -189,35 +378,47 @@ class VideoPlayerWidget(QWidget):
         self.loop_start = start_frame
         self.loop_end = end_frame
 
-    def set_playback_speed(self, speed: float):
-        """
-        Set playback speed multiplier (-8.0 to 8.0).
-        Negative speeds play backwards (frame-by-frame, no audio).
-        """
-        was_backwards = self.playback_speed < 0
-        is_now_backwards = speed < 0
+        # Enable/disable QMediaPlayer loops (for simple full-video loop)
+        if enabled and start_frame is None and end_frame is None:
+            self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
+        else:
+            self.media_player.setLoops(QMediaPlayer.Loops.Once)
 
-        # Clamp to extended range
+    def set_playback_speed(self, speed: float):
+        """Set playback speed multiplier (-8.0 to 8.0)."""
+        old_speed = self.playback_speed
         self.playback_speed = max(-8.0, min(8.0, speed))
 
-        # If speed is zero or very close, stop timer but stay in play mode
-        if abs(self.playback_speed) < 0.01:
-            if self.is_playing:
-                self.timer.stop()  # Stop timer but keep is_playing = True
-            return
+        # If playing, switch modes if needed
+        if self.is_playing:
+            was_negative = old_speed < 0
+            is_negative = self.playback_speed < 0
 
-        # Update timer interval if currently playing
-        if self.is_playing and self.fps > 0:
-            # Use absolute value for timer calculation
-            abs_speed = abs(self.playback_speed)
-            interval_ms = int(1000 / (self.fps * abs_speed))
-            self.timer.stop()
-            self.timer.setInterval(interval_ms)
-            self.timer.start()  # Restart timer with new interval
+            if was_negative != is_negative:
+                # Need to switch playback modes
+                self.pause()
+                self.play()
+            elif is_negative:
+                # Update OpenCV timer interval
+                interval_ms = round(1000 / (self.fps * abs(self.playback_speed)))
+                self.position_timer.setInterval(interval_ms)
+            else:
+                # Update QMediaPlayer rate
+                self.media_player.setPlaybackRate(self.playback_speed)
 
     def cleanup(self):
         """Release video resources."""
         self.stop()
+        self.position_timer.stop()
+
+        if self.media_player:
+            self.media_player.stop()
+            self.media_player.setSource(QUrl())
+
         if self.cap:
             self.cap.release()
             self.cap = None
+
+        if self.video_item and self.video_item.scene():
+            self.video_item.scene().removeItem(self.video_item)
+            self.video_item = None
