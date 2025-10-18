@@ -59,6 +59,11 @@ class SignalManager:
                                                               ImageMarking.CROP]))
 
         image_viewer.accept_crop_addition.connect(toolbar_manager.add_crop_action.setEnabled)
+        # Enable/disable apply crop button based on whether crop exists (inverse of add_crop)
+        image_viewer.accept_crop_addition.connect(
+            lambda can_add: toolbar_manager.apply_crop_btn.setEnabled(not can_add))
+        # Connect apply crop button to the apply_crop_to_file method
+        toolbar_manager.apply_crop_btn.clicked.connect(image_viewer.apply_crop_to_file)
 
         image_viewer.scene.selectionChanged.connect(lambda:
             self.main_window.is_running and toolbar_manager.delete_marking_action.setEnabled(

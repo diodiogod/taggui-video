@@ -5,9 +5,9 @@ from PySide6.QtWidgets import (QToolBar, QPushButton, QWidget, QHBoxLayout,
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PySide6.QtCore import Qt
 
-from utils.icons import (create_add_box_icon, toggle_marking_icon,
-                         show_markings_icon, show_labels_icon,
-                         show_marking_latent_icon)
+from utils.icons import (create_add_box_icon, create_apply_crop_icon,
+                         toggle_marking_icon, show_markings_icon,
+                         show_labels_icon, show_marking_latent_icon)
 from utils.settings import settings
 
 
@@ -24,6 +24,7 @@ class ToolbarManager:
         self.zoom_out_action = None
         self.add_action_group = None
         self.add_crop_action = None
+        self.apply_crop_btn = None
         self.add_hint_action = None
         self.add_exclude_action = None
         self.add_include_action = None
@@ -98,6 +99,32 @@ class ToolbarManager:
                                        'Add crop', self.add_action_group)
         self.add_crop_action.setCheckable(True)
         self.toolbar.addAction(self.add_crop_action)
+
+        # Apply Crop button (right after Add Crop)
+        self.apply_crop_btn = QPushButton('✂')
+        self.apply_crop_btn.setToolTip('Apply crop to file (destructive, creates backup)')
+        self.apply_crop_btn.setMaximumWidth(32)
+        self.apply_crop_btn.setMaximumHeight(32)
+        self.apply_crop_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 18px;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                border-color: #2196F3;
+                background-color: #353535;
+                box-shadow: 0 0 8px #2196F3;
+            }
+            QPushButton:disabled {
+                color: #555;
+                border-color: #333;
+            }
+        """)
+        self.apply_crop_btn.setEnabled(False)  # Disabled by default, enabled when crop exists
+        self.toolbar.addWidget(self.apply_crop_btn)
 
         self.add_hint_action = QAction(create_add_box_icon(Qt.gray),
                                        'Add hint', self.add_action_group)
