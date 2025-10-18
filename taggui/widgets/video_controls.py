@@ -94,11 +94,14 @@ class LoopSlider(QSlider):
         return int(self.minimum() + ratio * (self.maximum() - self.minimum()))
 
     def _is_near_marker(self, pos, marker_value, groove_rect):
-        """Check if position is near a marker."""
+        """Check if position is near a marker (upper area only for grabbing)."""
         if marker_value is None:
             return False
         marker_x = self._value_to_position(marker_value, groove_rect)
-        return abs(pos.x() - marker_x) < self._marker_size
+        # Only detect marker in the UPPER area (above groove) - y must be less than groove top
+        # This allows seekbar clicks to work on the groove itself
+        is_in_upper_area = pos.y() < groove_rect.top()
+        return is_in_upper_area and abs(pos.x() - marker_x) < self._marker_size
 
     def mousePressEvent(self, event):
         """Handle mouse press for marker dragging and position jumping."""
