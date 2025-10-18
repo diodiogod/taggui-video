@@ -1,10 +1,15 @@
 import cv2
+import os
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+
+# Suppress ffmpeg/opencv verbose output
+os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'  # Suppress all output
+cv2.setLogLevel(0)  # Suppress OpenCV logs
 
 
 class VideoPlayerWidget(QWidget):
@@ -77,11 +82,15 @@ class VideoPlayerWidget(QWidget):
         self.current_frame = 0
 
         # Create QGraphicsVideoItem for QMediaPlayer output
-        try:
-            if self.video_item and self.video_item.scene():
-                self.video_item.scene().removeItem(self.video_item)
-        except RuntimeError:
-            pass  # C++ object deleted
+        # Properly cleanup old video item
+        if self.video_item:
+            try:
+                scene = self.video_item.scene()
+                if scene:
+                    scene.removeItem(self.video_item)
+            except RuntimeError:
+                pass  # C++ object already deleted
+            self.video_item = None
 
         self.video_item = QGraphicsVideoItem()
         self.video_item.setZValue(0)
