@@ -50,3 +50,40 @@ def create_add_box_icon(color: QColor) -> QPixmap:
     painter.end()
 
     return pixmap
+
+def create_apply_crop_icon() -> QPixmap:
+    """Create an icon for the apply crop button - scissors cutting a blue rectangle"""
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(QColor('transparent'))
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    # Draw the crop rectangle (blue box)
+    crop_rect = QRect(4, 8, 16, 16)
+    painter.setPen(QPen(Qt.blue, 2))
+    painter.drawRect(crop_rect)
+
+    # Draw scissors (simplified design)
+    painter.setPen(QPen(Qt.red, 2))
+
+    # Scissors blade 1
+    path1 = QPainterPath()
+    path1.moveTo(22, 10)
+    path1.lineTo(18, 14)
+    path1.lineTo(20, 16)
+    painter.drawPath(path1)
+
+    # Scissors blade 2
+    path2 = QPainterPath()
+    path2.moveTo(22, 22)
+    path2.lineTo(18, 18)
+    path2.lineTo(20, 16)
+    painter.drawPath(path2)
+
+    # Scissors pivot
+    painter.setBrush(Qt.red)
+    painter.drawEllipse(19, 15, 3, 3)
+
+    painter.end()
+    return pixmap

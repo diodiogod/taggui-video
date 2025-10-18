@@ -466,7 +466,14 @@ class ImageGraphicsView(QGraphicsView):
         if isinstance(item, MarkingItem) and MarkingItem.handle_selected != RectPosition.NONE:
             menu = QMenu()
             if item.rect_type != ImageMarking.NONE:
-                if item.rect_type != ImageMarking.CROP:
+                if item.rect_type == ImageMarking.CROP:
+                    # Add "Apply Crop" option for crop markings
+                    apply_crop_action = QAction('Apply Crop (Destructive)', self)
+                    apply_crop_action.triggered.connect(
+                        lambda: self.image_viewer.apply_crop_to_file())
+                    menu.addAction(apply_crop_action)
+                    menu.addSeparator()
+                else:
                     marking_group = QActionGroup(menu)
                     change_to_hint_action = QAction('Hint', marking_group)
                     change_to_hint_action.setCheckable(True)
@@ -1170,3 +1177,51 @@ class ImageViewer(QWidget):
                 self.label_changed()
                 self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
             self.scene.removeItem(item)
+
+    @Slot()
+    def apply_crop_to_file(self):
+        """Apply the crop directly to the file (destructive operation with backup)."""
+        from PySide6.QtWidgets import QMessageBox
+        from pathlib import Path
+        from utils.crop_applier import apply_crop
+
+        # Check if we have a crop defined
+        if not self.crop_marking:
+            QMessageBox.warning(self, "No Crop", "No crop marking defined for this image/video.")
+            return
+
+        # Get current image
+        image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        crop_rect = self.crop_marking.rect().toRect()
+
+        # Warning dialog
+        file_type = "video" if image.is_video else "image"
+        reply = QMessageBox.question(
+            self, "Apply Crop - Destructive Operation",
+            f"This will PERMANENTLY crop the {file_type} file to {crop_rect.width()}x{crop_rect.height()}.\n\n"
+            f"The original will be saved as:\n{image.path.name}.backup\n\n"
+            f"⚠️  This modifies your working directory, not an export.\n"
+            f"💡 Tip: Use File → Export for non-destructive workflows.\n\n"
+            f"Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Apply the crop
+        success, message = apply_crop(Path(image.path), crop_rect)
+
+        if success:
+            QMessageBox.information(self, "Success", message + "\n\nReloading directory...")
+            # Clear the crop marking from metadata (since it's now applied)
+            image.crop = None
+            image.target_dimension = None
+            image.thumbnail = None
+            self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+            # Reload directory to show updated file
+            # Need to access main_window through the model chain
+            self.proxy_image_list_model.sourceModel().parent().reload_directory()
+        else:
+            QMessageBox.critical(self, "Error", message)

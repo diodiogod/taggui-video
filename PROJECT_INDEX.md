@@ -66,6 +66,7 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 ### Utils (utils/)
 - `__init__.py`: Utils subpackage init
 - `big_widgets.py`: Large UI widget components
+- `crop_applier.py`: In-place crop application to images/videos
 - `enums.py`: Application enumerations
 - `focused_scroll_mixin.py`: Scroll behavior mixin
 - `grammar_checker.py`: LanguageTool grammar checking integration
