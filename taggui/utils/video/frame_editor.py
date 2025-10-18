@@ -15,7 +15,8 @@ class FrameEditor:
     def extract_range(input_path: Path, output_path: Path,
                       start_frame: int, end_frame: int, fps: float) -> Tuple[bool, str]:
         """
-        Extract a frame range from video to new file.
+        Extract a frame range from video.
+        Creates .backup of original if input == output. Uses stream copy (no re-encoding).
 
         Args:
             input_path: Input video file path
@@ -28,9 +29,19 @@ class FrameEditor:
             Tuple of (success: bool, message: str)
         """
         try:
+            # Create backup if replacing original
+            if input_path == output_path:
+                if not create_backup(input_path):
+                    return False, "Failed to create backup"
+
             # Convert frames to time
             start_time = start_frame / fps
             duration = (end_frame - start_frame + 1) / fps
+
+            # Use temp output if input == output
+            import shutil
+            temp_output = output_path.parent / f'.temp_extract_{output_path.name}'
+            actual_output = temp_output if input_path == output_path else output_path
 
             # ffmpeg command to extract range - no re-encoding
             cmd = [
@@ -41,10 +52,18 @@ class FrameEditor:
                 '-c', 'copy',  # Copy streams without re-encoding
                 '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
                 '-y',
-                str(output_path)
+                str(actual_output)
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True)
+
+            # If successful and input == output, replace input with temp
+            if result.returncode == 0 and input_path == output_path:
+                shutil.move(str(temp_output), str(output_path))
+
+            # Cleanup temp if it still exists
+            if temp_output.exists():
+                temp_output.unlink()
 
             if result.returncode == 0:
                 return True, f"Successfully extracted frames {start_frame}-{end_frame}"
