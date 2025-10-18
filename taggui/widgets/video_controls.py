@@ -9,6 +9,9 @@ class LoopSlider(QSlider):
 
     loop_start_changed = Signal(int)
     loop_end_changed = Signal(int)
+    marker_drag_started = Signal()  # Emitted when marker drag starts
+    marker_drag_ended = Signal()  # Emitted when marker drag ends
+    marker_preview_frame = Signal(int)  # Emitted during drag to preview frame
 
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
@@ -120,14 +123,17 @@ class LoopSlider(QSlider):
             # Drag both markers together
             self._dragging_marker = 'both'
             self._marker_gap = self.loop_end - self.loop_start
+            self.marker_drag_started.emit()
             event.accept()
             return
         elif near_start:
             self._dragging_marker = 'start'
+            self.marker_drag_started.emit()
             event.accept()
             return
         elif near_end:
             self._dragging_marker = 'end'
+            self.marker_drag_started.emit()
             event.accept()
             return
 
@@ -169,9 +175,11 @@ class LoopSlider(QSlider):
             if self._dragging_marker == 'start':
                 self.loop_start = new_value
                 self.loop_start_changed.emit(new_value)
+                self.marker_preview_frame.emit(new_value)
             elif self._dragging_marker == 'end':
                 self.loop_end = new_value
                 self.loop_end_changed.emit(new_value)
+                self.marker_preview_frame.emit(new_value)
             elif self._dragging_marker == 'both':
                 # Move both markers maintaining the gap
                 max_val = self.maximum()
@@ -183,6 +191,7 @@ class LoopSlider(QSlider):
                 self.loop_end = new_end
                 self.loop_start_changed.emit(new_start)
                 self.loop_end_changed.emit(new_end)
+                self.marker_preview_frame.emit(new_start)
 
             self.update()
             event.accept()
@@ -194,6 +203,7 @@ class LoopSlider(QSlider):
         """Handle mouse release."""
         if self._dragging_marker:
             self._dragging_marker = None
+            self.marker_drag_ended.emit()
             event.accept()
             return
 
@@ -207,6 +217,7 @@ class VideoControlsWidget(QWidget):
     play_pause_requested = Signal()
     stop_requested = Signal()
     frame_changed = Signal(int)  # Frame number
+    marker_preview_requested = Signal(int)  # Preview frame during marker drag (doesn't move seekbar)
     skip_backward_requested = Signal()  # Skip 1 second backward
     skip_forward_requested = Signal()  # Skip 1 second forward
     loop_start_set = Signal()
@@ -397,6 +408,10 @@ class VideoControlsWidget(QWidget):
         # Connect marker dragging signals
         self.timeline_slider.loop_start_changed.connect(self._on_loop_start_dragged)
         self.timeline_slider.loop_end_changed.connect(self._on_loop_end_dragged)
+        # Connect marker preview signals
+        self.timeline_slider.marker_drag_started.connect(self._on_marker_drag_started)
+        self.timeline_slider.marker_drag_ended.connect(self._on_marker_drag_ended)
+        self.timeline_slider.marker_preview_frame.connect(self._on_marker_preview_frame)
         slider_layout.addWidget(self.timeline_slider)
 
         # Bottom row: Info display + Loop controls
@@ -521,6 +536,11 @@ class VideoControlsWidget(QWidget):
         self._current_frame_count = 0
         self._current_duration = 0
         self._custom_preview_fps = None  # User can override FPS for preview
+
+        # Marker preview state
+        self._in_marker_preview = False  # True when dragging a marker
+        self._preview_restore_frame = None  # Frame to restore to after preview ends
+        self._was_playing_before_preview = False  # Store play state to restore after preview
 
         # Load persistent settings
         self._load_persistent_settings()
@@ -972,6 +992,11 @@ class VideoControlsWidget(QWidget):
     @Slot(int, float)
     def update_position(self, frame: int, time_ms: float):
         """Update display when playback position changes."""
+        # Skip updates if in marker preview mode (dragging marker)
+        # This keeps seekbar frozen at original position during preview
+        if self._in_marker_preview:
+            return
+
         # Update frame display - block signals to prevent feedback loop
         self._updating_slider = True
         self.frame_spinbox.blockSignals(True)
@@ -1205,6 +1230,43 @@ class VideoControlsWidget(QWidget):
         self.loop_end_set.emit()
         # Update range display
         self._update_marker_range_display()
+
+    @Slot()
+    def _on_marker_drag_started(self):
+        """Handle marker drag start - pause playback and store position."""
+        # Store current frame position from the spinbox
+        self._preview_restore_frame = self.frame_spinbox.value()
+
+        # Store whether video is playing and pause if needed
+        self._was_playing_before_preview = self.is_playing
+        if self.is_playing:
+            self.play_pause_requested.emit()  # Pause video
+
+        # Enter preview mode (blocks seekbar updates)
+        self._in_marker_preview = True
+
+    @Slot(int)
+    def _on_marker_preview_frame(self, frame):
+        """Handle marker preview - show frame without moving seekbar."""
+        if self._in_marker_preview:
+            # Emit special preview signal that won't update the seekbar
+            self.marker_preview_requested.emit(frame)
+
+    @Slot()
+    def _on_marker_drag_ended(self):
+        """Handle marker drag end - restore position and resume playback."""
+        # Exit preview mode first (allows seekbar updates again)
+        self._in_marker_preview = False
+
+        if self._preview_restore_frame is not None:
+            # Force seek back to the stored frame (don't use setValue as it won't emit if value unchanged)
+            self.frame_changed.emit(self._preview_restore_frame)
+            self._preview_restore_frame = None
+
+        # Resume playback if it was playing before
+        if self._was_playing_before_preview:
+            self.play_pause_requested.emit()  # Resume video
+            self._was_playing_before_preview = False
 
     def mousePressEvent(self, event):
         """Start dragging or resizing the controls widget."""
