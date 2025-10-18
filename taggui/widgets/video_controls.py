@@ -20,9 +20,17 @@ class LoopSlider(QSlider):
         self._dragging_marker = None  # 'start', 'end', 'both', or None
         self._marker_size = 20  # Click detection radius
         self._marker_gap = 0  # Distance between markers when dragging both
+        self._drag_anchor = None  # 'start' or 'end' - which marker was originally clicked for 'both' drag
 
         # Set minimum height to show markers above slider
         self.setMinimumHeight(30)
+
+        # Tooltip to explain marker controls
+        self.setToolTip(
+            'Loop Markers:\n'
+            '• Drag markers to adjust range\n'
+            '• Shift+Drag marker to move both together'
+        )
 
     def set_loop_markers(self, start, end):
         """Set loop marker positions."""
@@ -123,6 +131,8 @@ class LoopSlider(QSlider):
             # Drag both markers together
             self._dragging_marker = 'both'
             self._marker_gap = self.loop_end - self.loop_start
+            # Remember which marker was clicked as the drag anchor
+            self._drag_anchor = 'start' if near_start else 'end'
             self.marker_drag_started.emit()
             event.accept()
             return
@@ -183,15 +193,25 @@ class LoopSlider(QSlider):
             elif self._dragging_marker == 'both':
                 # Move both markers maintaining the gap
                 max_val = self.maximum()
-                # Clamp the start position
-                new_start = max(self.minimum(), min(new_value, max_val - self._marker_gap))
-                new_end = new_start + self._marker_gap
+                min_val = self.minimum()
+
+                # Calculate new positions based on which marker is the drag anchor
+                if self._drag_anchor == 'start':
+                    # Mouse follows start marker
+                    new_start = max(min_val, min(new_value, max_val - self._marker_gap))
+                    new_end = new_start + self._marker_gap
+                else:
+                    # Mouse follows end marker
+                    new_end = max(min_val + self._marker_gap, min(new_value, max_val))
+                    new_start = new_end - self._marker_gap
 
                 self.loop_start = new_start
                 self.loop_end = new_end
                 self.loop_start_changed.emit(new_start)
                 self.loop_end_changed.emit(new_end)
-                self.marker_preview_frame.emit(new_start)
+                # Preview the marker that's being dragged
+                preview_frame = new_start if self._drag_anchor == 'start' else new_end
+                self.marker_preview_frame.emit(preview_frame)
 
             self.update()
             event.accept()
@@ -1192,8 +1212,16 @@ class VideoControlsWidget(QWidget):
 
     @Slot()
     def _set_loop_end(self):
-        """Set loop end at current frame."""
+        """Set loop end at current frame, and auto-set start if fixed marker size is enabled."""
         self.loop_end_frame = self.frame_spinbox.value()
+
+        # Auto-set start marker based on fixed marker size (only if not Custom/0)
+        if self.fixed_marker_size > 0:
+            self.loop_start_frame = max(0, self.loop_end_frame - self.fixed_marker_size + 1)
+            # Update start button color too
+            self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
+            self.loop_start_set.emit()
+
         self.loop_end_set.emit()
         # Update button color to match orange marker
         self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
