@@ -3,6 +3,7 @@
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
 from PySide6.QtCore import Qt
+from collections import deque
 
 from utils.video_editor import VideoEditor
 import subprocess
@@ -15,6 +16,72 @@ class VideoEditingController:
     def __init__(self, main_window):
         """Initialize controller with reference to main window."""
         self.main_window = main_window
+        # Undo/redo stacks: store (video_path, operation_name, undo_snapshot_path) tuples
+        self.undo_stack = deque(maxlen=10)  # Keep last 10 edits
+        self.redo_stack = []
+
+    def _save_undo_snapshot(self, video_path: Path, operation_name: str):
+        """Save current video state for undo before editing."""
+        import shutil
+        import time
+        import tempfile
+
+        # Create undo snapshots directory in system temp
+        temp_base = Path(tempfile.gettempdir()) / 'taggui_undo'
+        temp_base.mkdir(exist_ok=True)
+
+        # Create unique snapshot filename with timestamp
+        timestamp = int(time.time() * 1000)
+        snapshot_name = f"{video_path.stem}_undo_{timestamp}{video_path.suffix}"
+        snapshot_path = temp_base / snapshot_name
+
+        try:
+            # Copy current video to snapshot
+            shutil.copy2(str(video_path), str(snapshot_path))
+
+            # Add to undo stack
+            self.undo_stack.append((video_path, operation_name, snapshot_path))
+
+            # Clear redo stack (new edit invalidates redo history)
+            self._clear_redo_stack()
+
+            # Clean up old snapshots (keep only what's in undo stack)
+            self._cleanup_old_snapshots(video_path)
+
+        except Exception as e:
+            print(f"Failed to create undo snapshot: {e}")
+
+    def _clear_redo_stack(self):
+        """Clear redo stack and delete redo snapshot files."""
+        import os
+        for video_path, operation_name, snapshot_path in self.redo_stack:
+            try:
+                if snapshot_path.exists():
+                    os.remove(snapshot_path)
+            except:
+                pass
+        self.redo_stack.clear()
+
+    def _cleanup_old_snapshots(self, video_path: Path):
+        """Remove undo snapshots that are no longer in the undo stack."""
+        import os
+        import tempfile
+
+        temp_base = Path(tempfile.gettempdir()) / 'taggui_undo'
+        if not temp_base.exists():
+            return
+
+        # Get all snapshots currently in undo stack for this video
+        active_snapshots = {str(s) for v, o, s in self.undo_stack if v == video_path}
+
+        # Delete snapshots that aren't in the stack
+        try:
+            for file in temp_base.iterdir():
+                if file.is_file() and file.stem.startswith(video_path.stem + '_undo_'):
+                    if str(file) not in active_snapshots:
+                        os.remove(file)
+        except:
+            pass
 
     def extract_video_range(self):
         """Extract the marked range, replacing the original video (creates backup)."""
@@ -46,6 +113,9 @@ class VideoEditingController:
 
         if reply != QMessageBox.Yes:
             return
+
+        # Save undo snapshot before editing
+        self._save_undo_snapshot(input_path, f"Extract frames {start_frame}-{end_frame}")
 
         # Extract range (overwrites original, creates backup)
         success, message = VideoEditor.extract_range(
@@ -88,6 +158,9 @@ class VideoEditingController:
         if reply != QMessageBox.Yes:
             return
 
+        # Save undo snapshot before editing
+        self._save_undo_snapshot(input_path, f"Remove frames {start_frame}-{end_frame}")
+
         # Remove range (overwrites original, creates backup)
         success, message = VideoEditor.remove_range(
             input_path, input_path,
@@ -122,6 +195,9 @@ class VideoEditingController:
 
         if reply != QMessageBox.Yes:
             return
+
+        # Save undo snapshot before editing
+        self._save_undo_snapshot(input_path, f"Remove frame {current_frame}")
 
         # Remove frame
         success, message = VideoEditor.remove_frame(
@@ -170,6 +246,9 @@ class VideoEditingController:
 
         if reply != QMessageBox.Yes:
             return
+
+        # Save undo snapshot before editing
+        self._save_undo_snapshot(input_path, f"Repeat frame {current_frame} {repeat_count}x")
 
         # Repeat frame
         success, message = VideoEditor.repeat_frame(
@@ -268,6 +347,8 @@ class VideoEditingController:
 
                 if success:
                     success_count += 1
+                    if success_count == 1:  # Track first successful edit for undo
+                        self.last_edited_video = video_path
                 else:
                     errors.append(f"{video_path.name}: {message}")
                     error_count += 1
@@ -468,6 +549,9 @@ class VideoEditingController:
                 progress.wasCanceled()
             )
         )
+
+        if success_count > 0:  # Track first successful edit for undo
+            self.last_edited_video = non_square_videos[0][0]
 
         progress.setValue(len(non_square_videos))
 
@@ -682,7 +766,114 @@ class VideoEditingController:
         )
 
         if success:
+            self.last_edited_video = input_path  # Track for undo
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
         else:
             QMessageBox.critical(self.main_window, "Error", message)
+
+    def undo_last_edit(self):
+        """Undo the last video editing operation."""
+        import shutil
+        import time
+
+        if not self.undo_stack:
+            QMessageBox.information(self.main_window, "No Undo Available", "No recent video edits to undo.")
+            return
+
+        # Get last edit from undo stack
+        video_path, operation_name, snapshot_path = self.undo_stack.pop()
+
+        if not snapshot_path.exists():
+            QMessageBox.warning(
+                self.main_window, "Snapshot Not Found",
+                f"Undo snapshot not found:\n{snapshot_path.name}\n\nCannot undo."
+            )
+            return
+
+        # Confirm undo
+        reply = QMessageBox.question(
+            self.main_window, "Undo Video Edit",
+            f"Undo: {operation_name}\n\n"
+            f"Video: {video_path.name}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            # Put it back on the stack
+            self.undo_stack.append((video_path, operation_name, snapshot_path))
+            return
+
+        try:
+            # Save current version for redo
+            import tempfile
+            temp_base = Path(tempfile.gettempdir()) / 'taggui_undo'
+            temp_base.mkdir(exist_ok=True)
+            timestamp = int(time.time() * 1000)
+            redo_snapshot = temp_base / f"{video_path.stem}_redo_{timestamp}{video_path.suffix}"
+            shutil.copy2(str(video_path), str(redo_snapshot))
+
+            # Restore from snapshot
+            shutil.copy2(str(snapshot_path), str(video_path))
+
+            # Move to redo stack
+            self.redo_stack.append((video_path, operation_name, redo_snapshot))
+
+            QMessageBox.information(self.main_window, "Undo Complete", f"Undone: {operation_name}")
+            self.main_window.reload_directory()
+        except Exception as e:
+            QMessageBox.critical(self.main_window, "Undo Error", f"Failed to undo:\n{str(e)}")
+
+    def redo_last_edit(self):
+        """Redo the last undone video editing operation."""
+        import shutil
+        import time
+
+        if not self.redo_stack:
+            QMessageBox.information(self.main_window, "No Redo Available", "No recent undos to redo.")
+            return
+
+        # Get last redo from stack
+        video_path, operation_name, redo_snapshot = self.redo_stack.pop()
+
+        if not redo_snapshot.exists():
+            QMessageBox.warning(
+                self.main_window, "Redo Snapshot Not Found",
+                f"Redo snapshot not found:\n{redo_snapshot.name}\n\nCannot redo."
+            )
+            return
+
+        # Confirm redo
+        reply = QMessageBox.question(
+            self.main_window, "Redo Video Edit",
+            f"Redo: {operation_name}\n\n"
+            f"Video: {video_path.name}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            # Put it back on the stack
+            self.redo_stack.append((video_path, operation_name, redo_snapshot))
+            return
+
+        try:
+            # Save current version for undo
+            import tempfile
+            temp_base = Path(tempfile.gettempdir()) / 'taggui_undo'
+            temp_base.mkdir(exist_ok=True)
+            timestamp = int(time.time() * 1000)
+            undo_snapshot = temp_base / f"{video_path.stem}_undo_{timestamp}{video_path.suffix}"
+            shutil.copy2(str(video_path), str(undo_snapshot))
+
+            # Restore from redo snapshot
+            shutil.copy2(str(redo_snapshot), str(video_path))
+
+            # Move back to undo stack
+            self.undo_stack.append((video_path, operation_name, undo_snapshot))
+
+            QMessageBox.information(self.main_window, "Redo Complete", f"Redone: {operation_name}")
+            self.main_window.reload_directory()
+        except Exception as e:
+            QMessageBox.critical(self.main_window, "Redo Error", f"Failed to redo:\n{str(e)}")

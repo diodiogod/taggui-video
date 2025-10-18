@@ -43,14 +43,19 @@ class FrameEditor:
             temp_output = output_path.parent / f'.temp_extract_{output_path.name}'
             actual_output = temp_output if input_path == output_path else output_path
 
-            # ffmpeg command to extract range - no re-encoding
+            # ffmpeg command to extract range - frame-accurate extraction
+            # Note: -c copy cannot do frame-accurate cuts, only keyframe cuts
+            # Using trim filter for frame accuracy with re-encoding
             cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
-                '-ss', str(start_time),
-                '-t', str(duration),
-                '-c', 'copy',  # Copy streams without re-encoding
-                '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
+                '-vf', f'trim=start_frame={start_frame}:end_frame={end_frame+1},setpts=PTS-STARTPTS',
+                '-af', f'atrim=start={start_time}:duration={duration},asetpts=PTS-STARTPTS',  # Audio sync
+                '-c:v', 'libx264',
+                '-crf', '18',  # High quality
+                '-preset', 'medium',
+                '-c:a', 'aac',  # Re-encode audio
+                '-b:a', '192k',
                 '-y',
                 str(actual_output)
             ]
@@ -66,7 +71,29 @@ class FrameEditor:
                 temp_output.unlink()
 
             if result.returncode == 0:
-                return True, f"Successfully extracted frames {start_frame}-{end_frame}"
+                # Verify we got the expected number of frames
+                expected_frames = end_frame - start_frame + 1
+                probe_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-select_streams', 'v:0',
+                    '-count_frames',
+                    '-show_entries', 'stream=nb_read_frames',
+                    '-of', 'csv=p=0',
+                    str(output_path)
+                ]
+                try:
+                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+                    if probe_result.returncode == 0:
+                        actual_frames = int(probe_result.stdout.strip())
+                        if actual_frames != expected_frames:
+                            return False, (f"Extraction incomplete: got {actual_frames} frames "
+                                         f"but expected {expected_frames} frames. "
+                                         f"This may indicate a corrupted source video.")
+                except:
+                    pass  # Skip verification if ffprobe fails
+
+                return True, f"Successfully extracted {expected_frames} frames ({start_frame}-{end_frame})"
             else:
                 return False, f"ffmpeg error: {result.stderr}"
 
