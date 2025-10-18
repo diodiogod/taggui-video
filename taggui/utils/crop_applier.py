@@ -94,6 +94,7 @@ def apply_crop_to_video(video_path: Path, crop_rect: QRect) -> tuple[bool, str]:
         # Run ffmpeg to crop video
         cmd = [
             'ffmpeg', '-y',
+            '-loglevel', 'error',  # Only show errors, not warnings
             '-i', str(video_path),
             '-vf', crop_filter,
             '-c:v', 'libx264',  # Re-encode video
@@ -103,7 +104,7 @@ def apply_crop_to_video(video_path: Path, crop_rect: QRect) -> tuple[bool, str]:
             str(temp_output)
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, stderr=subprocess.PIPE)
 
         if result.returncode != 0:
             if temp_output.exists():
