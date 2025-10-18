@@ -104,7 +104,7 @@ def apply_crop_to_video(video_path: Path, crop_rect: QRect) -> tuple[bool, str]:
             str(temp_output)
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, stderr=subprocess.PIPE)
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
             if temp_output.exists():
