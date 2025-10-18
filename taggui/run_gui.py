@@ -4,6 +4,10 @@ import sys
 import traceback
 import warnings
 
+# Suppress ffmpeg verbose output BEFORE any OpenCV imports
+os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
+os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
+
 import transformers
 from PySide6.QtGui import QImageReader
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -31,6 +35,9 @@ def suppress_warnings():
 
 
 def run_gui():
+    # Suppress Qt multimedia ffmpeg output
+    os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false'
+
     app = QApplication([])
     # The application name is shown in the taskbar.
     app.setApplicationName('TagGUI')
