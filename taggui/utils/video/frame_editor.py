@@ -539,3 +539,97 @@ class FrameEditor:
             return False, "ffmpeg not found. Please install ffmpeg."
         except Exception as e:
             return False, f"Error: {str(e)}"
+
+    @staticmethod
+    def change_fps(input_path: Path, output_path: Path,
+                   target_fps: float) -> Tuple[bool, str]:
+        """
+        Change video FPS without changing duration (drops/duplicates frames as needed).
+        Preserves duration by adjusting frame count to match new FPS.
+        Creates .backup of original if input == output.
+
+        Args:
+            input_path: Input video file path
+            output_path: Output video file path
+            target_fps: Target frames per second
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            # Get original video info
+            probe_cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(input_path)
+            ]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if probe_result.returncode != 0:
+                return False, f"Failed to probe video: {probe_result.stderr}"
+
+            probe_data = json.loads(probe_result.stdout)
+            original_fps = None
+            current_frames = None
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    fps_str = stream.get('r_frame_rate', '0/1')
+                    num, denom = map(float, fps_str.split('/'))
+                    original_fps = num / denom if denom != 0 else 0
+                    current_frames = int(stream.get('nb_frames', 0))
+                    break
+
+            if not original_fps:
+                return False, "Could not determine original FPS"
+
+            # Check if already at target FPS
+            if abs(original_fps - target_fps) < 0.01:
+                return True, f"Video already at {original_fps:.2f} fps"
+
+            # Calculate duration and expected new frame count
+            duration = current_frames / original_fps if original_fps > 0 else 0
+            new_frame_count = int(duration * target_fps)
+
+            # Create backup if replacing original
+            if input_path == output_path:
+                if not create_backup(input_path):
+                    return False, "Failed to create backup"
+
+            # Use temp output if input == output
+            import shutil
+            temp_output = output_path.parent / f'.temp_fps_{output_path.name}'
+            actual_output = temp_output if input_path == output_path else output_path
+
+            # Use fps filter to change framerate (automatically drops/duplicates frames)
+            # This preserves duration by adjusting frame count
+            cmd = [
+                'ffmpeg',
+                '-i', str(input_path),
+                '-filter:v', f'fps={target_fps}',
+                '-c:a', 'copy',  # Keep audio unchanged
+                '-y',
+                str(actual_output)
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            # If successful and input == output, replace input with temp
+            if result.returncode == 0 and input_path == output_path:
+                shutil.move(str(temp_output), str(output_path))
+
+            # Cleanup temp if it still exists
+            if temp_output.exists():
+                temp_output.unlink()
+
+            if result.returncode == 0:
+                action = "dropped" if target_fps < original_fps else "duplicated"
+                return True, (f"Successfully changed FPS: {original_fps:.2f} → {target_fps:.2f} fps\n"
+                             f"Frames: {current_frames} → ~{new_frame_count} ({action} frames to preserve duration)")
+            else:
+                return False, f"ffmpeg error: {result.stderr}"
+
+        except FileNotFoundError:
+            return False, "ffmpeg not found. Please install ffmpeg."
+        except Exception as e:
+            return False, f"Error: {str(e)}"

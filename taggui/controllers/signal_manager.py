@@ -279,6 +279,8 @@ class SignalManager:
             video_editing_controller.fix_all_sar_folder)
         toolbar_manager.apply_speed_btn.clicked.connect(
             video_editing_controller.apply_speed_change)
+        toolbar_manager.change_fps_btn.clicked.connect(
+            video_editing_controller.change_fps)
 
     def _update_loop_state(self):
         """Update video player loop state from controls."""
