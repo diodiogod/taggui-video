@@ -327,10 +327,10 @@ class VideoControlsWidget(QWidget):
         # Playback speed slider with extended range support (rubberband effect)
         self.speed_label = QLabel('Speed:')
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setMinimum(20)  # 0.2x (visual range)
-        self.speed_slider.setMaximum(500)  # 5.0x (visual range)
+        self.speed_slider.setMinimum(-400)  # -4.0x (extended range)
+        self.speed_slider.setMaximum(600)  # 6.0x (extended range)
         self.speed_slider.setValue(100)  # 1.0x
-        self.speed_slider.setTickInterval(48)  # ~1.0x intervals (500-20)/10
+        self.speed_slider.setTickInterval(100)  # 1.0x intervals
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.speed_slider.setMinimumWidth(100)  # Minimum width
         # No maximum width - let it expand to fill available space
@@ -353,7 +353,7 @@ class VideoControlsWidget(QWidget):
         """)
 
         # Extended speed tracking for rubberband effect
-        self._extended_speed = 1.0  # Actual speed (can be -8.0 to 8.0, but visual range is 0.2-5.0)
+        self._extended_speed = 1.0  # Actual speed (can be -12.0 to 12.0)
         self._is_dragging_speed = False
         self._last_mouse_pos = None
         self._drag_start_value = 100
@@ -414,26 +414,30 @@ class VideoControlsWidget(QWidget):
         self.frame_count_label = QLabel('0 frames')
         self.frame_count_label.setMinimumWidth(80)
 
+        # Combined preview labels container
+        self.preview_labels_layout = QVBoxLayout()
+        self.preview_labels_layout.setSpacing(0)
+        self.preview_labels_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Container widget to constrain the preview layout
+        self.preview_container = QWidget()
+        self.preview_container.setLayout(self.preview_labels_layout)
+        self.preview_container.setMaximumWidth(300)  # Limit width to prevent over-expansion
+
         # Marker range frame count display
         self.marker_range_label = QLabel('')
-        self.marker_range_label.setMinimumWidth(90)
-        self.marker_range_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
+        self.marker_range_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 9px; }")
 
-        # N*4+1 frame rule indicator
-        self.frame_rule_label = QLabel('')
-        self.frame_rule_label.setMinimumWidth(60)
-        self.frame_rule_label.setStyleSheet("QLabel { color: #FF9800; font-weight: bold; }")
 
         # SAR warning indicator (only shown for non-square pixel videos)
         self.sar_warning_label = QLabel('')
-        self.sar_warning_label.setMinimumWidth(80)
         self.sar_warning_label.setStyleSheet("QLabel { color: #FF5722; font-weight: bold; }")
         self.sar_warning_label.setToolTip('Video has non-square pixels (SAR != 1:1)\nMay cause issues with training tools that ignore SAR')
+        self.sar_warning_label.hide()  # Hide by default, only show when SAR != 1:1
 
         # Speed preview label (shows what would happen if speed is applied)
         self.speed_preview_label = QLabel('')
-        self.speed_preview_label.setMinimumWidth(150)
-        self.speed_preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; }")
+        self.speed_preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; font-size: 9px; }")
         self.speed_preview_label.setToolTip('Preview of video if speed change is applied. Click to set custom FPS.')
         self.speed_preview_label.mousePressEvent = self._on_preview_label_clicked
 
@@ -480,11 +484,10 @@ class VideoControlsWidget(QWidget):
         info_layout.addWidget(self.time_label)
         info_layout.addWidget(self.fps_label)
         info_layout.addWidget(self.frame_count_label)
-        info_layout.addWidget(self.marker_range_label)
-        info_layout.addWidget(self.frame_rule_label)
+        info_layout.addStretch(1)
+        info_layout.addWidget(self.preview_container)
+        info_layout.addStretch(1)
         info_layout.addWidget(self.sar_warning_label)
-        info_layout.addWidget(self.speed_preview_label)
-        info_layout.addStretch()
         info_layout.addWidget(self.loop_reset_btn)
         info_layout.addWidget(self.loop_start_btn)
         info_layout.addWidget(self.loop_end_btn)
@@ -549,12 +552,32 @@ class VideoControlsWidget(QWidget):
         ideal_width = 800
         scale = min(1.0, max(0.5, width / ideal_width))
 
-        # Scale button sizes
+        # Scale button sizes and fonts
         button_size = int(40 * scale)
+        button_font_size = int(18 * scale)
         for btn in [self.play_pause_btn, self.stop_btn, self.mute_btn, self.prev_frame_btn,
                     self.next_frame_btn, self.skip_back_btn, self.skip_forward_btn]:
             btn.setMaximumWidth(button_size)
             btn.setMaximumHeight(button_size)
+
+        # Update mute button font size
+        self.mute_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #2b2b2b;
+                border: 2px solid #555;
+                border-radius: 4px;
+                font-size: {button_font_size}px;
+            }}
+            QPushButton:hover {{
+                background-color: #3a3a3a;
+                border-color: #666;
+            }}
+        """)
+
+        # Update skip button font sizes
+        skip_font_size = int(16 * scale)
+        for btn in [self.skip_back_btn, self.skip_forward_btn]:
+            btn.setStyleSheet(f"QPushButton {{ font-size: {skip_font_size}px; }}")
 
         # Scale loop control buttons
         loop_btn_size = int(30 * scale)
@@ -596,10 +619,21 @@ class VideoControlsWidget(QWidget):
         label_font = self.frame_label.font()
         label_font.setPointSize(max(8, int(11 * scale)))
         for label in [self.frame_label, self.time_label, self.fps_label,
-                      self.frame_count_label, self.marker_range_label, self.frame_total_label,
-                      self.frame_rule_label, self.sar_warning_label, self.speed_label, self.speed_value_label,
-                      self.speed_preview_label]:
+                      self.frame_count_label, self.frame_total_label,
+                      self.sar_warning_label, self.speed_label, self.speed_value_label]:
             label.setFont(label_font)
+
+        # Scale preview labels font size (slightly larger base size)
+        preview_font_size = max(8, int(10 * scale))
+        # Update existing preview labels
+        for i in range(self.preview_labels_layout.count()):
+            item = self.preview_labels_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, QLabel):
+                    font = widget.font()
+                    font.setPointSize(preview_font_size)
+                    widget.setFont(font)
 
         # Scale speed slider - only set minimum width, let it expand
         speed_slider_min_width = int(100 * scale)
@@ -679,23 +713,25 @@ class VideoControlsWidget(QWidget):
                         sensitivity = base_sensitivity * acceleration
                         self._extended_speed += delta_x * sensitivity
 
-                        # Clamp to absolute limits (-8.0 to 8.0)
-                        self._extended_speed = max(-8.0, min(8.0, self._extended_speed))
+                        # Clamp to absolute limits (-12.0 to 12.0)
+                        self._extended_speed = max(-12.0, min(12.0, self._extended_speed))
 
-                        # Update slider position (clamped to visual range 0.2-5.0)
-                        clamped_value = max(0.2, min(5.0, self._extended_speed))
+                        # Update slider position (clamped to visual range -4.0-6.0)
+                        clamped_value = max(-4.0, min(6.0, self._extended_speed))
                         self.speed_slider.blockSignals(True)
                         self.speed_slider.setValue(int(clamped_value * 100.0))
                         self.speed_slider.blockSignals(False)
 
                         # If we're back in normal range, sync extended speed with slider
-                        if 0.2 <= self._extended_speed <= 5.0:
+                        if -4.0 <= self._extended_speed <= 6.0:
                             self._extended_speed = clamped_value
 
                         # Update display and emit signal
                         self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
                         self.speed_changed.emit(self._extended_speed)
                         self._update_speed_preview()
+                        self._update_marker_range_display()
+                        self._update_marker_range_display()
 
                 self._last_mouse_pos = current_mouse
 
@@ -716,15 +752,15 @@ class VideoControlsWidget(QWidget):
         self._is_dragging_speed = False
         self._last_mouse_pos = None
 
-        # If extended speed is outside the visual range (0.2-5.0), clamp to edges
-        if self._extended_speed < 0.2:
-            # Was below minimum, clamp to 0.2x
-            self._extended_speed = 0.2
-            slider_pos = 20
-        elif self._extended_speed > 5.0:
-            # Was above max, clamp to maximum (5.0x)
-            self._extended_speed = 5.0
-            slider_pos = 500
+        # If extended speed is outside the visual range (-4.0-6.0), clamp to edges
+        if self._extended_speed < -4.0:
+            # Was below minimum, clamp to -4.0x
+            self._extended_speed = -4.0
+            slider_pos = -400
+        elif self._extended_speed > 6.0:
+            # Was above max, clamp to maximum (6.0x)
+            self._extended_speed = 6.0
+            slider_pos = 600
         else:
             # Within range, sync with slider value
             self._extended_speed = self.speed_slider.value() / 100.0
@@ -737,6 +773,7 @@ class VideoControlsWidget(QWidget):
         self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
         self.speed_changed.emit(self._extended_speed)
         self._update_speed_preview()
+        self._update_marker_range_display()
 
     @Slot(int)
     def _on_speed_slider_changed(self, value):
@@ -757,6 +794,7 @@ class VideoControlsWidget(QWidget):
         self.speed_value_label.setText('1.00x')
         self.speed_changed.emit(1.0)
         self._update_speed_preview()
+        self._update_marker_range_display()
 
     def _update_speed_preview(self):
         """Update speed preview label based on current speed and video metadata."""
@@ -811,6 +849,7 @@ class VideoControlsWidget(QWidget):
 
             # Update preview with new FPS
             self._update_speed_preview()
+            self._update_marker_range_display()
 
     @Slot()
     def _toggle_mute(self):
@@ -894,18 +933,6 @@ class VideoControlsWidget(QWidget):
         else:
             self.frame_total_label.setText('/ 0')
 
-        # Update N*4+1 frame rule indicator
-        if frame_count > 0:
-            # Check if frame count follows N*4+1 rule
-            is_valid = (frame_count - 1) % 4 == 0
-            if is_valid:
-                self.frame_rule_label.setText('✓N*4+1')
-                self.frame_rule_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
-            else:
-                self.frame_rule_label.setText('✗N*4+1')
-                self.frame_rule_label.setStyleSheet("QLabel { color: #F44336; font-weight: bold; }")
-        else:
-            self.frame_rule_label.setText('')
 
         # Update SAR warning indicator (only show if SAR != 1:1)
         if sar_num > 0 and sar_den > 0 and sar_num != sar_den:
@@ -916,9 +943,11 @@ class VideoControlsWidget(QWidget):
                 f'Training tools like musubi-tuner may ignore SAR and use wrong dimensions.\n'
                 f'Consider re-encoding with square pixels (SAR 1:1) before training.'
             )
+            self.sar_warning_label.show()
         else:
             self.sar_warning_label.setText('')
             self.sar_warning_label.setToolTip('')
+            self.sar_warning_label.hide()
 
         # Format duration as mm:ss.mmm
         minutes = int(duration // 60)
@@ -1022,11 +1051,63 @@ class VideoControlsWidget(QWidget):
 
     def _update_marker_range_display(self):
         """Update the marker range frame count display."""
+        # Clear existing preview labels
+        while self.preview_labels_layout.count():
+            item = self.preview_labels_layout.takeAt(0)
+            if item.widget():
+                item.widget().hide()
+                item.widget().setParent(None)
+
+        # Show marker range if markers are set
         if self.loop_start_frame is not None and self.loop_end_frame is not None:
             frame_count = abs(self.loop_end_frame - self.loop_start_frame) + 1
-            self.marker_range_label.setText(f'[{frame_count} frames]')
-        else:
-            self.marker_range_label.setText('')
+
+            # Check if speed preview should be shown for markers
+            if abs(self._extended_speed - 1.0) >= 0.01 and self._current_fps > 0:
+                # Use custom FPS if set, otherwise use current FPS
+                preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
+
+                # Calculate for marker range
+                original_duration = frame_count / self._current_fps
+                new_duration = original_duration / self._extended_speed
+                new_frame_count = max(1, int(new_duration * preview_fps))
+
+                # Format marker range display: [81 frames → 23f @16fps 3.5x]
+                fps_indicator = f'*{preview_fps:.0f}' if self._custom_preview_fps else f'{preview_fps:.0f}'
+                marker_text = f'[{frame_count} frames → {new_frame_count}f @{fps_indicator}fps {self._extended_speed:.1f}x]'
+
+                # Create marker range label with full prediction
+                marker_label = QLabel(marker_text)
+                marker_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 10px; }")
+                marker_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                self.preview_labels_layout.addWidget(marker_label)
+
+        # Show speed preview if speed is changed (regardless of markers)
+        if abs(self._extended_speed - 1.0) >= 0.01 and self._current_fps > 0 and self._current_frame_count > 0:
+            # Use custom FPS if set, otherwise use current FPS
+            preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
+
+            # Calculate for full video speed preview
+            full_original_duration = self._current_frame_count / self._current_fps
+            full_new_duration = full_original_duration / self._extended_speed
+            full_new_frame_count = max(1, int(full_new_duration * preview_fps))
+
+            # Format duration as seconds with 1 decimal
+            duration_str = f'{full_new_duration:.1f}s'
+
+            # Display format for speed preview: [2.0x → 40f @30fps | 1.3s]
+            fps_indicator = f'*{preview_fps:.0f}' if self._custom_preview_fps else f'{preview_fps:.0f}'
+            full_preview_text = f'[{self._extended_speed:.1f}x → {full_new_frame_count}f @{fps_indicator}fps | {duration_str}]'
+
+            # Create speed preview label with full prediction
+            speed_preview_label = QLabel(full_preview_text)
+            speed_preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; font-size: 10px; }")
+            speed_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            speed_preview_label.setToolTip('Preview of video if speed change is applied. Click to set custom FPS.')
+            speed_preview_label.mousePressEvent = self._on_preview_label_clicked
+
+            self.preview_labels_layout.addWidget(speed_preview_label)
 
     @Slot()
     def _set_loop_start(self):
@@ -1100,7 +1181,7 @@ class VideoControlsWidget(QWidget):
         self.fps_label.setText('0.00 fps')
         self.frame_count_label.setText('0 frames')
         self.frame_total_label.setText('/ 0')
-        self.frame_rule_label.setText('')
+        # N*4+1 frame rule indicator removed - now shown as stamp on sidebar preview
         self.set_playing(False)
         self._reset_loop()
 

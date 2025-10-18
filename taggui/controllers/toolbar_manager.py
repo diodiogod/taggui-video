@@ -44,6 +44,7 @@ class ToolbarManager:
         self.fix_sar_btn = None
         self.fix_all_sar_btn = None
         self.apply_speed_btn = None
+        self.change_fps_btn = None
         self.star_labels = []
         self.rating = 0
 
@@ -260,6 +261,12 @@ class ToolbarManager:
             'SPEED', 'Apply speed change to video (uses current speed slider value)', 55, '#2196F3'
         )
         self.toolbar.addWidget(self.apply_speed_btn)
+
+        # FPS change button
+        self.change_fps_btn = self._create_styled_button(
+            'FPS', 'Change video FPS (drops/duplicates frames, preserves duration)\nNote: This can also be achieved with SPEED button at 1.0x + FPS override', 40, '#03A9F4'
+        )
+        self.toolbar.addWidget(self.change_fps_btn)
 
     def _create_styled_button(self, text, tooltip, width, hover_color):
         """Create a styled button for video operations."""

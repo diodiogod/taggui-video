@@ -55,6 +55,12 @@ class VideoEditor:
         """Change video speed by adjusting frame count (drops/duplicates frames)."""
         return FrameEditor.change_speed(input_path, output_path, speed_multiplier, target_fps)
 
+    @staticmethod
+    def change_fps(input_path: Path, output_path: Path,
+                   target_fps: float) -> Tuple[bool, str]:
+        """Change video FPS without changing duration (drops/duplicates frames as needed)."""
+        return FrameEditor.change_fps(input_path, output_path, target_fps)
+
     # SAR fixing operations
     @staticmethod
     def check_sar(video_path: Path) -> Tuple[Optional[int], Optional[int], Optional[Tuple[int, int]]]:

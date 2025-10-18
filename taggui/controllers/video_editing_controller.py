@@ -680,8 +680,8 @@ class VideoEditingController:
         speed_layout = QHBoxLayout()
         speed_layout.addWidget(QLabel("Speed multiplier:"))
         speed_spinbox = QDoubleSpinBox()
-        speed_spinbox.setMinimum(0.2)
-        speed_spinbox.setMaximum(5.0)
+        speed_spinbox.setMinimum(0.1)
+        speed_spinbox.setMaximum(100.0)
         speed_spinbox.setValue(current_speed)
         speed_spinbox.setSingleStep(0.1)
         speed_spinbox.setDecimals(2)
@@ -759,6 +759,9 @@ class VideoEditingController:
         if reply != QMessageBox.Yes:
             return
 
+        # Save undo snapshot before editing
+        self._save_undo_snapshot(input_path, f"Speed change {final_speed:.2f}x")
+
         # Apply speed change
         success, message = VideoEditor.change_speed(
             input_path, input_path,
@@ -766,7 +769,108 @@ class VideoEditingController:
         )
 
         if success:
-            self.last_edited_video = input_path  # Track for undo
+            QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)
+
+    def change_fps(self):
+        """Change FPS of current video without changing duration (drops/duplicates frames)."""
+        video_player = self.main_window.image_viewer.video_player
+
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        input_path = Path(video_player.video_path)
+        current_fps = video_player.get_fps()
+        current_frames = video_player.get_total_frames()
+
+        # Calculate current duration
+        current_duration = current_frames / current_fps if current_fps > 0 else 0
+
+        # Ask for target FPS
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDoubleSpinBox, QDialogButtonBox, QHBoxLayout
+
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Change FPS")
+        layout = QVBoxLayout(dialog)
+
+        # Current video info
+        info_label = QLabel(f"Current: {current_frames} frames @ {current_fps:.2f} fps ({current_duration:.1f}s)")
+        layout.addWidget(info_label)
+
+        # Target FPS input
+        fps_layout = QHBoxLayout()
+        fps_layout.addWidget(QLabel("Target FPS:"))
+        fps_spinbox = QDoubleSpinBox()
+        fps_spinbox.setMinimum(1.0)
+        fps_spinbox.setMaximum(120.0)
+        fps_spinbox.setValue(current_fps)
+        fps_spinbox.setSingleStep(0.1)
+        fps_spinbox.setDecimals(2)
+        fps_spinbox.setSuffix(' fps')
+        fps_layout.addWidget(fps_spinbox)
+        layout.addLayout(fps_layout)
+
+        # Preview label (updates when FPS changes)
+        preview_label = QLabel()
+        layout.addWidget(preview_label)
+
+        def update_preview():
+            target_fps = fps_spinbox.value()
+            new_frames = int(current_duration * target_fps)
+            action = "drop" if target_fps < current_fps else "duplicate"
+            frames_diff = abs(new_frames - current_frames)
+
+            preview_label.setText(
+                f"Result: ~{new_frames} frames @ {target_fps:.2f} fps ({current_duration:.1f}s)\n"
+                f"Will {action} ~{frames_diff} frames to preserve duration"
+            )
+
+        fps_spinbox.valueChanged.connect(update_preview)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # Initialize preview
+        update_preview()
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        target_fps = fps_spinbox.value()
+
+        # Check if already at target FPS
+        if abs(target_fps - current_fps) < 0.01:
+            QMessageBox.information(self.main_window, "No Change", f"Video already at {current_fps:.2f} fps.")
+            return
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self.main_window, "Change FPS",
+            f"Change FPS from {current_fps:.2f} to {target_fps:.2f}?\n"
+            f"Duration will be preserved (~{current_duration:.1f}s)\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Save undo snapshot before editing
+        self._save_undo_snapshot(input_path, f"FPS change {current_fps:.2f}→{target_fps:.2f}")
+
+        # Apply FPS change
+        success, message = VideoEditor.change_fps(
+            input_path, input_path,
+            target_fps
+        )
+
+        if success:
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
         else:

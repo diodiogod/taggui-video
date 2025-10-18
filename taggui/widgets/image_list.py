@@ -6,12 +6,12 @@ from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
-                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer)
-from PySide6.QtGui import QDesktopServices, QColor
+                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent)
+from PySide6.QtGui import QDesktopServices, QColor, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QVBoxLayout,
-                               QWidget, QStyledItemDelegate)
+                               QWidget, QStyledItemDelegate, QToolTip)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
@@ -139,6 +139,9 @@ class ImageDelegate(QStyledItemDelegate):
             painter.drawRect(option.rect)
             painter.drawText(option.rect, label_text, Qt.AlignCenter)
 
+        # Draw N*4+1 stamp for video files
+        self._draw_n4_plus_1_stamp(painter, option, index)
+
     def update_label(self, index: QModelIndex, label: str):
         p_index = QPersistentModelIndex(index)
         self.labels[p_index] = label
@@ -149,6 +152,100 @@ class ImageDelegate(QStyledItemDelegate):
         if p_index in self.labels:
             del self.labels[p_index]
             self.parent().update(index)
+
+    def helpEvent(self, event, view, option, index):
+        """Provide tooltip for N*4+1 stamp on hover."""
+        if event.type() == QEvent.ToolTip and index.isValid():
+            try:
+                # Get the image data
+                image = index.data(Qt.ItemDataRole.UserRole)
+                if not image or not hasattr(image, 'is_video') or not image.is_video:
+                    return False
+
+                # Check if video has metadata with frame count
+                if not hasattr(image, 'video_metadata') or not image.video_metadata:
+                    return False
+
+                frame_count = image.video_metadata.get('frame_count', 0)
+                if frame_count <= 0:
+                    return False
+
+                # Check N*4+1 rule: (frame_count - 1) % 4 == 0
+                is_valid = (frame_count - 1) % 4 == 0
+
+                # Stamp position: top-left corner
+                margin = 2
+                stamp_rect = QRect(option.rect.left() + margin,
+                                  option.rect.top() + margin,
+                                  80, 20)
+
+                # Check if mouse is over the stamp
+                if stamp_rect.contains(event.pos()):
+                    tooltip_text = f"N*4+1 validation: {'Valid' if is_valid else 'Invalid'}\nFrame count: {frame_count}"
+                    QToolTip.showText(event.globalPos(), tooltip_text, view, 2000)  # 2 second duration
+                    return True
+                else:
+                    # Hide tooltip if not over stamp
+                    QToolTip.hideText()
+                    return False
+            except Exception:
+                pass
+        return super().helpEvent(event, view, option, index)
+
+    def _draw_n4_plus_1_stamp(self, painter, option, index):
+        """Draw N*4+1 validation stamp on video file previews."""
+        try:
+            # Get the image data
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if not image or not hasattr(image, 'is_video') or not image.is_video:
+                return
+
+            # Check if video has metadata with frame count
+            if not hasattr(image, 'video_metadata') or not image.video_metadata:
+                return
+
+            frame_count = image.video_metadata.get('frame_count', 0)
+            if frame_count <= 0:
+                return
+
+            # Check N*4+1 rule: (frame_count - 1) % 4 == 0
+            is_valid = (frame_count - 1) % 4 == 0
+
+            # Set up painter for stamp
+            painter.save()
+
+            # Stamp position: top-left corner
+            margin = 2
+            text_rect = QRect(option.rect.left() + margin,
+                              option.rect.top() + margin,
+                              80, 20)  # Width and height for text
+
+            # Set font size and bold
+            font = painter.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+
+            # Draw subtle glow (shadow)
+            painter.setPen(QPen(QColor(0, 0, 0, 100), 1))  # Semi-transparent black
+            glow_text = "✓N*4+1" if is_valid else "✗N*4+1"
+            painter.drawText(text_rect.adjusted(1, 1, 1, 1), Qt.AlignLeft | Qt.AlignTop, glow_text)
+
+            # Set text color
+            if is_valid:
+                painter.setPen(QPen(QColor(76, 175, 80), 2))  # Green
+            else:
+                painter.setPen(QPen(QColor(244, 67, 54), 2))  # Red
+
+            # Draw text
+            text = "✓N*4+1" if is_valid else "✗N*4+1"
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, text)
+
+            painter.restore()
+
+        except Exception:
+            # Silently ignore any errors in stamp drawing
+            pass
 
 
 class ImageListView(QListView):
