@@ -1058,13 +1058,13 @@ class VideoControlsWidget(QWidget):
                 item.widget().hide()
                 item.widget().setParent(None)
 
-        # Show marker range if markers are set
+        # Show marker range if markers are set (ALWAYS show when both markers exist)
         if self.loop_start_frame is not None and self.loop_end_frame is not None:
             frame_count = abs(self.loop_end_frame - self.loop_start_frame) + 1
 
-            # Check if speed preview should be shown for markers
+            # Check if we should show speed prediction
             if abs(self._extended_speed - 1.0) >= 0.01 and self._current_fps > 0:
-                # Use custom FPS if set, otherwise use current FPS
+                # Speed is different from 1.0x - show full prediction
                 preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
 
                 # Calculate for marker range
@@ -1075,13 +1075,16 @@ class VideoControlsWidget(QWidget):
                 # Format marker range display: [81 frames → 23f @16fps 3.5x]
                 fps_indicator = f'*{preview_fps:.0f}' if self._custom_preview_fps else f'{preview_fps:.0f}'
                 marker_text = f'[{frame_count} frames → {new_frame_count}f @{fps_indicator}fps {self._extended_speed:.1f}x]'
+            else:
+                # Speed is 1.0x - show basic frame count only
+                marker_text = f'[{frame_count} frames]'
 
-                # Create marker range label with full prediction
-                marker_label = QLabel(marker_text)
-                marker_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 10px; }")
-                marker_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Create marker range label
+            marker_label = QLabel(marker_text)
+            marker_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 10px; }")
+            marker_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-                self.preview_labels_layout.addWidget(marker_label)
+            self.preview_labels_layout.addWidget(marker_label)
 
         # Show speed preview if speed is changed (regardless of markers)
         if abs(self._extended_speed - 1.0) >= 0.01 and self._current_fps > 0 and self._current_frame_count > 0:
