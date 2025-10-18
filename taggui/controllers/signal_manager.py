@@ -236,9 +236,15 @@ class SignalManager:
         # Connect speed control
         video_controls.speed_changed.connect(video_player.set_playback_speed)
 
+        # Connect mute control
+        video_controls.mute_toggled.connect(
+            lambda muted: video_player.set_muted(muted))
+
         # Connect toolbar video editing controls
         toolbar_manager.fixed_marker_size_spinbox.valueChanged.connect(
             lambda value: self._on_marker_size_changed(value))
+        # Initialize video_controls.fixed_marker_size from saved settings
+        video_controls.fixed_marker_size = toolbar_manager.fixed_marker_size_spinbox.value()
 
         # Always show controls toggle
         def on_always_show_toggled(checked):
