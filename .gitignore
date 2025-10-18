@@ -162,3 +162,5 @@ cython_debug/
 .vscode/
 test/
 Ignored/
+CLAUDE.md
+.claide/

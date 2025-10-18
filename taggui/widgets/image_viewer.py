@@ -117,6 +117,8 @@ class MarkingItem(QGraphicsRectItem):
             if MarkingItem.handle_selected == RectPosition.CENTER:
                 self.drag_start_pos = event.pos()
                 self.drag_start_rect = self.rect()
+            # Reset snapped bucket size for sticky snapping behavior
+            self.last_snapped_bucket_size = None
             self.move()
         elif (event.button() == Qt.MouseButton.RightButton and
                 MarkingItem.handle_selected != RectPosition.NONE):
@@ -150,15 +152,22 @@ class MarkingItem(QGraphicsRectItem):
                                            MarkingItem.handle_selected,
                                            event.pos())
                     target_size = target_dimension.get(rect_pre.toRect().size())
-                    # target is the final size, so anticipate the scaling
-                    scale = min(rect_pre.width() / target_size.width(),
-                                rect_pre.height() / target_size.height())
-                    target = target_size.toSizeF() * scale
-                    target = QSize(max(bucket_res, ceil(target.width())),
-                                   max(bucket_res, ceil(target.height())))
-                    rect = change_rect_to_match_size(self.rect(),
-                                                     MarkingItem.handle_selected,
-                                                     target)
+
+                    # Sticky snapping: only update if target bucket size changed
+                    if target_size != self.last_snapped_bucket_size:
+                        self.last_snapped_bucket_size = target_size
+                        # target is the final size, so anticipate the scaling
+                        scale = min(rect_pre.width() / target_size.width(),
+                                    rect_pre.height() / target_size.height())
+                        target = target_size.toSizeF() * scale
+                        target = QSize(max(bucket_res, ceil(target.width())),
+                                       max(bucket_res, ceil(target.height())))
+                        rect = change_rect_to_match_size(self.rect(),
+                                                         MarkingItem.handle_selected,
+                                                         target)
+                    else:
+                        # Keep current rect - locked to current bucket size
+                        rect = self.rect()
                 else:
                     rect = change_rect(self.rect(),
                                        MarkingItem.handle_selected,
