@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/linux/ComfyUI_TTS_Audio_Suite/web/**)",
+      "Read(//home/linux/musubi-tuner/src/musubi_tuner/dataset/**)",
+      "Read(//mnt/j/train/GUI_kho/musubi-tuner_Wan2.2_GUI/**)",
+      "Read(//mnt/j/train/GUI_kho/musubi-tuner_Wan2.2_GUI/src/musubi_tuner/dataset/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
