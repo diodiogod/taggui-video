@@ -83,8 +83,8 @@ class VideoEditingController:
         except:
             pass
 
-    def extract_video_range(self):
-        """Extract the marked range, replacing the original video (creates backup)."""
+    def extract_video_range_rough(self):
+        """Extract the marked range using keyframe cuts (fast, no re-encoding)."""
         video_player = self.main_window.image_viewer.video_player
         video_controls = self.main_window.image_viewer.video_controls
 
@@ -103,10 +103,13 @@ class VideoEditingController:
         fps = video_player.get_fps()
         input_path = Path(video_player.video_path)
 
-        # Confirm action
+        # Confirm action with warning about keyframe accuracy
         reply = QMessageBox.question(
-            self.main_window, "Extract Range",
-            f"Extract frames {start_frame}-{end_frame} (discard rest)?\n\n"
+            self.main_window, "Extract Range (Rough Cut)",
+            f"Extract frames ~{start_frame}-{end_frame} (keyframe-based)?\n\n"
+            f"⚡ FAST: No re-encoding, preserves 100% quality\n"
+            f"⚠ NOT frame-accurate: Cuts at nearest keyframes\n"
+            f"💡 Use this for rough cuts, then use precise cut for final trim\n\n"
             f"Original will be saved as {input_path.name}.backup",
             QMessageBox.Yes | QMessageBox.No
         )
@@ -115,12 +118,77 @@ class VideoEditingController:
             return
 
         # Save undo snapshot before editing
-        self._save_undo_snapshot(input_path, f"Extract frames {start_frame}-{end_frame}")
+        self._save_undo_snapshot(input_path, f"Extract rough frames ~{start_frame}-{end_frame}")
+
+        # Extract range (overwrites original, creates backup)
+        success, message = VideoEditor.extract_range_rough(
+            input_path, input_path,
+            start_frame, end_frame, fps
+        )
+
+        if success:
+            QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)
+
+    def extract_video_range(self):
+        """Extract the marked range with frame accuracy (re-encodes)."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QDialogButtonBox
+
+        video_player = self.main_window.image_viewer.video_player
+        video_controls = self.main_window.image_viewer.video_controls
+
+        # Check if we have a video loaded
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        # Check if markers are set
+        loop_range = video_controls.get_loop_range()
+        if not loop_range:
+            QMessageBox.warning(self.main_window, "No Markers", "Please set loop markers first.")
+            return
+
+        start_frame, end_frame = loop_range
+        fps = video_player.get_fps()
+        input_path = Path(video_player.video_path)
+
+        # Create dialog with reverse option
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Extract Range (Precise)")
+        layout = QVBoxLayout(dialog)
+
+        info_label = QLabel(
+            f"Extract frames {start_frame}-{end_frame} (discard rest)?\n\n"
+            f"⚠ SLOW: Re-encodes video for frame accuracy\n"
+            f"✓ Frame-accurate cut\n\n"
+            f"Original will be saved as {input_path.name}.backup"
+        )
+        layout.addWidget(info_label)
+
+        reverse_checkbox = QCheckBox("Reverse video (plays backwards)")
+        reverse_checkbox.setChecked(False)
+        layout.addWidget(reverse_checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        reverse = reverse_checkbox.isChecked()
+
+        # Save undo snapshot before editing
+        operation_desc = f"Extract frames {start_frame}-{end_frame}" + (" (reversed)" if reverse else "")
+        self._save_undo_snapshot(input_path, operation_desc)
 
         # Extract range (overwrites original, creates backup)
         success, message = VideoEditor.extract_range(
             input_path, input_path,
-            start_frame, end_frame, fps
+            start_frame, end_frame, fps, reverse=reverse
         )
 
         if success:

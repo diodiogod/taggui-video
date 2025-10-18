@@ -12,11 +12,79 @@ class FrameEditor:
     """Handles frame-level video editing operations using ffmpeg."""
 
     @staticmethod
-    def extract_range(input_path: Path, output_path: Path,
-                      start_frame: int, end_frame: int, fps: float) -> Tuple[bool, str]:
+    def extract_range_rough(input_path: Path, output_path: Path,
+                            start_frame: int, end_frame: int, fps: float) -> Tuple[bool, str]:
         """
-        Extract a frame range from video.
-        Creates .backup of original if input == output. Uses stream copy (no re-encoding).
+        Extract a rough frame range from video using keyframes (no re-encoding).
+        FAST but NOT frame-accurate - cuts at nearest keyframes.
+        Preserves 100% original quality. Creates .backup of original if input == output.
+
+        Args:
+            input_path: Input video file path
+            output_path: Output video file path
+            start_frame: Starting frame number (approximate)
+            end_frame: Ending frame number (approximate)
+            fps: Video frames per second
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            # Create backup if replacing original
+            if input_path == output_path:
+                if not create_backup(input_path):
+                    return False, "Failed to create backup"
+
+            # Convert frames to time
+            start_time = start_frame / fps
+            end_time = (end_frame + 1) / fps
+            duration = end_time - start_time
+
+            # Use temp output if input == output
+            import shutil
+            temp_output = output_path.parent / f'.temp_extract_rough_{output_path.name}'
+            actual_output = temp_output if input_path == output_path else output_path
+
+            # ffmpeg command with stream copy (keyframe-accurate only, no re-encoding)
+            cmd = [
+                'ffmpeg',
+                '-ss', str(start_time),  # Seek to start (keyframe)
+                '-i', str(input_path),
+                '-t', str(duration),     # Duration
+                '-c', 'copy',            # Stream copy - no re-encoding!
+                '-avoid_negative_ts', '1',
+                '-y',
+                str(actual_output)
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            # If successful and input == output, replace input with temp
+            if result.returncode == 0 and input_path == output_path:
+                shutil.move(str(temp_output), str(output_path))
+
+            # Cleanup temp if it still exists
+            if temp_output.exists():
+                temp_output.unlink()
+
+            if result.returncode == 0:
+                return True, (f"Successfully extracted rough range (keyframe-based)\n"
+                             f"Requested: frames {start_frame}-{end_frame}\n"
+                             f"NOTE: Actual cut may be off by a few frames due to keyframe positioning")
+            else:
+                return False, f"ffmpeg error: {result.stderr}"
+
+        except FileNotFoundError:
+            return False, "ffmpeg not found. Please install ffmpeg."
+        except Exception as e:
+            return False, f"Error: {str(e)}"
+
+    @staticmethod
+    def extract_range(input_path: Path, output_path: Path,
+                      start_frame: int, end_frame: int, fps: float, reverse: bool = False) -> Tuple[bool, str]:
+        """
+        Extract a frame range from video with FRAME ACCURACY (re-encodes).
+        SLOW but PRECISE. Creates .backup of original if input == output.
 
         Args:
             input_path: Input video file path
@@ -24,6 +92,7 @@ class FrameEditor:
             start_frame: Starting frame number (inclusive)
             end_frame: Ending frame number (inclusive)
             fps: Video frames per second
+            reverse: If True, reverse the extracted video
 
         Returns:
             Tuple of (success: bool, message: str)
@@ -43,14 +112,26 @@ class FrameEditor:
             temp_output = output_path.parent / f'.temp_extract_{output_path.name}'
             actual_output = temp_output if input_path == output_path else output_path
 
+            # Build video filter chain
+            vf_parts = [f'trim=start_frame={start_frame}:end_frame={end_frame+1}', 'setpts=PTS-STARTPTS']
+            if reverse:
+                vf_parts.append('reverse')
+            vf = ','.join(vf_parts)
+
+            # Build audio filter chain
+            af_parts = [f'atrim=start={start_time}:duration={duration}', 'asetpts=PTS-STARTPTS']
+            if reverse:
+                af_parts.append('areverse')
+            af = ','.join(af_parts)
+
             # ffmpeg command to extract range - frame-accurate extraction
             # Note: -c copy cannot do frame-accurate cuts, only keyframe cuts
             # Using trim filter for frame accuracy with re-encoding
             cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
-                '-vf', f'trim=start_frame={start_frame}:end_frame={end_frame+1},setpts=PTS-STARTPTS',
-                '-af', f'atrim=start={start_time}:duration={duration},asetpts=PTS-STARTPTS',  # Audio sync
+                '-vf', vf,
+                '-af', af,
                 '-c:v', 'libx264',
                 '-crf', '18',  # High quality
                 '-preset', 'medium',
@@ -93,7 +174,8 @@ class FrameEditor:
                 except:
                     pass  # Skip verification if ffprobe fails
 
-                return True, f"Successfully extracted {expected_frames} frames ({start_frame}-{end_frame})"
+                reversed_msg = " (reversed)" if reverse else ""
+                return True, f"Successfully extracted {expected_frames} frames ({start_frame}-{end_frame}){reversed_msg}"
             else:
                 return False, f"ffmpeg error: {result.stderr}"
 

@@ -263,6 +263,8 @@ class SignalManager:
         # Connect video editing buttons
         toolbar_manager.extract_range_action.triggered.connect(
             video_editing_controller.extract_video_range)
+        toolbar_manager.extract_range_rough_btn.clicked.connect(
+            video_editing_controller.extract_video_range_rough)
         toolbar_manager.remove_range_action.triggered.connect(
             video_editing_controller.remove_video_range)
         toolbar_manager.remove_frame_action.triggered.connect(
