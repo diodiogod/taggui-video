@@ -343,10 +343,9 @@ class ImageTagsEditor(QDockWidget):
             self.image_tags_list.hide()
             self.descriptive_text_edit.show()
 
-            # Show grammar check button if grammar checker is available
-            if (self.descriptive_text_edit.grammar_checker and
-                self.descriptive_text_edit.grammar_checker.is_available()):
-                self.grammar_check_button.show()
+            # Always show grammar check button in descriptive mode
+            # (will show error if grammar checker not available when clicked)
+            self.grammar_check_button.show()
         else:
             # Switch to tag mode
             # Hide text edit and grammar button, show tag list and input

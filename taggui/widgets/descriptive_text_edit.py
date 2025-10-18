@@ -79,13 +79,23 @@ class DescriptiveTextEdit(QPlainTextEdit):
             suggestions = self.spell_highlighter.get_suggestions(word)
 
             if suggestions:
+                # Add header for suggestions
+                header_action = QAction(f'Suggestions for "{word}":', menu)
+                header_action.setEnabled(False)
+                menu.addAction(header_action)
+
                 for suggestion in suggestions[:5]:  # Limit to 5 suggestions
-                    action = QAction(suggestion, menu)
+                    action = QAction(f'  → {suggestion}', menu)
                     action.triggered.connect(
-                        lambda checked, s=suggestion, c=cursor:
-                        self._replace_word(c, s))
-                    action.setData(('suggestion', word, suggestion))
+                        lambda checked, s=suggestion, c=cursor.position():
+                        self._replace_word_at_position(c, word, s))
                     menu.addAction(action)
+                menu.addSeparator()
+            else:
+                # No suggestions available
+                no_suggestions_action = QAction(f'No suggestions for "{word}"', menu)
+                no_suggestions_action.setEnabled(False)
+                menu.addAction(no_suggestions_action)
                 menu.addSeparator()
 
             # Add to dictionary option
@@ -118,12 +128,18 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         menu.exec(event.globalPos())
 
-    def _replace_word(self, cursor: QTextCursor, replacement: str):
-        """Replace word at cursor with replacement."""
-        cursor.beginEditBlock()
-        cursor.removeSelectedText()
-        cursor.insertText(replacement)
-        cursor.endEditBlock()
+    def _replace_word_at_position(self, position: int, old_word: str, replacement: str):
+        """Replace word at given position with replacement."""
+        cursor = self.textCursor()
+        cursor.setPosition(position)
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+
+        # Verify we're replacing the right word
+        if cursor.selectedText() == old_word:
+            cursor.beginEditBlock()
+            cursor.removeSelectedText()
+            cursor.insertText(replacement)
+            cursor.endEditBlock()
 
     def _add_to_dictionary(self, word: str):
         """Add word to custom dictionary."""
@@ -136,7 +152,16 @@ class DescriptiveTextEdit(QPlainTextEdit):
     @Slot()
     def check_grammar(self):
         """Check grammar using LanguageTool and display issues."""
+        from PySide6.QtWidgets import QMessageBox
+
         if not self.grammar_checker or not self.grammar_checker.is_available():
+            QMessageBox.warning(
+                self, "Grammar Check Unavailable",
+                "Grammar checking is not available.\n\n"
+                "Make sure 'language-tool-python' is installed:\n"
+                "pip install language-tool-python\n\n"
+                "Or check Settings to configure the grammar check mode."
+            )
             return
 
         text = self.toPlainText()
