@@ -621,13 +621,14 @@ class VideoEditingController:
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
 
+        def update_progress(current, total, name):
+            progress.setLabelText(f"Processing {name}...")
+            progress.setValue(current)
+            return progress.wasCanceled()
+
         success_count, error_count, errors = VideoEditor.batch_fix_sar(
             [v[0] for v in non_square_videos],
-            progress_callback=lambda current, total, name: (
-                progress.setLabelText(f"Processing {name}..."),
-                progress.setValue(current),
-                progress.wasCanceled()
-            )
+            progress_callback=update_progress
         )
 
         if success_count > 0:  # Track first successful edit for undo
@@ -698,13 +699,14 @@ class VideoEditingController:
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
 
+        def update_progress_all(current, total, name):
+            progress.setLabelText(f"Processing {name}...")
+            progress.setValue(current)
+            return progress.wasCanceled()
+
         success_count, error_count, errors = VideoEditor.batch_fix_sar(
             [v[0] for v in non_square_videos],
-            progress_callback=lambda current, total, name: (
-                progress.setLabelText(f"Processing {name}..."),
-                progress.setValue(current),
-                progress.wasCanceled()
-            )
+            progress_callback=update_progress_all
         )
 
         progress.setValue(len(non_square_videos))
