@@ -368,7 +368,7 @@ class VideoControlsWidget(QWidget):
 
         self.speed_value_label = QLabel('1.00x')
         self.speed_value_label.setMinimumWidth(45)
-        self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; cursor: pointer; }")
+        self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
         self.speed_value_label.mousePressEvent = self._reset_speed
 
         controls_layout.addWidget(self.play_pause_btn)
@@ -433,7 +433,7 @@ class VideoControlsWidget(QWidget):
         # Speed preview label (shows what would happen if speed is applied)
         self.speed_preview_label = QLabel('')
         self.speed_preview_label.setMinimumWidth(150)
-        self.speed_preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; cursor: pointer; }")
+        self.speed_preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; }")
         self.speed_preview_label.setToolTip('Preview of video if speed change is applied. Click to set custom FPS.')
         self.speed_preview_label.mousePressEvent = self._on_preview_label_clicked
 

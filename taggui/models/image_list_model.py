@@ -159,6 +159,9 @@ class ImageListModel(QAbstractListModel):
         return len(self.images)
 
     def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
+        # Validate index bounds to prevent errors during model reset
+        if not index.isValid() or index.row() >= len(self.images):
+            return None
         image = self.images[index.row()]
         if role == Qt.ItemDataRole.UserRole:
             return image
@@ -242,6 +245,7 @@ class ImageListModel(QAbstractListModel):
             return f'{path}\n{dimensions} 🠮 {target}'
 
     def load_directory(self, directory_path: Path):
+        self.beginResetModel()
         self.images.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -355,7 +359,7 @@ class ImageListModel(QAbstractListModel):
                                               f'"{json_file_path}"')
             self.images.append(image)
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
-        self.modelReset.emit()
+        self.endResetModel()
         if len(error_messages) > 0:
             print('\n'.join(error_messages), file=sys.stderr)
             error_message_box = QMessageBox()

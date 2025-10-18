@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
-                            Signal, Slot, QPersistentModelIndex, QProcess)
+                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer)
 from PySide6.QtGui import QDesktopServices, QColor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -104,13 +104,36 @@ class ImageDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.labels = {}
 
+    def clear_labels(self):
+        """Clear all stored labels (called on model reset)."""
+        self.labels.clear()
+
     def sizeHint(self, option, index):
         return index.data(Qt.ItemDataRole.SizeHintRole)
 
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
+        # Validate index and painter before painting
+        if not index.isValid():
+            return
+
+        # Additional safety: check if model and data are valid
+        try:
+            if not index.model():
+                return
+            # Try to access data to ensure index is truly valid
+            index.data(Qt.ItemDataRole.DisplayRole)
+        except (RuntimeError, AttributeError):
+            return
+
+        # Wrap super().paint() in try/except to catch Qt internal errors during model transitions
+        try:
+            super().paint(painter, option, index)
+        except RuntimeError:
+            # Silently ignore paint errors during model reset
+            return
+
         p_index = QPersistentModelIndex(index)
-        if p_index in self.labels:
+        if p_index.isValid() and p_index in self.labels:
             label_text = self.labels[p_index]
             painter.setBrush(QColor(255, 255, 255, 163))
             painter.drawRect(option.rect)
@@ -140,6 +163,18 @@ class ImageListView(QListView):
         self.setModel(proxy_image_list_model)
         self.delegate = ImageDelegate(self)
         self.setItemDelegate(self.delegate)
+
+        # Get source model for signal connections
+        source_model = proxy_image_list_model.sourceModel()
+
+        # Clear delegate labels when model resets to avoid painting stale indexes
+        source_model.modelReset.connect(self.delegate.clear_labels)
+
+        # Disable updates during model reset to prevent paint errors
+        # Use source model signals since proxy may not forward modelAboutToBeReset
+        source_model.modelAboutToBeReset.connect(self._disable_updates)
+        source_model.modelReset.connect(self._enable_updates)
+
         self.setWordWrap(True)
         self.setDragEnabled(True)
         # If the actual height of the image is greater than 3 times the width,
@@ -223,6 +258,22 @@ class ImageListView(QListView):
                     label += '✅' if grid.aspect_ratio[2] else ''
                     label += f'  {grid.aspect_ratio[0]}:{grid.aspect_ratio[1]}'
                 self.delegate.update_label(index, label)
+
+    def _disable_updates(self):
+        """Disable widget updates during model reset."""
+        self.setUpdatesEnabled(False)
+        self.viewport().setUpdatesEnabled(False)
+
+    def _enable_updates(self):
+        """Re-enable widget updates after model reset."""
+        # Defer re-enabling updates to next event loop iteration
+        # This ensures the view's internal state is fully updated before repainting
+        QTimer.singleShot(0, self._do_enable_updates)
+
+    def _do_enable_updates(self):
+        """Actually re-enable updates (called after event loop processes)."""
+        self.setUpdatesEnabled(True)
+        self.viewport().setUpdatesEnabled(True)
 
     @Slot()
     def invert_selection(self):
