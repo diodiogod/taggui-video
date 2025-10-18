@@ -94,7 +94,7 @@ class SettingsDialog(QDialog):
         # Spell checking and grammar checking settings
         self.spell_check_enabled = SettingsBigCheckBox(
             key='spell_check_enabled',
-            default_value=True)
+            default=True)
         self.spell_check_enabled.stateChanged.connect(self.show_restart_warning)
 
         self.grammar_check_mode_combo = QComboBox()
