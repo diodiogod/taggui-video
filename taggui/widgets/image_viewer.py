@@ -433,6 +433,10 @@ class ImageViewer(QWidget):
         if rect_type == ImageMarking.CROP:
             self.crop_marking = marking_item
             marking_item.size_changed() # call after self.crop_marking was set!
+            if interactive:
+                image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+                image.crop = rect
+                self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
         elif name == '' and rect_type != ImageMarking.NONE:
             image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
             name = {ImageMarking.HINT: 'hint',
@@ -552,6 +556,7 @@ class ImageViewer(QWidget):
                     self.proxy_image_index, self.proxy_image_index,
                     [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
                      Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
+                self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
             else:
                 self.marking_items.remove(item)
                 self.label_changed()
