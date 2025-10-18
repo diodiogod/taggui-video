@@ -230,7 +230,11 @@ class ImageViewer(QWidget):
                         # Show video controls
                         self._is_video_loaded = True
                         if image.video_metadata:
-                            self.video_controls.set_video_info(image.video_metadata)
+                            self.video_controls.set_video_info(
+                                image.video_metadata,
+                                image=image,
+                                proxy_model=self.proxy_image_list_model
+                            )
 
                         # Only show controls if always-show is enabled
                         if not self.video_controls_auto_hide:
