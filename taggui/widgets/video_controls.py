@@ -876,6 +876,14 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.setMaximum(frame_count - 1 if frame_count > 0 else 0)
         self.frame_total_label.setText(f'/ {frame_count}')
 
+        # Clear loop markers if they're out of range for the new video
+        # This prevents looping issues after video edits that change frame count
+        max_frame = frame_count - 1 if frame_count > 0 else 0
+        if self.loop_start_frame is not None and self.loop_start_frame > max_frame:
+            self._reset_loop()
+        elif self.loop_end_frame is not None and self.loop_end_frame > max_frame:
+            self._reset_loop()
+
         # Update info labels
         self.fps_label.setText(f'{fps:.2f} fps')
         self.frame_count_label.setText(f'{frame_count} frames')
