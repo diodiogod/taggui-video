@@ -117,7 +117,6 @@ class ToolbarManager:
             QPushButton:hover {
                 border-color: #2196F3;
                 background-color: #353535;
-                box-shadow: 0 0 8px #2196F3;
             }
             QPushButton:disabled {
                 color: #555;
@@ -195,7 +194,6 @@ class ToolbarManager:
             QPushButton:checked {
                 border-color: #4CAF50;
                 background-color: #2d5a2d;
-                box-shadow: 0 0 8px #4CAF50;
             }
         """)
         self.toolbar.addWidget(self.always_show_controls_btn)
