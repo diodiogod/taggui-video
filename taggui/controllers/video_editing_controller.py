@@ -562,3 +562,127 @@ class VideoEditingController:
 
         # Auto-reload directory to show changes
         self.main_window.reload_directory()
+
+    def apply_speed_change(self):
+        """Apply speed change to current video based on speed slider value."""
+        video_player = self.main_window.image_viewer.video_player
+        video_controls = self.main_window.image_viewer.video_controls
+
+        if not video_player.video_path:
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        # Get current speed from controls
+        current_speed = video_controls._extended_speed
+
+        input_path = Path(video_player.video_path)
+        fps = video_player.get_fps()
+
+        # Calculate new frame count for preview
+        current_frames = video_controls._current_frame_count
+
+        # Ask for speed and optional FPS override
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDoubleSpinBox, QDialogButtonBox, QCheckBox, QHBoxLayout
+
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Apply Speed Change")
+        layout = QVBoxLayout(dialog)
+
+        # Current video info
+        info_label = QLabel(f"Current video: {current_frames} frames @ {fps:.2f} fps")
+        layout.addWidget(info_label)
+
+        # Speed multiplier input
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(QLabel("Speed multiplier:"))
+        speed_spinbox = QDoubleSpinBox()
+        speed_spinbox.setMinimum(0.2)
+        speed_spinbox.setMaximum(5.0)
+        speed_spinbox.setValue(current_speed)
+        speed_spinbox.setSingleStep(0.1)
+        speed_spinbox.setDecimals(2)
+        speed_spinbox.setSuffix('x')
+        speed_layout.addWidget(speed_spinbox)
+        layout.addLayout(speed_layout)
+
+        # Preview label (updates when speed changes)
+        preview_label = QLabel()
+        layout.addWidget(preview_label)
+
+        def update_preview():
+            speed = speed_spinbox.value()
+            target_fps = fps_spinbox.value() if fps_checkbox.isChecked() else fps
+
+            # Calculate new duration based on speed
+            original_duration = current_frames / fps if fps > 0 else 0
+            new_duration = original_duration / speed
+
+            # Calculate new frame count based on target FPS and new duration
+            new_frames = max(1, int(new_duration * target_fps))
+
+            preview_label.setText(f"Result: {new_frames} frames @ {target_fps:.2f} fps | {new_duration:.1f}s")
+
+        speed_spinbox.valueChanged.connect(update_preview)
+
+        # FPS override option
+        fps_checkbox = QCheckBox("Override FPS (for LoRA training, recommended: 16 fps)")
+        fps_checkbox.setChecked(False)
+        layout.addWidget(fps_checkbox)
+
+        fps_spinbox = QDoubleSpinBox()
+        fps_spinbox.setMinimum(1.0)
+        fps_spinbox.setMaximum(120.0)
+        fps_spinbox.setValue(16.0)  # Default suggestion for LoRA training
+        fps_spinbox.setSuffix(' fps')
+        fps_spinbox.setEnabled(False)
+        layout.addWidget(fps_spinbox)
+
+        fps_checkbox.toggled.connect(fps_spinbox.setEnabled)
+        fps_checkbox.toggled.connect(update_preview)
+        fps_spinbox.valueChanged.connect(update_preview)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # Initialize preview
+        update_preview()
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        # Get final values
+        final_speed = speed_spinbox.value()
+        target_fps = fps_spinbox.value() if fps_checkbox.isChecked() else None
+
+        # Check if speed is 1.0x (no change needed)
+        if abs(final_speed - 1.0) < 0.01 and target_fps is None:
+            QMessageBox.information(self.main_window, "No Change", "Speed is 1.0x and no FPS override. No changes needed.")
+            return
+
+        # Confirm action
+        fps_msg = f"\nTarget FPS: {target_fps:.2f}" if target_fps else ""
+
+        reply = QMessageBox.question(
+            self.main_window, "Apply Speed Change",
+            f"Apply speed change {final_speed:.2f}x to video?{fps_msg}\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Apply speed change
+        success, message = VideoEditor.change_speed(
+            input_path, input_path,
+            final_speed, target_fps
+        )
+
+        if success:
+            QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
+        else:
+            QMessageBox.critical(self.main_window, "Error", message)

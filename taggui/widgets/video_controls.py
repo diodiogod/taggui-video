@@ -327,10 +327,10 @@ class VideoControlsWidget(QWidget):
         # Playback speed slider with extended range support (rubberband effect)
         self.speed_label = QLabel('Speed:')
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setMinimum(0)  # 0.0x (visual range)
-        self.speed_slider.setMaximum(200)  # 2.0x (visual range)
+        self.speed_slider.setMinimum(20)  # 0.2x (visual range)
+        self.speed_slider.setMaximum(500)  # 5.0x (visual range)
         self.speed_slider.setValue(100)  # 1.0x
-        self.speed_slider.setTickInterval(25)
+        self.speed_slider.setTickInterval(48)  # ~1.0x intervals (500-20)/10
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.speed_slider.setMinimumWidth(100)  # Minimum width
         # No maximum width - let it expand to fill available space
@@ -353,7 +353,7 @@ class VideoControlsWidget(QWidget):
         """)
 
         # Extended speed tracking for rubberband effect
-        self._extended_speed = 1.0  # Actual speed (can be -8.0 to 8.0)
+        self._extended_speed = 1.0  # Actual speed (can be -8.0 to 8.0, but visual range is 0.2-5.0)
         self._is_dragging_speed = False
         self._last_mouse_pos = None
         self._drag_start_value = 100
@@ -430,6 +430,13 @@ class VideoControlsWidget(QWidget):
         self.sar_warning_label.setStyleSheet("QLabel { color: #FF5722; font-weight: bold; }")
         self.sar_warning_label.setToolTip('Video has non-square pixels (SAR != 1:1)\nMay cause issues with training tools that ignore SAR')
 
+        # Speed preview label (shows what would happen if speed is applied)
+        self.speed_preview_label = QLabel('')
+        self.speed_preview_label.setMinimumWidth(150)
+        self.speed_preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; cursor: pointer; }")
+        self.speed_preview_label.setToolTip('Preview of video if speed change is applied. Click to set custom FPS.')
+        self.speed_preview_label.mousePressEvent = self._on_preview_label_clicked
+
         # Loop controls - smaller buttons with text labels
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
         self.loop_start_btn.setToolTip('Set Loop Start at current frame (Pink marker)')
@@ -476,6 +483,7 @@ class VideoControlsWidget(QWidget):
         info_layout.addWidget(self.marker_range_label)
         info_layout.addWidget(self.frame_rule_label)
         info_layout.addWidget(self.sar_warning_label)
+        info_layout.addWidget(self.speed_preview_label)
         info_layout.addStretch()
         info_layout.addWidget(self.loop_reset_btn)
         info_layout.addWidget(self.loop_start_btn)
@@ -504,6 +512,12 @@ class VideoControlsWidget(QWidget):
 
         # Mute state (persists across video changes in session, not across reboots)
         self.is_muted = True  # Default to muted
+
+        # Video metadata for speed preview calculations
+        self._current_fps = 0
+        self._current_frame_count = 0
+        self._current_duration = 0
+        self._custom_preview_fps = None  # User can override FPS for preview
 
         # Load persistent settings
         self._load_persistent_settings()
@@ -583,7 +597,8 @@ class VideoControlsWidget(QWidget):
         label_font.setPointSize(max(8, int(11 * scale)))
         for label in [self.frame_label, self.time_label, self.fps_label,
                       self.frame_count_label, self.marker_range_label, self.frame_total_label,
-                      self.frame_rule_label, self.sar_warning_label, self.speed_label, self.speed_value_label]:
+                      self.frame_rule_label, self.sar_warning_label, self.speed_label, self.speed_value_label,
+                      self.speed_preview_label]:
             label.setFont(label_font)
 
         # Scale speed slider - only set minimum width, let it expand
@@ -651,13 +666,13 @@ class VideoControlsWidget(QWidget):
 
                         # Calculate acceleration based on how far we are from normal bounds
                         acceleration = 1.0
-                        if self._extended_speed < 0.0:
+                        if self._extended_speed < 0.2:
                             # Left side acceleration: more negative = faster
-                            out_of_bounds = abs(self._extended_speed)
+                            out_of_bounds = abs(self._extended_speed - 0.2)
                             acceleration = 1.0 + (out_of_bounds * 3.0)
-                        elif self._extended_speed > 2.0:
-                            # Right side acceleration: higher above 2.0 = faster
-                            out_of_bounds = self._extended_speed - 2.0
+                        elif self._extended_speed > 5.0:
+                            # Right side acceleration: higher above 5.0 = faster
+                            out_of_bounds = self._extended_speed - 5.0
                             acceleration = 1.0 + (out_of_bounds * 2.5)
 
                         # Apply accelerated sensitivity
@@ -667,19 +682,20 @@ class VideoControlsWidget(QWidget):
                         # Clamp to absolute limits (-8.0 to 8.0)
                         self._extended_speed = max(-8.0, min(8.0, self._extended_speed))
 
-                        # Update slider position (clamped to visual range 0.0-2.0)
-                        clamped_value = max(0.0, min(2.0, self._extended_speed))
+                        # Update slider position (clamped to visual range 0.2-5.0)
+                        clamped_value = max(0.2, min(5.0, self._extended_speed))
                         self.speed_slider.blockSignals(True)
                         self.speed_slider.setValue(int(clamped_value * 100.0))
                         self.speed_slider.blockSignals(False)
 
                         # If we're back in normal range, sync extended speed with slider
-                        if 0.0 <= self._extended_speed <= 2.0:
+                        if 0.2 <= self._extended_speed <= 5.0:
                             self._extended_speed = clamped_value
 
                         # Update display and emit signal
                         self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
                         self.speed_changed.emit(self._extended_speed)
+                        self._update_speed_preview()
 
                 self._last_mouse_pos = current_mouse
 
@@ -700,18 +716,15 @@ class VideoControlsWidget(QWidget):
         self._is_dragging_speed = False
         self._last_mouse_pos = None
 
-        # If extended speed is outside the visual range (0.0-2.0), clamp to edges
-        # But for negative speeds, clamp to -2.0 (minimum backward speed) instead of 0.0
-        if self._extended_speed < 0.0:
-            # Was in negative range, clamp to minimum backward speed (-2.0x)
-            # This corresponds to slider position 0 showing as minimum speed
-            self._extended_speed = max(-2.0, self._extended_speed)
-            # Map -2.0 to slider position 0
-            slider_pos = 0
-        elif self._extended_speed > 2.0:
-            # Was above max, clamp to maximum (2.0x)
-            self._extended_speed = 2.0
-            slider_pos = 200
+        # If extended speed is outside the visual range (0.2-5.0), clamp to edges
+        if self._extended_speed < 0.2:
+            # Was below minimum, clamp to 0.2x
+            self._extended_speed = 0.2
+            slider_pos = 20
+        elif self._extended_speed > 5.0:
+            # Was above max, clamp to maximum (5.0x)
+            self._extended_speed = 5.0
+            slider_pos = 500
         else:
             # Within range, sync with slider value
             self._extended_speed = self.speed_slider.value() / 100.0
@@ -723,6 +736,7 @@ class VideoControlsWidget(QWidget):
         self.speed_slider.blockSignals(False)
         self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
         self.speed_changed.emit(self._extended_speed)
+        self._update_speed_preview()
 
     @Slot(int)
     def _on_speed_slider_changed(self, value):
@@ -732,6 +746,7 @@ class VideoControlsWidget(QWidget):
             self._extended_speed = value / 100.0
             self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
             self.speed_changed.emit(self._extended_speed)
+            self._update_speed_preview()
 
     def _reset_speed(self, event):
         """Reset playback speed to 1.0x when label is clicked."""
@@ -741,6 +756,61 @@ class VideoControlsWidget(QWidget):
         self.speed_slider.blockSignals(False)
         self.speed_value_label.setText('1.00x')
         self.speed_changed.emit(1.0)
+        self._update_speed_preview()
+
+    def _update_speed_preview(self):
+        """Update speed preview label based on current speed and video metadata."""
+        if self._current_frame_count == 0 or abs(self._extended_speed - 1.0) < 0.01:
+            # No video loaded or speed is 1.0x, hide preview
+            self.speed_preview_label.setText('')
+            return
+
+        # Use custom FPS if set, otherwise use current FPS
+        preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
+
+        # Calculate new duration based on speed multiplier
+        original_duration = self._current_frame_count / self._current_fps if self._current_fps > 0 else 0
+        new_duration = original_duration / self._extended_speed
+
+        # Calculate new frame count based on target FPS and new duration
+        new_frame_count = max(1, int(new_duration * preview_fps))
+
+        # Format duration as seconds with 1 decimal
+        duration_str = f'{new_duration:.1f}s'
+
+        # Display format: [Speed: 2.0x → 40f @30fps | 1.3s]
+        # Add asterisk if using custom FPS
+        fps_indicator = f'*{preview_fps:.0f}' if self._custom_preview_fps else f'{preview_fps:.0f}'
+        preview_text = f'[{self._extended_speed:.1f}x → {new_frame_count}f @{fps_indicator}fps | {duration_str}]'
+        self.speed_preview_label.setText(preview_text)
+
+    def _on_preview_label_clicked(self, event):
+        """Handle click on speed preview label to set custom FPS."""
+        if self._current_frame_count == 0:
+            return
+
+        from PySide6.QtWidgets import QInputDialog
+
+        current_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
+
+        fps, ok = QInputDialog.getDouble(
+            self, "Set Preview FPS",
+            f"Enter target FPS for preview calculation:\n(Original: {self._current_fps:.2f} fps)",
+            value=current_fps,
+            minValue=1.0,
+            maxValue=120.0,
+            decimals=2
+        )
+
+        if ok:
+            # Set custom FPS (or reset to original if same)
+            if abs(fps - self._current_fps) < 0.01:
+                self._custom_preview_fps = None  # Reset to original
+            else:
+                self._custom_preview_fps = fps
+
+            # Update preview with new FPS
+            self._update_speed_preview()
 
     @Slot()
     def _toggle_mute(self):
@@ -796,6 +866,11 @@ class VideoControlsWidget(QWidget):
         sar_num = metadata.get('sar_num', 1)
         sar_den = metadata.get('sar_den', 1)
 
+        # Store for speed preview calculations
+        self._current_fps = fps
+        self._current_frame_count = frame_count
+        self._current_duration = duration
+
         # Update frame controls
         self.frame_spinbox.setMaximum(frame_count - 1 if frame_count > 0 else 0)
         self.timeline_slider.setMaximum(frame_count - 1 if frame_count > 0 else 0)
@@ -849,6 +924,9 @@ class VideoControlsWidget(QWidget):
 
         # Restore mute state after video loads (emit to sync with video player)
         self.mute_toggled.emit(self.is_muted)
+
+        # Update speed preview with new video metadata
+        self._update_speed_preview()
 
     def should_auto_play(self) -> bool:
         """Check if auto-play should trigger for the next video."""

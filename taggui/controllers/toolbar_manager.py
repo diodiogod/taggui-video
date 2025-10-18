@@ -42,6 +42,7 @@ class ToolbarManager:
         self.fix_all_folder_btn = None
         self.fix_sar_btn = None
         self.fix_all_sar_btn = None
+        self.apply_speed_btn = None
         self.star_labels = []
         self.rating = 0
 
@@ -227,6 +228,12 @@ class ToolbarManager:
             'SAR*', 'Fix SAR for all videos in folder', 45, '#FF5722'
         )
         self.toolbar.addWidget(self.fix_all_sar_btn)
+
+        # Speed change button
+        self.apply_speed_btn = self._create_styled_button(
+            'SPEED', 'Apply speed change to video (uses current speed slider value)', 55, '#2196F3'
+        )
+        self.toolbar.addWidget(self.apply_speed_btn)
 
     def _create_styled_button(self, text, tooltip, width, hover_color):
         """Create a styled button for video operations."""
