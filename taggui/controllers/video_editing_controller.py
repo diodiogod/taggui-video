@@ -21,7 +21,7 @@ class VideoEditingController:
         self.redo_stack = []
 
     def _save_undo_snapshot(self, video_path: Path, operation_name: str):
-        """Save current video state for undo before editing."""
+        """Save current video state and metadata for undo before editing."""
         import shutil
         import time
         import tempfile
@@ -38,6 +38,12 @@ class VideoEditingController:
         try:
             # Copy current video to snapshot
             shutil.copy2(str(video_path), str(snapshot_path))
+
+            # Also save JSON metadata if it exists
+            json_path = video_path.with_suffix(video_path.suffix + '.json')
+            if json_path.exists():
+                json_snapshot_path = snapshot_path.with_suffix(snapshot_path.suffix + '.json')
+                shutil.copy2(str(json_path), str(json_snapshot_path))
 
             # Add to undo stack
             self.undo_stack.append((video_path, operation_name, snapshot_path))
@@ -58,6 +64,10 @@ class VideoEditingController:
             try:
                 if snapshot_path.exists():
                     os.remove(snapshot_path)
+                # Also delete JSON snapshot if it exists
+                json_snapshot = snapshot_path.with_suffix(snapshot_path.suffix + '.json')
+                if json_snapshot.exists():
+                    os.remove(json_snapshot)
             except:
                 pass
         self.redo_stack.clear()
@@ -73,12 +83,14 @@ class VideoEditingController:
 
         # Get all snapshots currently in undo stack for this video
         active_snapshots = {str(s) for v, o, s in self.undo_stack if v == video_path}
+        # Also include JSON snapshots
+        active_json_snapshots = {str(s.with_suffix(s.suffix + '.json')) for v, o, s in self.undo_stack if v == video_path}
 
         # Delete snapshots that aren't in the stack
         try:
             for file in temp_base.iterdir():
                 if file.is_file() and file.stem.startswith(video_path.stem + '_undo_'):
-                    if str(file) not in active_snapshots:
+                    if str(file) not in active_snapshots and str(file) not in active_json_snapshots:
                         os.remove(file)
         except:
             pass
@@ -986,8 +998,22 @@ class VideoEditingController:
             redo_snapshot = temp_base / f"{video_path.stem}_redo_{timestamp}{video_path.suffix}"
             shutil.copy2(str(video_path), str(redo_snapshot))
 
+            # Also save current JSON for redo if it exists
+            json_path = video_path.with_suffix(video_path.suffix + '.json')
+            if json_path.exists():
+                redo_json_snapshot = redo_snapshot.with_suffix(redo_snapshot.suffix + '.json')
+                shutil.copy2(str(json_path), str(redo_json_snapshot))
+
             # Restore from snapshot
             shutil.copy2(str(snapshot_path), str(video_path))
+
+            # Restore JSON from snapshot if it exists
+            json_snapshot = snapshot_path.with_suffix(snapshot_path.suffix + '.json')
+            if json_snapshot.exists():
+                shutil.copy2(str(json_snapshot), str(json_path))
+            elif json_path.exists():
+                # Snapshot has no JSON but current does - delete current JSON
+                json_path.unlink()
 
             # Move to redo stack
             self.redo_stack.append((video_path, operation_name, redo_snapshot))
@@ -1039,8 +1065,22 @@ class VideoEditingController:
             undo_snapshot = temp_base / f"{video_path.stem}_undo_{timestamp}{video_path.suffix}"
             shutil.copy2(str(video_path), str(undo_snapshot))
 
+            # Also save current JSON for undo if it exists
+            json_path = video_path.with_suffix(video_path.suffix + '.json')
+            if json_path.exists():
+                undo_json_snapshot = undo_snapshot.with_suffix(undo_snapshot.suffix + '.json')
+                shutil.copy2(str(json_path), str(undo_json_snapshot))
+
             # Restore from redo snapshot
             shutil.copy2(str(redo_snapshot), str(video_path))
+
+            # Restore JSON from redo snapshot if it exists
+            redo_json_snapshot = redo_snapshot.with_suffix(redo_snapshot.suffix + '.json')
+            if redo_json_snapshot.exists():
+                shutil.copy2(str(redo_json_snapshot), str(json_path))
+            elif json_path.exists():
+                # Redo snapshot has no JSON but current does - delete current JSON
+                json_path.unlink()
 
             # Move back to undo stack
             self.undo_stack.append((video_path, operation_name, undo_snapshot))

@@ -517,6 +517,10 @@ class VideoControlsWidget(QWidget):
         self.is_playing = False
         self._updating_slider = False
 
+        # Current image and model reference for persistence
+        self.current_image = None
+        self.proxy_image_list_model = None
+
         # Loop state
         self.loop_start_frame = None
         self.loop_end_frame = None
@@ -914,10 +918,14 @@ class VideoControlsWidget(QWidget):
             """)
 
     @Slot(dict)
-    def set_video_info(self, metadata: dict):
-        """Update controls with video metadata."""
+    def set_video_info(self, metadata: dict, image=None, proxy_model=None):
+        """Update controls with video metadata and load loop markers from image."""
         if not metadata:
             return
+
+        # Store references for persistence
+        self.current_image = image
+        self.proxy_image_list_model = proxy_model
 
         fps = metadata.get('fps', 0)
         frame_count = metadata.get('frame_count', 0)
@@ -935,13 +943,27 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.setMaximum(frame_count - 1 if frame_count > 0 else 0)
         self.frame_total_label.setText(f'/ {frame_count}')
 
-        # Clear loop markers if they're out of range for the new video
-        # This prevents looping issues after video edits that change frame count
+        # Load loop markers from image if available
         max_frame = frame_count - 1 if frame_count > 0 else 0
-        if self.loop_start_frame is not None and self.loop_start_frame > max_frame:
-            self._reset_loop()
-        elif self.loop_end_frame is not None and self.loop_end_frame > max_frame:
-            self._reset_loop()
+        if image and hasattr(image, 'loop_start_frame') and hasattr(image, 'loop_end_frame'):
+            # Validate markers are within range
+            if (image.loop_start_frame is not None and
+                image.loop_end_frame is not None and
+                0 <= image.loop_start_frame <= max_frame and
+                0 <= image.loop_end_frame <= max_frame):
+                self.loop_start_frame = image.loop_start_frame
+                self.loop_end_frame = image.loop_end_frame
+                self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
+            else:
+                # Clear invalid markers (don't save - let user decide)
+                self._reset_loop(save=False)
+        else:
+            # Clear loop markers if they're out of range for the new video
+            # This prevents looping issues after video edits that change frame count
+            if self.loop_start_frame is not None and self.loop_start_frame > max_frame:
+                self._reset_loop(save=False)
+            elif self.loop_end_frame is not None and self.loop_end_frame > max_frame:
+                self._reset_loop(save=False)
 
         # Update info labels
         self.fps_label.setText(f'{fps:.2f} fps')
@@ -984,6 +1006,14 @@ class VideoControlsWidget(QWidget):
 
         # Update speed preview with new video metadata
         self._update_speed_preview()
+
+    def _save_loop_markers(self):
+        """Save current loop markers to image metadata."""
+        if self.current_image and self.proxy_image_list_model:
+            self.current_image.loop_start_frame = self.loop_start_frame
+            self.current_image.loop_end_frame = self.loop_end_frame
+            # Write to disk through the source model
+            self.proxy_image_list_model.sourceModel().write_meta_to_disk(self.current_image)
 
     def should_auto_play(self) -> bool:
         """Check if auto-play should trigger for the next video."""
@@ -1157,6 +1187,8 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
         # Update range display
         self._update_marker_range_display()
+        # Save to JSON
+        self._save_loop_markers()
 
     @Slot()
     def _set_loop_end(self):
@@ -1169,6 +1201,8 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
         # Update range display
         self._update_marker_range_display()
+        # Save to JSON
+        self._save_loop_markers()
 
     @Slot(bool)
     def _toggle_loop(self, enabled: bool):
@@ -1180,7 +1214,7 @@ class VideoControlsWidget(QWidget):
         settings.setValue('video_loop_enabled', enabled)
 
     @Slot()
-    def _reset_loop(self):
+    def _reset_loop(self, save=True):
         """Reset loop markers only (keeps loop enabled/disabled state)."""
         self.loop_start_frame = None
         self.loop_end_frame = None
@@ -1193,6 +1227,9 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.clear_loop_markers()
         # Clear range display
         self._update_marker_range_display()
+        # Save to JSON only if requested (don't save during video load validation)
+        if save:
+            self._save_loop_markers()
 
     def get_loop_range(self):
         """Get current loop range (start, end) or None if not set."""
@@ -1221,6 +1258,8 @@ class VideoControlsWidget(QWidget):
         self.loop_start_set.emit()
         # Update range display
         self._update_marker_range_display()
+        # Save to JSON
+        self._save_loop_markers()
 
     @Slot(int)
     def _on_loop_end_dragged(self, frame):
@@ -1230,6 +1269,8 @@ class VideoControlsWidget(QWidget):
         self.loop_end_set.emit()
         # Update range display
         self._update_marker_range_display()
+        # Save to JSON
+        self._save_loop_markers()
 
     @Slot()
     def _on_marker_drag_started(self):

@@ -353,6 +353,12 @@ class ImageListModel(QAbstractListModel):
                                                   rect=QRect(*marking.get('rect')),
                                                   confidence=marking.get('confidence', 1.0))
                                 image.markings.append(marking)
+                        loop_start = meta.get('loop_start_frame')
+                        if loop_start is not None and isinstance(loop_start, int):
+                            image.loop_start_frame = loop_start
+                        loop_end = meta.get('loop_end_frame')
+                        if loop_end is not None and isinstance(loop_end, int):
+                            image.loop_end_frame = loop_end
                     else:
                         error_messages.append(f'Invalid version '
                                               f'"{meta.get('version')}" in '
@@ -374,7 +380,9 @@ class ImageListModel(QAbstractListModel):
         tags = [{'tags': image.tags.copy(),
                  'rating': image.rating,
                  'crop': QRect(image.crop) if image.crop is not None else None,
-                 'markings': image.markings.copy()} for image in self.images]
+                 'markings': image.markings.copy(),
+                 'loop_start_frame': image.loop_start_frame,
+                 'loop_end_frame': image.loop_end_frame} for image in self.images]
         self.undo_stack.append(HistoryItem(action_name, tags,
                                            should_ask_for_confirmation))
         self.redo_stack.clear()
@@ -401,6 +409,10 @@ class ImageListModel(QAbstractListModel):
                              'type': marking.type.name,
                              'confidence': marking.confidence,
                              'rect': marking.rect.getRect()} for marking in image.markings]
+        if image.loop_start_frame is not None:
+            meta['loop_start_frame'] = image.loop_start_frame
+        if image.loop_end_frame is not None:
+            meta['loop_end_frame'] = image.loop_end_frame
         if does_exist or len(meta.keys()) > 1:
             try:
                 with image.path.with_suffix('.json').open('w', encoding='UTF-8') as meta_file:
@@ -435,7 +447,9 @@ class ImageListModel(QAbstractListModel):
         tags = [{'tags': image.tags.copy(),
                  'rating': image.rating,
                  'crop': QRect(image.crop) if image.crop is not None else None,
-                 'markings': image.markings.copy()} for image in self.images]
+                 'markings': image.markings.copy(),
+                 'loop_start_frame': image.loop_start_frame,
+                 'loop_end_frame': image.loop_end_frame} for image in self.images]
         destination_stack.append(HistoryItem(
             history_item.action_name, tags,
             history_item.should_ask_for_confirmation))
@@ -445,13 +459,17 @@ class ImageListModel(QAbstractListModel):
             if (image.tags == history_image_tags['tags'] and
                 image.rating == history_image_tags['rating'] and
                 image.crop == history_image_tags['crop'] and
-                image.markings == history_image_tags['markings']):
+                image.markings == history_image_tags['markings'] and
+                image.loop_start_frame == history_image_tags.get('loop_start_frame') and
+                image.loop_end_frame == history_image_tags.get('loop_end_frame')):
                 continue
             changed_image_indices.append(image_index)
             image.tags = history_image_tags['tags']
             image.rating = history_image_tags['rating']
             image.crop = history_image_tags['crop']
             image.markings = history_image_tags['markings']
+            image.loop_start_frame = history_image_tags.get('loop_start_frame')
+            image.loop_end_frame = history_image_tags.get('loop_end_frame')
             self.write_image_tags_to_disk(image)
             self.write_meta_to_disk(image)
         if changed_image_indices:
@@ -910,6 +928,12 @@ class ImageListModel(QAbstractListModel):
                                                   rect=QRect(*marking.get('rect')),
                                                   confidence=marking.get('confidence', 1.0))
                                 image.markings.append(marking)
+                        loop_start = meta.get('loop_start_frame')
+                        if loop_start is not None and isinstance(loop_start, int):
+                            image.loop_start_frame = loop_start
+                        loop_end = meta.get('loop_end_frame')
+                        if loop_end is not None and isinstance(loop_end, int):
+                            image.loop_end_frame = loop_end
 
         # Insert the image in the correct sorted position
         # Use natural sort key for insertion
