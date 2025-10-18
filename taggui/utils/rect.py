@@ -13,6 +13,7 @@ class RectPosition(str, Enum):
     BOTTOM = 'bottom'
     BL = 'bottom left'
     LEFT = 'left'
+    CENTER = 'center'
     NONE = 'none'
 
 def map_rect_position_to_cursor(handle: RectPosition) -> Qt.CursorShape | None:
@@ -24,6 +25,8 @@ def map_rect_position_to_cursor(handle: RectPosition) -> Qt.CursorShape | None:
         return Qt.CursorShape.SizeVerCursor
     elif handle == RectPosition.LEFT or handle == RectPosition.RIGHT:
         return Qt.CursorShape.SizeHorCursor
+    elif handle == RectPosition.CENTER:
+        return Qt.CursorShape.SizeAllCursor
     return None
 
 def get_rect_position(left: bool, right: bool, top: bool, bottom: bool) -> RectPosition:

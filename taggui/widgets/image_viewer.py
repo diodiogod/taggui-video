@@ -95,10 +95,14 @@ class MarkingItem(QGraphicsRectItem):
     def handleAt(self, point: QPointF) -> RectPosition:
         handle_space = -min(self.pen_half_width - self.handle_half_size,
                             0)/self.zoom_factor
-        return get_rect_position(point.x() < self.rect().left() + handle_space,
+        pos = get_rect_position(point.x() < self.rect().left() + handle_space,
                                  point.x() > self.rect().right() - handle_space,
                                  point.y() < self.rect().top() + handle_space,
                                  point.y() > self.rect().bottom() - handle_space)
+        # If we're inside the rect (not on edges), return CENTER
+        if pos == RectPosition.NONE and self.rect().contains(point):
+            return RectPosition.CENTER
+        return pos
 
     def mousePressEvent(self, event):
         self.show_crop_hint = ((event.modifiers() & Qt.KeyboardModifier.AltModifier) !=
@@ -109,6 +113,10 @@ class MarkingItem(QGraphicsRectItem):
             self.image_view.image_viewer.proxy_image_index.model().sourceModel().add_to_undo_stack(
                 action_name=f'Change marking geometry', should_ask_for_confirmation=False)
             self.setZValue(4)
+            # Store initial position for CENTER drag
+            if MarkingItem.handle_selected == RectPosition.CENTER:
+                self.drag_start_pos = event.pos()
+                self.drag_start_rect = self.rect()
             self.move()
         elif (event.button() == Qt.MouseButton.RightButton and
                 MarkingItem.handle_selected != RectPosition.NONE):
@@ -120,7 +128,21 @@ class MarkingItem(QGraphicsRectItem):
         if MarkingItem.handle_selected != RectPosition.NONE:
             self.show_crop_hint = ((event.modifiers() & Qt.KeyboardModifier.AltModifier) !=
                                    Qt.KeyboardModifier.AltModifier)
-            if ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
+
+            # Handle CENTER drag (move entire rect)
+            if MarkingItem.handle_selected == RectPosition.CENTER:
+                delta = event.pos() - self.drag_start_pos
+                rect = self.drag_start_rect.translated(delta)
+                # Clamp to image boundaries
+                if rect.left() < 0:
+                    rect.moveLeft(0)
+                if rect.top() < 0:
+                    rect.moveTop(0)
+                if rect.right() > self.image_size.width():
+                    rect.moveRight(self.image_size.width())
+                if rect.bottom() > self.image_size.height():
+                    rect.moveBottom(self.image_size.height())
+            elif ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
                 Qt.KeyboardModifier.ShiftModifier):
                 if self.rect_type == ImageMarking.CROP:
                     bucket_res = settings.value('export_bucket_res_size', type=int)
@@ -162,16 +184,19 @@ class MarkingItem(QGraphicsRectItem):
                                    MarkingItem.handle_selected,
                                    pos_quantized)
 
-            MarkingItem.handle_selected = flip_rect_position(self.handle_selected,
-                                                             rect.width() < 0,
-                                                             rect.height() < 0)
+            # Only flip position for resize operations, not for CENTER move
+            if MarkingItem.handle_selected != RectPosition.CENTER:
+                MarkingItem.handle_selected = flip_rect_position(self.handle_selected,
+                                                                 rect.width() < 0,
+                                                                 rect.height() < 0)
 
             if rect.width() == 0 or rect.height() == 0:
                 self.setRect(rect)
             else:
                 rect = rect.intersected(self.image_size)
                 self.setRect(rect)
-                self.size_changed()
+                if MarkingItem.handle_selected != RectPosition.CENTER:
+                    self.size_changed()
 
             self.move()
         super().mouseMoveEvent(event)
@@ -189,8 +214,10 @@ class MarkingItem(QGraphicsRectItem):
 
     def paint(self, painter, option, widget=None):
         if self.rect_type == ImageMarking.CROP:
+            # Only show hints and overlay during resize operations, not during CENTER move
             if (self.show_crop_hint and
                 MarkingItem.handle_selected != RectPosition.NONE and
+                MarkingItem.handle_selected != RectPosition.CENTER and
                 self==self.scene().mouseGrabberItem()):
                 hint_line_crossings = [
                     self.rect().center(),
@@ -213,12 +240,19 @@ class MarkingItem(QGraphicsRectItem):
                     painter.drawPath(path)
                     painter.setPen(QPen(QColor(0, 0, 0), 1 / self.zoom_factor, style))
                     painter.drawPath(path)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 0, 0, 127))
-            path = QPainterPath()
-            path.addRect(self.rect())
-            path.addRect(grid.visible)
-            painter.drawPath(path)
+            # Show red overlay during active resize operations (not during move or when idle)
+            if (MarkingItem.handle_selected != RectPosition.NONE and
+                MarkingItem.handle_selected != RectPosition.CENTER and
+                self==self.scene().mouseGrabberItem()):
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(255, 0, 0, 127))
+                path = QPainterPath()
+                # The red shows what will be cropped OUT
+                # First add the full image area, then subtract the crop rect to create the mask
+                path.setFillRule(Qt.OddEvenFill)
+                path.addRect(MarkingItem.image_size)
+                path.addRect(self.rect())
+                painter.drawPath(path)
 
         pen_half_width = self.pen_half_width / self.zoom_factor
         pen = QPen(self.color, 2*pen_half_width, Qt.SolidLine, Qt.RoundCap,
@@ -545,6 +579,19 @@ class ImageGraphicsView(QGraphicsView):
                                        self.last_pos.x(), view_rect.bottom())
 
     def mousePressEvent(self, event: QMouseEvent):
+        # Check if clicking on an existing marking item first
+        scene_pos = self.mapToScene(event.pos())
+        item_at_pos = self.scene().itemAt(scene_pos, self.transform())
+
+        # Walk up the parent chain to find if we're clicking on a MarkingItem
+        current_item = item_at_pos
+        while current_item:
+            if isinstance(current_item, MarkingItem):
+                # Let the MarkingItem handle this event
+                super().mousePressEvent(event)
+                return
+            current_item = current_item.parentItem()
+
         if self.insertion_mode and event.button() == Qt.MouseButton.LeftButton:
             rect_type = self.image_viewer.marking_to_add
             if rect_type == ImageMarking.NONE:

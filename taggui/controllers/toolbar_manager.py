@@ -98,6 +98,7 @@ class ToolbarManager:
         self.add_crop_action = QAction(create_add_box_icon(Qt.blue),
                                        'Add crop', self.add_action_group)
         self.add_crop_action.setCheckable(True)
+        self.add_crop_action.setToolTip('Add crop box (hold Shift while dragging to snap to bucket resolution)')
         self.toolbar.addAction(self.add_crop_action)
 
         # Apply Crop button (right after Add Crop)
