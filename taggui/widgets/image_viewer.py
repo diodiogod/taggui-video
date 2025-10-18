@@ -650,6 +650,7 @@ class ImageViewer(QWidget):
     accept_crop_addition = Signal(bool, name='allowAdditionOfCrop')
     crop_changed = Signal(Grid, name='cropChanged')
     rating_changed = Signal(float, name='ratingChanged')
+    directory_reload_requested = Signal(name='directoryReloadRequested')
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel):
         super().__init__()
@@ -1220,8 +1221,7 @@ class ImageViewer(QWidget):
             image.target_dimension = None
             image.thumbnail = None
             self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
-            # Reload directory to show updated file
-            # Need to access main_window through the model chain
-            self.proxy_image_list_model.sourceModel().parent().reload_directory()
+            # Request directory reload via signal
+            self.directory_reload_requested.emit()
         else:
             QMessageBox.critical(self, "Error", message)

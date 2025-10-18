@@ -132,6 +132,8 @@ class SignalManager:
             lambda: menu_manager.toggle_image_list_action.setChecked(
                 image_list.isVisible()))
         image_viewer.crop_changed.connect(image_list.list_view.show_crop_size)
+        image_viewer.directory_reload_requested.connect(
+            self.main_window.reload_directory)
 
     def connect_image_tags_editor_signals(self):
         """Connect image tags editor-related signals."""
