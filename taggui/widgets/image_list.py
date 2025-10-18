@@ -1,4 +1,4 @@
-wimport shutil
+import shutil
 from enum import Enum
 from functools import reduce
 from operator import or_
@@ -305,6 +305,9 @@ class ImageListView(QListView):
         self.copy_images_action.setShortcut('Ctrl+Shift+M')
         self.copy_images_action.triggered.connect(
             self.copy_selected_images)
+        self.duplicate_images_action = self.addAction('Duplicate Images')
+        self.duplicate_images_action.triggered.connect(
+            self.duplicate_selected_images)
         self.delete_images_action = self.addAction('Delete Images')
         # Setting the shortcut to `Del` creates a conflict with tag deletion.
         self.delete_images_action.setShortcut('Ctrl+Del')
@@ -330,6 +333,7 @@ class ImageListView(QListView):
         self.context_menu.addSeparator()
         self.context_menu.addAction(self.move_images_action)
         self.context_menu.addAction(self.copy_images_action)
+        self.context_menu.addAction(self.duplicate_images_action)
         self.context_menu.addAction(self.delete_images_action)
         self.context_menu.addAction(self.open_image_action)
         self.context_menu.addAction(self.open_folder_action)
@@ -488,6 +492,62 @@ class ImageListView(QListView):
                                      f'{copy_directory_path}.')
 
     @Slot()
+    def duplicate_selected_images(self):
+        selected_images = self.get_selected_images()
+        selected_image_count = len(selected_images)
+        if selected_image_count == 0:
+            return
+
+        # Get the source model to add duplicated images
+        source_model = self.proxy_image_list_model.sourceModel()
+
+        duplicated_count = 0
+        for image in selected_images:
+            try:
+                # Generate unique name for duplicate
+                original_path = image.path
+                directory = original_path.parent
+                stem = original_path.stem
+                suffix = original_path.suffix
+
+                # Find a unique name by appending "_copy" or "_copy2", etc.
+                counter = 1
+                new_stem = f"{stem}_copy"
+                new_path = directory / f"{new_stem}{suffix}"
+                while new_path.exists():
+                    counter += 1
+                    new_stem = f"{stem}_copy{counter}"
+                    new_path = directory / f"{new_stem}{suffix}"
+
+                # Copy the media file
+                shutil.copy2(original_path, new_path)
+
+                # Copy caption file if it exists
+                caption_file_path = original_path.with_suffix('.txt')
+                if caption_file_path.exists():
+                    new_caption_path = new_path.with_suffix('.txt')
+                    shutil.copy2(caption_file_path, new_caption_path)
+
+                # Copy JSON metadata file if it exists
+                json_file_path = original_path.with_suffix('.json')
+                if json_file_path.exists():
+                    new_json_path = new_path.with_suffix('.json')
+                    shutil.copy2(json_file_path, new_json_path)
+
+                # Add the new image to the model
+                source_model.add_image(new_path)
+
+                duplicated_count += 1
+
+            except OSError as e:
+                QMessageBox.critical(self, 'Error',
+                                     f'Failed to duplicate {image.path}: {str(e)}')
+
+        if duplicated_count > 0:
+            # Emit signal to reload directory (this will refresh the list)
+            self.directory_reload_requested.emit()
+
+    @Slot()
     def delete_selected_images(self):
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
@@ -588,12 +648,15 @@ class ImageListView(QListView):
             f'Move {pluralize("Image", selected_image_count)} to...')
         copy_images_action_name = (
             f'Copy {pluralize("Image", selected_image_count)} to...')
+        duplicate_images_action_name = (
+            f'Duplicate {pluralize("Image", selected_image_count)}')
         delete_images_action_name = (
             f'Delete {pluralize("Image", selected_image_count)}')
         self.copy_file_names_action.setText(copy_file_names_action_name)
         self.copy_paths_action.setText(copy_paths_action_name)
         self.move_images_action.setText(move_images_action_name)
         self.copy_images_action.setText(copy_images_action_name)
+        self.duplicate_images_action.setText(duplicate_images_action_name)
         self.delete_images_action.setText(delete_images_action_name)
         self.open_image_action.setVisible(selected_image_count == 1)
         self.open_folder_action.setVisible(selected_image_count >= 1)

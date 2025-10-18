@@ -827,3 +827,101 @@ class ImageListModel(QAbstractListModel):
         if len(markings) > 0:
             self.dataChanged.emit(image_index, image_index)
             self.write_meta_to_disk(image)
+
+    def add_image(self, image_path: Path):
+        """
+        Add a single image to the model. This is used for duplicating images
+        without reloading the entire directory.
+        """
+        # Check if image is already in the list
+        if any(img.path == image_path for img in self.images):
+            return
+
+        # Determine if it's a video
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        is_video = image_path.suffix.lower() in video_extensions
+        video_metadata = None
+        first_frame_pixmap = None
+
+        try:
+            if is_video:
+                # Handle video files
+                dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
+                if dimensions is None:
+                    return  # Skip if video info extraction fails
+            elif str(image_path).endswith('jxl'):
+                dimensions = get_jxl_size(image_path)
+            else:
+                dimensions = pilimage.open(image_path).size
+
+            if not is_video:
+                # Only get EXIF for images, not videos
+                try:
+                    with open(image_path, 'rb') as image_file:
+                        exif_tags = exifread.process_file(
+                            image_file, details=False, extract_thumbnail=False,
+                            stop_tag='Image Orientation')
+                        if 'Image Orientation' in exif_tags:
+                            orientations = (exif_tags['Image Orientation']
+                                            .values)
+                            if any(value in orientations
+                                   for value in (5, 6, 7, 8)):
+                                dimensions = (dimensions[1], dimensions[0])
+                except Exception:
+                    pass  # Ignore EXIF errors for duplicates
+        except (ValueError, OSError):
+            return  # Skip if dimensions cannot be obtained
+
+        tags = []
+        text_file_path = image_path.with_suffix('.txt')
+        if text_file_path.exists():
+            # `errors='replace'` inserts a replacement marker such as '?'
+            # when there is malformed data.
+            caption = text_file_path.read_text(encoding='utf-8',
+                                               errors='replace')
+            if caption:
+                tags = caption.split(self.tag_separator)
+                tags = [tag.strip() for tag in tags]
+                tags = [tag for tag in tags if tag]
+
+        image = Image(image_path, dimensions, tags, is_video=is_video,
+                     video_metadata=video_metadata)
+
+        json_file_path = image_path.with_suffix('.json')
+        if json_file_path.exists() and json_file_path.stat().st_size > 0:
+            with json_file_path.open(encoding='UTF-8') as source:
+                try:
+                    meta = json.load(source)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass  # Ignore JSON errors for duplicates
+                else:
+                    if meta.get('version') == 1:
+                        crop = meta.get('crop')
+                        if crop and type(crop) is list and len(crop) == 4:
+                            image.crop = QRect(*crop)
+                        rating = meta.get('rating')
+                        if rating:
+                            image.rating = rating
+                        markings = meta.get('markings')
+                        if markings and type(markings) is list:
+                            for marking in markings:
+                                marking = Marking(label=marking.get('label'),
+                                                  type=ImageMarking[marking.get('type')],
+                                                  rect=QRect(*marking.get('rect')),
+                                                  confidence=marking.get('confidence', 1.0))
+                                image.markings.append(marking)
+
+        # Insert the image in the correct sorted position
+        # Use natural sort key for insertion
+        insert_pos = 0
+        image_key = natural_sort_key(image_path)
+        for i, existing_image in enumerate(self.images):
+            if natural_sort_key(existing_image.path) > image_key:
+                insert_pos = i
+                break
+        else:
+            insert_pos = len(self.images)
+
+        self.beginInsertRows(QModelIndex(), insert_pos, insert_pos)
+        self.images.insert(insert_pos, image)
+        self.endInsertRows()
