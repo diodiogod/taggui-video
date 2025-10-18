@@ -1,5 +1,9 @@
-import cv2
 import os
+# Set environment variables BEFORE importing cv2
+os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
+os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
+
+import cv2
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl
 from PySide6.QtGui import QImage, QPixmap
@@ -7,9 +11,8 @@ from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
-# Suppress ffmpeg/opencv verbose output
-os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'  # Suppress all output
-cv2.setLogLevel(0)  # Suppress OpenCV logs
+# Suppress OpenCV logs
+cv2.setLogLevel(0)
 
 
 class VideoPlayerWidget(QWidget):
@@ -70,7 +73,23 @@ class VideoPlayerWidget(QWidget):
         self.pixmap_item = pixmap_item
 
         # Load with OpenCV to get metadata and for frame extraction
-        self.cap = cv2.VideoCapture(str(video_path))
+        # Suppress ffmpeg output by temporarily redirecting stdout and stderr at OS level
+        import sys
+        stdout_fd = sys.stdout.fileno()
+        stderr_fd = sys.stderr.fileno()
+        with open(os.devnull, 'w') as devnull:
+            old_stdout = os.dup(stdout_fd)
+            old_stderr = os.dup(stderr_fd)
+            os.dup2(devnull.fileno(), stdout_fd)
+            os.dup2(devnull.fileno(), stderr_fd)
+            try:
+                self.cap = cv2.VideoCapture(str(video_path))
+            finally:
+                os.dup2(old_stdout, stdout_fd)
+                os.dup2(old_stderr, stderr_fd)
+                os.close(old_stdout)
+                os.close(old_stderr)
+
         if not self.cap.isOpened():
             print(f"Failed to open video: {video_path}")
             return False
@@ -99,9 +118,23 @@ class VideoPlayerWidget(QWidget):
         if pixmap_item.scene():
             pixmap_item.scene().addItem(self.video_item)
 
-        # Load video into QMediaPlayer
-        self.media_player.setSource(QUrl.fromLocalFile(str(video_path)))
-        self.media_player.setVideoOutput(self.video_item)
+        # Load video into QMediaPlayer (suppress ffmpeg output)
+        import sys
+        stdout_fd = sys.stdout.fileno()
+        stderr_fd = sys.stderr.fileno()
+        with open(os.devnull, 'w') as devnull:
+            old_stdout = os.dup(stdout_fd)
+            old_stderr = os.dup(stderr_fd)
+            os.dup2(devnull.fileno(), stdout_fd)
+            os.dup2(devnull.fileno(), stderr_fd)
+            try:
+                self.media_player.setSource(QUrl.fromLocalFile(str(video_path)))
+                self.media_player.setVideoOutput(self.video_item)
+            finally:
+                os.dup2(old_stdout, stdout_fd)
+                os.dup2(old_stderr, stderr_fd)
+                os.close(old_stdout)
+                os.close(old_stderr)
 
         # Show first frame using OpenCV (for frame-accurate display)
         self._show_opencv_frame(0)
