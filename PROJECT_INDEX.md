@@ -102,10 +102,17 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `descriptive_text_edit.py`: Text editor with spell/grammar checking support
 - `image_list.py`: Image list widget
 - `image_tags_editor.py`: Image tags editor widget with descriptive mode
-- `image_viewer.py`: Image display and marking widget (1172 lines - needs refactoring)
+- `image_viewer.py`: Image display and marking widget (605 lines - refactored from 1274)
+- `marking_view.py`: Graphics view for marking insertion mode (226 lines)
 - `main_window.py`: Main application window (460 lines - refactored from 1661)
 - `video_controls.py`: Video playback controls (1065 lines - needs refactoring)
 - `video_player.py`: Video player widget
+
+#### Marking Components (widgets/marking/)
+- `__init__.py`: Package exports
+- `marking_item.py`: Interactive marking rectangle with drag/resize (307 lines)
+- `marking_label.py`: Editable text labels for markings (43 lines)
+- `resize_hint_hud.py`: Visual crop hints/guides HUD (143 lines)
 
 ## Resources
 - `clip-vit-base-patch32/`: CLIP tokenizer data files
