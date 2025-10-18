@@ -417,3 +417,98 @@ class FrameEditor:
 
         except Exception as e:
             return False, f"Error: {str(e)}"
+
+    @staticmethod
+    def change_speed(input_path: Path, output_path: Path,
+                    speed_multiplier: float, target_fps: Optional[float] = None) -> Tuple[bool, str]:
+        """
+        Change video speed by adjusting frame count (drops/duplicates frames).
+        Creates .backup of original if input == output.
+
+        Args:
+            input_path: Input video file path
+            output_path: Output video file path
+            speed_multiplier: Speed multiplier (>1.0 = faster/fewer frames, <1.0 = slower/more frames)
+            target_fps: Optional target FPS (if None, keeps original FPS)
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            # Get original video info
+            probe_cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(input_path)
+            ]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if probe_result.returncode != 0:
+                return False, f"Failed to probe video: {probe_result.stderr}"
+
+            probe_data = json.loads(probe_result.stdout)
+            original_fps = None
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    fps_str = stream.get('r_frame_rate', '0/1')
+                    num, denom = map(float, fps_str.split('/'))
+                    original_fps = num / denom if denom != 0 else 0
+                    break
+
+            if not original_fps:
+                return False, "Could not determine original FPS"
+
+            # Create backup if replacing original
+            if input_path == output_path:
+                if not create_backup(input_path):
+                    return False, "Failed to create backup"
+
+            # Use temp output if input == output
+            import shutil
+            temp_output = output_path.parent / f'.temp_speed_{output_path.name}'
+            actual_output = temp_output if input_path == output_path else output_path
+
+            # Build filter chain: setpts for speed, then fps for FPS change
+            filters = []
+
+            # Step 1: Change speed using setpts (affects duration)
+            if abs(speed_multiplier - 1.0) > 0.01:
+                # setpts=PTS/speed makes video faster (smaller PTS values)
+                filters.append(f'setpts=PTS/{speed_multiplier}')
+
+            # Step 2: Change FPS (affects frame count for the new duration)
+            final_fps = target_fps if target_fps is not None else original_fps
+            filters.append(f'fps={final_fps}')
+
+            filter_string = ','.join(filters)
+
+            # ffmpeg command to change speed and/or fps
+            cmd = [
+                'ffmpeg',
+                '-i', str(input_path),
+                '-filter:v', filter_string,
+                '-c:a', 'copy',  # Keep audio unchanged
+                '-y',
+                str(actual_output)
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            # If successful and input == output, replace input with temp
+            if result.returncode == 0 and input_path == output_path:
+                shutil.move(str(temp_output), str(output_path))
+
+            # Cleanup temp if it still exists
+            if temp_output.exists():
+                temp_output.unlink()
+
+            if result.returncode == 0:
+                return True, f"Successfully changed speed to {speed_multiplier:.2f}x (FPS: {final_fps:.2f})"
+            else:
+                return False, f"ffmpeg error: {result.stderr}"
+
+        except FileNotFoundError:
+            return False, "ffmpeg not found. Please install ffmpeg."
+        except Exception as e:
+            return False, f"Error: {str(e)}"
