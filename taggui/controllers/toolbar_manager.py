@@ -36,6 +36,7 @@ class ToolbarManager:
         self.always_show_controls_btn = None
         self.fixed_marker_size_spinbox = None
         self.extract_range_action = None
+        self.extract_range_rough_btn = None
         self.remove_range_action = None
         self.remove_frame_action = None
         self.repeat_frame_action = None
@@ -218,8 +219,31 @@ class ToolbarManager:
         self.toolbar.addWidget(marker_size_widget)
 
         # Video edit buttons
+        # Rough extract - floppy disk emoji button (similar to save icon but distinct)
+        self.extract_range_rough_btn = QPushButton('💾')
+        self.extract_range_rough_btn.setToolTip('Extract range* (ROUGH: fast keyframe cut, preserves quality, NOT frame-accurate)')
+        self.extract_range_rough_btn.setMaximumWidth(32)
+        self.extract_range_rough_btn.setMaximumHeight(32)
+        self.extract_range_rough_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 18px;
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 165, 0, 60);
+                border: 1px solid rgba(255, 165, 0, 150);
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 165, 0, 90);
+            }
+        """)
+        self.toolbar.addWidget(self.extract_range_rough_btn)
+
         self.extract_range_action = QAction(QIcon.fromTheme('document-save'),
-            'Extract range to new video', self.main_window)
+            'Extract range (PRECISE: frame-accurate, slow, re-encodes)', self.main_window)
         self.toolbar.addAction(self.extract_range_action)
 
         self.remove_range_action = QAction(QIcon.fromTheme('edit-cut'),

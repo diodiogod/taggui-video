@@ -17,10 +17,16 @@ class VideoEditor:
 
     # Frame editing operations
     @staticmethod
+    def extract_range_rough(input_path: Path, output_path: Path,
+                            start_frame: int, end_frame: int, fps: float) -> Tuple[bool, str]:
+        """Extract a rough frame range using keyframes (fast, no re-encoding)."""
+        return FrameEditor.extract_range_rough(input_path, output_path, start_frame, end_frame, fps)
+
+    @staticmethod
     def extract_range(input_path: Path, output_path: Path,
-                      start_frame: int, end_frame: int, fps: float) -> Tuple[bool, str]:
-        """Extract a frame range from video."""
-        return FrameEditor.extract_range(input_path, output_path, start_frame, end_frame, fps)
+                      start_frame: int, end_frame: int, fps: float, reverse: bool = False) -> Tuple[bool, str]:
+        """Extract a frame range from video (precise, re-encodes)."""
+        return FrameEditor.extract_range(input_path, output_path, start_frame, end_frame, fps, reverse)
 
     @staticmethod
     def remove_range(input_path: Path, output_path: Path,
