@@ -406,6 +406,11 @@ class VideoPlayerWidget(QWidget):
                 # Update QMediaPlayer rate
                 self.media_player.setPlaybackRate(self.playback_speed)
 
+    def set_muted(self, muted: bool):
+        """Set audio mute state."""
+        if self.audio_output:
+            self.audio_output.setMuted(muted)
+
     def cleanup(self):
         """Release video resources."""
         self.stop()

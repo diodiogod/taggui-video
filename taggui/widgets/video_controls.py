@@ -214,6 +214,7 @@ class VideoControlsWidget(QWidget):
     loop_reset = Signal()
     loop_toggled = Signal(bool)
     speed_changed = Signal(float)  # Playback speed multiplier
+    mute_toggled = Signal(bool)  # Mute state (True = muted)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -270,6 +271,23 @@ class VideoControlsWidget(QWidget):
         self.stop_btn.setToolTip('Stop')
         self.stop_btn.setMaximumWidth(40)
         self.stop_btn.clicked.connect(self.stop_requested.emit)
+
+        self.mute_btn = QPushButton('🔇')
+        self.mute_btn.setToolTip('Toggle Mute/Unmute')
+        self.mute_btn.setMaximumWidth(40)
+        self.mute_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b2b;
+                border: 2px solid #555;
+                border-radius: 4px;
+                font-size: 18px;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #666;
+            }
+        """)
+        self.mute_btn.clicked.connect(self._toggle_mute)
 
         # Frame navigation with icons
         self.prev_frame_btn = QPushButton()
@@ -355,6 +373,7 @@ class VideoControlsWidget(QWidget):
 
         controls_layout.addWidget(self.play_pause_btn)
         controls_layout.addWidget(self.stop_btn)
+        controls_layout.addWidget(self.mute_btn)
         controls_layout.addSpacing(20)
         controls_layout.addWidget(self.skip_back_btn)
         controls_layout.addWidget(self.prev_frame_btn)
@@ -483,8 +502,14 @@ class VideoControlsWidget(QWidget):
         # Auto-play state (persists across video changes)
         self.auto_play_enabled = False
 
+        # Mute state (persists across video changes in session, not across reboots)
+        self.is_muted = True  # Default to muted
+
         # Load persistent settings
         self._load_persistent_settings()
+
+        # Initialize mute button appearance
+        self._update_mute_button()
 
         # Hide by default
         self.hide()
@@ -512,7 +537,7 @@ class VideoControlsWidget(QWidget):
 
         # Scale button sizes
         button_size = int(40 * scale)
-        for btn in [self.play_pause_btn, self.stop_btn, self.prev_frame_btn,
+        for btn in [self.play_pause_btn, self.stop_btn, self.mute_btn, self.prev_frame_btn,
                     self.next_frame_btn, self.skip_back_btn, self.skip_forward_btn]:
             btn.setMaximumWidth(button_size)
             btn.setMaximumHeight(button_size)
@@ -717,6 +742,48 @@ class VideoControlsWidget(QWidget):
         self.speed_value_label.setText('1.00x')
         self.speed_changed.emit(1.0)
 
+    @Slot()
+    def _toggle_mute(self):
+        """Toggle mute/unmute state."""
+        self.is_muted = not self.is_muted
+        self.mute_toggled.emit(self.is_muted)
+        self._update_mute_button()
+
+    def _update_mute_button(self):
+        """Update mute button appearance based on state."""
+        if self.is_muted:
+            self.mute_btn.setText('🔇')
+            self.mute_btn.setToolTip('Unmute Audio')
+            # Normal state when muted
+            self.mute_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2b2b2b;
+                    border: 2px solid #555;
+                    border-radius: 4px;
+                    font-size: 18px;
+                }
+                QPushButton:hover {
+                    background-color: #3a3a3a;
+                    border-color: #666;
+                }
+            """)
+        else:
+            self.mute_btn.setText('🔊')
+            self.mute_btn.setToolTip('Mute Audio')
+            # Green glow when unmuted
+            self.mute_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3a1a;
+                    border: 2px solid #4CAF50;
+                    border-radius: 4px;
+                    font-size: 18px;
+                }
+                QPushButton:hover {
+                    background-color: #254a25;
+                    border-color: #5FBF60;
+                }
+            """)
+
     @Slot(dict)
     def set_video_info(self, metadata: dict):
         """Update controls with video metadata."""
@@ -779,6 +846,9 @@ class VideoControlsWidget(QWidget):
         # Restore loop state after video loads
         if self.is_looping:
             self.loop_toggled.emit(True)
+
+        # Restore mute state after video loads (emit to sync with video player)
+        self.mute_toggled.emit(self.is_muted)
 
     def should_auto_play(self) -> bool:
         """Check if auto-play should trigger for the next video."""
