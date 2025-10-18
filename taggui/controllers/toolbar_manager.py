@@ -219,8 +219,8 @@ class ToolbarManager:
         self.toolbar.addWidget(marker_size_widget)
 
         # Video edit buttons
-        # Rough extract - floppy disk emoji button (similar to save icon but distinct)
-        self.extract_range_rough_btn = QPushButton('💾')
+        # Rough extract - key emoji button (keyframe extraction)
+        self.extract_range_rough_btn = QPushButton('🔑')
         self.extract_range_rough_btn.setToolTip('Extract range* (ROUGH: fast keyframe cut, preserves quality, NOT frame-accurate)')
         self.extract_range_rough_btn.setMaximumWidth(32)
         self.extract_range_rough_btn.setMaximumHeight(32)

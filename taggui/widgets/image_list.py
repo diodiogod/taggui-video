@@ -1,4 +1,4 @@
-import shutil
+wimport shutil
 from enum import Enum
 from functools import reduce
 from operator import or_
