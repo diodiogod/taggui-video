@@ -218,6 +218,8 @@ class ImageListView(QListView):
         self.open_image_action.triggered.connect(self.open_image)
         self.open_folder_action = self.addAction('Open on Windows Explorer')
         self.open_folder_action.triggered.connect(self.open_folder)
+        self.restore_backup_action = self.addAction('Restore from Backup')
+        self.restore_backup_action.triggered.connect(self.restore_backup)
 
         self.context_menu = QMenu(self)
         self.context_menu.addAction('Select All Images', self.selectAll,
@@ -234,6 +236,8 @@ class ImageListView(QListView):
         self.context_menu.addAction(self.delete_images_action)
         self.context_menu.addAction(self.open_image_action)
         self.context_menu.addAction(self.open_folder_action)
+        self.context_menu.addSeparator()
+        self.context_menu.addAction(self.restore_backup_action)
         self.selectionModel().selectionChanged.connect(
             self.update_context_menu_actions)
 
@@ -428,6 +432,55 @@ class ImageListView(QListView):
             QProcess.startDetached('explorer.exe', ['/select,', str(file_path)])
 
     @Slot()
+    def restore_backup(self):
+        """Restore selected images/videos from their .backup files."""
+        from PySide6.QtWidgets import QMessageBox
+        import shutil
+
+        selected_images = self.get_selected_images()
+        if not selected_images:
+            return
+
+        # Find which images have backups
+        images_with_backups = []
+        for img in selected_images:
+            backup_path = Path(str(img.path) + '.backup')
+            if backup_path.exists():
+                images_with_backups.append((img, backup_path))
+
+        if not images_with_backups:
+            QMessageBox.information(None, "No Backups", "No backup files found for selected images.")
+            return
+
+        # Confirm restoration
+        count = len(images_with_backups)
+        reply = QMessageBox.question(
+            None,
+            "Restore from Backup",
+            f"Restore {count} {'file' if count == 1 else 'files'} from backup?\n\n"
+            f"This will replace the current {'file' if count == 1 else 'files'} with the backup version.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Restore files
+        restored = 0
+        for img, backup_path in images_with_backups:
+            try:
+                shutil.copy2(str(backup_path), str(img.path))
+                restored += 1
+            except Exception as e:
+                QMessageBox.warning(None, "Restore Error", f"Failed to restore {img.path.name}:\n{str(e)}")
+
+        if restored > 0:
+            QMessageBox.information(None, "Restore Complete", f"Successfully restored {restored} {'file' if restored == 1 else 'files'}.")
+            # Trigger reload to update thumbnails
+            self.directory_reload_requested.emit()
+
+    @Slot()
     def update_context_menu_actions(self):
         selected_image_count = len(self.selectedIndexes())
         copy_file_names_action_name = (
@@ -447,6 +500,15 @@ class ImageListView(QListView):
         self.delete_images_action.setText(delete_images_action_name)
         self.open_image_action.setVisible(selected_image_count == 1)
         self.open_folder_action.setVisible(selected_image_count >= 1)
+
+        # Check if any selected images have backups
+        has_backup = False
+        if selected_image_count > 0:
+            selected_images = self.get_selected_images()
+            has_backup = any((Path(str(img.path) + '.backup')).exists() for img in selected_images)
+        restore_action_name = f'Restore {pluralize("Backup", selected_image_count)}'
+        self.restore_backup_action.setText(restore_action_name)
+        self.restore_backup_action.setVisible(has_backup)
 
 
 class ImageList(QDockWidget):

@@ -95,6 +95,23 @@ class MenuManager:
         self.redo_action.setDisabled(True)
         edit_menu.addAction(self.redo_action)
 
+        edit_menu.addSeparator()
+
+        # Video edit undo/redo
+        undo_video_edit_action = QAction('Undo Video Edit', parent=self.main_window)
+        undo_video_edit_action.setShortcut(QKeySequence('Ctrl+Shift+Z'))
+        undo_video_edit_action.triggered.connect(
+            lambda: self.main_window.video_editing_controller.undo_last_edit())
+        edit_menu.addAction(undo_video_edit_action)
+
+        redo_video_edit_action = QAction('Redo Video Edit', parent=self.main_window)
+        redo_video_edit_action.setShortcut(QKeySequence('Ctrl+Shift+Y'))
+        redo_video_edit_action.triggered.connect(
+            lambda: self.main_window.video_editing_controller.redo_last_edit())
+        edit_menu.addAction(redo_video_edit_action)
+
+        edit_menu.addSeparator()
+
         find_and_replace_action = QAction('Find and Replace...', parent=self.main_window)
         find_and_replace_action.setShortcut(QKeySequence('Ctrl+R'))
         find_and_replace_action.triggered.connect(

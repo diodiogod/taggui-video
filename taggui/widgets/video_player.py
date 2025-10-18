@@ -7,9 +7,11 @@ import cv2
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget
+from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget, QMessageBox
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+
+from utils.video import VideoValidator
 
 # Suppress OpenCV logs
 cv2.setLogLevel(0)
@@ -44,6 +46,10 @@ class VideoPlayerWidget(QWidget):
         self.loop_start = None
         self.loop_end = None
 
+        # Corruption detection
+        self.consecutive_frame_failures = 0
+        self.corruption_warning_shown = False
+
         # QMediaPlayer for smooth playback
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -63,6 +69,10 @@ class VideoPlayerWidget(QWidget):
         """Load a video file."""
         # Stop any previous playback
         self.pause()
+
+        # Reset corruption detection state
+        self.consecutive_frame_failures = 0
+        self.corruption_warning_shown = False
 
         # Release old OpenCV capture
         if self.cap:
@@ -276,7 +286,27 @@ class VideoPlayerWidget(QWidget):
         ret, frame = self.cap.read()
         if not ret:
             print(f"Failed to read frame {frame_number}")
+            self.consecutive_frame_failures += 1
+
+            # Show warning if multiple consecutive failures detected
+            if self.consecutive_frame_failures >= 3 and not self.corruption_warning_shown:
+                self.corruption_warning_shown = True
+                self.pause()  # Stop playback
+
+                backup_path = Path(str(self.video_path) + '.backup')
+                backup_msg = f"\n\nA backup file exists at:\n{backup_path}" if backup_path.exists() else ""
+
+                QMessageBox.warning(
+                    None,
+                    "Video Corruption Detected",
+                    f"Failed to read multiple frames from:\n{self.video_path.name}\n\n"
+                    f"The video file appears to be corrupted or damaged. "
+                    f"Playback has been paused.{backup_msg}"
+                )
             return
+
+        # Reset failure counter on successful read
+        self.consecutive_frame_failures = 0
 
         # Convert BGR to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

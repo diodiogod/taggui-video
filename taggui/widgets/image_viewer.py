@@ -590,6 +590,20 @@ class ImageViewer(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        # Save undo snapshot before editing
+        try:
+            parent = self.parent()
+            while parent:
+                if hasattr(parent, 'video_editing_controller'):
+                    parent.video_editing_controller._save_undo_snapshot(
+                        Path(image.path),
+                        f"Crop to {crop_rect.width()}x{crop_rect.height()}"
+                    )
+                    break
+                parent = parent.parent()
+        except:
+            pass
+
         # Apply the crop
         success, message = apply_crop(Path(image.path), crop_rect)
 
