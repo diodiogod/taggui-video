@@ -81,10 +81,12 @@ class FrameEditor:
 
     @staticmethod
     def extract_range(input_path: Path, output_path: Path,
-                      start_frame: int, end_frame: int, fps: float, reverse: bool = False) -> Tuple[bool, str]:
+                      start_frame: int, end_frame: int, fps: float, reverse: bool = False,
+                      speed_factor: float = 1.0, target_fps: Optional[float] = None) -> Tuple[bool, str]:
         """
         Extract a frame range from video with FRAME ACCURACY (re-encodes).
         SLOW but PRECISE. Creates .backup of original if input == output.
+        Optionally apply speed and/or FPS changes in the same encode pass.
 
         Args:
             input_path: Input video file path
@@ -93,6 +95,8 @@ class FrameEditor:
             end_frame: Ending frame number (inclusive)
             fps: Video frames per second
             reverse: If True, reverse the extracted video
+            speed_factor: Speed multiplier (2.0 = 2x faster, 0.5 = half speed). Default: 1.0
+            target_fps: Target FPS for output. If None, keeps original FPS. Default: None
 
         Returns:
             Tuple of (success: bool, message: str)
@@ -116,12 +120,35 @@ class FrameEditor:
             vf_parts = [f'trim=start_frame={start_frame}:end_frame={end_frame+1}', 'setpts=PTS-STARTPTS']
             if reverse:
                 vf_parts.append('reverse')
+
+            # Add speed filter if needed
+            if abs(speed_factor - 1.0) >= 0.01:
+                vf_parts.append(f'setpts=PTS/{speed_factor}')
+
+            # Add FPS filter if needed
+            if target_fps is not None:
+                vf_parts.append(f'fps={target_fps}')
+
             vf = ','.join(vf_parts)
 
             # Build audio filter chain
             af_parts = [f'atrim=start={start_time}:duration={duration}', 'asetpts=PTS-STARTPTS']
             if reverse:
                 af_parts.append('areverse')
+
+            # Add audio speed filter if needed (atempo has limitations: 0.5-2.0 range)
+            if abs(speed_factor - 1.0) >= 0.01:
+                # atempo only supports 0.5-2.0, so chain multiple filters if needed
+                tempo = speed_factor
+                while tempo > 2.0:
+                    af_parts.append('atempo=2.0')
+                    tempo /= 2.0
+                while tempo < 0.5:
+                    af_parts.append('atempo=0.5')
+                    tempo /= 0.5
+                if abs(tempo - 1.0) >= 0.01:
+                    af_parts.append(f'atempo={tempo}')
+
             af = ','.join(af_parts)
 
             # ffmpeg command to extract range - frame-accurate extraction
@@ -152,8 +179,19 @@ class FrameEditor:
                 temp_output.unlink()
 
             if result.returncode == 0:
-                # Verify we got the expected number of frames
-                expected_frames = end_frame - start_frame + 1
+                # Calculate expected output frames (considering speed/FPS changes)
+                input_frames = end_frame - start_frame + 1
+
+                # If speed or FPS changed, calculate expected output frames
+                if abs(speed_factor - 1.0) >= 0.01 or target_fps is not None:
+                    original_duration = input_frames / fps
+                    new_duration = original_duration / speed_factor
+                    output_fps = target_fps if target_fps is not None else fps
+                    expected_output_frames = max(1, int(new_duration * output_fps))
+                else:
+                    expected_output_frames = input_frames
+
+                # Verify output frame count
                 probe_cmd = [
                     'ffprobe',
                     '-v', 'error',
@@ -167,15 +205,21 @@ class FrameEditor:
                     probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
                     if probe_result.returncode == 0:
                         actual_frames = int(probe_result.stdout.strip())
-                        if actual_frames != expected_frames:
+                        # Allow small tolerance for rounding differences
+                        if abs(actual_frames - expected_output_frames) > 2:
                             return False, (f"Extraction incomplete: got {actual_frames} frames "
-                                         f"but expected {expected_frames} frames. "
+                                         f"but expected {expected_output_frames} frames. "
                                          f"This may indicate a corrupted source video.")
                 except:
                     pass  # Skip verification if ffprobe fails
 
                 reversed_msg = " (reversed)" if reverse else ""
-                return True, f"Successfully extracted {expected_frames} frames ({start_frame}-{end_frame}){reversed_msg}"
+                speed_msg = f" at {speed_factor}x speed" if abs(speed_factor - 1.0) >= 0.01 else ""
+                fps_msg = f" @ {target_fps}fps" if target_fps is not None else ""
+
+                # Get actual frame count for success message
+                actual_output_frames = actual_frames if 'actual_frames' in locals() else expected_output_frames
+                return True, f"Successfully extracted {input_frames} frames ({start_frame}-{end_frame}) → {actual_output_frames} output frames{reversed_msg}{speed_msg}{fps_msg}"
             else:
                 return False, f"ffmpeg error: {result.stderr}"
 

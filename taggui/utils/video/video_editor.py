@@ -24,9 +24,11 @@ class VideoEditor:
 
     @staticmethod
     def extract_range(input_path: Path, output_path: Path,
-                      start_frame: int, end_frame: int, fps: float, reverse: bool = False) -> Tuple[bool, str]:
-        """Extract a frame range from video (precise, re-encodes)."""
-        return FrameEditor.extract_range(input_path, output_path, start_frame, end_frame, fps, reverse)
+                      start_frame: int, end_frame: int, fps: float, reverse: bool = False,
+                      speed_factor: float = 1.0, target_fps: Optional[float] = None) -> Tuple[bool, str]:
+        """Extract a frame range from video (precise, re-encodes). Optionally apply speed/FPS changes."""
+        return FrameEditor.extract_range(input_path, output_path, start_frame, end_frame, fps,
+                                        reverse, speed_factor, target_fps)
 
     @staticmethod
     def remove_range(input_path: Path, output_path: Path,
