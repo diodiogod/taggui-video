@@ -855,7 +855,8 @@ class VideoControlsWidget(QWidget):
         new_duration = original_duration / self._extended_speed
 
         # Calculate new frame count based on target FPS and new duration
-        new_frame_count = max(1, int(new_duration * preview_fps))
+        # Use round() to match ffmpeg's fps filter behavior better
+        new_frame_count = max(1, round(new_duration * preview_fps))
 
         # Format duration as seconds with 1 decimal
         duration_str = f'{new_duration:.1f}s'
@@ -1137,27 +1138,31 @@ class VideoControlsWidget(QWidget):
         if self.loop_start_frame is not None and self.loop_end_frame is not None:
             frame_count = abs(self.loop_end_frame - self.loop_start_frame) + 1
 
-            # Check if we should show speed prediction
-            if abs(self._extended_speed - 1.0) >= 0.01 and self._current_fps > 0:
-                # Speed is different from 1.0x - show full prediction
+            # Check if we should show speed/FPS prediction
+            # Show full prediction if either speed changed OR custom FPS is set
+            if (abs(self._extended_speed - 1.0) >= 0.01 or self._custom_preview_fps is not None) and self._current_fps > 0:
+                # Speed/FPS changed - show full prediction
                 preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
 
                 # Calculate for marker range
                 original_duration = frame_count / self._current_fps
                 new_duration = original_duration / self._extended_speed
-                new_frame_count = max(1, int(new_duration * preview_fps))
+                # Use round() to match ffmpeg's fps filter behavior better
+                new_frame_count = max(1, round(new_duration * preview_fps))
 
                 # Format marker range display: [81 frames → 23f @16fps 3.5x]
                 fps_indicator = f'*{preview_fps:.0f}' if self._custom_preview_fps else f'{preview_fps:.0f}'
                 marker_text = f'[{frame_count} frames → {new_frame_count}f @{fps_indicator}fps {self._extended_speed:.1f}x]'
             else:
-                # Speed is 1.0x - show basic frame count only
+                # Speed is 1.0x and no custom FPS - show basic frame count only
                 marker_text = f'[{frame_count} frames]'
 
             # Create marker range label
             marker_label = QLabel(marker_text)
             marker_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; font-size: 10px; }")
             marker_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            marker_label.setToolTip('Frame count between markers. Click to set custom FPS for preview calculation.')
+            marker_label.mousePressEvent = self._on_preview_label_clicked
 
             self.preview_labels_layout.addWidget(marker_label)
 
@@ -1169,7 +1174,8 @@ class VideoControlsWidget(QWidget):
             # Calculate for full video speed preview
             full_original_duration = self._current_frame_count / self._current_fps
             full_new_duration = full_original_duration / self._extended_speed
-            full_new_frame_count = max(1, int(full_new_duration * preview_fps))
+            # Use round() to match ffmpeg's fps filter behavior better
+            full_new_frame_count = max(1, round(full_new_duration * preview_fps))
 
             # Format duration as seconds with 1 decimal
             duration_str = f'{full_new_duration:.1f}s'

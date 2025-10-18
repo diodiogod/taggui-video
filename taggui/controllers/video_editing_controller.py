@@ -146,7 +146,8 @@ class VideoEditingController:
 
     def extract_video_range(self):
         """Extract the marked range with frame accuracy (re-encodes)."""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QDialogButtonBox
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel,
+                                       QCheckBox, QDialogButtonBox, QPushButton)
 
         video_player = self.main_window.image_viewer.video_player
         video_controls = self.main_window.image_viewer.video_controls
@@ -164,24 +165,87 @@ class VideoEditingController:
 
         start_frame, end_frame = loop_range
         fps = video_player.get_fps()
+        frame_count = end_frame - start_frame + 1
         input_path = Path(video_player.video_path)
 
-        # Create dialog with reverse option
+        # Get current speed/FPS settings from video controls
+        current_speed = video_controls._extended_speed
+        custom_fps = video_controls._custom_preview_fps
+
+        # Store speed/FPS settings (will be updated by button)
+        speed_fps_settings = {
+            'speed': current_speed if abs(current_speed - 1.0) >= 0.01 else None,
+            'fps': custom_fps
+        }
+
+        # Create dialog
         dialog = QDialog(self.main_window)
         dialog.setWindowTitle("Extract Range (Precise)")
         layout = QVBoxLayout(dialog)
 
         info_label = QLabel(
-            f"Extract frames {start_frame}-{end_frame} (discard rest)?\n\n"
+            f"Extract frames {start_frame}-{end_frame} ({frame_count} frames)\n"
+            f"Discard all other frames from video.\n\n"
             f"⚠ SLOW: Re-encodes video for frame accuracy\n"
             f"✓ Frame-accurate cut\n\n"
             f"Original will be saved as {input_path.name}.backup"
         )
         layout.addWidget(info_label)
 
+        # Reverse option
         reverse_checkbox = QCheckBox("Reverse video (plays backwards)")
         reverse_checkbox.setChecked(False)
         layout.addWidget(reverse_checkbox)
+
+        # Speed/FPS configuration button
+        speed_fps_button = QPushButton("⚡ SPEED/FPS (Optional) - Avoid Double Re-encode")
+        speed_fps_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                font-weight: bold;
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+
+        # Status label showing current settings
+        speed_fps_status = QLabel()
+
+        def update_speed_fps_status():
+            if speed_fps_settings['speed'] is not None or speed_fps_settings['fps'] is not None:
+                parts = []
+                if speed_fps_settings['speed'] is not None:
+                    parts.append(f"Speed: {speed_fps_settings['speed']:.2f}x")
+                if speed_fps_settings['fps'] is not None:
+                    parts.append(f"FPS: {speed_fps_settings['fps']:.2f}")
+                speed_fps_status.setText(f"✓ Active: {' | '.join(parts)}")
+                speed_fps_status.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
+            else:
+                speed_fps_status.setText("No speed/FPS changes (click button to configure)")
+                speed_fps_status.setStyleSheet("QLabel { color: #999; }")
+
+        def open_speed_fps_dialog():
+            # Open speed/FPS dialog with live preview
+            result = self._show_speed_fps_dialog(
+                frame_count, fps,
+                initial_speed=speed_fps_settings['speed'] or 1.0,
+                initial_fps=speed_fps_settings['fps']
+            )
+            if result is not None:
+                speed_fps_settings['speed'] = result['speed']
+                speed_fps_settings['fps'] = result['fps']
+                update_speed_fps_status()
+
+        speed_fps_button.clicked.connect(open_speed_fps_dialog)
+        layout.addWidget(speed_fps_button)
+        layout.addWidget(speed_fps_status)
+
+        # Initialize status
+        update_speed_fps_status()
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
@@ -192,15 +256,26 @@ class VideoEditingController:
             return
 
         reverse = reverse_checkbox.isChecked()
+        speed_factor = speed_fps_settings['speed'] if speed_fps_settings['speed'] is not None else 1.0
+        target_fps = speed_fps_settings['fps']
 
         # Save undo snapshot before editing
-        operation_desc = f"Extract frames {start_frame}-{end_frame}" + (" (reversed)" if reverse else "")
+        operation_desc = f"Extract frames {start_frame}-{end_frame}"
+        if reverse:
+            operation_desc += " (reversed)"
+        if abs(speed_factor - 1.0) >= 0.01:
+            operation_desc += f" at {speed_factor}x speed"
+        if target_fps is not None:
+            operation_desc += f" @ {target_fps}fps"
         self._save_undo_snapshot(input_path, operation_desc)
 
-        # Extract range (overwrites original, creates backup)
+        # Extract range with optional speed/FPS changes (all in one ffmpeg pass)
         success, message = VideoEditor.extract_range(
             input_path, input_path,
-            start_frame, end_frame, fps, reverse=reverse
+            start_frame, end_frame, fps,
+            reverse=reverse,
+            speed_factor=speed_factor,
+            target_fps=target_fps
         )
 
         if success:
@@ -208,6 +283,96 @@ class VideoEditingController:
             self.main_window.reload_directory()
         else:
             QMessageBox.critical(self.main_window, "Error", message)
+
+    def _show_speed_fps_dialog(self, frame_count, fps, initial_speed=1.0, initial_fps=None):
+        """
+        Show speed/FPS configuration dialog with live preview.
+        Returns dict with 'speed' and 'fps' keys, or None if cancelled.
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                                       QDoubleSpinBox, QDialogButtonBox, QCheckBox)
+
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Speed/FPS Configuration")
+        layout = QVBoxLayout(dialog)
+
+        # Current video info
+        info_label = QLabel(f"Input: {frame_count} frames @ {fps:.2f} fps")
+        layout.addWidget(info_label)
+
+        # Speed multiplier input
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(QLabel("Speed multiplier:"))
+        speed_spinbox = QDoubleSpinBox()
+        speed_spinbox.setMinimum(0.1)
+        speed_spinbox.setMaximum(100.0)
+        speed_spinbox.setValue(initial_speed)
+        speed_spinbox.setSingleStep(0.1)
+        speed_spinbox.setDecimals(2)
+        speed_spinbox.setSuffix('x')
+        speed_layout.addWidget(speed_spinbox)
+        layout.addLayout(speed_layout)
+
+        # FPS override option
+        fps_checkbox = QCheckBox("Override FPS (recommended: 16 fps for LoRA training)")
+        fps_checkbox.setChecked(initial_fps is not None)
+        layout.addWidget(fps_checkbox)
+
+        fps_spinbox = QDoubleSpinBox()
+        fps_spinbox.setMinimum(1.0)
+        fps_spinbox.setMaximum(120.0)
+        fps_spinbox.setValue(initial_fps if initial_fps is not None else 16.0)
+        fps_spinbox.setSuffix(' fps')
+        fps_spinbox.setEnabled(fps_checkbox.isChecked())
+        layout.addWidget(fps_spinbox)
+
+        fps_checkbox.toggled.connect(fps_spinbox.setEnabled)
+
+        # Preview label (updates live)
+        preview_label = QLabel()
+        preview_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; padding: 8px; }")
+        layout.addWidget(preview_label)
+
+        def update_preview():
+            speed = speed_spinbox.value()
+            target_fps = fps_spinbox.value() if fps_checkbox.isChecked() else fps
+
+            # Calculate new duration based on speed
+            original_duration = frame_count / fps if fps > 0 else 0
+            new_duration = original_duration / speed
+
+            # Calculate new frame count based on target FPS and new duration
+            # Use round() to match ffmpeg's fps filter behavior
+            new_frames = max(1, round(new_duration * target_fps))
+
+            preview_label.setText(
+                f"Output: {new_frames} frames @ {target_fps:.2f} fps | {new_duration:.1f}s"
+            )
+
+        speed_spinbox.valueChanged.connect(update_preview)
+        fps_checkbox.toggled.connect(update_preview)
+        fps_spinbox.valueChanged.connect(update_preview)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # Initialize preview
+        update_preview()
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        # Return settings (None means "no change" for speed 1.0 or unchecked FPS)
+        final_speed = speed_spinbox.value()
+        final_fps = fps_spinbox.value() if fps_checkbox.isChecked() else None
+
+        return {
+            'speed': final_speed if abs(final_speed - 1.0) >= 0.01 else None,
+            'fps': final_fps
+        }
 
     def remove_video_range(self):
         """Remove the marked range from the video."""
@@ -784,7 +949,8 @@ class VideoEditingController:
             new_duration = original_duration / speed
 
             # Calculate new frame count based on target FPS and new duration
-            new_frames = max(1, int(new_duration * target_fps))
+            # Use round() to match ffmpeg's fps filter behavior
+            new_frames = max(1, round(new_duration * target_fps))
 
             preview_label.setText(f"Result: {new_frames} frames @ {target_fps:.2f} fps | {new_duration:.1f}s")
 
