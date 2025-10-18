@@ -488,14 +488,25 @@ class VideoPlayerWidget(QWidget):
         self.stop()
         self.position_timer.stop()
 
+        # Release QMediaPlayer first (more sticky on Windows)
         if self.media_player:
             self.media_player.stop()
-            self.media_player.setSource(QUrl())
+            self.media_player.setVideoOutput(None)  # Disconnect video output
+            self.media_player.setSource(QUrl())  # Clear source
 
+        # Release OpenCV capture
         if self.cap:
             self.cap.release()
             self.cap = None
 
+        # Remove video item from scene
         if self.video_item and self.video_item.scene():
             self.video_item.scene().removeItem(self.video_item)
             self.video_item = None
+
+        # Reset video path to indicate no video is loaded
+        self.video_path = None
+
+        # Force Python garbage collection to release file handles immediately
+        import gc
+        gc.collect()

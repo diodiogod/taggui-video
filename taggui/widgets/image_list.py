@@ -559,18 +559,82 @@ class ImageListView(QListView):
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
+
+        # Check if any selected videos are currently loaded and unload them
+        # Hierarchy: ImageListView -> container -> ImageList (QDockWidget) -> MainWindow
+        main_window = self.parent().parent().parent()  # Get main window reference
+        video_was_cleaned = False
+        if hasattr(main_window, 'image_viewer') and hasattr(main_window.image_viewer, 'video_player'):
+            video_player = main_window.image_viewer.video_player
+            if video_player.video_path:
+                currently_loaded_path = Path(video_player.video_path)
+                # Check if we're deleting the currently loaded video
+                for image in selected_images:
+                    if image.path == currently_loaded_path:
+                        # Unload the video first (stop playback and release resources)
+                        video_player.cleanup()
+                        video_was_cleaned = True
+                        break
+
+        # Clear thumbnails for all selected videos to release graphics resources
         for image in selected_images:
-            image_file = QFile(image.path)
-            if not image_file.moveToTrash():
-                QMessageBox.critical(self, 'Error',
-                                     f'Failed to delete {image.path}.')
+            if hasattr(image, 'is_video') and image.is_video and image.thumbnail:
+                image.thumbnail = None
+
+        # If we cleaned up a video, give Qt/Windows a moment to release file handles
+        if video_was_cleaned:
+            from PySide6.QtCore import QThread
+            QThread.msleep(100)  # 100ms delay
+            QApplication.processEvents()  # Process pending events to ensure cleanup completes
+
+        # Force garbage collection to release any remaining file handles
+        import gc
+        gc.collect()
+
+        from PySide6.QtCore import QThread
+        import time
+
+        for image in selected_images:
+            success = False
+
+            # For videos, try multiple times with delays (Windows file handle release is async)
+            max_retries = 3 if (hasattr(image, 'is_video') and image.is_video) else 1
+
+            for attempt in range(max_retries):
+                if attempt > 0:
+                    # Wait and retry
+                    QThread.msleep(150)  # Wait 150ms between retries
+                    QApplication.processEvents()
+                    gc.collect()
+
+                # Try Qt's moveToTrash first
+                image_file = QFile(str(image.path))
+                if image_file.moveToTrash():
+                    success = True
+                    break
+                elif attempt == max_retries - 1:
+                    # Last attempt - ask user for permanent deletion
+                    reply = QMessageBox.question(
+                        self, 'Trash Failed',
+                        f'Could not move {image.path.name} to trash.\nDelete permanently?',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No  # Default to No for safety
+                    )
+                    if reply == QMessageBox.Yes:
+                        if image_file.remove():
+                            success = True
+
+            if not success:
+                QMessageBox.critical(self, 'Error', f'Failed to delete {image.path}.')
+                continue
+
+            # Also try to delete caption file
             caption_file_path = image.path.with_suffix('.txt')
-            caption_file = QFile(caption_file_path)
-            if caption_file.exists():
+            if caption_file_path.exists():
+                caption_file = QFile(caption_file_path)
                 if not caption_file.moveToTrash():
-                    QMessageBox.critical(self, 'Error',
-                                         f'Failed to delete '
-                                         f'{caption_file_path}.')
+                    # For caption files, try permanent deletion without asking again
+                    caption_file.remove()  # Silent operation for captions
         self.directory_reload_requested.emit()
 
     @Slot()
