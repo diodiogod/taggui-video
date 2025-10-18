@@ -17,7 +17,7 @@ class VideoEditingController:
         self.main_window = main_window
 
     def extract_video_range(self):
-        """Extract the marked range to a new video file."""
+        """Extract the marked range, replacing the original video (creates backup)."""
         video_player = self.main_window.image_viewer.video_player
         video_controls = self.main_window.image_viewer.video_controls
 
@@ -34,30 +34,28 @@ class VideoEditingController:
 
         start_frame, end_frame = loop_range
         fps = video_player.get_fps()
-
-        # Ask for output filename
         input_path = Path(video_player.video_path)
-        default_name = f"{input_path.stem}_extract_{start_frame}-{end_frame}{input_path.suffix}"
 
-        filename, ok = QInputDialog.getText(
-            self.main_window, "Extract Video Range",
-            "Output filename:",
-            text=default_name
+        # Confirm action
+        reply = QMessageBox.question(
+            self.main_window, "Extract Range",
+            f"Extract frames {start_frame}-{end_frame} (discard rest)?\n\n"
+            f"Original will be saved as {input_path.name}.backup",
+            QMessageBox.Yes | QMessageBox.No
         )
 
-        if not ok or not filename:
+        if reply != QMessageBox.Yes:
             return
 
-        output_path = input_path.parent / filename
-
-        # Perform extraction
+        # Extract range (overwrites original, creates backup)
         success, message = VideoEditor.extract_range(
-            input_path, output_path,
+            input_path, input_path,
             start_frame, end_frame, fps
         )
 
         if success:
             QMessageBox.information(self.main_window, "Success", message)
+            self.main_window.reload_directory()
         else:
             QMessageBox.critical(self.main_window, "Error", message)
 
