@@ -288,6 +288,10 @@ class ImageTagsEditor(QDockWidget):
             proxy_image_index)
         image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
+        # Safety check: if no image is selected or available, clear the tags
+        if image is None:
+            self.image_tag_list_model.setStringList([])
+            return
         # If the string list already contains the image's tags, do not reload
         # them. This is the case when the tags are edited directly through the
         # image tags editor. Removing this check breaks the functionality of
