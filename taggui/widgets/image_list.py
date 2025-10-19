@@ -411,8 +411,17 @@ class ImageListView(QListView):
 
             event.accept()
         else:
-            # Normal scroll behavior
-            super().wheelEvent(event)
+            # Normal scroll behavior - but boost scroll speed in IconMode
+            if self.viewMode() == QListView.ViewMode.IconMode:
+                # In icon mode, manually scroll by a reasonable pixel amount
+                delta = event.angleDelta().y()
+                scroll_amount = delta * 2  # Multiply by 2 for faster scrolling
+                current_value = self.verticalScrollBar().value()
+                self.verticalScrollBar().setValue(current_value - scroll_amount)
+                event.accept()
+            else:
+                # Default scroll behavior in ListMode
+                super().wheelEvent(event)
 
     def _update_view_mode(self):
         """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
