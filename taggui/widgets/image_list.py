@@ -555,6 +555,38 @@ class ImageListView(QListView):
         if not move_directory_path:
             return
         move_directory_path = Path(move_directory_path)
+
+        # Check if any selected videos are currently loaded and unload them
+        # Hierarchy: ImageListView -> container -> ImageList (QDockWidget) -> MainWindow
+        main_window = self.parent().parent().parent()  # Get main window reference
+        video_was_cleaned = False
+        if hasattr(main_window, 'image_viewer') and hasattr(main_window.image_viewer, 'video_player'):
+            video_player = main_window.image_viewer.video_player
+            if video_player.video_path:
+                currently_loaded_path = Path(video_player.video_path)
+                # Check if we're moving the currently loaded video
+                for image in selected_images:
+                    if image.path == currently_loaded_path:
+                        # Unload the video first (stop playback and release resources)
+                        video_player.cleanup()
+                        video_was_cleaned = True
+                        break
+
+        # Clear thumbnails for all selected videos to release graphics resources
+        for image in selected_images:
+            if hasattr(image, 'is_video') and image.is_video and image.thumbnail:
+                image.thumbnail = None
+
+        # If we cleaned up a video, give Qt/Windows a moment to release file handles
+        if video_was_cleaned:
+            from PySide6.QtCore import QThread
+            QThread.msleep(100)  # 100ms delay
+            QApplication.processEvents()  # Process pending events to ensure cleanup completes
+
+        # Force garbage collection to release any remaining file handles
+        import gc
+        gc.collect()
+
         for image in selected_images:
             try:
                 image.path.replace(move_directory_path / image.path.name)
@@ -562,10 +594,15 @@ class ImageListView(QListView):
                 if caption_file_path.exists():
                     caption_file_path.replace(
                         move_directory_path / caption_file_path.name)
-            except OSError:
+                # Also move JSON metadata if it exists
+                json_file_path = image.path.with_suffix('.json')
+                if json_file_path.exists():
+                    json_file_path.replace(
+                        move_directory_path / json_file_path.name)
+            except OSError as e:
                 QMessageBox.critical(self, 'Error',
                                      f'Failed to move {image.path} to '
-                                     f'{move_directory_path}.')
+                                     f'{move_directory_path}.\n{str(e)}')
         self.directory_reload_requested.emit()
 
     @Slot()
