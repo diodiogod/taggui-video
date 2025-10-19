@@ -11,7 +11,7 @@ from PySide6.QtGui import QDesktopServices, QColor, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QVBoxLayout,
-                               QWidget, QStyledItemDelegate, QToolTip)
+                               QWidget, QStyledItemDelegate, QToolTip, QStyle)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
@@ -109,6 +109,11 @@ class ImageDelegate(QStyledItemDelegate):
         self.labels.clear()
 
     def sizeHint(self, option, index):
+        # In IconMode, return compact size (just the thumbnail)
+        if isinstance(self.parent(), QListView) and self.parent().viewMode() == QListView.ViewMode.IconMode:
+            icon_size = self.parent().iconSize()
+            return QSize(icon_size.width() + 10, icon_size.height() + 10)  # Small padding
+        # In ListMode, use default size hint with text
         return index.data(Qt.ItemDataRole.SizeHintRole)
 
     def paint(self, painter, option, index):
@@ -125,21 +130,41 @@ class ImageDelegate(QStyledItemDelegate):
         except (RuntimeError, AttributeError):
             return
 
-        # Wrap super().paint() in try/except to catch Qt internal errors during model transitions
-        try:
-            super().paint(painter, option, index)
-        except RuntimeError:
-            # Silently ignore paint errors during model reset
-            return
+        # Check if we're in IconMode (compact view without text)
+        is_icon_mode = isinstance(self.parent(), QListView) and self.parent().viewMode() == QListView.ViewMode.IconMode
 
-        p_index = QPersistentModelIndex(index)
-        if p_index.isValid() and p_index in self.labels:
-            label_text = self.labels[p_index]
-            painter.setBrush(QColor(255, 255, 255, 163))
-            painter.drawRect(option.rect)
-            painter.drawText(option.rect, label_text, Qt.AlignCenter)
+        if is_icon_mode:
+            # In IconMode: paint only the icon, no text
+            try:
+                icon = index.data(Qt.ItemDataRole.DecorationRole)
+                if icon and not icon.isNull():
+                    # Paint background if selected
+                    if option.state & QStyle.StateFlag.State_Selected:
+                        painter.fillRect(option.rect, option.palette.highlight())
 
-        # Draw N*4+1 stamp for video files
+                    # Paint just the icon, centered
+                    icon_size = self.parent().iconSize()
+                    x = option.rect.x() + (option.rect.width() - icon_size.width()) // 2
+                    y = option.rect.y() + (option.rect.height() - icon_size.height()) // 2
+                    icon.paint(painter, x, y, icon_size.width(), icon_size.height())
+            except RuntimeError:
+                return
+        else:
+            # In ListMode: use default painting with text
+            try:
+                super().paint(painter, option, index)
+            except RuntimeError:
+                # Silently ignore paint errors during model reset
+                return
+
+            p_index = QPersistentModelIndex(index)
+            if p_index.isValid() and p_index in self.labels:
+                label_text = self.labels[p_index]
+                painter.setBrush(QColor(255, 255, 255, 163))
+                painter.drawRect(option.rect)
+                painter.drawText(option.rect, label_text, Qt.AlignCenter)
+
+        # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)
 
     def update_label(self, index: QModelIndex, label: str):
@@ -274,9 +299,23 @@ class ImageListView(QListView):
 
         self.setWordWrap(True)
         self.setDragEnabled(True)
+
+        # Zoom settings
+        self.min_thumbnail_size = 64
+        self.max_thumbnail_size = 512
+        self.column_switch_threshold = 150  # Below this size, switch to multi-column
+
+        # Load saved zoom level or use default
+        self.current_thumbnail_size = settings.value('image_list_thumbnail_size', image_width, type=int)
+        self.current_thumbnail_size = max(self.min_thumbnail_size,
+                                          min(self.max_thumbnail_size, self.current_thumbnail_size))
+
         # If the actual height of the image is greater than 3 times the width,
         # the image will be scaled down to fit.
-        self.setIconSize(QSize(image_width, image_width * 3))
+        self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
+
+        # Set initial view mode based on size
+        self._update_view_mode()
 
         invert_selection_action = self.addAction('Invert Selection')
         invert_selection_action.setShortcut('Ctrl+I')
@@ -344,6 +383,59 @@ class ImageListView(QListView):
 
     def contextMenuEvent(self, event):
         self.context_menu.exec_(event.globalPos())
+
+    def wheelEvent(self, event):
+        """Handle Ctrl+scroll wheel for zooming thumbnails."""
+        if event.modifiers() == Qt.ControlModifier:
+            # Get scroll direction
+            delta = event.angleDelta().y()
+
+            # Adjust thumbnail size
+            zoom_step = 20  # Pixels per scroll step
+            if delta > 0:
+                # Scroll up = zoom in (larger thumbnails)
+                new_size = min(self.current_thumbnail_size + zoom_step, self.max_thumbnail_size)
+            else:
+                # Scroll down = zoom out (smaller thumbnails)
+                new_size = max(self.current_thumbnail_size - zoom_step, self.min_thumbnail_size)
+
+            if new_size != self.current_thumbnail_size:
+                self.current_thumbnail_size = new_size
+                self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
+
+                # Update view mode (single column vs multi-column)
+                self._update_view_mode()
+
+                # Save to settings
+                settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)
+
+            event.accept()
+        else:
+            # Normal scroll behavior
+            super().wheelEvent(event)
+
+    def _update_view_mode(self):
+        """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
+        if self.current_thumbnail_size >= self.column_switch_threshold:
+            # Large thumbnails: single column list view
+            self.setViewMode(QListView.ViewMode.ListMode)
+            self.setFlow(QListView.Flow.TopToBottom)
+            self.setResizeMode(QListView.ResizeMode.Adjust)
+            self.setWrapping(False)
+            self.setSpacing(0)
+            self.setGridSize(QSize(-1, -1))  # Reset grid size to default
+        else:
+            # Small thumbnails: compact multi-column grid view (no text labels)
+            self.setViewMode(QListView.ViewMode.IconMode)
+            self.setFlow(QListView.Flow.LeftToRight)
+            self.setResizeMode(QListView.ResizeMode.Adjust)
+            self.setWrapping(True)
+            self.setSpacing(2)  # Minimal spacing for compact layout
+            # Use fixed grid based on icon size for tight packing
+            grid_size = self.current_thumbnail_size + 10  # Small padding
+            self.setGridSize(QSize(grid_size, grid_size))
+            # Force item delegate to recalculate sizes
+            self.scheduleDelayedItemsLayout()
 
     @Slot(Grid)
     def show_crop_size(self, grid):
