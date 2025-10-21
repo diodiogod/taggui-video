@@ -258,12 +258,12 @@ class SpeedSlider(QSlider):
         divider2_x = groove.left() + groove.width() * 0.5
 
         # Draw dividers as thin vertical lines
-        pen = QPen(QColor(255, 255, 255), 2)  # White lines
+        pen = QPen(QColor(255, 255, 255), 1)  # White lines, 1px width
         pen.setStyle(Qt.PenStyle.SolidLine)
         painter.setPen(pen)
 
-        painter.drawLine(int(divider1_x), groove.top(), int(divider1_x), groove.bottom())
-        painter.drawLine(int(divider2_x), groove.top(), int(divider2_x), groove.bottom())
+        painter.drawLine(int(divider1_x), groove.top() + 1, int(divider1_x), groove.bottom())
+        painter.drawLine(int(divider2_x), groove.top() + 1, int(divider2_x), groove.bottom())
 
         painter.end()
 
@@ -399,7 +399,7 @@ class VideoControlsWidget(QWidget):
         # Range for slider display (not used for mouse mapping anymore, using non-linear zones)
         self.speed_slider.setMinimum(-200)  # -2.0x
         self.speed_slider.setMaximum(600)   # 6.0x
-        self.speed_slider.setValue(100)  # 1.0x
+        self.speed_slider.setValue(200)  # 1.0x at 50% position
         self.speed_slider.setTickInterval(100)  # 1.0x intervals
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.speed_slider.setSingleStep(0)  # Disable keyboard/click increment
@@ -411,10 +411,10 @@ class VideoControlsWidget(QWidget):
                 height: 8px;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0.0 #8B0000,
-                    stop:0.2 #8B0000,
-                    stop:0.2 #FFB366,
-                    stop:0.5 #FFB366,
-                    stop:0.5 #4CAF50,
+                    stop:0.15 #8B0000,
+                    stop:0.25 #FFB366,
+                    stop:0.45 #FFB366,
+                    stop:0.55 #4CAF50,
                     stop:1.0 #4CAF50);
                 border-radius: 4px;
             }
@@ -937,8 +937,11 @@ class VideoControlsWidget(QWidget):
     def _reset_speed(self, event):
         """Reset playback speed to 1.0x when label is clicked."""
         self._extended_speed = 1.0
+        # Convert 1.0x to correct slider position using non-linear mapping
+        position_ratio = self._speed_to_position_ratio(1.0)
+        slider_pos = int(self.speed_slider.minimum() + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
         self.speed_slider.blockSignals(True)
-        self.speed_slider.setValue(100)
+        self.speed_slider.setValue(slider_pos)
         self.speed_slider.blockSignals(False)
         self.speed_value_label.setText('1.00x')
         self.speed_changed.emit(1.0)
@@ -1272,7 +1275,7 @@ class VideoControlsWidget(QWidget):
             self.preview_labels_layout.addWidget(marker_label)
 
         # Show speed preview if speed is changed (regardless of markers)
-        if abs(self._extended_speed - 1.0) >= 0.01 and self._current_fps > 0 and self._current_frame_count > 0:
+        if abs(self._extended_speed - 1.0) >= 0.01 and abs(self._extended_speed) >= 0.01 and self._current_fps > 0 and self._current_frame_count > 0:
             # Use custom FPS if set, otherwise use current FPS
             preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
 
