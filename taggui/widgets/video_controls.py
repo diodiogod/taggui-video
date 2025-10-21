@@ -230,6 +230,44 @@ class LoopSlider(QSlider):
         super().mouseReleaseEvent(event)
 
 
+class SpeedSlider(QSlider):
+    """Custom speed slider with colored zones and visual dividers."""
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        # Note: range and styling are set by parent VideoControlsWidget
+
+    def paintEvent(self, event):
+        """Paint slider with zone dividers."""
+        super().paintEvent(event)
+
+        # Draw zone dividers
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Get groove rectangle
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
+
+        # Calculate divider positions (at fixed visual percentages to match color zones)
+        # Divider 1: at 20% visual position
+        divider1_x = groove.left() + groove.width() * 0.2
+
+        # Divider 2: at 50% visual position
+        divider2_x = groove.left() + groove.width() * 0.5
+
+        # Draw dividers as thin vertical lines
+        pen = QPen(QColor(255, 255, 255), 2)  # White lines
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+
+        painter.drawLine(int(divider1_x), groove.top(), int(divider1_x), groove.bottom())
+        painter.drawLine(int(divider2_x), groove.top(), int(divider2_x), groove.bottom())
+
+        painter.end()
+
+
 class VideoControlsWidget(QWidget):
     """Video playback controls with frame-accurate navigation - overlay widget."""
 
@@ -357,9 +395,10 @@ class VideoControlsWidget(QWidget):
 
         # Playback speed slider with extended range support (rubberband effect)
         self.speed_label = QLabel('Speed:')
-        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setMinimum(-200)  # -2.0x (visual minimum)
-        self.speed_slider.setMaximum(600)   # 6.0x (visual maximum)
+        self.speed_slider = SpeedSlider(Qt.Orientation.Horizontal)
+        # Range for slider display (not used for mouse mapping anymore, using non-linear zones)
+        self.speed_slider.setMinimum(-200)  # -2.0x
+        self.speed_slider.setMaximum(600)   # 6.0x
         self.speed_slider.setValue(100)  # 1.0x
         self.speed_slider.setTickInterval(100)  # 1.0x intervals
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
@@ -750,12 +789,20 @@ class VideoControlsWidget(QWidget):
                     mouse_x = event.globalPos().x()
                     position_ratio = max(0.0, min(1.0, (mouse_x - slider_left) / slider_width))
 
-                    # Map position to speed range (-2.0 to 6.0)
-                    self._extended_speed = -2.0 + (position_ratio * 8.0)
-                    self._extended_speed = max(-2.0, min(6.0, self._extended_speed))
+                    # Non-linear mapping for zones
+                    if position_ratio < 0.2:
+                        # Red zone: 0-20% maps to -2.0x to 0.0x
+                        self._extended_speed = -2.0 + (position_ratio / 0.2) * 2.0
+                    elif position_ratio < 0.5:
+                        # Orange zone: 20-50% maps to 0.0x to 1.0x
+                        self._extended_speed = (position_ratio - 0.2) / 0.3 * 1.0
+                    else:
+                        # Green zone: 50-100% maps to 1.0x to 6.0x
+                        self._extended_speed = 1.0 + (position_ratio - 0.5) / 0.5 * 5.0
 
-                    # Update display
-                    slider_pos = int(self._extended_speed * 100.0)
+                    # Update display: position_ratio directly maps to slider handle position
+                    # Use the visual position directly as slider value (0% -> min, 100% -> max)
+                    slider_pos = int(self.speed_slider.minimum() + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
                     self.speed_slider.blockSignals(True)
                     self.speed_slider.setValue(slider_pos)
                     self.speed_slider.blockSignals(False)
@@ -763,6 +810,8 @@ class VideoControlsWidget(QWidget):
                     self.speed_changed.emit(self._extended_speed)
                     self._update_speed_preview()
                     self._update_marker_range_display()
+                    event.accept()
+                    return
 
             if event.type() == QEvent.Type.MouseMove and self._is_dragging_speed:
                 from PySide6.QtCore import QPoint
@@ -779,34 +828,38 @@ class VideoControlsWidget(QWidget):
                 if slider_width > 0:
                     # Calculate mouse position relative to slider (0.0 to 1.0)
                     mouse_x = current_mouse.x()
-                    position_ratio = max(0.0, min(1.0, (mouse_x - slider_left) / slider_width))
+                    position_ratio = (mouse_x - slider_left) / slider_width
 
-                    # Map position to speed range
-                    # 0.0 position = -2.0x, 1.0 position = 6.0x
-                    base_speed = -2.0 + (position_ratio * 8.0)  # -2.0 to 6.0
-
-                    # Check if dragging beyond bounds for rubberband effect
-                    if mouse_x < slider_left:
-                        # Beyond left edge - rubberband to -12.0x
-                        overshoot_pixels = slider_left - mouse_x
-                        overshoot_factor = overshoot_pixels / slider_width
-                        self._extended_speed = -2.0 - (overshoot_factor * 10.0)  # Up to -12.0x
-                    elif mouse_x > slider_right:
-                        # Beyond right edge - rubberband to +12.0x
-                        overshoot_pixels = mouse_x - slider_right
-                        overshoot_factor = overshoot_pixels / slider_width
-                        self._extended_speed = 6.0 + (overshoot_factor * 6.0)  # Up to +12.0x
+                    # Non-linear mapping for zones:
+                    # 0-20% → -2.0x to 0.0x
+                    # 20-50% → 0.0x to 1.0x (more space for accuracy)
+                    # 50-100% → 1.0x to 6.0x
+                    if position_ratio < 0.0:
+                        # Beyond left edge - rubberband
+                        overshoot_factor = abs(position_ratio)
+                        self._extended_speed = -2.0 - (overshoot_factor * 10.0)
+                    elif position_ratio < 0.2:
+                        # Red zone: 0-20% maps to -2.0x to 0.0x
+                        self._extended_speed = -2.0 + (position_ratio / 0.2) * 2.0
+                    elif position_ratio < 0.5:
+                        # Orange zone: 20-50% maps to 0.0x to 1.0x
+                        self._extended_speed = (position_ratio - 0.2) / 0.3 * 1.0
+                    elif position_ratio <= 1.0:
+                        # Green zone: 50-100% maps to 1.0x to 6.0x
+                        self._extended_speed = 1.0 + (position_ratio - 0.5) / 0.5 * 5.0
                     else:
-                        # Within bounds - use accurate position mapping
-                        self._extended_speed = base_speed
+                        # Beyond right edge - rubberband
+                        overshoot_factor = position_ratio - 1.0
+                        self._extended_speed = 6.0 + (overshoot_factor * 6.0)
 
                     # Clamp to absolute limits (-12.0 to 12.0)
                     self._extended_speed = max(-12.0, min(12.0, self._extended_speed))
 
-                    # Update slider position (clamped to visual range -2.0-6.0 for display only)
-                    display_value = max(-2.0, min(6.0, self._extended_speed))
+                    # Update slider position: clamp position_ratio to visual bounds for display
+                    clamped_ratio = max(0.0, min(1.0, position_ratio))
+                    slider_pos = int(self.speed_slider.minimum() + clamped_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
                     self.speed_slider.blockSignals(True)
-                    self.speed_slider.setValue(int(display_value * 100.0))
+                    self.speed_slider.setValue(slider_pos)
                     self.speed_slider.blockSignals(False)
 
                     # Update display and emit signal
@@ -828,6 +881,22 @@ class VideoControlsWidget(QWidget):
         from PySide6.QtGui import QCursor
         self._last_mouse_pos = QCursor.pos()
 
+    def _speed_to_position_ratio(self, speed):
+        """Convert speed value to visual position ratio (0.0 to 1.0) using non-linear zones."""
+        if speed < -2.0:
+            return 0.0
+        elif speed < 0.0:
+            # Red zone: -2.0x to 0.0x maps to 0-20%
+            return (speed + 2.0) / 2.0 * 0.2
+        elif speed < 1.0:
+            # Orange zone: 0.0x to 1.0x maps to 20-50%
+            return 0.2 + (speed / 1.0) * 0.3
+        elif speed <= 6.0:
+            # Green zone: 1.0x to 6.0x maps to 50-100%
+            return 0.5 + (speed - 1.0) / 5.0 * 0.5
+        else:
+            return 1.0
+
     @Slot()
     def _on_speed_slider_released(self):
         """Handle speed slider release - clamp to visual range."""
@@ -841,10 +910,11 @@ class VideoControlsWidget(QWidget):
         elif self._extended_speed > 6.0:
             # Was above max, clamp to maximum (6.0x)
             self._extended_speed = 6.0
-        # else: keep the accurate _extended_speed calculated during drag, don't re-read from slider
+        # else: keep the accurate _extended_speed calculated during drag
 
-        # Update slider display to match the accurate speed
-        slider_pos = int(self._extended_speed * 100.0)
+        # Update slider display: convert speed to position_ratio, then to slider value
+        position_ratio = self._speed_to_position_ratio(self._extended_speed)
+        slider_pos = int(self.speed_slider.minimum() + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
         self.speed_slider.blockSignals(True)
         self.speed_slider.setValue(slider_pos)
         self.speed_slider.blockSignals(False)
@@ -877,8 +947,8 @@ class VideoControlsWidget(QWidget):
 
     def _update_speed_preview(self):
         """Update speed preview label based on current speed and video metadata."""
-        if self._current_frame_count == 0 or abs(self._extended_speed - 1.0) < 0.01:
-            # No video loaded or speed is 1.0x, hide preview
+        if self._current_frame_count == 0 or abs(self._extended_speed - 1.0) < 0.01 or abs(self._extended_speed) < 0.01:
+            # No video loaded, speed is 1.0x, or speed is 0 (avoid division by zero), hide preview
             self.speed_preview_label.setText('')
             return
 
@@ -1174,8 +1244,8 @@ class VideoControlsWidget(QWidget):
             frame_count = abs(self.loop_end_frame - self.loop_start_frame) + 1
 
             # Check if we should show speed/FPS prediction
-            # Show full prediction if either speed changed OR custom FPS is set
-            if (abs(self._extended_speed - 1.0) >= 0.01 or self._custom_preview_fps is not None) and self._current_fps > 0:
+            # Show full prediction if either speed changed OR custom FPS is set (but not if speed is 0)
+            if (abs(self._extended_speed - 1.0) >= 0.01 or self._custom_preview_fps is not None) and self._current_fps > 0 and abs(self._extended_speed) >= 0.01:
                 # Speed/FPS changed - show full prediction
                 preview_fps = self._custom_preview_fps if self._custom_preview_fps else self._current_fps
 
