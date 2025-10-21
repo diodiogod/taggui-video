@@ -363,6 +363,8 @@ class VideoControlsWidget(QWidget):
         self.speed_slider.setValue(100)  # 1.0x
         self.speed_slider.setTickInterval(100)  # 1.0x intervals
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.speed_slider.setSingleStep(0)  # Disable keyboard/click increment
+        self.speed_slider.setPageStep(0)    # Disable page increment
         self.speed_slider.setMinimumWidth(100)  # Minimum width
         # No maximum width - let it expand to fill available space
         self.speed_slider.setStyleSheet("""
@@ -734,8 +736,33 @@ class VideoControlsWidget(QWidget):
     def eventFilter(self, obj, event):
         """Event filter for speed slider mouse tracking."""
         if obj == self.speed_slider:
-            from PySide6.QtCore import QEvent
+            from PySide6.QtCore import QEvent, QPoint
             from PySide6.QtGui import QCursor
+
+            # Handle clicks to snap to position
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    # Snap to clicked position
+                    slider_rect = self.speed_slider.geometry()
+                    slider_width = slider_rect.width()
+                    slider_left = self.speed_slider.mapToGlobal(QPoint(0, 0)).x()
+
+                    mouse_x = event.globalPos().x()
+                    position_ratio = max(0.0, min(1.0, (mouse_x - slider_left) / slider_width))
+
+                    # Map position to speed range (-2.0 to 6.0)
+                    self._extended_speed = -2.0 + (position_ratio * 8.0)
+                    self._extended_speed = max(-2.0, min(6.0, self._extended_speed))
+
+                    # Update display
+                    slider_pos = int(self._extended_speed * 100.0)
+                    self.speed_slider.blockSignals(True)
+                    self.speed_slider.setValue(slider_pos)
+                    self.speed_slider.blockSignals(False)
+                    self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+                    self.speed_changed.emit(self._extended_speed)
+                    self._update_speed_preview()
+                    self._update_marker_range_display()
 
             if event.type() == QEvent.Type.MouseMove and self._is_dragging_speed:
                 from PySide6.QtCore import QPoint
@@ -835,6 +862,7 @@ class VideoControlsWidget(QWidget):
             self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
             self.speed_changed.emit(self._extended_speed)
             self._update_speed_preview()
+            self._update_marker_range_display()
 
     def _reset_speed(self, event):
         """Reset playback speed to 1.0x when label is clicked."""
