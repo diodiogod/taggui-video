@@ -358,8 +358,8 @@ class VideoControlsWidget(QWidget):
         # Playback speed slider with extended range support (rubberband effect)
         self.speed_label = QLabel('Speed:')
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setMinimum(-400)  # -4.0x (extended range)
-        self.speed_slider.setMaximum(600)  # 6.0x (extended range)
+        self.speed_slider.setMinimum(-200)  # -2.0x (visual minimum)
+        self.speed_slider.setMaximum(600)   # 6.0x (visual maximum)
         self.speed_slider.setValue(100)  # 1.0x
         self.speed_slider.setTickInterval(100)  # 1.0x intervals
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
@@ -367,19 +367,26 @@ class VideoControlsWidget(QWidget):
         # No maximum width - let it expand to fill available space
         self.speed_slider.setStyleSheet("""
             QSlider::groove:horizontal {
-                height: 4px;
-                background: #555;
-                border-radius: 2px;
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0.0 #8B0000,
+                    stop:0.2 #8B0000,
+                    stop:0.2 #FFB366,
+                    stop:0.5 #FFB366,
+                    stop:0.5 #4CAF50,
+                    stop:1.0 #4CAF50);
+                border-radius: 4px;
             }
             QSlider::handle:horizontal {
-                background: #4CAF50;
-                border: 1px solid #45a049;
-                width: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
+                background: #FFFFFF;
+                border: 2px solid #333;
+                width: 16px;
+                margin: -4px 0;
+                border-radius: 8px;
             }
             QSlider::handle:horizontal:hover {
-                background: #5FBF60;
+                background: #E0E0E0;
+                border: 2px solid #000;
             }
         """)
 
@@ -744,13 +751,13 @@ class VideoControlsWidget(QWidget):
 
                         # Calculate acceleration based on how far we are from normal bounds
                         acceleration = 1.0
-                        if self._extended_speed < 0.2:
+                        if self._extended_speed < -2.0:
                             # Left side acceleration: more negative = faster
-                            out_of_bounds = abs(self._extended_speed - 0.2)
+                            out_of_bounds = abs(self._extended_speed + 2.0)
                             acceleration = 1.0 + (out_of_bounds * 3.0)
-                        elif self._extended_speed > 5.0:
-                            # Right side acceleration: higher above 5.0 = faster
-                            out_of_bounds = self._extended_speed - 5.0
+                        elif self._extended_speed > 6.0:
+                            # Right side acceleration: higher above 6.0 = faster
+                            out_of_bounds = self._extended_speed - 6.0
                             acceleration = 1.0 + (out_of_bounds * 2.5)
 
                         # Apply accelerated sensitivity
@@ -760,14 +767,14 @@ class VideoControlsWidget(QWidget):
                         # Clamp to absolute limits (-12.0 to 12.0)
                         self._extended_speed = max(-12.0, min(12.0, self._extended_speed))
 
-                        # Update slider position (clamped to visual range -4.0-6.0)
-                        clamped_value = max(-4.0, min(6.0, self._extended_speed))
+                        # Update slider position (clamped to visual range -2.0-6.0)
+                        clamped_value = max(-2.0, min(6.0, self._extended_speed))
                         self.speed_slider.blockSignals(True)
                         self.speed_slider.setValue(int(clamped_value * 100.0))
                         self.speed_slider.blockSignals(False)
 
                         # If we're back in normal range, sync extended speed with slider
-                        if -4.0 <= self._extended_speed <= 6.0:
+                        if -2.0 <= self._extended_speed <= 6.0:
                             self._extended_speed = clamped_value
 
                         # Update display and emit signal
@@ -796,11 +803,11 @@ class VideoControlsWidget(QWidget):
         self._is_dragging_speed = False
         self._last_mouse_pos = None
 
-        # If extended speed is outside the visual range (-4.0-6.0), clamp to edges
-        if self._extended_speed < -4.0:
-            # Was below minimum, clamp to -4.0x
-            self._extended_speed = -4.0
-            slider_pos = -400
+        # If extended speed is outside the visual range (-2.0-6.0), clamp to edges
+        if self._extended_speed < -2.0:
+            # Was below minimum, clamp to -2.0x
+            self._extended_speed = -2.0
+            slider_pos = -200
         elif self._extended_speed > 6.0:
             # Was above max, clamp to maximum (6.0x)
             self._extended_speed = 6.0
