@@ -738,51 +738,55 @@ class VideoControlsWidget(QWidget):
             from PySide6.QtGui import QCursor
 
             if event.type() == QEvent.Type.MouseMove and self._is_dragging_speed:
+                from PySide6.QtCore import QPoint
+                from PySide6.QtGui import QCursor
+
                 current_mouse = QCursor.pos()
 
-                if self._last_mouse_pos is not None:
-                    # Calculate delta movement
-                    delta_x = current_mouse.x() - self._last_mouse_pos.x()
+                # Get slider geometry
+                slider_rect = self.speed_slider.geometry()
+                slider_width = slider_rect.width()
+                slider_left = self.speed_slider.mapToGlobal(QPoint(0, 0)).x()
+                slider_right = slider_left + slider_width
 
-                    # Calculate base sensitivity based on slider width
-                    slider_width = self.speed_slider.width()
-                    if slider_width > 0:
-                        base_sensitivity = 2.0 / slider_width  # 2.0 is normal range
+                if slider_width > 0:
+                    # Calculate mouse position relative to slider (0.0 to 1.0)
+                    mouse_x = current_mouse.x()
+                    position_ratio = max(0.0, min(1.0, (mouse_x - slider_left) / slider_width))
 
-                        # Calculate acceleration based on how far we are from normal bounds
-                        acceleration = 1.0
-                        if self._extended_speed < -2.0:
-                            # Left side acceleration: more negative = faster
-                            out_of_bounds = abs(self._extended_speed + 2.0)
-                            acceleration = 1.0 + (out_of_bounds * 3.0)
-                        elif self._extended_speed > 6.0:
-                            # Right side acceleration: higher above 6.0 = faster
-                            out_of_bounds = self._extended_speed - 6.0
-                            acceleration = 1.0 + (out_of_bounds * 2.5)
+                    # Map position to speed range
+                    # 0.0 position = -2.0x, 1.0 position = 6.0x
+                    base_speed = -2.0 + (position_ratio * 8.0)  # -2.0 to 6.0
 
-                        # Apply accelerated sensitivity
-                        sensitivity = base_sensitivity * acceleration
-                        self._extended_speed += delta_x * sensitivity
+                    # Check if dragging beyond bounds for rubberband effect
+                    if mouse_x < slider_left:
+                        # Beyond left edge - rubberband to -12.0x
+                        overshoot_pixels = slider_left - mouse_x
+                        overshoot_factor = overshoot_pixels / slider_width
+                        self._extended_speed = -2.0 - (overshoot_factor * 10.0)  # Up to -12.0x
+                    elif mouse_x > slider_right:
+                        # Beyond right edge - rubberband to +12.0x
+                        overshoot_pixels = mouse_x - slider_right
+                        overshoot_factor = overshoot_pixels / slider_width
+                        self._extended_speed = 6.0 + (overshoot_factor * 6.0)  # Up to +12.0x
+                    else:
+                        # Within bounds - use accurate position mapping
+                        self._extended_speed = base_speed
 
-                        # Clamp to absolute limits (-12.0 to 12.0)
-                        self._extended_speed = max(-12.0, min(12.0, self._extended_speed))
+                    # Clamp to absolute limits (-12.0 to 12.0)
+                    self._extended_speed = max(-12.0, min(12.0, self._extended_speed))
 
-                        # Update slider position (clamped to visual range -2.0-6.0)
-                        clamped_value = max(-2.0, min(6.0, self._extended_speed))
-                        self.speed_slider.blockSignals(True)
-                        self.speed_slider.setValue(int(clamped_value * 100.0))
-                        self.speed_slider.blockSignals(False)
+                    # Update slider position (clamped to visual range -2.0-6.0 for display only)
+                    display_value = max(-2.0, min(6.0, self._extended_speed))
+                    self.speed_slider.blockSignals(True)
+                    self.speed_slider.setValue(int(display_value * 100.0))
+                    self.speed_slider.blockSignals(False)
 
-                        # If we're back in normal range, sync extended speed with slider
-                        if -2.0 <= self._extended_speed <= 6.0:
-                            self._extended_speed = clamped_value
-
-                        # Update display and emit signal
-                        self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
-                        self.speed_changed.emit(self._extended_speed)
-                        self._update_speed_preview()
-                        self._update_marker_range_display()
-                        self._update_marker_range_display()
+                    # Update display and emit signal
+                    self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+                    self.speed_changed.emit(self._extended_speed)
+                    self._update_speed_preview()
+                    self._update_marker_range_display()
 
                 self._last_mouse_pos = current_mouse
 
@@ -807,17 +811,13 @@ class VideoControlsWidget(QWidget):
         if self._extended_speed < -2.0:
             # Was below minimum, clamp to -2.0x
             self._extended_speed = -2.0
-            slider_pos = -200
         elif self._extended_speed > 6.0:
             # Was above max, clamp to maximum (6.0x)
             self._extended_speed = 6.0
-            slider_pos = 600
-        else:
-            # Within range, sync with slider value
-            self._extended_speed = self.speed_slider.value() / 100.0
-            slider_pos = int(self._extended_speed * 100.0)
+        # else: keep the accurate _extended_speed calculated during drag, don't re-read from slider
 
-        # Update slider and display
+        # Update slider display to match the accurate speed
+        slider_pos = int(self._extended_speed * 100.0)
         self.speed_slider.blockSignals(True)
         self.speed_slider.setValue(slider_pos)
         self.speed_slider.blockSignals(False)
