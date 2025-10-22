@@ -242,6 +242,7 @@ class ToolbarManager:
         """)
         self.toolbar.addWidget(self.extract_range_rough_btn)
 
+
         self.extract_range_action = QAction(QIcon.fromTheme('document-save'),
             'Extract range (PRECISE: frame-accurate, slow, re-encodes)', self.main_window)
         self.toolbar.addAction(self.extract_range_action)

@@ -95,8 +95,45 @@ class VideoEditingController:
         except:
             pass
 
+    def _prepare_video_for_editing(self, video_player):
+        """Release video player file handles before editing to allow file modification."""
+        video_player.cleanup()
+        import gc
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication
+
+        # Give Windows time to fully release file handles
+        QThread.msleep(200)  # Wait 200ms for file handle release
+        QApplication.processEvents()  # Process pending events to keep GUI responsive
+        gc.collect()  # Force garbage collection
+
+    def _run_video_operation(self, operation_name: str, operation_func, *args):
+        """Run a video editing operation and show progress."""
+        from PySide6.QtWidgets import QProgressDialog
+        from PySide6.QtCore import Qt
+
+        # Create non-modal progress dialog
+        progress = QProgressDialog(
+            f"Processing {operation_name}...",
+            "Cancel",
+            0, 0,  # Indeterminate progress
+            self.main_window
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        try:
+            # Run the actual operation - this may block but progress dialog keeps GUI responsive
+            success, message = operation_func(*args)
+            return success, message
+        finally:
+            progress.close()
+
     def extract_video_range_rough(self):
         """Extract the marked range using keyframe cuts (fast, no re-encoding)."""
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel,
+                                       QCheckBox, QDialogButtonBox)
+
         video_player = self.main_window.image_viewer.video_player
         video_controls = self.main_window.image_viewer.video_controls
 
@@ -115,34 +152,137 @@ class VideoEditingController:
         fps = video_player.get_fps()
         input_path = Path(video_player.video_path)
 
-        # Confirm action with warning about keyframe accuracy
-        reply = QMessageBox.question(
-            self.main_window, "Extract Range (Rough Cut)",
-            f"Extract frames ~{start_frame}-{end_frame} (keyframe-based)?\n\n"
-            f"⚡ FAST: No re-encoding, preserves 100% quality\n"
-            f"⚠ NOT frame-accurate: Cuts at nearest keyframes\n"
-            f"💡 Use this for rough cuts, then use precise cut for final trim\n\n"
-            f"Original will be saved as {input_path.name}.backup",
-            QMessageBox.Yes | QMessageBox.No
-        )
+        # Create dialog for rough extract
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Extract Range (Rough Cut)")
+        layout = QVBoxLayout(dialog)
 
-        if reply != QMessageBox.Yes:
+        # Extract as copy option (at the top)
+        extract_as_copy_checkbox = QCheckBox("Extract as copy (create new file, don't replace original)")
+        extract_as_copy_checkbox.setChecked(False)
+        extract_as_copy_checkbox.setToolTip("Create a copy with the extracted range instead of replacing the current video")
+        layout.addWidget(extract_as_copy_checkbox)
+
+        # Update info label based on checkbox state
+        def update_info_label():
+            if extract_as_copy_checkbox.isChecked():
+                info_label.setText(
+                    f"Extract frames ~{start_frame}-{end_frame} ({frame_count} frames)\n"
+                    f"Create a copy with only the selected range.\n\n"
+                    f"⚡ FAST: No re-encoding, preserves 100% quality\n"
+                    f"⚠ NOT frame-accurate: Cuts at nearest keyframes\n"
+                    f"✓ Original video remains unchanged"
+                )
+            else:
+                info_label.setText(
+                    f"Extract frames ~{start_frame}-{end_frame} ({frame_count} frames)\n"
+                    f"Discard all other frames from video.\n\n"
+                    f"⚡ FAST: No re-encoding, preserves 100% quality\n"
+                    f"⚠ NOT frame-accurate: Cuts at nearest keyframes\n"
+                    f"💡 Use this for rough cuts, then use precise cut for final trim\n\n"
+                    f"Original will be saved as {input_path.name}.backup"
+                )
+
+        frame_count = end_frame - start_frame + 1
+        info_label = QLabel()
+        layout.addWidget(info_label)
+
+        # Connect checkbox to update info label
+        extract_as_copy_checkbox.toggled.connect(update_info_label)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # Initialize info label
+        update_info_label()
+
+        if dialog.exec() != QDialog.Accepted:
             return
 
-        # Save undo snapshot before editing
-        self._save_undo_snapshot(input_path, f"Extract rough frames ~{start_frame}-{end_frame}")
+        extract_as_copy = extract_as_copy_checkbox.isChecked()
 
-        # Extract range (overwrites original, creates backup)
-        success, message = VideoEditor.extract_range_rough(
-            input_path, input_path,
-            start_frame, end_frame, fps
-        )
+        if extract_as_copy:
+            # Create a copy first using the duplicate function
+            import shutil
 
-        if success:
-            QMessageBox.information(self.main_window, "Success", message)
-            self.main_window.reload_directory()
+            # Generate unique name for duplicate
+            directory = input_path.parent
+            stem = input_path.stem
+            suffix = input_path.suffix
+
+            # Find a unique name by appending "_copy" or "_copy2", etc.
+            counter = 1
+            new_stem = f"{stem}_extract_{start_frame}-{end_frame}"
+            new_path = Path(directory / f"{new_stem}{suffix}")
+            while new_path.exists():
+                counter += 1
+                new_stem = f"{stem}_extract_{start_frame}-{end_frame}_{counter}"
+                new_path = Path(directory / f"{new_stem}{suffix}")
+
+            # Copy the media file
+            shutil.copy2(str(input_path), str(new_path))
+
+            # Copy caption file if it exists
+            caption_file_path = input_path.with_suffix('.txt')
+            if caption_file_path.exists():
+                new_caption_path = new_path.with_suffix('.txt')
+                shutil.copy2(str(caption_file_path), str(new_caption_path))
+
+            # Copy JSON metadata file if it exists
+            json_file_path = input_path.with_suffix('.json')
+            if json_file_path.exists():
+                new_json_path = new_path.with_suffix('.json')
+                shutil.copy2(str(json_file_path), str(new_json_path))
+
+            # Add the new image to the model
+            source_model = self.main_window.image_list_model.sourceModel()
+            source_model.add_image(new_path)
+
+            # Extract range on the copy (no backup needed since it's a new file)
+            success, message = VideoEditor.extract_range_rough(
+                new_path, new_path,
+                start_frame, end_frame, fps
+            )
+
+            if success:
+                QMessageBox.information(self.main_window, "Success", f"Created copy and extracted range:\n{new_path.name}")
+                self.main_window.reload_directory()
+            else:
+                QMessageBox.critical(self.main_window, "Error", message)
         else:
-            QMessageBox.critical(self.main_window, "Error", message)
+            # Confirm action with warning about keyframe accuracy
+            reply = QMessageBox.question(
+                self.main_window, "Extract Range (Rough Cut)",
+                f"Extract frames ~{start_frame}-{end_frame} (keyframe-based)?\n\n"
+                f"⚡ FAST: No re-encoding, preserves 100% quality\n"
+                f"⚠ NOT frame-accurate: Cuts at nearest keyframes\n"
+                f"💡 Use this for rough cuts, then use precise cut for final trim\n\n"
+                f"Original will be saved as {input_path.name}.backup",
+                QMessageBox.Yes | QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+            # Save undo snapshot before editing
+            self._save_undo_snapshot(input_path, f"Extract rough frames ~{start_frame}-{end_frame}")
+
+            # Release file handles before editing
+            self._prepare_video_for_editing(video_player)
+
+            # Extract range (overwrites original, creates backup)
+            success, message = VideoEditor.extract_range_rough(
+                input_path, input_path,
+                start_frame, end_frame, fps
+            )
+
+            if success:
+                QMessageBox.information(self.main_window, "Success", message)
+                self.main_window.reload_directory()
+            else:
+                QMessageBox.critical(self.main_window, "Error", message)
 
     def extract_video_range(self):
         """Extract the marked range with frame accuracy (re-encodes)."""
@@ -183,14 +323,36 @@ class VideoEditingController:
         dialog.setWindowTitle("Extract Range (Precise)")
         layout = QVBoxLayout(dialog)
 
-        info_label = QLabel(
-            f"Extract frames {start_frame}-{end_frame} ({frame_count} frames)\n"
-            f"Discard all other frames from video.\n\n"
-            f"⚠ SLOW: Re-encodes video for frame accuracy\n"
-            f"✓ Frame-accurate cut\n\n"
-            f"Original will be saved as {input_path.name}.backup"
-        )
+        # Extract as copy option (at the top)
+        extract_as_copy_checkbox = QCheckBox("Extract as copy (create new file, don't replace original)")
+        extract_as_copy_checkbox.setChecked(False)
+        extract_as_copy_checkbox.setToolTip("Create a copy with the extracted range instead of replacing the current video")
+        layout.addWidget(extract_as_copy_checkbox)
+
+        # Update info label based on checkbox state
+        def update_info_label():
+            if extract_as_copy_checkbox.isChecked():
+                info_label.setText(
+                    f"Extract frames {start_frame}-{end_frame} ({frame_count} frames)\n"
+                    f"Create a copy with only the selected range.\n\n"
+                    f"⚠ SLOW: Re-encodes video for frame accuracy\n"
+                    f"✓ Frame-accurate cut\n"
+                    f"✓ Original video remains unchanged"
+                )
+            else:
+                info_label.setText(
+                    f"Extract frames {start_frame}-{end_frame} ({frame_count} frames)\n"
+                    f"Discard all other frames from video.\n\n"
+                    f"⚠ SLOW: Re-encodes video for frame accuracy\n"
+                    f"✓ Frame-accurate cut\n\n"
+                    f"Original will be saved as {input_path.name}.backup"
+                )
+
+        info_label = QLabel()
         layout.addWidget(info_label)
+
+        # Connect checkbox to update info label
+        extract_as_copy_checkbox.toggled.connect(update_info_label)
 
         # Reverse option
         reverse_checkbox = QCheckBox("Reverse video (plays backwards)")
@@ -247,6 +409,9 @@ class VideoEditingController:
         # Initialize status
         update_speed_fps_status()
 
+        # Initialize info label
+        update_info_label()
+
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
@@ -256,33 +421,96 @@ class VideoEditingController:
             return
 
         reverse = reverse_checkbox.isChecked()
+        extract_as_copy = extract_as_copy_checkbox.isChecked()
         speed_factor = speed_fps_settings['speed'] if speed_fps_settings['speed'] is not None else 1.0
         target_fps = speed_fps_settings['fps']
 
-        # Save undo snapshot before editing
-        operation_desc = f"Extract frames {start_frame}-{end_frame}"
-        if reverse:
-            operation_desc += " (reversed)"
-        if abs(speed_factor - 1.0) >= 0.01:
-            operation_desc += f" at {speed_factor}x speed"
-        if target_fps is not None:
-            operation_desc += f" @ {target_fps}fps"
-        self._save_undo_snapshot(input_path, operation_desc)
+        if extract_as_copy:
+            # Create a copy first using the duplicate function
+            import shutil
 
-        # Extract range with optional speed/FPS changes (all in one ffmpeg pass)
-        success, message = VideoEditor.extract_range(
-            input_path, input_path,
-            start_frame, end_frame, fps,
-            reverse=reverse,
-            speed_factor=speed_factor,
-            target_fps=target_fps
-        )
+            # Generate unique name for duplicate
+            directory = input_path.parent
+            stem = input_path.stem
+            suffix = input_path.suffix
 
-        if success:
-            QMessageBox.information(self.main_window, "Success", message)
-            self.main_window.reload_directory()
+            # Find a unique name by appending "_copy" or "_copy2", etc.
+            counter = 1
+            new_stem = f"{stem}_extract_{start_frame}-{end_frame}"
+            new_path = directory / f"{new_stem}{suffix}"
+            while new_path.exists():
+                counter += 1
+                new_stem = f"{stem}_extract_{start_frame}-{end_frame}_{counter}"
+                new_path = directory / f"{new_stem}{suffix}"
+
+            # Copy the media file
+            shutil.copy2(str(input_path), str(new_path))
+
+            # Copy caption file if it exists
+            caption_file_path = input_path.with_suffix('.txt')
+            if caption_file_path.exists():
+                new_caption_path = new_path.with_suffix('.txt')
+                shutil.copy2(str(caption_file_path), str(new_caption_path))
+
+            # Copy JSON metadata file if it exists
+            json_file_path = input_path.with_suffix('.json')
+            if json_file_path.exists():
+                new_json_path = new_path.with_suffix('.json')
+                shutil.copy2(str(json_file_path), str(new_json_path))
+
+            # Add the new image to the model
+            source_model = self.main_window.image_list_model
+            source_model.add_image(new_path)
+
+            # Extract range on the copy (no backup needed since it's a new file)
+            success, message = VideoEditor.extract_range(
+                new_path, new_path,
+                start_frame, end_frame, fps,
+                reverse=reverse,
+                speed_factor=speed_factor,
+                target_fps=target_fps
+            )
+
+            if success:
+                operation_desc = f"Created copy and extracted frames {start_frame}-{end_frame}"
+                if reverse:
+                    operation_desc += " (reversed)"
+                if abs(speed_factor - 1.0) >= 0.01:
+                    operation_desc += f" at {speed_factor}x speed"
+                if target_fps is not None:
+                    operation_desc += f" @ {target_fps}fps"
+                QMessageBox.information(self.main_window, "Success", f"{operation_desc}:\n{new_path.name}")
+                self.main_window.reload_directory()
+            else:
+                QMessageBox.critical(self.main_window, "Error", message)
         else:
-            QMessageBox.critical(self.main_window, "Error", message)
+            # Save undo snapshot before editing
+            operation_desc = f"Extract frames {start_frame}-{end_frame}"
+            if reverse:
+                operation_desc += " (reversed)"
+            if abs(speed_factor - 1.0) >= 0.01:
+                operation_desc += f" at {speed_factor}x speed"
+            if target_fps is not None:
+                operation_desc += f" @ {target_fps}fps"
+            self._save_undo_snapshot(input_path, operation_desc)
+
+            # Release file handles before editing
+            self._prepare_video_for_editing(video_player)
+
+            # Extract range with optional speed/FPS changes (all in one ffmpeg pass)
+            success, message = VideoEditor.extract_range(
+                input_path, input_path,
+                start_frame, end_frame, fps,
+                reverse=reverse,
+                speed_factor=speed_factor,
+                target_fps=target_fps
+            )
+
+            if success:
+                QMessageBox.information(self.main_window, "Success", message)
+                self.main_window.reload_directory()
+            else:
+                QMessageBox.critical(self.main_window, "Error", message)
 
     def _show_speed_fps_dialog(self, frame_count, fps, initial_speed=1.0, initial_fps=None):
         """
@@ -406,6 +634,9 @@ class VideoEditingController:
         # Save undo snapshot before editing
         self._save_undo_snapshot(input_path, f"Remove frames {start_frame}-{end_frame}")
 
+        # Release file handles before editing
+        self._prepare_video_for_editing(video_player)
+
         # Remove range (overwrites original, creates backup)
         success, message = VideoEditor.remove_range(
             input_path, input_path,
@@ -443,6 +674,9 @@ class VideoEditingController:
 
         # Save undo snapshot before editing
         self._save_undo_snapshot(input_path, f"Remove frame {current_frame}")
+
+        # Release file handles before editing
+        self._prepare_video_for_editing(video_player)
 
         # Remove frame
         success, message = VideoEditor.remove_frame(
@@ -494,6 +728,9 @@ class VideoEditingController:
 
         # Save undo snapshot before editing
         self._save_undo_snapshot(input_path, f"Repeat frame {current_frame} {repeat_count}x")
+
+        # Release file handles before editing
+        self._prepare_video_for_editing(video_player)
 
         # Repeat frame
         success, message = VideoEditor.repeat_frame(
@@ -1010,6 +1247,9 @@ class VideoEditingController:
         # Save undo snapshot before editing
         self._save_undo_snapshot(input_path, f"Speed change {final_speed:.2f}x")
 
+        # Release file handles before editing
+        self._prepare_video_for_editing(video_player)
+
         # Apply speed change
         success, message = VideoEditor.change_speed(
             input_path, input_path,
@@ -1111,6 +1351,9 @@ class VideoEditingController:
 
         # Save undo snapshot before editing
         self._save_undo_snapshot(input_path, f"FPS change {current_fps:.2f}→{target_fps:.2f}")
+
+        # Release file handles before editing
+        self._prepare_video_for_editing(video_player)
 
         # Apply FPS change
         success, message = VideoEditor.change_fps(
