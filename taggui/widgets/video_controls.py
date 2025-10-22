@@ -410,12 +410,12 @@ class VideoControlsWidget(QWidget):
             QSlider::groove:horizontal {
                 height: 8px;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0.0 #8B0000,
-                    stop:0.15 #8B0000,
-                    stop:0.25 #FFB366,
-                    stop:0.45 #FFB366,
-                    stop:0.55 #4CAF50,
-                    stop:1.0 #4CAF50);
+                    stop:0.0 #2D5A2D,
+                    stop:0.15 #2D5A2D,
+                    stop:0.25 #6B8E23,
+                    stop:0.45 #6B8E23,
+                    stop:0.55 #32CD32,
+                    stop:1.0 #32CD32);
                 border-radius: 4px;
             }
             QSlider::handle:horizontal {
@@ -436,6 +436,7 @@ class VideoControlsWidget(QWidget):
         self._is_dragging_speed = False
         self._last_mouse_pos = None
         self._drag_start_value = 100
+        self._skip_next_slider_change = False  # Flag to skip processing next valueChanged signal
 
         # Install event filter for mouse tracking
         self.speed_slider.installEventFilter(self)
@@ -787,6 +788,7 @@ class VideoControlsWidget(QWidget):
                     slider_left = self.speed_slider.mapToGlobal(QPoint(0, 0)).x()
 
                     mouse_x = event.globalPos().x()
+                    # Clamp position_ratio to visual bounds (no rubberband on click)
                     position_ratio = max(0.0, min(1.0, (mouse_x - slider_left) / slider_width))
 
                     # Non-linear mapping for zones
@@ -800,12 +802,12 @@ class VideoControlsWidget(QWidget):
                         # Green zone: 50-100% maps to 1.0x to 6.0x
                         self._extended_speed = 1.0 + (position_ratio - 0.5) / 0.5 * 5.0
 
-                    # Update display: position_ratio directly maps to slider handle position
-                    # Use the visual position directly as slider value (0% -> min, 100% -> max)
+                    # Update slider handle position for visual feedback
                     slider_pos = int(self.speed_slider.minimum() + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
-                    self.speed_slider.blockSignals(True)
+                    self._skip_next_slider_change = True  # Prevent valueChanged from re-calculating speed
                     self.speed_slider.setValue(slider_pos)
-                    self.speed_slider.blockSignals(False)
+
+                    # Update labels and emit with the calculated speed
                     self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
                     self.speed_changed.emit(self._extended_speed)
                     self._update_speed_preview()
@@ -876,7 +878,8 @@ class VideoControlsWidget(QWidget):
     def _on_speed_slider_pressed(self):
         """Handle speed slider press - start extended drag tracking."""
         self._is_dragging_speed = True
-        self._extended_speed = self.speed_slider.value() / 100.0
+        # Don't recalculate speed here - keep the accurate speed from click/drag
+        # (speed_slider.value() would use linear math which is wrong for our non-linear zones)
         self._drag_start_value = self.speed_slider.value()
         from PySide6.QtGui import QCursor
         self._last_mouse_pos = QCursor.pos()
@@ -926,9 +929,24 @@ class VideoControlsWidget(QWidget):
     @Slot(int)
     def _on_speed_slider_changed(self, value):
         """Handle playback speed slider change (normal mode only)."""
+        # Skip if we just set this value ourselves during click handling
+        if self._skip_next_slider_change:
+            self._skip_next_slider_change = False
+            return
+
+        # Only process if not actively dragging with our custom handler
         if not self._is_dragging_speed:
-            # Normal slider input (not during extended drag)
-            self._extended_speed = value / 100.0
+            # Convert slider value to position ratio, then to speed using non-linear mapping
+            position_ratio = (value - self.speed_slider.minimum()) / (self.speed_slider.maximum() - self.speed_slider.minimum())
+
+            # Apply non-linear zone mapping
+            if position_ratio < 0.2:
+                self._extended_speed = -2.0 + (position_ratio / 0.2) * 2.0
+            elif position_ratio < 0.5:
+                self._extended_speed = (position_ratio - 0.2) / 0.3 * 1.0
+            else:
+                self._extended_speed = 1.0 + (position_ratio - 0.5) / 0.5 * 5.0
+
             self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
             self.speed_changed.emit(self._extended_speed)
             self._update_speed_preview()
