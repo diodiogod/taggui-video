@@ -2,6 +2,7 @@ from PySide6.QtCore import Qt, Signal, Slot, QPointF, QRectF
 from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
                                QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider)
+from utils.settings import settings, DEFAULT_SETTINGS
 
 
 class LoopSlider(QSlider):
@@ -438,6 +439,43 @@ class VideoControlsWidget(QWidget):
         self._drag_start_value = 100
         self._skip_next_slider_change = False  # Flag to skip processing next valueChanged signal
 
+        # Gradient color schemes (from user's testcolor.html)
+        self._gradient_themes = [
+            # Current theme (Volcanic)
+            ("#2D5A2D", "#6B8E23", "#32CD32"),
+            # Cosmic Drift
+            ("#4B0082", "#008080", "#39FF14"),
+            # Organic Pulse
+            ("#E97451", "#556B2F", "#00FF7F"),
+            # Sunburst Rise
+            ("#FF4500", "#FFD700", "#ADFF2F"),
+            # Twilight Flow
+            ("#2F4F4F", "#6A5ACD", "#00CED1"),
+            # Ember Surge
+            ("#8B0000", "#FF8C00", "#FFFF00"),
+            # Aurora Stream
+            ("#9400D3", "#00BFFF", "#7FFF00"),
+            # Neon Wave
+            ("#FF00FF", "#00FFFF", "#00FF00"),
+            # Citrus Bloom
+            ("#FFA500", "#FFFF66", "#CCFF99"),
+            # Storm Fade
+            ("#1C1C1C", "#5F9EA0", "#B0C4DE"),
+            # Lava Drift
+            ("#800000", "#FF6347", "#FFDAB9"),
+            # Ice & Fire
+            ("#00FFFF", "#FFFFFF", "#FF4500"),
+            # Forest Light
+            ("#013220", "#228B22", "#7CFC00"),
+        ]
+        # Load saved theme index from settings
+        self._current_theme_index = settings.value('speed_slider_theme_index',
+                                                    defaultValue=DEFAULT_SETTINGS['speed_slider_theme_index'],
+                                                    type=int)
+
+        # Apply the saved theme to the slider
+        self._apply_speed_theme()
+
         # Install event filter for mouse tracking
         self.speed_slider.installEventFilter(self)
 
@@ -450,6 +488,9 @@ class VideoControlsWidget(QWidget):
         self.speed_value_label.setMinimumWidth(45)
         self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
         self.speed_value_label.mousePressEvent = self._reset_speed
+
+        # Speed label for theme cycling (clicking "Speed:" text)
+        self.speed_label.mousePressEvent = self._cycle_speed_theme
 
         controls_layout.addWidget(self.play_pause_btn)
         controls_layout.addWidget(self.stop_btn)
@@ -815,6 +856,30 @@ class VideoControlsWidget(QWidget):
                     event.accept()
                     return
 
+            # Handle mouse wheel for fine adjustment
+            if event.type() == QEvent.Type.Wheel:
+                wheel_delta = event.angleDelta().y()
+                # Positive delta = wheel up = increase speed
+                # Negative delta = wheel down = decrease speed
+                adjustment = 0.01 if wheel_delta > 0 else -0.01
+
+                # Clamp new speed to visual range (-2.0 to 6.0)
+                self._extended_speed = max(-2.0, min(6.0, self._extended_speed + adjustment))
+
+                # Update slider position to match new speed
+                position_ratio = self._speed_to_position_ratio(self._extended_speed)
+                slider_pos = int(self.speed_slider.minimum() + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
+                self._skip_next_slider_change = True
+                self.speed_slider.setValue(slider_pos)
+
+                # Update display
+                self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+                self.speed_changed.emit(self._extended_speed)
+                self._update_speed_preview()
+                self._update_marker_range_display()
+                event.accept()
+                return True  # Consume event - prevent zoom from happening
+
             if event.type() == QEvent.Type.MouseMove and self._is_dragging_speed:
                 from PySide6.QtCore import QPoint
                 from PySide6.QtGui import QCursor
@@ -953,7 +1018,7 @@ class VideoControlsWidget(QWidget):
             self._update_marker_range_display()
 
     def _reset_speed(self, event):
-        """Reset playback speed to 1.0x when label is clicked."""
+        """Reset playback speed to 1.0x when speed value label is clicked."""
         self._extended_speed = 1.0
         # Convert 1.0x to correct slider position using non-linear mapping
         position_ratio = self._speed_to_position_ratio(1.0)
@@ -965,6 +1030,45 @@ class VideoControlsWidget(QWidget):
         self.speed_changed.emit(1.0)
         self._update_speed_preview()
         self._update_marker_range_display()
+
+    def _apply_speed_theme(self):
+        """Apply the current theme to the speed slider stylesheet."""
+        theme = self._gradient_themes[self._current_theme_index]
+        # Update gradient stylesheet with theme colors
+        # Keep the same transition smoothness as before (0.15-0.25, 0.45-0.55)
+        self.speed_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0.0 {theme[0]},
+                    stop:0.15 {theme[0]},
+                    stop:0.25 {theme[1]},
+                    stop:0.45 {theme[1]},
+                    stop:0.55 {theme[2]},
+                    stop:1.0 {theme[2]});
+                border-radius: 4px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #FFFFFF;
+                border: 2px solid #333;
+                width: 16px;
+                margin: -4px 0;
+                border-radius: 8px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: #E0E0E0;
+                border: 2px solid #000;
+            }}
+        """)
+
+    def _cycle_speed_theme(self, event):
+        """Cycle through gradient themes when 'Speed:' label is clicked."""
+        # Move to next theme
+        self._current_theme_index = (self._current_theme_index + 1) % len(self._gradient_themes)
+        # Apply the new theme
+        self._apply_speed_theme()
+        # Save theme choice to settings
+        settings.setValue('speed_slider_theme_index', self._current_theme_index)
 
     def _update_speed_preview(self):
         """Update speed preview label based on current speed and video metadata."""

@@ -31,7 +31,8 @@ DEFAULT_SETTINGS = {
     'export_keep_dir_structure': False,
     'export_filter_hashtag': True,
     'spell_check_enabled': True,
-    'grammar_check_mode': 'free_api'
+    'grammar_check_mode': 'free_api',
+    'speed_slider_theme_index': 12  # Forest Light
 }
 
 
