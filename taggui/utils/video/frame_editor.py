@@ -246,6 +246,30 @@ class FrameEditor:
             Tuple of (success: bool, message: str)
         """
         try:
+            # Get current frame count
+            probe_cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(input_path)
+            ]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if probe_result.returncode != 0:
+                return False, f"Failed to probe video: {probe_result.stderr}"
+
+            probe_data = json.loads(probe_result.stdout)
+            current_frames = None
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    current_frames = stream.get('nb_frames')
+                    break
+
+            if current_frames is None:
+                return False, "Could not determine frame count"
+
+            current_frames = int(current_frames)
+
             # Create backup of original
             if not create_backup(input_path):
                 return False, "Failed to create backup"
@@ -261,58 +285,79 @@ class FrameEditor:
             segment2 = temp_dir / 'segment2.mp4'
             concat_list = temp_dir / 'concat.txt'
 
-            # Extract first segment (before removal)
-            if start_frame > 0:
-                cmd1 = [
+            try:
+                # Use single ffmpeg call with trim filters instead of concat
+                # This is faster and more reliable than extracting multiple segments
+                filter_parts = []
+
+                if start_frame > 0:
+                    filter_parts.append(f'[0:v]trim=start_frame=0:end_frame={start_frame},setpts=PTS-STARTPTS[before];')
+
+                if end_frame < current_frames - 1:
+                    filter_parts.append(f'[0:v]trim=start_frame={end_frame+1},setpts=PTS-STARTPTS[after];')
+
+                # Concatenate the segments
+                if start_frame > 0 and end_frame < current_frames - 1:
+                    filter_parts.append('[before][after]concat=n=2:v=1:a=0[out]')
+                elif start_frame > 0:
+                    filter_parts.append('[before]copy[out]')
+                elif end_frame < current_frames - 1:
+                    filter_parts.append('[after]copy[out]')
+
+                filter_complex = ''.join(filter_parts)
+
+                # Use temp output if input == output
+                import shutil
+                temp_output = output_path.parent / f'.temp_output_{output_path.name}'
+
+                # Run single ffmpeg command with filter complex
+                cmd = [
                     'ffmpeg',
                     '-i', str(input_path),
-                    '-frames:v', str(start_frame),  # Exact frame count
-                    '-c', 'copy',
+                    '-filter_complex', filter_complex if filter_complex else 'copy',
+                    '-map', '[out]' if filter_complex else '0:v',
+                    '-map', '0:a?',  # Include audio if present
+                    '-c:v', 'libx264',
+                    '-crf', '18',
+                    '-preset', 'slow',
+                    '-c:a', 'aac',
                     '-y',
-                    str(segment1)
+                    str(temp_output)
                 ]
-                subprocess.run(cmd1, capture_output=True, check=True)
 
-            # Extract second segment (after removal)
-            cmd2 = [
-                'ffmpeg',
-                '-i', str(input_path),
-                '-ss', str(end_time),
-                '-c', 'copy',
-                '-y',
-                str(segment2)
-            ]
-            subprocess.run(cmd2, capture_output=True, check=True)
+                result = subprocess.run(cmd, capture_output=True, text=True)
 
-            # Create concat list
-            with open(concat_list, 'w') as f:
-                if start_frame > 0 and segment1.exists():
-                    f.write(f"file '{segment1}'\n")
-                if segment2.exists():
-                    f.write(f"file '{segment2}'\n")
+                # If successful and input == output, replace input with temp
+                if result.returncode == 0 and input_path == output_path:
+                    shutil.move(str(temp_output), str(output_path))
 
-            # Concatenate segments
-            cmd3 = [
-                'ffmpeg',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', str(concat_list),
-                '-c', 'copy',
-                '-y',
-                str(output_path)
-            ]
-            result = subprocess.run(cmd3, capture_output=True, text=True)
+                if result.returncode != 0:
+                    # Clean up any corrupted output file
+                    import time
+                    for _ in range(5):
+                        if temp_output.exists():
+                            try:
+                                temp_output.unlink()
+                                break
+                            except:
+                                time.sleep(0.1)
+                    return False, f"Failed to remove frames: {result.stderr[-300:]}"
 
-            # Cleanup temp files
-            for f in [segment1, segment2, concat_list]:
-                if f.exists():
-                    f.unlink()
-            temp_dir.rmdir()
-
-            if result.returncode == 0:
                 return True, f"Successfully removed frames {start_frame}-{end_frame}"
-            else:
-                return False, f"ffmpeg error: {result.stderr}"
+
+            finally:
+                # Cleanup temp files
+                import time
+                for _ in range(3):
+                    try:
+                        for f in [segment1, segment2, concat_list]:
+                            if f.exists():
+                                f.unlink()
+                        if temp_dir.exists():
+                            temp_dir.rmdir()
+                        break
+                    except:
+                        time.sleep(0.1)
 
         except FileNotFoundError:
             return False, "ffmpeg not found. Please install ffmpeg."
@@ -384,23 +429,53 @@ class FrameEditor:
 
             # Use split filter to create multiple segments and concat them
             temp_dir = output_path.parent / '.temp_segments'
-            temp_dir.mkdir(exist_ok=True)
+            try:
+                temp_dir.mkdir(exist_ok=True)
+            except Exception as e:
+                return False, f"Failed to create temp directory {temp_dir}: {str(e)}"
 
-            frame_png = temp_dir / f'frame_{frame_num}.png'
+            frame_file = temp_dir / f'frame_{frame_num}.mp4'
 
-            # Extract the frame to repeat as a PNG
+            # Extract the frame to repeat as MP4
+            # Using MP4 avoids problematic color space conversion issues (yuv420p doesn't need conversion)
             extract_cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
-                '-vf', f'select=eq(n\\,{frame_num})',
-                '-vframes', '1',
+                '-vf', f'trim=start_frame={frame_num}:end_frame={frame_num+1}',
+                '-c:v', 'libx264',
+                '-crf', '28',  # Lower quality for speed
+                '-preset', 'ultrafast',
+                '-c:a', 'aac',
                 '-y',
-                str(frame_png)
+                str(frame_file)
             ]
-            subprocess.run(extract_cmd, capture_output=True, check=True)
+
+            extract_result = subprocess.run(extract_cmd, capture_output=True, text=True)
+
+            if extract_result.returncode != 0:
+                error_msg = extract_result.stderr if extract_result.stderr else "Unknown error"
+                return False, f"Failed to extract frame {frame_num}: {error_msg}"
+
+            # Check if file exists - wait a moment in case of filesystem lag
+            import time
+            for _ in range(3):
+                if frame_file.exists():
+                    break
+                time.sleep(0.1)
+
+            if not frame_file.exists():
+                # Check what files are in temp dir
+                files_in_temp = list(temp_dir.glob('*'))
+                files_msg = f"Files in temp dir: {[f.name for f in files_in_temp]}" if files_in_temp else "Temp dir is empty"
+                stderr_tail = extract_result.stderr[-500:] if extract_result.stderr else "No stderr"
+                return False, f"Failed to extract frame {frame_num}: {files_msg}. ffmpeg stderr: {stderr_tail}"
 
             # Build complex filter
             filter_parts = []
+
+            # Extract the single frame from the second input and loop it repeat_count times
+            # loop=loop=N means repeat the clip N times (so N+1 total), so we need repeat_count-1
+            filter_parts.append(f'[1:v]trim=start_frame=0:end_frame=1,setpts=PTS-STARTPTS,loop=loop={repeat_count-1}:size=1[looped];')
 
             # Split the input
             if frame_num > 0:
@@ -408,10 +483,6 @@ class FrameEditor:
 
             # Original frame at position
             filter_parts.append(f'[0:v]trim=start_frame={frame_num}:end_frame={frame_num+1},setpts=PTS-STARTPTS[at];')
-
-            # Repeated frames from PNG
-            for i in range(repeat_count):
-                filter_parts.append(f'[1:v]copy[repeat{i}];')
 
             # Frames after (if any)
             if frame_num < current_frames - 1:
@@ -422,8 +493,7 @@ class FrameEditor:
             if frame_num > 0:
                 concat_inputs.append('[before]')
             concat_inputs.append('[at]')
-            for i in range(repeat_count):
-                concat_inputs.append(f'[repeat{i}]')
+            concat_inputs.append('[looped]')
             if frame_num < current_frames - 1:
                 concat_inputs.append('[after]')
 
@@ -437,7 +507,7 @@ class FrameEditor:
             cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
-                '-i', str(frame_png),
+                '-i', str(frame_file),
                 '-filter_complex', filter_complex,
                 '-map', '[outv]',
                 '-map', '0:a?',  # Include audio if present
@@ -457,8 +527,8 @@ class FrameEditor:
                 shutil.move(str(temp_output), str(output_path))
 
             # Cleanup
-            if frame_png.exists():
-                frame_png.unlink()
+            if frame_file.exists():
+                frame_file.unlink()
             if temp_output.exists():
                 temp_output.unlink()
             if temp_dir.exists():
