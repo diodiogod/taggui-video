@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 
 from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
@@ -194,7 +195,8 @@ class MainWindow(QMainWindow):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.timeout.connect(self.delayed_filter)
         self._filter_delay = 100
-        self._max_delay = 400
+        self._max_delay = 500
+        self._filter_timer_running = False
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
@@ -341,6 +343,23 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def set_image_list_filter(self):
+        if self._filter_timer.isActive():
+            self._filter_timer.stop()
+        
+        if hasattr(self, '_filter_timer_running') and self._filter_timer_running:
+            self._filter_delay = min(self._filter_delay + 5, self._max_delay)
+        
+        self._filter_timer_running = True
+        #self._filter_timer = threading.Timer(self._filter_delay / 1000.0, self._execute_delayed_filter)
+        self._filter_timer.start()
+        
+    def _execute_delayed_filter(self):
+        """Execute the actual filter and reset state"""
+        self._filter_timer_running = False
+        self._filter_delay = 100  # Reset to initial delay
+        self.delayed_filter()
+
+    def delayed_filter(self):
         filter_ = self.image_list.filter_line_edit.parse_filter_text()
         self.proxy_image_list_model.set_filter(filter_)
         self.proxy_image_list_model.filter_changed.emit()
