@@ -117,6 +117,10 @@ class ImageDelegate(QStyledItemDelegate):
         return index.data(Qt.ItemDataRole.SizeHintRole)
 
     def paint(self, painter, option, index):
+        # Validate painter state before any painting operations
+        if not painter or not painter.isActive():
+            return
+
         # Validate index and painter before painting
         if not index.isValid():
             return
@@ -153,16 +157,18 @@ class ImageDelegate(QStyledItemDelegate):
             # In ListMode: use default painting with text
             try:
                 super().paint(painter, option, index)
-            except RuntimeError:
+            except (RuntimeError, Exception):
                 # Silently ignore paint errors during model reset
                 return
 
-            p_index = QPersistentModelIndex(index)
-            if p_index.isValid() and p_index in self.labels:
-                label_text = self.labels[p_index]
-                painter.setBrush(QColor(255, 255, 255, 163))
-                painter.drawRect(option.rect)
-                painter.drawText(option.rect, label_text, Qt.AlignCenter)
+            # Only draw custom labels if painter is still active
+            if painter.isActive():
+                p_index = QPersistentModelIndex(index)
+                if p_index.isValid() and p_index in self.labels:
+                    label_text = self.labels[p_index]
+                    painter.setBrush(QColor(255, 255, 255, 163))
+                    painter.drawRect(option.rect)
+                    painter.drawText(option.rect, label_text, Qt.AlignCenter)
 
         # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)
@@ -220,6 +226,10 @@ class ImageDelegate(QStyledItemDelegate):
     def _draw_n4_plus_1_stamp(self, painter, option, index):
         """Draw N*4+1 validation stamp on video file previews."""
         try:
+            # Validate painter state
+            if not painter or not painter.isActive():
+                return
+
             # Get the image data
             image = index.data(Qt.ItemDataRole.UserRole)
             if not image or not hasattr(image, 'is_video') or not image.is_video:

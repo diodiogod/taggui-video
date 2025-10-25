@@ -53,6 +53,9 @@ class LoopSlider(QSlider):
             return
 
         painter = QPainter(self)
+        if not painter.isActive():
+            return
+
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Calculate positions
@@ -244,6 +247,9 @@ class SpeedSlider(QSlider):
 
         # Draw zone dividers
         painter = QPainter(self)
+        if not painter.isActive():
+            return
+
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Get groove rectangle
