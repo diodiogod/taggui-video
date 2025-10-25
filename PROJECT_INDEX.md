@@ -5,6 +5,8 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 ## Root Files
 - `CLAUDE.md`: Instructions for Claude AI usage
 - `INSTRUCTION.md`: Project development instructions
+- `start_windows.bat`: Windows startup script with venv activation
+- `start_linux.sh`: Linux startup script with venv activation
 - `taggui/.gitignore`: Git ignore patterns
 - `taggui/LICENSE`: Project license
 - `taggui/README.md`: Project documentation and features
