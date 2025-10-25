@@ -43,18 +43,21 @@ class CaptioningThread(ModelThread):
     def __init__(self, parent, image_list_model: ImageListModel,
                  selected_image_indices: list[QModelIndex],
                  caption_settings: dict, tag_separator: str,
-                 models_directory_path: Path | None):
+                 models_directory_path: Path | None,
+                 image_viewer: 'ImageViewer' = None):
         super().__init__(parent, image_list_model, selected_image_indices)
         self.caption_settings = caption_settings
         self.tag_separator = tag_separator
         self.models_directory_path = models_directory_path
+        self.image_viewer = image_viewer
         self.model: AutoCaptioningModel | None = None
 
     def load_model(self):
         model_id = self.caption_settings['model_id']
         model_class = get_model_class(model_id)
         self.model = model_class(
-            captioning_thread_=self, caption_settings=self.caption_settings)
+            captioning_thread_=self, caption_settings=self.caption_settings,
+            image_viewer=self.image_viewer)
         self.error_message = self.model.get_error_message()
         if self.error_message:
             self.is_error = True

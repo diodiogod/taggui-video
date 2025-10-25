@@ -444,6 +444,31 @@ class VideoPlayerWidget(QWidget):
         """Get frames per second."""
         return self.fps
 
+    def get_current_frame_as_numpy(self):
+        """Extract current frame as RGB numpy array for processing.
+
+        Returns:
+            numpy.ndarray: RGB frame data, or None if extraction fails
+        """
+        if not self.cap:
+            return None
+
+        try:
+            # Seek to current frame
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+
+            # Read frame
+            ret, frame = self.cap.read()
+            if not ret:
+                return None
+
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return frame_rgb
+        except Exception as e:
+            print(f"Error extracting frame {self.current_frame}: {e}")
+            return None
+
     def set_loop(self, enabled: bool, start_frame: int = None, end_frame: int = None):
         """Set loop playback parameters."""
         self.loop_enabled = enabled

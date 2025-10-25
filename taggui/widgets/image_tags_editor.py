@@ -352,6 +352,13 @@ class ImageTagsEditor(QDockWidget):
             self.grammar_check_button.show()
         else:
             # Switch to tag mode
+            # Sync descriptive text back to tags before hiding
+            text = self.descriptive_text_edit.toPlainText()
+            if text:
+                tags = text.split(self.tag_separator)
+            else:
+                tags = []
+            self.image_tag_list_model.setStringList(tags)
             # Hide text edit and grammar button, show tag list and input
             self.descriptive_text_edit.hide()
             self.grammar_check_button.hide()
