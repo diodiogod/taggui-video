@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
                            self.all_tags_editor)
         self.auto_captioner = AutoCaptioner(self.image_list_model,
-                                            self.image_list)
+                                            self.image_list, self.image_viewer)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
                            self.auto_captioner)
         self.auto_markings = AutoMarkings(self.image_list_model,

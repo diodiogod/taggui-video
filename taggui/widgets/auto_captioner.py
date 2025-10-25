@@ -375,10 +375,12 @@ class AutoCaptioner(QDockWidget):
     caption_generated = Signal(QModelIndex, str, list)
 
     def __init__(self, image_list_model: ImageListModel,
-                 image_list: ImageList):
+                 image_list: ImageList,
+                 image_viewer: 'ImageViewer' = None):
         super().__init__()
         self.image_list_model = image_list_model
         self.image_list = image_list
+        self.image_viewer = image_viewer
         self.is_captioning = False
         self.captioning_thread = None
         self.processor = None
@@ -510,7 +512,8 @@ class AutoCaptioner(QDockWidget):
                                  if models_directory_path else None)
         self.captioning_thread = CaptioningThread(
             self, self.image_list_model, selected_image_indices,
-            caption_settings, tag_separator, models_directory_path)
+            caption_settings, tag_separator, models_directory_path,
+            self.image_viewer)
         self.captioning_thread.text_outputted.connect(
             self.update_console_text_edit)
         self.captioning_thread.clear_console_text_edit_requested.connect(

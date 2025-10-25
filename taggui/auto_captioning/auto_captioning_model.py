@@ -6,7 +6,7 @@ from datetime import datetime
 import numpy as np
 import torch
 import pillow_jxl
-from PIL import Image as PilImage
+from PIL import Image as PilImage, UnidentifiedImageError
 from PIL.ImageOps import exif_transpose
 from transformers import (AutoModelForVision2Seq, AutoProcessor,
                           BatchFeature, BitsAndBytesConfig)
@@ -52,9 +52,11 @@ class AutoCaptioningModel:
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',
-                 caption_settings: dict):
+                 caption_settings: dict,
+                 image_viewer: 'ImageViewer' = None):
         self.thread = captioning_thread_
         self.thread_parent = captioning_thread_.parent()
+        self.image_viewer = image_viewer
         self.caption_settings = caption_settings
         self.model_id = caption_settings['model_id']
         self.prompt = caption_settings['prompt']
@@ -207,6 +209,28 @@ class AutoCaptioningModel:
         return text
 
     def load_image(self, image: Image, crop: bool) -> PilImage:
+        # Handle video frames by extracting current frame from video player
+        if image.is_video and self.image_viewer:
+            video_player = self.image_viewer.video_player
+            if video_player:
+                frame_array = video_player.get_current_frame_as_numpy()
+                if frame_array is not None:
+                    # Convert numpy array (RGB) to PIL Image
+                    pil_image = PilImage.fromarray(frame_array, mode='RGB')
+                    pil_image = pil_image.convert(self.image_mode)
+                    if crop and image.crop is not None:
+                        pil_image = pil_image.crop(image.crop.getCoords())
+                    return pil_image
+                else:
+                    # Frame extraction failed, raise error
+                    raise UnidentifiedImageError(
+                        f'Could not extract frame from video: {image.path.name}')
+            else:
+                # No video player available
+                raise UnidentifiedImageError(
+                    f'Video player not available for: {image.path.name}')
+
+        # Handle regular image files
         pil_image = PilImage.open(image.path)
         # Rotate the image according to the orientation tag.
         pil_image = exif_transpose(pil_image)
