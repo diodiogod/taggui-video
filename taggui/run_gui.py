@@ -12,9 +12,21 @@ os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
 import transformers
 from PySide6.QtGui import QImageReader
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import qInstallMessageHandler
 
 from utils.settings import settings
 from widgets.main_window import MainWindow
+
+
+# Install a message handler to suppress QPainter warnings at Qt level
+def qt_message_handler(msg_type, msg_context, msg_string):
+    """Suppress Qt's QPainter debug messages."""
+    if "QPainter" in msg_string or "Paint device returned engine" in msg_string:
+        return
+    # For development, uncomment to see other messages:
+    # print(f"[Qt] {msg_string}")
+
+qInstallMessageHandler(qt_message_handler)
 
 
 def suppress_warnings():
@@ -36,29 +48,19 @@ def suppress_warnings():
 
 
 def run_gui():
-    # Suppress Qt multimedia ffmpeg output and QPainter warnings
-    os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false;qt.qpa.drawing=false;qt.gui.painting=false'
+    # Suppress Qt multimedia ffmpeg output
+    os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false'
 
-    # Open /dev/null to suppress stderr during widget initialization
-    try:
-        devnull = open(os.devnull, 'w')
-        old_stderr = sys.stderr
-        sys.stderr = devnull
-
-        app = QApplication([])
-        # The application name is shown in the taskbar.
-        app.setApplicationName('TagGUI')
-        # The application display name is shown in the title bar.
-        app.setApplicationDisplayName('TagGUI')
-        app.setStyle('Fusion')
-        # Disable the allocation limit to allow loading large images.
-        QImageReader.setAllocationLimit(0)
-        main_window = MainWindow(app)
-        main_window.show()
-    finally:
-        sys.stderr = old_stderr
-        devnull.close()
-
+    app = QApplication([])
+    # The application name is shown in the taskbar.
+    app.setApplicationName('TagGUI')
+    # The application display name is shown in the title bar.
+    app.setApplicationDisplayName('TagGUI')
+    app.setStyle('Fusion')
+    # Disable the allocation limit to allow loading large images.
+    QImageReader.setAllocationLimit(0)
+    main_window = MainWindow(app)
+    main_window.show()
     sys.exit(app.exec())
 
 
