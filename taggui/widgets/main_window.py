@@ -1,5 +1,4 @@
 from pathlib import Path
-import threading
 
 from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, Slot, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
@@ -292,11 +291,6 @@ class MainWindow(QMainWindow):
         self._filter_timer.timeout.connect(self.delayed_filter)
         self._filter_delay = 100
         self._max_delay = 500
-
-        # self._filter_timer = None
-        # self._filter_delay = 100
-        # self._max_delay = 500
-        # self._filter_timer_running = False
         
 
     def closeEvent(self, event: QCloseEvent):
@@ -552,7 +546,6 @@ class MainWindow(QMainWindow):
             self._filter_delay = min(self._filter_delay + 5, self._max_delay)
         
         self._filter_timer_running = True
-        #self._filter_timer = threading.Timer(self._filter_delay / 1000.0, self._execute_delayed_filter)
         self._filter_timer.start()
         
     def _execute_delayed_filter(self):
