@@ -1,5 +1,4 @@
 from pathlib import Path
-import threading
 
 from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
