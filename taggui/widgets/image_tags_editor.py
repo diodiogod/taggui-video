@@ -1,6 +1,6 @@
 from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
-from PySide6.QtGui import QKeyEvent, QIcon
+from PySide6.QtGui import QKeyEvent, QIcon, QFont, QWheelEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
                                QPushButton, QStyle, QToolButton, QVBoxLayout, QWidget)
@@ -96,11 +96,24 @@ class ImageTagsList(QListView):
         super().__init__()
         self.image_tag_list_model = image_tag_list_model
         self.setModel(self.image_tag_list_model)
-        self.setItemDelegate(TextEditItemDelegate(self))
+        self.delegate = TextEditItemDelegate(self)
+        self.setItemDelegate(self.delegate)
         self.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setWordWrap(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+
+        # Initialize tag list zoom level from settings
+        self.min_zoom = 50  # Percent
+        self.max_zoom = 300  # Percent
+        self.zoom_step = 10  # Percent per scroll step
+        self.current_zoom = settings.value(
+            'tag_list_zoom',
+            defaultValue=DEFAULT_SETTINGS.get('tag_list_zoom', 100),
+            type=int)
+        self.current_zoom = max(self.min_zoom,
+                                min(self.max_zoom, self.current_zoom))
+        self._apply_zoom(self.current_zoom)
 
     def keyPressEvent(self, event: QKeyEvent):
         """
@@ -131,6 +144,46 @@ class ImageTagsList(QListView):
         self.selectionModel().select(
             self.image_tag_list_model.index(row),
             QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle Ctrl+scroll wheel for zooming tag list (font and row height)."""
+        if event.modifiers() == Qt.ControlModifier:
+            # Get scroll direction
+            delta = event.angleDelta().y()
+
+            # Adjust zoom level
+            if delta > 0:
+                # Scroll up = zoom in (larger tags)
+                new_zoom = min(self.current_zoom + self.zoom_step, self.max_zoom)
+            else:
+                # Scroll down = zoom out (smaller tags)
+                new_zoom = max(self.current_zoom - self.zoom_step, self.min_zoom)
+
+            if new_zoom != self.current_zoom:
+                self.current_zoom = new_zoom
+                self._apply_zoom(self.current_zoom)
+                # Save to settings
+                settings.setValue('tag_list_zoom', self.current_zoom)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _apply_zoom(self, zoom_percent: int):
+        """Apply zoom level to tag list (scales font and row heights)."""
+        # Scale font size based on zoom percentage
+        base_font_size = 10
+        scaled_font_size = int(base_font_size * zoom_percent / 100)
+        font = QFont(self.font())
+        font.setPointSize(max(8, min(32, scaled_font_size)))
+        self.setFont(font)
+
+        # Update delegate's zoom multiplier for row height scaling
+        self.delegate.set_zoom_multiplier(zoom_percent)
+
+        # Reset all row heights to trigger recalculation with new zoom
+        for row in range(self.model().rowCount()):
+            self.openPersistentEditor(self.model().index(row, 0))
+            self.closePersistentEditor(self.model().index(row, 0))
 
 
 class ImageTagsEditor(QDockWidget):

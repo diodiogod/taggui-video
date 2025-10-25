@@ -3,6 +3,10 @@ from PySide6.QtWidgets import QFrame, QPlainTextEdit, QStyledItemDelegate, QStyl
 
 
 class TextEditItemDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.zoom_multiplier = 1.0
+
     def paint(self, painter, option, index):
         # Add some left padding.
         option.rect.adjust(4, 0, 0, 0)
@@ -20,8 +24,15 @@ class TextEditItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
-        size.setHeight(size.height() + 8)
+        # Base padding + zoom scaled padding
+        base_padding = 8
+        scaled_padding = int(base_padding * self.zoom_multiplier)
+        size.setHeight(size.height() + scaled_padding)
         return size
+
+    def set_zoom_multiplier(self, zoom_percent: int):
+        """Set zoom level (as percentage) for row height scaling."""
+        self.zoom_multiplier = zoom_percent / 100.0
 
     def eventFilter(self, editor, event: QEvent):
         if (event.type() == QEvent.KeyPress
