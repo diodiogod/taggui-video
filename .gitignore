@@ -166,3 +166,6 @@ CLAUDE.md
 .claide/
 .claude/
 .taggui_undo/
+
+# Setup script logs
+taggui_setup.log

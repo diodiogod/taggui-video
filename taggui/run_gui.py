@@ -3,6 +3,7 @@ import os
 import sys
 import traceback
 import warnings
+import io
 
 # Suppress ffmpeg verbose output BEFORE any OpenCV imports
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
@@ -35,19 +36,29 @@ def suppress_warnings():
 
 
 def run_gui():
-    # Suppress Qt multimedia ffmpeg output
-    os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false'
+    # Suppress Qt multimedia ffmpeg output and QPainter warnings
+    os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false;qt.qpa.drawing=false;qt.gui.painting=false'
 
-    app = QApplication([])
-    # The application name is shown in the taskbar.
-    app.setApplicationName('TagGUI')
-    # The application display name is shown in the title bar.
-    app.setApplicationDisplayName('TagGUI')
-    app.setStyle('Fusion')
-    # Disable the allocation limit to allow loading large images.
-    QImageReader.setAllocationLimit(0)
-    main_window = MainWindow(app)
-    main_window.show()
+    # Open /dev/null to suppress stderr during widget initialization
+    try:
+        devnull = open(os.devnull, 'w')
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+
+        app = QApplication([])
+        # The application name is shown in the taskbar.
+        app.setApplicationName('TagGUI')
+        # The application display name is shown in the title bar.
+        app.setApplicationDisplayName('TagGUI')
+        app.setStyle('Fusion')
+        # Disable the allocation limit to allow loading large images.
+        QImageReader.setAllocationLimit(0)
+        main_window = MainWindow(app)
+        main_window.show()
+    finally:
+        sys.stderr = old_stderr
+        devnull.close()
+
     sys.exit(app.exec())
 
 

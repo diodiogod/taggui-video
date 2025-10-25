@@ -28,62 +28,79 @@ def show_marking_latent_icon():
 
 def create_add_box_icon(color: QColor) -> QPixmap:
     """Create a QPixmap for an icon"""
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(QColor('transparent'))
+    try:
+        pixmap = QPixmap(32, 32)
+        if pixmap.isNull():
+            return QPixmap()
 
-    # Create a painter to draw on the pixmap
-    painter = QPainter(pixmap)
+        pixmap.fill(QColor('transparent'))
 
-    # Draw a bordered rectangle in the specified color
-    rect = QRect(2, 2, 28, 28)
-    painter.setPen(QPen(color, 2))
-    painter.drawRect(rect)
+        # Create a painter to draw on the pixmap
+        painter = QPainter(pixmap)
+        if not painter.isActive():
+            return pixmap
 
-    # Draw a plus sign in the middle
-    painter.setPen(QPen(Qt.black, 1))
-    path = QPainterPath()
-    path.moveTo(16, 10)
-    path.lineTo(16, 22)
-    path.moveTo(10, 16)
-    path.lineTo(22, 16)
-    painter.drawPath(path)
-    painter.end()
+        # Draw a bordered rectangle in the specified color
+        rect = QRect(2, 2, 28, 28)
+        painter.setPen(QPen(color, 2))
+        painter.drawRect(rect)
 
-    return pixmap
+        # Draw a plus sign in the middle
+        painter.setPen(QPen(Qt.black, 1))
+        path = QPainterPath()
+        path.moveTo(16, 10)
+        path.lineTo(16, 22)
+        path.moveTo(10, 16)
+        path.lineTo(22, 16)
+        painter.drawPath(path)
+        painter.end()
+
+        return pixmap
+    except Exception:
+        return QPixmap()
 
 def create_apply_crop_icon() -> QPixmap:
     """Create an icon for the apply crop button - scissors cutting a blue rectangle"""
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(QColor('transparent'))
+    try:
+        pixmap = QPixmap(32, 32)
+        if pixmap.isNull():
+            return QPixmap()
 
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
+        pixmap.fill(QColor('transparent'))
 
-    # Draw the crop rectangle (blue box)
-    crop_rect = QRect(4, 8, 16, 16)
-    painter.setPen(QPen(Qt.blue, 2))
-    painter.drawRect(crop_rect)
+        painter = QPainter(pixmap)
+        if not painter.isActive():
+            return pixmap
 
-    # Draw scissors (simplified design)
-    painter.setPen(QPen(Qt.red, 2))
+        painter.setRenderHint(QPainter.Antialiasing)
 
-    # Scissors blade 1
-    path1 = QPainterPath()
-    path1.moveTo(22, 10)
-    path1.lineTo(18, 14)
-    path1.lineTo(20, 16)
-    painter.drawPath(path1)
+        # Draw the crop rectangle (blue box)
+        crop_rect = QRect(4, 8, 16, 16)
+        painter.setPen(QPen(Qt.blue, 2))
+        painter.drawRect(crop_rect)
 
-    # Scissors blade 2
-    path2 = QPainterPath()
-    path2.moveTo(22, 22)
-    path2.lineTo(18, 18)
-    path2.lineTo(20, 16)
-    painter.drawPath(path2)
+        # Draw scissors (simplified design)
+        painter.setPen(QPen(Qt.red, 2))
 
-    # Scissors pivot
-    painter.setBrush(Qt.red)
-    painter.drawEllipse(19, 15, 3, 3)
+        # Scissors blade 1
+        path1 = QPainterPath()
+        path1.moveTo(22, 10)
+        path1.lineTo(18, 14)
+        path1.lineTo(20, 16)
+        painter.drawPath(path1)
 
-    painter.end()
-    return pixmap
+        # Scissors blade 2
+        path2 = QPainterPath()
+        path2.moveTo(22, 22)
+        path2.lineTo(18, 18)
+        path2.lineTo(20, 16)
+        painter.drawPath(path2)
+
+        # Scissors pivot
+        painter.setBrush(Qt.red)
+        painter.drawEllipse(19, 15, 3, 3)
+
+        painter.end()
+        return pixmap
+    except Exception:
+        return QPixmap()
