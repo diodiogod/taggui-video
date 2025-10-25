@@ -294,7 +294,7 @@ they can be changed into each other.
 All markings are marking the pixels inside the border 🞑, not any pixels below
 the border.
 
-<img src='images/doc/cropping.jpg' alt='TagGUI cropping and masking feature' width='100%'>
+![TagGUI cropping and masking feature](images/doc/cropping.jpg)
 
 ### Crop
 
