@@ -6,7 +6,7 @@ for corrections and grammar checking.
 """
 
 from PySide6.QtCore import Qt, Slot, Signal
-from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent
+from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent
 from PySide6.QtWidgets import QPlainTextEdit, QMenu
 
 from utils.spell_highlighter import SpellHighlighter
@@ -47,6 +47,18 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         # Track grammar issues for highlighting
         self.grammar_issues = []
+
+        # Initialize zoom level from settings
+        self.min_zoom = 50  # Percent
+        self.max_zoom = 300  # Percent
+        self.zoom_step = 10  # Percent per scroll step
+        self.current_zoom = settings.value(
+            'descriptive_mode_zoom',
+            defaultValue=DEFAULT_SETTINGS.get('descriptive_mode_zoom', 100),
+            type=int)
+        self.current_zoom = max(self.min_zoom,
+                                min(self.max_zoom, self.current_zoom))
+        self._apply_zoom(self.current_zoom)
 
     def _init_grammar_checker(self):
         """Initialize grammar checker based on settings."""
@@ -267,6 +279,38 @@ class DescriptiveTextEdit(QPlainTextEdit):
     def set_spell_check_enabled(self, enabled: bool):
         """Enable or disable spell checking."""
         self.spell_highlighter.set_enabled(enabled)
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle Ctrl+scroll wheel for zooming text size."""
+        if event.modifiers() == Qt.ControlModifier:
+            # Get scroll direction
+            delta = event.angleDelta().y()
+
+            # Adjust zoom level
+            if delta > 0:
+                # Scroll up = zoom in (larger font)
+                new_zoom = min(self.current_zoom + self.zoom_step, self.max_zoom)
+            else:
+                # Scroll down = zoom out (smaller font)
+                new_zoom = max(self.current_zoom - self.zoom_step, self.min_zoom)
+
+            if new_zoom != self.current_zoom:
+                self.current_zoom = new_zoom
+                self._apply_zoom(self.current_zoom)
+                # Save to settings
+                settings.setValue('descriptive_mode_zoom', self.current_zoom)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _apply_zoom(self, zoom_percent: int):
+        """Apply zoom level to descriptive text editor."""
+        # Scale font size based on zoom percentage
+        base_font_size = 10
+        scaled_font_size = int(base_font_size * zoom_percent / 100)
+        font = QFont(self.font())
+        font.setPointSize(max(8, min(32, scaled_font_size)))
+        self.setFont(font)
 
     def cleanup(self):
         """Clean up resources before deletion."""
