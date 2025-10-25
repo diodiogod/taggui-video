@@ -154,14 +154,27 @@ class ImageDelegate(QStyledItemDelegate):
             except RuntimeError:
                 return
         else:
-            # In ListMode: use default painting with text
-            try:
-                super().paint(painter, option, index)
-            except (RuntimeError, Exception):
-                # Silently ignore paint errors during model reset
-                return
+            # In ListMode: manually paint instead of calling super() to avoid pixmap allocation issues
+            # Paint background if selected
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(option.rect, option.palette.highlight())
+            else:
+                painter.fillRect(option.rect, option.palette.base())
 
-            # Only draw custom labels if painter is still active
+            # Paint the icon/decoration
+            icon = index.data(Qt.ItemDataRole.DecorationRole)
+            if icon and not icon.isNull():
+                icon_rect = option.rect.adjusted(2, 2, -option.rect.width() + 34, -2)
+                icon.paint(painter, icon_rect.x(), icon_rect.y(), icon_rect.width(), icon_rect.height())
+
+            # Paint the text
+            text = index.data(Qt.ItemDataRole.DisplayRole)
+            if text:
+                text_rect = option.rect.adjusted(36, 2, -2, -2)
+                painter.setPen(option.palette.text().color())
+                painter.drawText(text_rect, Qt.AlignVCenter, str(text))
+
+            # Paint custom labels if any
             if painter.isActive():
                 p_index = QPersistentModelIndex(index)
                 if p_index.isValid() and p_index in self.labels:

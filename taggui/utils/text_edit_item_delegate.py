@@ -6,7 +6,31 @@ class TextEditItemDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         # Add some left padding.
         option.rect.adjust(4, 0, 0, 0)
-        super().paint(painter, option, index)
+        # Skip super().paint() to avoid Qt's internal pixmap allocation issues
+        # Manually paint the item instead
+        if not painter or not painter.isActive():
+            return
+        if not index.isValid():
+            return
+
+        # Paint background if selected
+        if option.state & option.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        else:
+            painter.fillRect(option.rect, option.palette.base())
+
+        # Paint the icon/decoration
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if icon and not icon.isNull():
+            icon_rect = option.rect.adjusted(2, 2, -option.rect.width() + 34, -2)
+            icon.paint(painter, icon_rect.x(), icon_rect.y(), icon_rect.width(), icon_rect.height())
+
+        # Paint the text
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if text:
+            text_rect = option.rect.adjusted(36, 2, -2, -2)
+            painter.setPen(option.palette.text().color())
+            painter.drawText(text_rect, Qt.AlignVCenter, str(text))
 
     def createEditor(self, parent, option, index):
         editor = QPlainTextEdit(parent)
