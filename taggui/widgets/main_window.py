@@ -350,8 +350,7 @@ class MainWindow(QMainWindow):
             self._filter_delay = min(self._filter_delay + 5, self._max_delay)
         
         self._filter_timer_running = True
-        #self._filter_timer = threading.Timer(self._filter_delay / 1000.0, self._execute_delayed_filter)
-        self._filter_timer.start()
+        self._filter_timer.start(self._filter_delay)
         
     def _execute_delayed_filter(self):
         """Execute the actual filter and reset state"""
