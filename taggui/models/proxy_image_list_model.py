@@ -31,6 +31,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.filter: list | None = None
+        self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
 
     def set_filter(self, new_filter: list | None):
         self.filter = new_filter
@@ -63,8 +64,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 else:
                     label = filter_[1][:last_colon_index]
                     confidence = filter_[1][last_colon_index + 1:]
-                    pattern =r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)'
-                    match = re.match(pattern, confidence)
+                    match = self._confidence_pattern.match(confidence)
                     if not match or len(match.group(2)) == 0:
                         return False
                     comparison_operator = comparison_operators[match.group(1)]

@@ -290,7 +290,7 @@ class MainWindow(QMainWindow):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.timeout.connect(self.delayed_filter)
         self._filter_delay = 100
-        self._max_delay = 500
+        self._max_delay = 400
         
 
     def closeEvent(self, event: QCloseEvent):
