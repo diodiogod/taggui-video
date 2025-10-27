@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, Slot
+from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QIcon, QKeySequence, QShortcut, QMouseEvent)
 from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
@@ -189,6 +189,12 @@ class MainWindow(QMainWindow):
             self.image_list.jump_to_first_untagged_image)
         self.restore()
         self.image_tags_editor.tag_input_box.setFocus()
+
+        self._filter_timer = QTimer()
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self.delayed_filter)
+        self._filter_delay = 100
+        self._max_delay = 400
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
