@@ -420,6 +420,8 @@ class MainWindow(QMainWindow):
         image_index = self.image_tags_editor.image_index
         image: Image = self.image_list_model.data(image_index,
                                                   Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
         old_tags = image.tags
         new_tags = self.image_tag_list_model.stringList()
         if old_tags == new_tags:
