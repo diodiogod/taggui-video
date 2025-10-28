@@ -12,6 +12,7 @@ from auto_captioning.models.moondream import Moondream1, Moondream2
 from auto_captioning.models.phi_3_vision import Phi3Vision
 from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models.xcomposer2 import Xcomposer2, Xcomposer2_4khd
+from auto_captioning.models.remote import RemoteGen
 
 MODELS = [
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
@@ -58,7 +59,8 @@ MODELS = [
     'Salesforce/blip2-opt-6.7b-coco',
     'Salesforce/blip2-flan-t5-xl',
     'Salesforce/blip2-flan-t5-xxl',
-    'microsoft/kosmos-2-patch14-224'
+    'microsoft/kosmos-2-patch14-224',
+    'Remote'
 ]
 
 
@@ -98,4 +100,6 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         if '4khd' in lowercase_model_id:
             return Xcomposer2_4khd
         return Xcomposer2
+    if 'remote' in lowercase_model_id:
+        return RemoteGen
     return AutoCaptioningModel
