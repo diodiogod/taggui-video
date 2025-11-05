@@ -128,7 +128,9 @@ class ImageListModel(QAbstractListModel):
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
-        self.image_list_image_width = image_list_image_width
+        # Always generate thumbnails at max size for best quality and performance
+        # The view will scale them down as needed based on zoom level
+        self.image_list_image_width = 512  # Max thumbnail size
         self.tag_separator = tag_separator
         self.images: list[Image] = []
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
