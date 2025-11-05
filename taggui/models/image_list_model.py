@@ -128,9 +128,11 @@ class ImageListModel(QAbstractListModel):
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
-        # Always generate thumbnails at max size for best quality and performance
-        # The view will scale them down as needed based on zoom level
-        self.image_list_image_width = 512  # Max thumbnail size
+        # Always generate thumbnails at max size (512px) for best quality and performance
+        # The view will scale them down/up as needed based on zoom level via setIconSize()
+        # This decouples thumbnail generation size from display size
+        self.thumbnail_generation_width = 512  # Max thumbnail size for generation
+        self.image_list_image_width = image_list_image_width  # For layout sizing (SizeHintRole)
         self.tag_separator = tag_separator
         self.images: list[Image] = []
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
@@ -186,11 +188,11 @@ class ImageListModel(QAbstractListModel):
                     _, _, first_frame_pixmap = extract_video_info(image.path)
                     if first_frame_pixmap:
                         pixmap = first_frame_pixmap.scaledToWidth(
-                            self.image_list_image_width,
+                            self.thumbnail_generation_width,
                             Qt.TransformationMode.SmoothTransformation)
                     else:
                         # Fallback to a placeholder if extraction fails
-                        pixmap = QPixmap(self.image_list_image_width, self.image_list_image_width)
+                        pixmap = QPixmap(self.thumbnail_generation_width, self.thumbnail_generation_width)
                         pixmap.fill(Qt.gray)
                 elif image.path.suffix.lower() == ".jxl":
                     pil_image = pilimage.open(image.path)  # Uses pillow-jxl
@@ -203,7 +205,7 @@ class ImageListModel(QAbstractListModel):
                         crop.setHeight(crop.width()*3)
 
                     pixmap = QPixmap.fromImage(qimage).scaledToWidth(
-                        self.image_list_image_width,
+                        self.thumbnail_generation_width,
                         Qt.TransformationMode.SmoothTransformation)
                 else:
                     image_reader = QImageReader(str(image.path))
@@ -217,7 +219,7 @@ class ImageListModel(QAbstractListModel):
                         crop.setHeight(crop.width()*3)
                     image_reader.setClipRect(crop)
                     pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
-                        self.image_list_image_width,
+                        self.thumbnail_generation_width,
                         Qt.TransformationMode.SmoothTransformation)
             except Exception as e:
                 print(f"Error loading image/video {image.path}: {e}")
@@ -225,8 +227,8 @@ class ImageListModel(QAbstractListModel):
             image.thumbnail = thumbnail
             return thumbnail
         if role == Qt.ItemDataRole.SizeHintRole:
-            if image.thumbnail:
-                return image.thumbnail.availableSizes()[0]
+            # Don't use thumbnail.availableSizes() - that returns the 512px generation size
+            # Instead, calculate based on the actual image dimensions
             dimensions = image.crop.size().toTuple() if image.crop else image.dimensions
             if not dimensions:
                 return QSize(self.image_list_image_width,
