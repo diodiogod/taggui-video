@@ -113,8 +113,10 @@ class ImageDelegate(QStyledItemDelegate):
         if isinstance(self.parent(), QListView) and self.parent().viewMode() == QListView.ViewMode.IconMode:
             icon_size = self.parent().iconSize()
             return QSize(icon_size.width() + 10, icon_size.height() + 10)  # Small padding
-        # In ListMode, use default size hint with text
-        return index.data(Qt.ItemDataRole.SizeHintRole)
+        # In ListMode, height should match the icon height for proper scaling with zoom
+        icon_size = self.parent().iconSize()
+        # Use the icon height (width dimension is stretched) plus text padding
+        return QSize(400, icon_size.width() + 4)  # 400px width is arbitrary, height scales with icon
 
     def paint(self, painter, option, index):
         # Validate painter state before any painting operations
@@ -164,13 +166,18 @@ class ImageDelegate(QStyledItemDelegate):
             # Paint the icon/decoration
             icon = index.data(Qt.ItemDataRole.DecorationRole)
             if icon and not icon.isNull():
-                icon_rect = option.rect.adjusted(2, 2, -option.rect.width() + 34, -2)
+                # Use the actual icon size instead of hardcoded 34px
+                icon_size = self.parent().iconSize()
+                icon_rect = option.rect.adjusted(2, 2, -option.rect.width() + icon_size.width() + 4, -2)
                 icon.paint(painter, icon_rect.x(), icon_rect.y(), icon_rect.width(), icon_rect.height())
 
             # Paint the text
             text = index.data(Qt.ItemDataRole.DisplayRole)
             if text:
-                text_rect = option.rect.adjusted(36, 2, -2, -2)
+                # Position text after the icon (which now uses actual icon_size.width())
+                icon_size = self.parent().iconSize()
+                text_x = 2 + icon_size.width() + 6  # 2px margin + icon width + 6px gap
+                text_rect = option.rect.adjusted(text_x, 2, -2, -2)
                 painter.setPen(option.palette.text().color())
                 painter.drawText(text_rect, Qt.AlignVCenter, str(text))
 
@@ -324,12 +331,16 @@ class ImageListView(QListView):
         self.setDragEnabled(True)
 
         # Zoom settings
+        # Note: Thumbnails are always generated at 512px (max quality)
+        # Display size can match generation size since we have the quality
         self.min_thumbnail_size = 64
-        self.max_thumbnail_size = 512
+        self.max_thumbnail_size = 512  # Can display at full 512px since generated at 512px
         self.column_switch_threshold = 150  # Below this size, switch to multi-column
 
         # Load saved zoom level or use default
-        self.current_thumbnail_size = settings.value('image_list_thumbnail_size', image_width, type=int)
+        # Since thumbnails are generated at 512px, default to showing them at full size
+        default_display_size = 512
+        self.current_thumbnail_size = settings.value('image_list_thumbnail_size', default_display_size, type=int)
         self.current_thumbnail_size = max(self.min_thumbnail_size,
                                           min(self.max_thumbnail_size, self.current_thumbnail_size))
 
