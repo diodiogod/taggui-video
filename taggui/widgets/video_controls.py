@@ -1483,8 +1483,8 @@ class VideoControlsWidget(QWidget):
         from utils.settings import settings
         settings.setValue('video_loop_enabled', enabled)
 
-    @Slot()
-    def _reset_loop(self, save=True):
+    @Slot(bool)
+    def _reset_loop(self, checked=False, save=True):
         """Reset loop markers only (keeps loop enabled/disabled state)."""
         self.loop_start_frame = None
         self.loop_end_frame = None
