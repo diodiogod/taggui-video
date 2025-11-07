@@ -358,11 +358,9 @@ class ImageListModel(QAbstractListModel):
                                                   confidence=marking.get('confidence', 1.0))
                                 image.markings.append(marking)
                         loop_start = meta.get('loop_start_frame')
-                        if loop_start is not None and isinstance(loop_start, int):
-                            image.loop_start_frame = loop_start
+                        image.loop_start_frame = loop_start if isinstance(loop_start, int) else None
                         loop_end = meta.get('loop_end_frame')
-                        if loop_end is not None and isinstance(loop_end, int):
-                            image.loop_end_frame = loop_end
+                        image.loop_end_frame = loop_end if isinstance(loop_end, int) else None
                     else:
                         error_messages.append(f'Invalid version '
                                               f'"{meta.get('version')}" in '
@@ -413,10 +411,8 @@ class ImageListModel(QAbstractListModel):
                              'type': marking.type.name,
                              'confidence': marking.confidence,
                              'rect': marking.rect.getRect()} for marking in image.markings]
-        if image.loop_start_frame is not None:
-            meta['loop_start_frame'] = image.loop_start_frame
-        if image.loop_end_frame is not None:
-            meta['loop_end_frame'] = image.loop_end_frame
+        meta['loop_start_frame'] = image.loop_start_frame
+        meta['loop_end_frame'] = image.loop_end_frame
         if does_exist or len(meta.keys()) > 1:
             try:
                 with image.path.with_suffix('.json').open('w', encoding='UTF-8') as meta_file:
