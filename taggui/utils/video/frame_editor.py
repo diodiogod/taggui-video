@@ -276,6 +276,7 @@ class FrameEditor:
             # Create two segments and concatenate
             start_time = start_frame / fps
             end_time = (end_frame + 1) / fps
+            removed_duration = end_time - start_time
 
             # Create temp directory for segments
             temp_dir = output_path.parent / '.temp_segments'
@@ -289,22 +290,37 @@ class FrameEditor:
                 # Use single ffmpeg call with trim filters instead of concat
                 # This is faster and more reliable than extracting multiple segments
                 filter_parts = []
+                audio_filter_parts = []
 
                 if start_frame > 0:
                     filter_parts.append(f'[0:v]trim=start_frame=0:end_frame={start_frame},setpts=PTS-STARTPTS[before];')
+                    audio_filter_parts.append(f'[0:a]atrim=start=0:duration={start_time},asetpts=PTS-STARTPTS[abefore];')
 
                 if end_frame < current_frames - 1:
+                    after_start_time = end_time
                     filter_parts.append(f'[0:v]trim=start_frame={end_frame+1},setpts=PTS-STARTPTS[after];')
+                    audio_filter_parts.append(f'[0:a]atrim=start={after_start_time},asetpts=PTS-STARTPTS[aafter];')
 
                 # Concatenate the segments
                 if start_frame > 0 and end_frame < current_frames - 1:
                     filter_parts.append('[before][after]concat=n=2:v=1:a=0[out]')
+                    audio_filter_parts.append('[abefore][aafter]concat=n=2:v=0:a=1[aout]')
                 elif start_frame > 0:
                     filter_parts.append('[before]copy[out]')
+                    audio_filter_parts.append('[abefore]copy[aout]')
                 elif end_frame < current_frames - 1:
                     filter_parts.append('[after]copy[out]')
+                    audio_filter_parts.append('[aafter]copy[aout]')
 
-                filter_complex = ''.join(filter_parts)
+                # Combine filters
+                video_filter_complex = ''.join(filter_parts)
+                audio_filter_complex = ''.join(audio_filter_parts)
+
+                # Build complete filter_complex with both video and audio
+                if video_filter_complex and audio_filter_complex:
+                    filter_complex = video_filter_complex + audio_filter_complex
+                else:
+                    filter_complex = video_filter_complex or audio_filter_complex or ''
 
                 # Use temp output if input == output
                 import shutil
@@ -315,15 +331,27 @@ class FrameEditor:
                     'ffmpeg',
                     '-i', str(input_path),
                     '-filter_complex', filter_complex if filter_complex else 'copy',
-                    '-map', '[out]' if filter_complex else '0:v',
-                    '-map', '0:a?',  # Include audio if present
+                ]
+
+                # Map outputs based on what filters were applied
+                if video_filter_complex:
+                    cmd.extend(['-map', '[out]'])
+                else:
+                    cmd.extend(['-map', '0:v'])
+
+                if audio_filter_complex:
+                    cmd.extend(['-map', '[aout]'])
+                else:
+                    cmd.extend(['-map', '0:a?'])
+
+                cmd.extend([
                     '-c:v', 'libx264',
                     '-crf', '18',
                     '-preset', 'slow',
                     '-c:a', 'aac',
                     '-y',
                     str(temp_output)
-                ]
+                ])
 
                 result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -470,8 +498,15 @@ class FrameEditor:
                 stderr_tail = extract_result.stderr[-500:] if extract_result.stderr else "No stderr"
                 return False, f"Failed to extract frame {frame_num}: {files_msg}. ffmpeg stderr: {stderr_tail}"
 
+            # Calculate timing for audio segments
+            frame_time = frame_num / fps
+            at_frame_duration = 1 / fps  # Single frame duration
+            looped_duration = repeat_count / fps  # Duration of looped frames
+            after_frame_start = frame_time + looped_duration
+
             # Build complex filter
             filter_parts = []
+            audio_filter_parts = []
 
             # Extract the single frame from the second input and loop it repeat_count times
             # loop=loop=N means repeat the clip N times (so N+1 total), so we need repeat_count-1
@@ -480,25 +515,38 @@ class FrameEditor:
             # Split the input
             if frame_num > 0:
                 filter_parts.append(f'[0:v]trim=start_frame=0:end_frame={frame_num},setpts=PTS-STARTPTS[before];')
+                audio_filter_parts.append(f'[0:a]atrim=start=0:duration={frame_time},asetpts=PTS-STARTPTS[abefore];')
 
             # Original frame at position
             filter_parts.append(f'[0:v]trim=start_frame={frame_num}:end_frame={frame_num+1},setpts=PTS-STARTPTS[at];')
+            audio_filter_parts.append(f'[0:a]atrim=start={frame_time}:duration={at_frame_duration},asetpts=PTS-STARTPTS[aat];')
+
+            # Looped frame section (repeat audio for looped frames)
+            audio_filter_parts.append(f'[0:a]atrim=start={frame_time}:duration={at_frame_duration},asetpts=PTS-STARTPTS,aloop=loop={repeat_count-1}[alooped];')
 
             # Frames after (if any)
             if frame_num < current_frames - 1:
                 filter_parts.append(f'[0:v]trim=start_frame={frame_num+1},setpts=PTS-STARTPTS[after];')
+                audio_filter_parts.append(f'[0:a]atrim=start={after_frame_start},asetpts=PTS-STARTPTS[aafter];')
 
             # Concatenate all parts
             concat_inputs = []
+            audio_concat_inputs = []
             if frame_num > 0:
                 concat_inputs.append('[before]')
+                audio_concat_inputs.append('[abefore]')
             concat_inputs.append('[at]')
+            audio_concat_inputs.append('[aat]')
             concat_inputs.append('[looped]')
+            audio_concat_inputs.append('[alooped]')
             if frame_num < current_frames - 1:
                 concat_inputs.append('[after]')
+                audio_concat_inputs.append('[aafter]')
 
             filter_parts.append(f'{"".join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[outv]')
-            filter_complex = ''.join(filter_parts)
+            audio_filter_parts.append(f'{"".join(audio_concat_inputs)}concat=n={len(audio_concat_inputs)}:v=0:a=1[aout]')
+
+            filter_complex = ''.join(filter_parts) + ''.join(audio_filter_parts)
 
             # Use temp output if input == output
             import shutil
@@ -510,7 +558,7 @@ class FrameEditor:
                 '-i', str(frame_file),
                 '-filter_complex', filter_complex,
                 '-map', '[outv]',
-                '-map', '0:a?',  # Include audio if present
+                '-map', '[aout]',
                 '-c:v', 'libx264',
                 '-crf', '18',
                 '-preset', 'slow',
@@ -707,14 +755,43 @@ class FrameEditor:
             filter_string = ','.join(filters)
 
             # ffmpeg command to change speed and/or fps
+            # Note: We must also adjust audio to match the new video duration.
+            # If we only use -c:a copy without audio filter, audio stream remains
+            # at original length, causing duration mismatch and playback issues.
+
+            # Calculate audio changes if needed
+            audio_filters = []
+            if abs(speed_multiplier - 1.0) > 0.01:
+                # Apply tempo/atempo to audio to match speed change
+                # atempo has limitations (0.5-2.0), so chain multiple filters if needed
+                tempo = speed_multiplier
+                while tempo > 2.0:
+                    audio_filters.append('atempo=2.0')
+                    tempo /= 2.0
+                while tempo < 0.5:
+                    audio_filters.append('atempo=0.5')
+                    tempo /= 0.5
+                if abs(tempo - 1.0) >= 0.01:
+                    audio_filters.append(f'atempo={tempo}')
+
+            af = ','.join(audio_filters) if audio_filters else None
+
             cmd = [
                 'ffmpeg',
                 '-i', str(input_path),
                 '-filter:v', filter_string,
-                '-c:a', 'copy',  # Keep audio unchanged
+            ]
+
+            # Add audio filter if needed, otherwise copy unchanged
+            if af:
+                cmd.extend(['-filter:a', af])
+            else:
+                cmd.extend(['-c:a', 'copy'])
+
+            cmd.extend([
                 '-y',
                 str(actual_output)
-            ]
+            ])
 
             result = subprocess.run(cmd, capture_output=True, text=True)
 
