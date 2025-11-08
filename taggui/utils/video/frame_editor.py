@@ -309,11 +309,11 @@ class FrameEditor:
                 elif start_frame > 0:
                     # Remove only from end: keep before
                     filter_parts.append('[before]copy[out]')
-                    audio_filter_parts.append('[abefore]copy[aout]')
+                    audio_filter_parts.append('[abefore]anull[aout]')  # Pass through audio unchanged
                 elif end_frame >= 0:
                     # Remove only from start (or all): handle normally
                     filter_parts.append('[after]copy[out]')
-                    audio_filter_parts.append('[aafter]copy[aout]')
+                    audio_filter_parts.append('[aafter]anull[aout]')  # Pass through audio unchanged
 
                 # Combine filters - they're already terminated with semicolons in the lists
                 video_filter_complex = ''.join(filter_parts)
@@ -553,7 +553,10 @@ class FrameEditor:
             filter_parts.append(f'{"".join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[outv]')
             audio_filter_parts.append(f'{"".join(audio_concat_inputs)}concat=n={len(audio_concat_inputs)}:v=0:a=1[aout]')
 
-            filter_complex = ''.join(filter_parts) + ''.join(audio_filter_parts)
+            # Combine video and audio filter chains with semicolon separator
+            video_filter = ''.join(filter_parts).rstrip(';')
+            audio_filter = ''.join(audio_filter_parts).rstrip(';')
+            filter_complex = video_filter + ';' + audio_filter
 
             # Use temp output if input == output
             import shutil
