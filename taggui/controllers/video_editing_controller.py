@@ -1027,6 +1027,10 @@ class VideoEditingController:
         if reply != QMessageBox.Yes:
             return
 
+        # Save undo snapshots for all videos before editing
+        for video_path, sar_num, sar_den in non_square_videos:
+            self._save_undo_snapshot(video_path, f"Fix SAR {sar_num}:{sar_den}")
+
         # Process videos with progress dialog
         progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self.main_window)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1104,6 +1108,10 @@ class VideoEditingController:
 
         if reply != QMessageBox.Yes:
             return
+
+        # Save undo snapshots for all videos before editing
+        for video_path, sar_num, sar_den in non_square_videos:
+            self._save_undo_snapshot(video_path, f"Fix SAR {sar_num}:{sar_den}")
 
         # Process videos with progress dialog
         progress = QProgressDialog("Fixing SAR...", "Cancel", 0, len(non_square_videos), self.main_window)
