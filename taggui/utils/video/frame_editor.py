@@ -301,24 +301,31 @@ class FrameEditor:
                     filter_parts.append(f'[0:v]trim=start_frame={end_frame+1},setpts=PTS-STARTPTS[after];')
                     audio_filter_parts.append(f'[0:a]atrim=start={after_start_time},asetpts=PTS-STARTPTS[aafter];')
 
-                # Concatenate the segments
+                # Concatenate the segments - keep video logic untouched
                 if start_frame > 0 and end_frame < current_frames - 1:
+                    # Remove from middle: concat before + after
                     filter_parts.append('[before][after]concat=n=2:v=1:a=0[out]')
                     audio_filter_parts.append('[abefore][aafter]concat=n=2:v=0:a=1[aout]')
                 elif start_frame > 0:
+                    # Remove only from end: keep before
                     filter_parts.append('[before]copy[out]')
                     audio_filter_parts.append('[abefore]copy[aout]')
-                elif end_frame < current_frames - 1:
+                elif end_frame >= 0:
+                    # Remove only from start (or all): handle normally
                     filter_parts.append('[after]copy[out]')
                     audio_filter_parts.append('[aafter]copy[aout]')
 
-                # Combine filters
+                # Combine filters - they're already terminated with semicolons in the lists
                 video_filter_complex = ''.join(filter_parts)
                 audio_filter_complex = ''.join(audio_filter_parts)
 
+                # Remove trailing semicolons and combine with proper delimiter
+                video_filter_complex = video_filter_complex.rstrip(';')
+                audio_filter_complex = audio_filter_complex.rstrip(';')
+
                 # Build complete filter_complex with both video and audio
                 if video_filter_complex and audio_filter_complex:
-                    filter_complex = video_filter_complex + audio_filter_complex
+                    filter_complex = video_filter_complex + ';' + audio_filter_complex
                 else:
                     filter_complex = video_filter_complex or audio_filter_complex or ''
 
