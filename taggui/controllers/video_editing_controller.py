@@ -509,6 +509,9 @@ class VideoEditingController:
             if success:
                 QMessageBox.information(self.main_window, "Success", message)
                 self.main_window.reload_directory()
+                # Reset speed slider to 1.0x if speed was applied
+                if abs(speed_factor - 1.0) >= 0.01:
+                    video_controls.speed_slider.setValue(200)  # 1.0x = 200 in slider units
             else:
                 QMessageBox.critical(self.main_window, "Error", message)
 
@@ -1265,6 +1268,8 @@ class VideoEditingController:
         if success:
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
+            # Reset speed slider to 1.0x after successful speed change
+            video_controls.speed_slider.setValue(200)  # 1.0x = 200 in slider units
         else:
             QMessageBox.critical(self.main_window, "Error", message)
 
