@@ -822,6 +822,9 @@ class VideoEditingController:
                     error_count += 1
                     continue
 
+                # Save undo snapshot before editing
+                self._save_undo_snapshot(video_path, "Fix N*4+1 frame count (single)")
+
                 # Fix frame count
                 success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
                     video_path, video_path, fps, repeat_last, None
@@ -931,6 +934,9 @@ class VideoEditingController:
                     errors.append(f"{video_path.name}: Could not determine FPS")
                     error_count += 1
                     continue
+
+                # Save undo snapshot before editing
+                self._save_undo_snapshot(video_path, "Fix N*4+1 frame count (batch)")
 
                 # Fix frame count
                 success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
