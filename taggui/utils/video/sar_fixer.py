@@ -79,11 +79,11 @@ class SARFixer:
             if not create_backup(input_path):
                 return False, "Failed to create backup"
 
-            # Calculate correct dimensions to normalize SAR to 1:1
-            # SAR tells pixel aspect ratio - to fix it, we scale to match display aspect
-            # If pixels are wider (SAR > 1), shrink width; if narrower (SAR < 1), expand width
+            # Calculate display dimensions to normalize SAR to 1:1
+            # When SAR != 1:1, video is displayed stretched. Scale storage dimension
+            # to match the display aspect ratio with square pixels.
             width, height = dims
-            display_width = int(width * sar_den / sar_num)
+            display_width = int(width * sar_num / sar_den)
 
             # Ensure dimensions are even (required by libx264)
             if display_width % 2 != 0:
