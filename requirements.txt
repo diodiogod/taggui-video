@@ -44,4 +44,4 @@ ultralytics>=8.3.100
 
 # Spell checking and grammar checking
 pyspellchecker==0.8.1
-language-tool-python==2.8
+language-tool-python>=2.10
