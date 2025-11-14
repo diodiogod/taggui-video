@@ -1,8 +1,8 @@
-# TagGUI
+# TagGUI Video
 
 <img src='images/icon.png' alt='TagGUI icon' width='128'>
 
-Cross-platform desktop application for quickly adding and editing image tags
+Cross-platform desktop application for quickly adding and editing image AND videos tags
 and captions, aimed towards creators of image datasets for generative AI
 models.
 
@@ -25,23 +25,9 @@ models.
 
 ## Installation
 
-The easiest way to use the application is to download the latest release from
-the [releases page](https://www.github.com/jhc13/taggui/releases).
-Choose the appropriate file for your operating system, extract it wherever you
-want, and run the executable file inside.
-You may have to install [7-Zip](https://www.7-zip.org/download.html) to
-extract the files if you don't have it on your system.
+You can install by cloning this repository and simpy clicking on start_windows.bat it should handle enviourment creation and the it should auto start.
 
-- macOS users: There is no macOS release because it requires a device running
-  the OS, and I do not have one. You can still install and run the program
-  manually (see below).
-- Linux users: You may need to install `libxcb-cursor0`.
-  (See [this Stack Overflow answer](https://stackoverflow.com/a/75941575).) You
-  may also have to install `python3.12-dev` or `python3.11-dev` (depending on
-  your Python version) if you get an error while trying to use a CogVLM2
-  model. (See [this issue](https://github.com/jhc13/taggui/issues/234).)
-
-Alternatively, you can install manually by cloning this repository and
+Or you can manually install by cloning this repository
 installing the dependencies in `requirements.txt`.
 Run `taggui/run_gui.py` to start the program.
 Python 3.12 is recommended, but Python 3.11 should also work.
