@@ -25,7 +25,7 @@ models.
 
 ## Installation
 
-You can install by cloning this repository and simpy clicking on start_windows.bat it should handle enviourment creation and the it should auto start.
+You can install by cloning this repository and simply clicking on `start_windows.bat` it should handle environment creation, auto update and it will auto start taggui.
 
 Or you can manually install by cloning this repository
 installing the dependencies in `requirements.txt`.
