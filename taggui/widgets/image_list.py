@@ -544,14 +544,9 @@ class ImageListView(QListView):
 
         # Generate cache key based on directory and settings
         cache_key = self._get_masonry_cache_key()
-        print(f"[MASONRY] Cache key: {cache_key}")
 
         # Calculate all positions (with caching!)
-        import time
-        start = time.time()
         self.masonry_layout.calculate_all(items_data, cache_key=cache_key)
-        elapsed = time.time() - start
-        print(f"[MASONRY] Layout calculation took {elapsed:.3f}s for {len(items_data)} items")
 
         # Hide loading label
         self._masonry_loading_label.hide()
@@ -566,8 +561,6 @@ class ImageListView(QListView):
         total_height = self.masonry_layout.get_total_height()
         viewport_height = self.viewport().height()
         max_scroll = max(0, total_height - viewport_height)
-
-        print(f"[SCROLL] Total height: {total_height}, Viewport: {viewport_height}, Max scroll: {max_scroll}")
 
         self.verticalScrollBar().setRange(0, max_scroll)
         self.verticalScrollBar().setPageStep(viewport_height)
@@ -672,19 +665,25 @@ class ImageListView(QListView):
                 }
             """)
 
-        # Position at bottom of viewport
-        bar_width = min(300, self.viewport().width() - 20)
-        self._thumbnail_progress_bar.setGeometry(
-            (self.viewport().width() - bar_width) // 2,
-            self.viewport().height() - 40,
-            bar_width,
-            25
-        )
         self._thumbnail_progress_bar.setMaximum(total_items)
         self._thumbnail_progress_bar.setValue(0)
         self._thumbnail_progress_bar.setFormat("Loading thumbnails: %v/%m")
+        self._update_progress_bar_position()
         self._thumbnail_progress_bar.show()
         self._thumbnail_progress_bar.raise_()
+
+    def _update_progress_bar_position(self):
+        """Update progress bar position to follow viewport (stick to bottom)."""
+        if self._thumbnail_progress_bar and self._thumbnail_progress_bar.isVisible():
+            # Position at bottom of viewport (follows scroll)
+            bar_width = min(300, self.viewport().width() - 20)
+            self._thumbnail_progress_bar.setGeometry(
+                (self.viewport().width() - bar_width) // 2,
+                self.viewport().height() - 40,
+                bar_width,
+                25
+            )
+            self._thumbnail_progress_bar.raise_()  # Keep on top
 
     def _update_thumbnail_progress(self, current, total):
         """Update progress bar value."""
@@ -808,6 +807,8 @@ class ImageListView(QListView):
             self.viewport().update()
             # Preload thumbnails for smoother scrolling
             self._preload_nearby_thumbnails()
+            # Update progress bar position if visible
+            self._update_progress_bar_position()
             # Reset idle timer - will start aggressive preload when user stops scrolling
             # Only if not already complete
             if not self._preload_complete:
@@ -836,11 +837,9 @@ class ImageListView(QListView):
             # Use masonry layout to get only visible items (OPTIMIZATION!)
             visible_items = self.masonry_layout.get_visible_items(expanded_viewport)
 
-            # DEBUG: Check if scroll bounds are wrong
+            # Auto-correct scroll bounds if needed
             max_allowed = self.masonry_layout.get_total_height() - viewport_height
             if scroll_offset > max_allowed and max_allowed > 0:
-                # Scroll position exceeds what it should - fix it
-                print(f"[SCROLL FIX] Correcting scroll: {scroll_offset} -> {max_allowed}")
                 self.verticalScrollBar().setMaximum(max_allowed)
                 self.verticalScrollBar().setValue(max_allowed)
 
@@ -868,6 +867,7 @@ class ImageListView(QListView):
                 option.rect = visual_rect
                 option.decorationSize = QSize(item.rect.width(), item.rect.height())
                 option.decorationAlignment = Qt.AlignCenter
+                option.palette = self.palette()  # Set palette for stamp drawing
 
                 # Set state flags
                 if self.selectionModel() and self.selectionModel().isSelected(index):
@@ -880,10 +880,6 @@ class ImageListView(QListView):
                 items_painted += 1
 
             painter.end()
-
-            elapsed = time.time() - paint_start
-            if elapsed > 0.016:  # Log if slower than 60fps (16ms)
-                print(f"[PAINT] Slow paint: {elapsed*1000:.1f}ms for {items_painted} items")
         else:
             # Use default painting
             super().paintEvent(event)

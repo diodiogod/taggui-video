@@ -94,10 +94,7 @@ class MasonryLayout:
         """
         # Try to load from cache first
         if cache_key and self._load_from_cache(cache_key, items_data):
-            print(f"[MASONRY CACHE] Loaded {len(items_data)} positions from cache")
             return  # Successfully loaded from cache
-
-        print(f"[MASONRY CACHE] Cache miss, calculating {len(items_data)} positions...")
 
         # Calculate positions
         self._reset_columns()
@@ -107,7 +104,6 @@ class MasonryLayout:
         # Save to cache
         if cache_key:
             self._save_to_cache(cache_key, items_data)
-            print(f"[MASONRY CACHE] Saved positions to cache")
 
     def _get_cache_path(self, cache_key: str) -> Path:
         """Get the cache file path for a given key."""
