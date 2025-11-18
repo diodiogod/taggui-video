@@ -24,6 +24,8 @@ class ResizeHintHUD(QGraphicsItem):
         self.setZValue(3)
         self.last_point: QPointF | float = QPointF(-1, -1)
         self.last_pos = RectPosition.NONE
+        # Make HUD non-interactive - it should not intercept mouse events
+        self.setAcceptedMouseButtons(0)  # Don't accept any mouse buttons
 
     @Slot(QRectF, RectPosition)
     def setValues(self, rect: QRectF, pos: RectPosition):
