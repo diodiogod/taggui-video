@@ -6,12 +6,13 @@ from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
-                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent)
+                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint)
 from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QVBoxLayout,
-                               QWidget, QStyledItemDelegate, QToolTip, QStyle)
+                               QWidget, QStyledItemDelegate, QToolTip, QStyle, QStyleOptionViewItem,
+                               QProgressBar)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
@@ -22,6 +23,7 @@ from utils.settings import settings
 from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
 from utils.grid import Grid
+from widgets.masonry_layout import MasonryLayout
 
 
 def replace_filter_wildcards(filter_: str | list) -> str | list:
@@ -109,10 +111,18 @@ class ImageDelegate(QStyledItemDelegate):
         self.labels.clear()
 
     def sizeHint(self, option, index):
-        # In IconMode, return compact size (just the thumbnail)
-        if isinstance(self.parent(), QListView) and self.parent().viewMode() == QListView.ViewMode.IconMode:
-            icon_size = self.parent().iconSize()
-            return QSize(icon_size.width() + 10, icon_size.height() + 10)  # Small padding
+        # Check if parent is using masonry layout
+        if isinstance(self.parent(), QListView):
+            parent_view = self.parent()
+            if hasattr(parent_view, 'use_masonry') and parent_view.use_masonry and parent_view.masonry_layout:
+                # Return the actual masonry size for this item
+                rect = parent_view.masonry_layout.get_item_rect(index.row())
+                if rect.isValid():
+                    return rect.size()
+            elif parent_view.viewMode() == QListView.ViewMode.IconMode:
+                # Regular icon mode (not masonry)
+                icon_size = parent_view.iconSize()
+                return QSize(icon_size.width() + 10, icon_size.height() + 10)
         # In ListMode, height should match the icon height for proper scaling with zoom
         icon_size = self.parent().iconSize()
         # Use the icon height (width dimension is stretched) plus text padding
@@ -327,8 +337,26 @@ class ImageListView(QListView):
         source_model.modelAboutToBeReset.connect(self._disable_updates)
         source_model.modelReset.connect(self._enable_updates)
 
+        # Recalculate masonry layout when model changes
+        proxy_image_list_model.modelReset.connect(self._recalculate_masonry_if_needed)
+        proxy_image_list_model.layoutChanged.connect(self._recalculate_masonry_if_needed)
+
         self.setWordWrap(True)
         self.setDragEnabled(True)
+
+        # Masonry layout for icon mode
+        self.masonry_layout = None
+        self.use_masonry = False
+
+        # Idle preloading timer for smooth scrolling
+        self._idle_preload_timer = QTimer(self)
+        self._idle_preload_timer.setSingleShot(True)
+        self._idle_preload_timer.timeout.connect(self._preload_all_thumbnails)
+        self._preload_index = 0  # Track preload progress
+        self._preload_complete = False  # Track if all thumbnails loaded
+
+        # Loading progress bar for thumbnail preloading
+        self._thumbnail_progress_bar = None  # Created on demand
 
         # Zoom settings
         # Note: Thumbnails are always generated at 512px (max quality)
@@ -457,10 +485,224 @@ class ImageListView(QListView):
                 # Default scroll behavior in ListMode
                 super().wheelEvent(event)
 
+    def _recalculate_masonry_if_needed(self):
+        """Recalculate masonry layout if in masonry mode."""
+        if self.use_masonry:
+            self._calculate_masonry_layout()
+            self.viewport().update()
+
+    def _calculate_masonry_layout(self):
+        """Calculate masonry layout positions for all items."""
+        if not self.use_masonry or not self.model():
+            return
+
+        # Initialize masonry layout
+        column_width = self.current_thumbnail_size
+        spacing = 2
+        viewport_width = self.viewport().width()
+
+        if viewport_width <= 0:
+            return
+
+        self.masonry_layout = MasonryLayout(column_width=column_width, spacing=spacing)
+        self.masonry_layout.set_viewport_width(viewport_width)
+
+        # Show loading label
+        if not hasattr(self, '_masonry_loading_label'):
+            self._masonry_loading_label = QLabel("Calculating layout...", self.viewport())
+            self._masonry_loading_label.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(0, 0, 0, 180);
+                    color: white;
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    font-size: 14px;
+                }
+            """)
+            self._masonry_loading_label.setAlignment(Qt.AlignCenter)
+
+        self._masonry_loading_label.setGeometry(
+            (self.viewport().width() - 200) // 2,
+            (self.viewport().height() - 50) // 2,
+            200, 50
+        )
+        self._masonry_loading_label.show()
+        self._masonry_loading_label.raise_()
+        QApplication.processEvents()  # Force UI update
+
+        # Collect all items with their aspect ratios
+        items_data = []
+        for row in range(self.model().rowCount()):
+            index = self.model().index(row, 0)
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image and hasattr(image, 'dimensions') and image.dimensions:
+                width, height = image.dimensions
+                aspect_ratio = width / height if height > 0 else 1.0
+            else:
+                aspect_ratio = 1.0  # Default to square
+            items_data.append((row, aspect_ratio))
+
+        # Generate cache key based on directory and settings
+        cache_key = self._get_masonry_cache_key()
+        print(f"[MASONRY] Cache key: {cache_key}")
+
+        # Calculate all positions (with caching!)
+        import time
+        start = time.time()
+        self.masonry_layout.calculate_all(items_data, cache_key=cache_key)
+        elapsed = time.time() - start
+        print(f"[MASONRY] Layout calculation took {elapsed:.3f}s for {len(items_data)} items")
+
+        # Hide loading label
+        self._masonry_loading_label.hide()
+
+        # Reset preload state when layout changes
+        self._preload_complete = False
+        self._preload_index = 0
+
+        # Update scroll area to accommodate total height
+        # The maximum scroll position should be: total_height - viewport_height
+        # So the last items are visible at the bottom
+        total_height = self.masonry_layout.get_total_height()
+        viewport_height = self.viewport().height()
+        max_scroll = max(0, total_height - viewport_height)
+
+        print(f"[SCROLL] Total height: {total_height}, Viewport: {viewport_height}, Max scroll: {max_scroll}")
+
+        self.verticalScrollBar().setRange(0, max_scroll)
+        self.verticalScrollBar().setPageStep(viewport_height)
+
+    def _get_masonry_cache_key(self) -> str:
+        """Generate a unique cache key for current directory and settings."""
+        # Get directory from model
+        dir_path = "default"
+        if self.model() and hasattr(self.model(), 'sourceModel'):
+            source_model = self.model().sourceModel()
+            if hasattr(source_model, 'images') and len(source_model.images) > 0:
+                # Use first image's parent directory as key
+                dir_path = str(source_model.images[0].path.parent)
+
+        # Round viewport width to nearest 100px to avoid cache misses from small resizes
+        viewport_width = (self.viewport().width() // 100) * 100
+
+        return f"{dir_path}_{self.current_thumbnail_size}_{viewport_width}"
+
+    def _preload_nearby_thumbnails(self):
+        """Preload thumbnails for items near viewport for smoother scrolling."""
+        if not self.use_masonry or not self.masonry_layout or not self.model():
+            return
+
+        # Get viewport bounds with large buffer for preloading
+        scroll_offset = self.verticalScrollBar().value()
+        viewport_height = self.viewport().height()
+
+        # Preload items within 2 screens above and below
+        preload_buffer = viewport_height * 2
+        preload_rect = QRect(0, scroll_offset - preload_buffer,
+                            self.viewport().width(), viewport_height + (preload_buffer * 2))
+
+        # Get items in preload range
+        items_to_preload = self.masonry_layout.get_visible_items(preload_rect)
+
+        # Trigger thumbnail loading by accessing decoration data
+        for item in items_to_preload:
+            index = self.model().index(item.index, 0)
+            if index.isValid():
+                # This triggers thumbnail generation if not cached
+                _ = index.data(Qt.ItemDataRole.DecorationRole)
+
+    def _preload_all_thumbnails(self):
+        """Aggressively preload ALL thumbnails when idle for buttery smooth scrolling."""
+        if not self.use_masonry or not self.model() or self._preload_complete:
+            return
+
+        total_items = self.model().rowCount()
+        if total_items == 0:
+            return
+
+        # Create progress bar on first run
+        if self._preload_index == 0:
+            self._show_thumbnail_progress(total_items)
+
+        # Preload in batches to avoid blocking UI
+        batch_size = 10
+        start_index = self._preload_index
+        end_index = min(start_index + batch_size, total_items)
+
+        # Silently preload (remove debug print)
+
+        # Preload batch
+        for i in range(start_index, end_index):
+            index = self.model().index(i, 0)
+            if index.isValid():
+                # Trigger thumbnail generation
+                _ = index.data(Qt.ItemDataRole.DecorationRole)
+
+        # Update progress
+        self._preload_index = end_index
+        self._update_thumbnail_progress(end_index, total_items)
+
+        # Continue preloading if more items remain
+        if self._preload_index < total_items:
+            # Schedule next batch (non-blocking)
+            QTimer.singleShot(50, self._preload_all_thumbnails)  # 50ms between batches
+        else:
+            # Silently complete
+            self._preload_index = 0  # Reset for next time
+            self._preload_complete = True  # Mark as complete
+            self._hide_thumbnail_progress()
+
+    def _show_thumbnail_progress(self, total_items):
+        """Show progress bar for thumbnail loading."""
+        if not self._thumbnail_progress_bar:
+            self._thumbnail_progress_bar = QProgressBar(self.viewport())
+            self._thumbnail_progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 2px solid #555;
+                    border-radius: 5px;
+                    background-color: rgba(0, 0, 0, 180);
+                    text-align: center;
+                    color: white;
+                    font-size: 12px;
+                    min-height: 20px;
+                }
+                QProgressBar::chunk {
+                    background-color: #4CAF50;
+                    border-radius: 3px;
+                }
+            """)
+
+        # Position at bottom of viewport
+        bar_width = min(300, self.viewport().width() - 20)
+        self._thumbnail_progress_bar.setGeometry(
+            (self.viewport().width() - bar_width) // 2,
+            self.viewport().height() - 40,
+            bar_width,
+            25
+        )
+        self._thumbnail_progress_bar.setMaximum(total_items)
+        self._thumbnail_progress_bar.setValue(0)
+        self._thumbnail_progress_bar.setFormat("Loading thumbnails: %v/%m")
+        self._thumbnail_progress_bar.show()
+        self._thumbnail_progress_bar.raise_()
+
+    def _update_thumbnail_progress(self, current, total):
+        """Update progress bar value."""
+        if self._thumbnail_progress_bar:
+            self._thumbnail_progress_bar.setValue(current)
+
+    def _hide_thumbnail_progress(self):
+        """Hide progress bar when complete."""
+        if self._thumbnail_progress_bar:
+            # Fade out effect
+            QTimer.singleShot(500, self._thumbnail_progress_bar.hide)  # Hide after 500ms
+
     def _update_view_mode(self):
         """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
         if self.current_thumbnail_size >= self.column_switch_threshold:
             # Large thumbnails: single column list view
+            self.use_masonry = False
+            self.masonry_layout = None
             self.setViewMode(QListView.ViewMode.ListMode)
             self.setFlow(QListView.Flow.TopToBottom)
             self.setResizeMode(QListView.ResizeMode.Adjust)
@@ -468,15 +710,18 @@ class ImageListView(QListView):
             self.setSpacing(0)
             self.setGridSize(QSize(-1, -1))  # Reset grid size to default
         else:
-            # Small thumbnails: compact multi-column grid view (no text labels)
+            # Small thumbnails: masonry grid view (Pinterest-style)
+            self.use_masonry = True
             self.setViewMode(QListView.ViewMode.IconMode)
             self.setFlow(QListView.Flow.LeftToRight)
-            self.setResizeMode(QListView.ResizeMode.Adjust)
+            self.setResizeMode(QListView.ResizeMode.Fixed)
             self.setWrapping(True)
-            self.setSpacing(2)  # Minimal spacing for compact layout
-            # Use fixed grid based on icon size for tight packing
-            grid_size = self.current_thumbnail_size + 10  # Small padding
-            self.setGridSize(QSize(grid_size, grid_size))
+            self.setSpacing(2)
+            self.setUniformItemSizes(False)  # Allow varying sizes
+            # Disable default grid - we'll handle positioning with masonry
+            self.setGridSize(QSize(-1, -1))
+            # Calculate masonry layout
+            self._calculate_masonry_layout()
             # Force item delegate to recalculate sizes
             self.scheduleDelayedItemsLayout()
 
@@ -509,6 +754,139 @@ class ImageListView(QListView):
         drag.setPixmap(drag_pixmap)
         drag.setHotSpot(drag_pixmap.rect().center())
         drag.exec(supportedActions)
+
+    def resizeEvent(self, event):
+        """Recalculate masonry layout on resize."""
+        super().resizeEvent(event)
+        if self.use_masonry:
+            # Recalculate layout with new width
+            self._calculate_masonry_layout()
+            self.viewport().update()
+
+    def viewportSizeHint(self):
+        """Return the size hint for masonry layout."""
+        if self.use_masonry and self.masonry_layout:
+            size = self.masonry_layout.get_total_size()
+            return size
+        return super().viewportSizeHint()
+
+    def visualRect(self, index):
+        """Return the visual rectangle for an index, using masonry positions."""
+        if self.use_masonry and self.masonry_layout and index.isValid():
+            # Get masonry position (absolute coordinates)
+            rect = self.masonry_layout.get_item_rect(index.row())
+            if rect.isValid():
+                # Create new rect adjusted for scroll position (viewport coordinates)
+                scroll_offset = self.verticalScrollBar().value()
+                return QRect(rect.x(), rect.y() - scroll_offset, rect.width(), rect.height())
+            return QRect()
+        else:
+            # Use default positioning
+            return super().visualRect(index)
+
+    def indexAt(self, point):
+        """Return the index at the given point, using masonry positions."""
+        if self.use_masonry and self.masonry_layout:
+            # Adjust point for scroll offset
+            scroll_offset = self.verticalScrollBar().value()
+            adjusted_point = QPoint(point.x(), point.y() + scroll_offset)
+
+            # Check all items for intersection
+            for row in range(self.model().rowCount() if self.model() else 0):
+                rect = self.masonry_layout.get_item_rect(row)
+                if rect.contains(adjusted_point):
+                    return self.model().index(row, 0)
+            return QModelIndex()
+        else:
+            return super().indexAt(point)
+
+    def scrollContentsBy(self, dx, dy):
+        """Handle scrolling and update viewport."""
+        super().scrollContentsBy(dx, dy)
+        if self.use_masonry:
+            # Force viewport update when scrolling in masonry mode
+            self.viewport().update()
+            # Preload thumbnails for smoother scrolling
+            self._preload_nearby_thumbnails()
+            # Reset idle timer - will start aggressive preload when user stops scrolling
+            # Only if not already complete
+            if not self._preload_complete:
+                self._idle_preload_timer.stop()
+                self._idle_preload_timer.start(500)  # 500ms after scrolling stops
+
+    def paintEvent(self, event):
+        """Override paint to handle masonry layout rendering."""
+        if self.use_masonry and self.masonry_layout and self.model():
+            import time
+            paint_start = time.time()
+
+            # Paint background
+            painter = QPainter(self.viewport())
+            painter.fillRect(self.viewport().rect(), self.palette().base())
+
+            # Get visible viewport rect in absolute coordinates
+            scroll_offset = self.verticalScrollBar().value()
+            viewport_height = self.viewport().height()
+            viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
+
+            # Add buffer zone for smooth scrolling (render items slightly outside viewport)
+            buffer = 200  # pixels
+            expanded_viewport = viewport_rect.adjusted(0, -buffer, 0, buffer)
+
+            # Use masonry layout to get only visible items (OPTIMIZATION!)
+            visible_items = self.masonry_layout.get_visible_items(expanded_viewport)
+
+            # DEBUG: Check if scroll bounds are wrong
+            max_allowed = self.masonry_layout.get_total_height() - viewport_height
+            if scroll_offset > max_allowed and max_allowed > 0:
+                # Scroll position exceeds what it should - fix it
+                print(f"[SCROLL FIX] Correcting scroll: {scroll_offset} -> {max_allowed}")
+                self.verticalScrollBar().setMaximum(max_allowed)
+                self.verticalScrollBar().setValue(max_allowed)
+
+            items_painted = 0
+            # Paint only visible items
+            for item in visible_items:
+                index = self.model().index(item.index, 0)
+                if not index.isValid():
+                    continue
+
+                # Adjust rect to viewport coordinates
+                visual_rect = QRect(
+                    item.rect.x(),
+                    item.rect.y() - scroll_offset,
+                    item.rect.width(),
+                    item.rect.height()
+                )
+
+                # Skip if completely outside viewport (after buffer)
+                if visual_rect.bottom() < -buffer or visual_rect.top() > viewport_height + buffer:
+                    continue
+
+                # Create option for delegate using QStyleOptionViewItem
+                option = QStyleOptionViewItem()
+                option.rect = visual_rect
+                option.decorationSize = QSize(item.rect.width(), item.rect.height())
+                option.decorationAlignment = Qt.AlignCenter
+
+                # Set state flags
+                if self.selectionModel() and self.selectionModel().isSelected(index):
+                    option.state |= QStyle.StateFlag.State_Selected
+                if self.currentIndex() == index:
+                    option.state |= QStyle.StateFlag.State_HasFocus
+
+                # Paint using delegate
+                self.itemDelegate().paint(painter, option, index)
+                items_painted += 1
+
+            painter.end()
+
+            elapsed = time.time() - paint_start
+            if elapsed > 0.016:  # Log if slower than 60fps (16ms)
+                print(f"[PAINT] Slow paint: {elapsed*1000:.1f}ms for {items_painted} items")
+        else:
+            # Use default painting
+            super().paintEvent(event)
 
     @Slot(Grid)
     def show_crop_size(self, grid):
