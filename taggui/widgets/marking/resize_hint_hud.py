@@ -1,6 +1,6 @@
 """Visual crop hints/guides HUD for marking operations."""
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Slot
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Slot
 from PySide6.QtGui import QColor, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem
 
@@ -24,8 +24,6 @@ class ResizeHintHUD(QGraphicsItem):
         self.setZValue(3)
         self.last_point: QPointF | float = QPointF(-1, -1)
         self.last_pos = RectPosition.NONE
-        # Make HUD non-interactive - it should not intercept mouse events
-        self.setAcceptedMouseButtons(0)  # Don't accept any mouse buttons
 
     @Slot(QRectF, RectPosition)
     def setValues(self, rect: QRectF, pos: RectPosition):
@@ -128,6 +126,14 @@ class ResizeHintHUD(QGraphicsItem):
 
     def boundingRect(self):
         return self._boundingRect
+
+    def shape(self):
+        """Return empty path so this item is never hit by mouse events.
+
+        This makes the HUD completely transparent to mouse clicks - scene().itemAt()
+        will never return this item, allowing clicks to pass through to items below.
+        """
+        return QPainterPath()  # Empty path = not hit-testable
 
     def paint(self, painter, option, widget=None):
         clip_path = QPainterPath()
