@@ -19,6 +19,9 @@ class ImageGraphicsView(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # Don't steal focus when clicked - prevents image list selection changes
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Also set on viewport
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.image_viewer = image_viewer
         MarkingItem.image_view = self
@@ -114,6 +117,7 @@ class ImageGraphicsView(QGraphicsView):
                                        self.last_pos.x(), view_rect.bottom())
 
     def mousePressEvent(self, event: QMouseEvent):
+        from PySide6.QtWidgets import QGraphicsPixmapItem
         # Check if clicking on an existing marking item first
         scene_pos = self.mapToScene(event.pos())
         item_at_pos = self.scene().itemAt(scene_pos, self.transform())
@@ -144,6 +148,7 @@ class ImageGraphicsView(QGraphicsView):
             self.set_insertion_mode(ImageMarking.NONE)
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):

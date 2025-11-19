@@ -25,6 +25,14 @@ class ResizeHintHUD(QGraphicsItem):
         self.last_point: QPointF | float = QPointF(-1, -1)
         self.last_pos = RectPosition.NONE
 
+    def shape(self):
+        """Return empty path so this item is never hit by mouse events.
+
+        This makes the HUD completely transparent to mouse clicks - scene().itemAt()
+        will never return this item, allowing clicks to pass through to items below.
+        """
+        return QPainterPath()  # Empty path = not hit-testable
+
     @Slot(QRectF, RectPosition)
     def setValues(self, rect: QRectF, pos: RectPosition):
         if self.rect == rect and self.isVisible() == (pos != RectPosition.NONE):
