@@ -17,6 +17,8 @@ class MasonryItem:
 class MasonryLayout:
     """Calculates masonry (Pinterest-style) layout positions for items."""
 
+    CACHE_VERSION = 2  # Increment to invalidate all old caches
+
     def __init__(self, column_width: int = 200, spacing: int = 2, num_columns: int = 4):
         """
         Initialize masonry layout calculator.
@@ -120,6 +122,7 @@ class MasonryLayout:
         try:
             cache_path = self._get_cache_path(cache_key)
             cache_data = {
+                'cache_version': self.CACHE_VERSION,
                 'column_width': self.column_width,
                 'spacing': self.spacing,
                 'num_columns': self.num_columns,
@@ -157,12 +160,27 @@ class MasonryLayout:
             with open(cache_path, 'r') as f:
                 cache_data = json.load(f)
 
+            # Validate cache version - reject old cache formats
+            if cache_data.get('cache_version') != self.CACHE_VERSION:
+                return False
+
             # Validate cache matches current configuration
             if (cache_data['column_width'] != self.column_width or
                 cache_data['spacing'] != self.spacing or
                 cache_data['num_columns'] != self.num_columns or
                 cache_data['items_count'] != len(items_data)):
                 return False
+
+            # Validate aspect ratios match (same images in same order)
+            # This prevents using cached layouts when sort order changes the image sequence
+            cached_items = cache_data['items']
+            for i, (index, aspect_ratio) in enumerate(items_data):
+                if i >= len(cached_items):
+                    return False
+                cached_aspect = cached_items[i]['aspect_ratio']
+                # Allow small floating point differences
+                if abs(cached_aspect - aspect_ratio) > 0.001:
+                    return False
 
             # Restore item positions
             self._reset_columns()

@@ -102,10 +102,11 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `auto_captioner.py`: Auto-captioning widget
 - `auto_markings.py`: Auto-marking widget
 - `descriptive_text_edit.py`: Text editor with spell/grammar checking support
-- `image_list.py`: Image list widget
+- `image_list.py`: Image list widget with masonry layout support (1472 lines)
 - `image_tags_editor.py`: Image tags editor widget with descriptive mode
 - `image_viewer.py`: Image display and marking widget (605 lines - refactored from 1274)
 - `marking_view.py`: Graphics view for marking insertion mode (226 lines)
+- `masonry_layout.py`: Pinterest-style masonry layout calculator with disk caching (224 lines)
 - `main_window.py`: Main application window (460 lines - refactored from 1661)
 - `video_controls.py`: Video playback controls (1065 lines - needs refactoring)
 - `video_player.py`: Video player widget
