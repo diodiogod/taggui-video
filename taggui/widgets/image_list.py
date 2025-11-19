@@ -806,14 +806,63 @@ class ImageListView(QListView):
             scroll_offset = self.verticalScrollBar().value()
             adjusted_point = QPoint(point.x(), point.y() + scroll_offset)
 
-            # Check all items for intersection
+            # Debug: find ALL rects that contain this point
+            matching_rows = []
             for row in range(self.model().rowCount() if self.model() else 0):
                 rect = self.masonry_layout.get_item_rect(row)
                 if rect.contains(adjusted_point):
-                    return self.model().index(row, 0)
-            return QModelIndex()
+                    matching_rows.append((row, rect))
+
+            if matching_rows:
+                # Show matching info (limit rect output for readability)
+                match_info = [(r, f"({rect.x()},{rect.y()} {rect.width()}x{rect.height()})") for r, rect in matching_rows]
+                print(f"[DEBUG] indexAt: click at ({adjusted_point.x()},{adjusted_point.y()}) matches {len(matching_rows)} items: {match_info}")
+                # Return the last one (topmost painted item)
+                last_row, last_rect = matching_rows[-1]
+                found_index = self.model().index(last_row, 0)
+                print(f"[DEBUG] indexAt returning row={last_row}")
+                return found_index
+            else:
+                print(f"[DEBUG] indexAt found no match at {adjusted_point}")
+                return QModelIndex()
         else:
             return super().indexAt(point)
+
+    def mousePressEvent(self, event):
+        """Override mouse press to fix selection in masonry mode."""
+        if self.use_masonry and self.masonry_layout:
+            # Get the index at click position
+            index = self.indexAt(event.pos())
+
+            if index.isValid():
+                # Check modifiers
+                modifiers = event.modifiers()
+
+                if modifiers & Qt.ControlModifier:
+                    # Ctrl+Click: toggle selection
+                    if self.selectionModel().isSelected(index):
+                        print(f"[DEBUG] Ctrl+Click: deselecting row={index.row()}")
+                        self.selectionModel().select(index, QItemSelectionModel.Deselect | QItemSelectionModel.Current)
+                    else:
+                        print(f"[DEBUG] Ctrl+Click: selecting row={index.row()}")
+                        self.selectionModel().select(index, QItemSelectionModel.Select | QItemSelectionModel.Current)
+                    # Force repaint to show selection changes
+                    self.viewport().update()
+                elif modifiers & Qt.ShiftModifier:
+                    # Shift+Click: range selection (let Qt handle it)
+                    super().mousePressEvent(event)
+                else:
+                    # Normal click: clear and select only this item
+                    print(f"[DEBUG] mousePressEvent: clearing selection and selecting row={index.row()}")
+                    self.selectionModel().clearSelection()
+                    self.selectionModel().select(index, QItemSelectionModel.Select)
+                    self.setCurrentIndex(index)
+            else:
+                # Click on empty space: clear selection
+                self.selectionModel().clearSelection()
+        else:
+            # Use default behavior in list mode
+            super().mousePressEvent(event)
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
@@ -889,13 +938,37 @@ class ImageListView(QListView):
                 option.palette = self.palette()  # Set palette for stamp drawing
 
                 # Set state flags
-                if self.selectionModel() and self.selectionModel().isSelected(index):
+                is_selected = self.selectionModel() and self.selectionModel().isSelected(index)
+                is_current = self.currentIndex() == index
+
+                # Debug: log selection state for visible items
+                if is_selected or is_current:
+                    print(f"[DEBUG] Painting row={item.index}, is_selected={is_selected}, is_current={is_current}")
+
+                if is_selected:
                     option.state |= QStyle.StateFlag.State_Selected
-                if self.currentIndex() == index:
+                if is_current:
                     option.state |= QStyle.StateFlag.State_HasFocus
 
                 # Paint using delegate
                 self.itemDelegate().paint(painter, option, index)
+
+                # Draw selection border on top in masonry mode (delegate doesn't show it clearly in IconMode)
+                if is_selected or is_current:
+                    painter.save()
+                    if is_current:
+                        # Current item: thicker blue border
+                        pen = QPen(QColor(0, 120, 215), 4)  # Windows blue
+                    else:
+                        # Just selected: thinner blue border
+                        pen = QPen(QColor(0, 120, 215), 2)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
+                    painter.restore()
+                    # Debug: show rect for selected items
+                    print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
+
                 items_painted += 1
 
             painter.end()
@@ -967,9 +1040,11 @@ class ImageListView(QListView):
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
         selected_image_proxy_indices = self.selectedIndexes()
+        print(f"[DEBUG] get_selected_image_indices: proxy indices = {[idx.row() for idx in selected_image_proxy_indices]}")
         selected_image_indices = [
             self.proxy_image_list_model.mapToSource(proxy_index)
             for proxy_index in selected_image_proxy_indices]
+        print(f"[DEBUG] get_selected_image_indices: source indices = {[idx.row() for idx in selected_image_indices]}")
         return selected_image_indices
 
     @Slot()
