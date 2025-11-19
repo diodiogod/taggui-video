@@ -355,6 +355,7 @@ class ImageListView(QListView):
         self._idle_preload_timer.timeout.connect(self._preload_all_thumbnails)
         self._preload_index = 0  # Track preload progress
         self._preload_complete = False  # Track if all thumbnails loaded
+        self._thumbnails_loaded = set()  # Track which thumbnails are loaded (by index)
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
@@ -555,6 +556,7 @@ class ImageListView(QListView):
         # Reset preload state when layout changes
         self._preload_complete = False
         self._preload_index = 0
+        self._thumbnails_loaded.clear()
 
         # Update scroll area to accommodate total height
         # The maximum scroll position should be: total_height - viewport_height
@@ -579,7 +581,10 @@ class ImageListView(QListView):
         # Round viewport width to nearest 100px to avoid cache misses from small resizes
         viewport_width = (self.viewport().width() // 100) * 100
 
-        return f"{dir_path}_{self.current_thumbnail_size}_{viewport_width}"
+        # Include sort order in cache key - different orders need different layouts!
+        sort_order = settings.value('image_list_sort_by', 'Name', type=str)
+
+        return f"{dir_path}_{self.current_thumbnail_size}_{viewport_width}_{sort_order}"
 
     def _preload_nearby_thumbnails(self):
         """Preload thumbnails for items near viewport for smoother scrolling."""
@@ -604,6 +609,13 @@ class ImageListView(QListView):
             if index.isValid():
                 # This triggers thumbnail generation if not cached
                 _ = index.data(Qt.ItemDataRole.DecorationRole)
+                # Track this thumbnail as loaded
+                if item.index not in self._thumbnails_loaded:
+                    self._thumbnails_loaded.add(item.index)
+                    # Update progress if progress bar is visible
+                    if self._thumbnail_progress_bar and self._thumbnail_progress_bar.isVisible():
+                        self._update_thumbnail_progress(len(self._thumbnails_loaded),
+                                                       self.model().rowCount())
 
     def _preload_all_thumbnails(self):
         """Aggressively preload ALL thumbnails when idle for buttery smooth scrolling."""
@@ -614,32 +626,35 @@ class ImageListView(QListView):
         if total_items == 0:
             return
 
-        # Create progress bar on first run
-        if self._preload_index == 0:
+        # Show progress bar (either first run or resuming after scroll)
+        if not self._thumbnail_progress_bar or not self._thumbnail_progress_bar.isVisible():
             self._show_thumbnail_progress(total_items)
 
-        # Preload in batches to avoid blocking UI
-        batch_size = 10
+        # Preload in smaller batches to avoid blocking UI
+        # Smaller batch = more responsive UI, especially for videos
+        batch_size = 3  # Reduced from 10 - videos can take time to extract frames
         start_index = self._preload_index
         end_index = min(start_index + batch_size, total_items)
 
-        # Silently preload (remove debug print)
-
-        # Preload batch
+        # Preload batch with UI updates between each item
         for i in range(start_index, end_index):
             index = self.model().index(i, 0)
             if index.isValid():
                 # Trigger thumbnail generation
                 _ = index.data(Qt.ItemDataRole.DecorationRole)
+                # Track this thumbnail as loaded
+                self._thumbnails_loaded.add(i)
+                # Process events after each thumbnail to keep UI responsive
+                QApplication.processEvents()
 
         # Update progress
         self._preload_index = end_index
-        self._update_thumbnail_progress(end_index, total_items)
+        self._update_thumbnail_progress(len(self._thumbnails_loaded), total_items)
 
         # Continue preloading if more items remain
         if self._preload_index < total_items:
-            # Schedule next batch (non-blocking)
-            QTimer.singleShot(50, self._preload_all_thumbnails)  # 50ms between batches
+            # Schedule next batch with minimal delay for responsiveness
+            QTimer.singleShot(10, self._preload_all_thumbnails)  # Reduced from 50ms to 10ms
         else:
             # Silently complete
             self._preload_index = 0  # Reset for next time
@@ -806,11 +821,14 @@ class ImageListView(QListView):
         if self.use_masonry:
             # Force viewport update when scrolling in masonry mode
             self.viewport().update()
-            # Preload thumbnails for smoother scrolling
+
+            # Preload thumbnails for smoother scrolling (only nearby items)
             self._preload_nearby_thumbnails()
-            # Update progress bar position if visible
+
+            # Update progress bar position to follow scroll
             self._update_progress_bar_position()
-            # Reset idle timer - will start aggressive preload when user stops scrolling
+
+            # Restart idle timer - will start/resume aggressive preload when user stops scrolling
             # Only if not already complete
             if not self._preload_complete:
                 self._idle_preload_timer.stop()
