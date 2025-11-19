@@ -41,9 +41,10 @@ class DescriptiveTextEdit(QPlainTextEdit):
             custom_dict = set(custom_dict_list)
             self.spell_highlighter.load_custom_dictionary(custom_dict)
 
-        # Grammar checker (optional, on-demand)
+        # Grammar checker (lazy initialization - only initialized on first use)
         self.grammar_checker = None
-        self._init_grammar_checker()
+        self.grammar_check_mode = None
+        self._load_grammar_check_mode()
 
         # Track grammar issues for highlighting
         self.grammar_issues = []
@@ -60,23 +61,30 @@ class DescriptiveTextEdit(QPlainTextEdit):
                                 min(self.max_zoom, self.current_zoom))
         self._apply_zoom(self.current_zoom)
 
-    def _init_grammar_checker(self):
-        """Initialize grammar checker based on settings."""
+    def _load_grammar_check_mode(self):
+        """Load grammar check mode from settings (lazy init, don't create tool yet)."""
         mode_str = settings.value('grammar_check_mode',
                                  defaultValue=GrammarCheckMode.FREE_API.value,
                                  type=str)
 
         try:
-            mode = GrammarCheckMode(mode_str)
+            self.grammar_check_mode = GrammarCheckMode(mode_str)
         except ValueError:
-            mode = GrammarCheckMode.FREE_API
+            self.grammar_check_mode = GrammarCheckMode.FREE_API
 
-        if mode != GrammarCheckMode.DISABLED:
-            try:
-                self.grammar_checker = GrammarChecker(mode=mode)
-            except Exception as e:
-                print(f"Failed to initialize grammar checker: {e}")
-                self.grammar_checker = None
+    def _init_grammar_checker(self):
+        """Initialize grammar checker on first use (lazy initialization)."""
+        if self.grammar_checker is not None:
+            return  # Already initialized
+
+        if self.grammar_check_mode == GrammarCheckMode.DISABLED:
+            return  # Grammar checking is disabled
+
+        try:
+            self.grammar_checker = GrammarChecker(mode=self.grammar_check_mode)
+        except Exception as e:
+            print(f"Failed to initialize grammar checker: {e}")
+            self.grammar_checker = None
 
     def contextMenuEvent(self, event: QContextMenuEvent):
         """Show custom context menu with spelling/grammar corrections."""
@@ -118,7 +126,7 @@ class DescriptiveTextEdit(QPlainTextEdit):
             menu.addSeparator()
 
         # Grammar check action
-        if self.grammar_checker and self.grammar_checker.is_available():
+        if self.grammar_check_mode != GrammarCheckMode.DISABLED:
             check_grammar_action = QAction('Check Grammar...', menu)
             check_grammar_action.triggered.connect(self.check_grammar)
             menu.addAction(check_grammar_action)
@@ -165,6 +173,9 @@ class DescriptiveTextEdit(QPlainTextEdit):
     def check_grammar(self):
         """Check grammar using LanguageTool and display issues."""
         from PySide6.QtWidgets import QMessageBox
+
+        # Initialize grammar checker on first use (lazy initialization)
+        self._init_grammar_checker()
 
         if not self.grammar_checker or not self.grammar_checker.is_available():
             QMessageBox.warning(
