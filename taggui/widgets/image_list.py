@@ -839,13 +839,24 @@ class ImageListView(QListView):
                 modifiers = event.modifiers()
 
                 if modifiers & Qt.ControlModifier:
-                    # Ctrl+Click: toggle selection
-                    if self.selectionModel().isSelected(index):
+                    # Ctrl+Click: toggle selection WITHOUT clearing others
+                    was_selected = self.selectionModel().isSelected(index)
+
+                    # First, set as current index
+                    self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+
+                    # Then toggle its selection state
+                    if was_selected:
                         print(f"[DEBUG] Ctrl+Click: deselecting row={index.row()}")
-                        self.selectionModel().select(index, QItemSelectionModel.Deselect | QItemSelectionModel.Current)
+                        self.selectionModel().select(index, QItemSelectionModel.Deselect)
                     else:
                         print(f"[DEBUG] Ctrl+Click: selecting row={index.row()}")
-                        self.selectionModel().select(index, QItemSelectionModel.Select | QItemSelectionModel.Current)
+                        self.selectionModel().select(index, QItemSelectionModel.Select)
+
+                    # Debug: show all selected indices
+                    all_selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]
+                    print(f"[DEBUG] After Ctrl+Click, all selected rows: {all_selected}")
+
                     # Force repaint to show selection changes
                     self.viewport().update()
                 elif modifiers & Qt.ShiftModifier:
