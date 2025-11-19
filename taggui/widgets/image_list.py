@@ -834,6 +834,8 @@ class ImageListView(QListView):
             # Get the index at click position
             index = self.indexAt(event.pos())
 
+            print(f"[DEBUG] mousePressEvent: click at {event.pos()}, found index={index.row() if index.isValid() else 'invalid'}, modifiers={event.modifiers()}")
+
             if index.isValid():
                 # Check modifiers
                 modifiers = event.modifiers()
@@ -891,16 +893,53 @@ class ImageListView(QListView):
                     self.viewport().update()
                 else:
                     # Normal click: clear and select only this item
-                    # print(f"[DEBUG] mousePressEvent: clearing selection and selecting row={index.row()}")
+                    print(f"[DEBUG] Normal click: clearing selection and selecting row={index.row()}")
                     self.selectionModel().clearSelection()
                     self.selectionModel().select(index, QItemSelectionModel.Select)
                     self.setCurrentIndex(index)
+
+                    # Verify what's actually selected after
+                    selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]
+                    print(f"[DEBUG] After normal click, selected rows: {selected}")
+
+                # Accept the event to prevent further processing
+                event.accept()
             else:
                 # Click on empty space: clear selection
                 self.selectionModel().clearSelection()
+                event.accept()
         else:
             # Use default behavior in list mode
             super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Prevent Qt's rubber-band selection in masonry mode."""
+        if self.use_masonry and self.masonry_layout:
+            # Don't call super() - it triggers rubber-band selection
+            # Just accept the event to prevent default behavior
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Override mouse release to prevent Qt from changing selection."""
+        if self.use_masonry and self.masonry_layout:
+            print(f"[DEBUG] mouseReleaseEvent START: at {event.pos()}")
+            # Check selection BEFORE accepting
+            selected_before = [idx.row() for idx in self.selectionModel().selectedIndexes()]
+            print(f"[DEBUG] On release BEFORE accept, selected rows: {selected_before}")
+
+            # Just accept the event, don't let Qt handle it
+            event.accept()
+
+            # Check selection AFTER accepting
+            selected_after = [idx.row() for idx in self.selectionModel().selectedIndexes()]
+            print(f"[DEBUG] On release AFTER accept, selected rows: {selected_after}")
+
+            if selected_before != selected_after:
+                print(f"[DEBUG] WARNING: Selection changed during mouseReleaseEvent!")
+        else:
+            super().mouseReleaseEvent(event)
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
