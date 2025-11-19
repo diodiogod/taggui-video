@@ -32,7 +32,8 @@ DEFAULT_SETTINGS = {
     'export_filter_hashtag': True,
     'spell_check_enabled': True,
     'grammar_check_mode': 'free_api',
-    'speed_slider_theme_index': 12  # Forest Light
+    'speed_slider_theme_index': 12,  # Forest Light
+    'recent_directories': []
 }
 
 

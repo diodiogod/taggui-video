@@ -1,8 +1,11 @@
 """Manager for main window menu bar."""
 
+from pathlib import Path
 from PySide6.QtWidgets import QMenuBar
 from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
 from PySide6.QtCore import QUrl
+
+from utils.settings import settings, DEFAULT_SETTINGS
 
 
 class MenuManager:
@@ -20,6 +23,7 @@ class MenuManager:
         self.toggle_all_tags_editor_action = None
         self.toggle_auto_captioner_action = None
         self.toggle_auto_markings_action = None
+        self.recent_folders_menu = None
 
     def create_menus(self):
         """Create and setup menu bar."""
@@ -66,6 +70,13 @@ class MenuManager:
             [QKeySequence('Ctrl+Shift+L'), QKeySequence('F5')])
         self.reload_directory_action.triggered.connect(self.main_window.reload_directory)
         file_menu.addAction(self.reload_directory_action)
+
+        file_menu.addSeparator()
+
+        self.recent_folders_menu = file_menu.addMenu('Recent Folders')
+        self._update_recent_folders_menu()
+
+        file_menu.addSeparator()
 
         export_action = QAction('Export...', parent=self.main_window)
         export_action.triggered.connect(self.main_window.export_images_dialog)
@@ -195,3 +206,37 @@ class MenuManager:
         else:
             self.redo_action.setText('Redo')
             self.redo_action.setDisabled(True)
+
+    def _update_recent_folders_menu(self):
+        """Update recent folders menu with current list."""
+        self.recent_folders_menu.clear()
+        recent_dirs = settings.value(
+            'recent_directories',
+            defaultValue=DEFAULT_SETTINGS['recent_directories'],
+            type=list
+        )
+
+        if not recent_dirs:
+            no_recent_action = QAction('No recent folders', self.main_window)
+            no_recent_action.setEnabled(False)
+            self.recent_folders_menu.addAction(no_recent_action)
+            return
+
+        for dir_path in recent_dirs:
+            if Path(dir_path).exists():
+                action = QAction(dir_path, self.main_window)
+                action.triggered.connect(
+                    lambda checked=False, p=dir_path:
+                        self.main_window.load_directory(Path(p), save_path_to_settings=True)
+                )
+                self.recent_folders_menu.addAction(action)
+
+        self.recent_folders_menu.addSeparator()
+        clear_action = QAction('Clear Recent Folders', self.main_window)
+        clear_action.triggered.connect(self._clear_recent_folders)
+        self.recent_folders_menu.addAction(clear_action)
+
+    def _clear_recent_folders(self):
+        """Clear the recent folders list."""
+        settings.setValue('recent_directories', [])
+        self._update_recent_folders_menu()

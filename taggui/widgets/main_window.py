@@ -243,6 +243,7 @@ class MainWindow(QMainWindow):
         self.directory_path = path.resolve()
         if save_path_to_settings:
             settings.setValue('directory_path', str(self.directory_path))
+            self._add_to_recent_directories(str(self.directory_path))
         self.setWindowTitle(path.name)
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
@@ -483,3 +484,29 @@ class MainWindow(QMainWindow):
                                                       type=str))
             if directory_path.is_dir():
                 self.load_directory(directory_path, select_index=image_index)
+
+    def _add_to_recent_directories(self, dir_path: str):
+        """Add directory to recent list, maintaining max size."""
+        MAX_RECENT = 10
+        recent_dirs = settings.value(
+            'recent_directories',
+            defaultValue=DEFAULT_SETTINGS['recent_directories'],
+            type=list
+        )
+        # Handle None or non-list values
+        if not isinstance(recent_dirs, list):
+            recent_dirs = []
+
+        # Remove if already exists (move to top)
+        if dir_path in recent_dirs:
+            recent_dirs.remove(dir_path)
+
+        # Add to beginning
+        recent_dirs.insert(0, dir_path)
+
+        # Limit size
+        recent_dirs = recent_dirs[:MAX_RECENT]
+
+        # Save and update menu
+        settings.setValue('recent_directories', recent_dirs)
+        self.menu_manager._update_recent_folders_menu()
