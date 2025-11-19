@@ -815,15 +815,15 @@ class ImageListView(QListView):
 
             if matching_rows:
                 # Show matching info (limit rect output for readability)
-                match_info = [(r, f"({rect.x()},{rect.y()} {rect.width()}x{rect.height()})") for r, rect in matching_rows]
-                print(f"[DEBUG] indexAt: click at ({adjusted_point.x()},{adjusted_point.y()}) matches {len(matching_rows)} items: {match_info}")
+                # match_info = [(r, f"({rect.x()},{rect.y()} {rect.width()}x{rect.height()})") for r, rect in matching_rows]
+                # print(f"[DEBUG] indexAt: click at ({adjusted_point.x()},{adjusted_point.y()}) matches {len(matching_rows)} items: {match_info}")
                 # Return the last one (topmost painted item)
                 last_row, last_rect = matching_rows[-1]
                 found_index = self.model().index(last_row, 0)
-                print(f"[DEBUG] indexAt returning row={last_row}")
+                # print(f"[DEBUG] indexAt returning row={last_row}")
                 return found_index
             else:
-                print(f"[DEBUG] indexAt found no match at {adjusted_point}")
+                # print(f"[DEBUG] indexAt found no match at {adjusted_point}")
                 return QModelIndex()
         else:
             return super().indexAt(point)
@@ -847,24 +847,51 @@ class ImageListView(QListView):
 
                     # Then toggle its selection state
                     if was_selected:
-                        print(f"[DEBUG] Ctrl+Click: deselecting row={index.row()}")
+                        # print(f"[DEBUG] Ctrl+Click: deselecting row={index.row()}")
                         self.selectionModel().select(index, QItemSelectionModel.Deselect)
                     else:
-                        print(f"[DEBUG] Ctrl+Click: selecting row={index.row()}")
+                        # print(f"[DEBUG] Ctrl+Click: selecting row={index.row()}")
                         self.selectionModel().select(index, QItemSelectionModel.Select)
 
                     # Debug: show all selected indices
-                    all_selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]
-                    print(f"[DEBUG] After Ctrl+Click, all selected rows: {all_selected}")
+                    # all_selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]
+                    # print(f"[DEBUG] After Ctrl+Click, all selected rows: {all_selected}")
 
                     # Force repaint to show selection changes
                     self.viewport().update()
                 elif modifiers & Qt.ShiftModifier:
-                    # Shift+Click: range selection (let Qt handle it)
-                    super().mousePressEvent(event)
+                    # Shift+Click: range selection
+                    current = self.currentIndex()
+                    if current.isValid():
+                        # Select all items between current and clicked index
+                        start_row = min(current.row(), index.row())
+                        end_row = max(current.row(), index.row())
+
+                        # print(f"[DEBUG] Shift+Click: selecting range from row {start_row} to {end_row}")
+
+                        # Build selection range
+                        selection = QItemSelection()
+                        for row in range(start_row, end_row + 1):
+                            item_index = self.model().index(row, 0)
+                            selection.select(item_index, item_index)
+
+                        # Apply selection (add to existing if Ctrl also held)
+                        self.selectionModel().select(selection, QItemSelectionModel.Select)
+                        self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+
+                        # Debug: show all selected indices
+                        # all_selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]
+                        # print(f"[DEBUG] After Shift+Click, all selected rows: {all_selected}")
+                    else:
+                        # No current index, just select this one
+                        self.selectionModel().select(index, QItemSelectionModel.Select)
+                        self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+
+                    # Force repaint
+                    self.viewport().update()
                 else:
                     # Normal click: clear and select only this item
-                    print(f"[DEBUG] mousePressEvent: clearing selection and selecting row={index.row()}")
+                    # print(f"[DEBUG] mousePressEvent: clearing selection and selecting row={index.row()}")
                     self.selectionModel().clearSelection()
                     self.selectionModel().select(index, QItemSelectionModel.Select)
                     self.setCurrentIndex(index)
@@ -953,8 +980,8 @@ class ImageListView(QListView):
                 is_current = self.currentIndex() == index
 
                 # Debug: log selection state for visible items
-                if is_selected or is_current:
-                    print(f"[DEBUG] Painting row={item.index}, is_selected={is_selected}, is_current={is_current}")
+                # if is_selected or is_current:
+                #     print(f"[DEBUG] Painting row={item.index}, is_selected={is_selected}, is_current={is_current}")
 
                 if is_selected:
                     option.state |= QStyle.StateFlag.State_Selected
@@ -978,7 +1005,7 @@ class ImageListView(QListView):
                     painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
                     painter.restore()
                     # Debug: show rect for selected items
-                    print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
+                    # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
 
                 items_painted += 1
 
@@ -1051,11 +1078,11 @@ class ImageListView(QListView):
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
         selected_image_proxy_indices = self.selectedIndexes()
-        print(f"[DEBUG] get_selected_image_indices: proxy indices = {[idx.row() for idx in selected_image_proxy_indices]}")
+        # print(f"[DEBUG] get_selected_image_indices: proxy indices = {[idx.row() for idx in selected_image_proxy_indices]}")
         selected_image_indices = [
             self.proxy_image_list_model.mapToSource(proxy_index)
             for proxy_index in selected_image_proxy_indices]
-        print(f"[DEBUG] get_selected_image_indices: source indices = {[idx.row() for idx in selected_image_indices]}")
+        # print(f"[DEBUG] get_selected_image_indices: source indices = {[idx.row() for idx in selected_image_indices]}")
         return selected_image_indices
 
     @Slot()
