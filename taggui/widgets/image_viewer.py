@@ -39,6 +39,7 @@ class ImageViewer(QWidget):
         self.show_marking_latent_state = True
         self.marking_to_add = ImageMarking.NONE
         self.scene = QGraphicsScene()
+
         self.view = ImageGraphicsView(self.scene, self)
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
         self.crop_marking: ImageMarking | None = None
@@ -198,10 +199,14 @@ class ImageViewer(QWidget):
     @Slot()
     def load_image(self, proxy_image_index: QModelIndex, is_complete = True):
         persistent_image_index = QPersistentModelIndex(proxy_image_index)
-        if ((not persistent_image_index.isValid()) or
-            (self.inhibit_reload_image and
-             persistent_image_index == self.proxy_image_index)):
+
+        # Check if we should skip this reload
+        if not persistent_image_index.isValid():
             return
+
+        if self.inhibit_reload_image and self.proxy_image_index and persistent_image_index == self.proxy_image_index:
+            return
+
         self.proxy_image_index = persistent_image_index
 
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
@@ -274,6 +279,7 @@ class ImageViewer(QWidget):
                 self.scene.setSceneRect(image_item.boundingRect()
                                         .adjusted(-1, -1, 1, 1)) # space for rect border
                 self.scene.addItem(image_item)
+                self.current_image_item = image_item  # Keep reference to prevent garbage collection!
                 MarkingItem.image_size = image_item.boundingRect().toRect()
 
             self.zoom_fit()
