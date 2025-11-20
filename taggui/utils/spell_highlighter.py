@@ -64,6 +64,20 @@ class SpellHighlighter(QSyntaxHighlighter):
             if word.lower() in self.custom_words:
                 continue
 
+            # For hyphenated words, check each component separately
+            if '-' in word:
+                parts = word.split('-')
+                # Skip if all parts are valid words
+                all_valid = True
+                for part in parts:
+                    if len(part) <= 2:  # Skip short parts
+                        continue
+                    if part.lower() not in self.custom_words and self.spell_checker.unknown([part.lower()]):
+                        all_valid = False
+                        break
+                if all_valid:
+                    continue
+
             # Check spelling (case-insensitive)
             if self.spell_checker.unknown([word.lower()]):
                 # Mark as misspelled
