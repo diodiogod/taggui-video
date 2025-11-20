@@ -152,9 +152,17 @@ class MarkingItem(QGraphicsRectItem):
                         target = target_size.toSizeF() * scale
                         target = QSize(max(bucket_res, ceil(target.width())),
                                        max(bucket_res, ceil(target.height())))
-                        rect = change_rect_to_match_size(self.rect(),
+                        rect_candidate = change_rect_to_match_size(self.rect(),
                                                          MarkingItem.handle_selected,
                                                          target)
+                        # Only accept the snap if it fits within image boundaries
+                        if self.image_size.contains(rect_candidate):
+                            rect = rect_candidate
+                        else:
+                            # Reject snap - keep current rect
+                            rect = self.rect()
+                            # Revert to previous valid bucket size
+                            self.last_snapped_bucket_size = target_dimension.get(self.rect().toRect().size())
                     else:
                         # Keep current rect - locked to current bucket size
                         rect = self.rect()
