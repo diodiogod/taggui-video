@@ -123,12 +123,12 @@ class DescriptiveTextEdit(QPlainTextEdit):
         cursor.select(QTextCursor.SelectionType.WordUnderCursor)
         word = cursor.selectedText()
 
-        # Schedule spell check menu if word is misspelled (with delay to allow double-click)
+        # Schedule spell check menu if word is misspelled (with minimal delay to debounce)
         if word and self.spell_highlighter.is_misspelled(word):
             cursor_rect = self.cursorRect(cursor)
             global_pos = self.mapToGlobal(cursor_rect.bottomLeft())
             self._pending_spell_menu = (cursor, global_pos)
-            self._spell_menu_timer.start(200)  # 200ms delay
+            self._spell_menu_timer.start(30)  # 30ms delay
 
     def _show_delayed_spell_menu(self):
         """Show spell check menu after delay (if not cancelled by double-click)."""
