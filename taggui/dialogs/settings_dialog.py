@@ -37,6 +37,8 @@ class SettingsDialog(QDialog):
                               Qt.AlignmentFlag.AlignRight)
         grid_layout.addWidget(QLabel('Grammar check mode'), 11, 0,
                               Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Trainer target resolution (for exact bucket snap)'), 12, 0,
+                              Qt.AlignmentFlag.AlignRight)
 
         font_size_spin_box = SettingsSpinBox(
             key='font_size',
@@ -114,6 +116,13 @@ class SettingsDialog(QDialog):
         self.grammar_check_mode_combo.currentIndexChanged.connect(
             lambda: self._save_grammar_mode())
 
+        trainer_target_resolution_spin_box = SettingsSpinBox(
+            key='trainer_target_resolution',
+            minimum=256, maximum=4096)
+        trainer_target_resolution_spin_box.setToolTip(
+            'Set your trainer\'s target resolution (e.g., 1024 for 1024x1024). '
+            'Use Shift+Ctrl+drag to snap crops to exact buckets for this resolution.')
+
         grid_layout.addWidget(font_size_spin_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(file_types_line_edit, 1, 1,
@@ -137,6 +146,8 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(self.spell_check_enabled, 10, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(self.grammar_check_mode_combo, 11, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(trainer_target_resolution_spin_box, 12, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 

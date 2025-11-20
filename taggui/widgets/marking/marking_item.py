@@ -11,6 +11,7 @@ import utils.target_dimension as target_dimension
 from utils.grid import Grid
 from utils.rect import (change_rect, change_rect_to_match_size,
                         flip_rect_position, get_rect_position, RectPosition)
+from math import sqrt, floor, ceil
 
 # The (inverse) golden ratio for showing hints during cropping
 golden_ratio = 2 / (1 + sqrt(5))
@@ -28,6 +29,31 @@ marking_colors = {
 def calculate_grid(content: QRect):
     global grid
     grid = Grid(content)
+
+
+def generate_trainer_buckets(target_resolution: int, reso_steps: int = 16) -> list[tuple[int, int]]:
+    """Generate trainer bucket resolutions for given target resolution.
+
+    Args:
+        target_resolution: trainer's target resolution (e.g., 1024 for 1024x1024)
+        reso_steps: resolution step size (typically 16 for trainers)
+
+    Returns:
+        List of (width, height) bucket tuples
+    """
+    bucket_area = target_resolution * target_resolution
+    sqrt_size = int(sqrt(bucket_area))
+    min_size = int(floor(sqrt_size / 2 / reso_steps) * reso_steps)
+
+    buckets = []
+    for w in range(min_size, sqrt_size + reso_steps, reso_steps):
+        h = int(floor(bucket_area / w / reso_steps) * reso_steps)
+        if h >= reso_steps:
+            buckets.append((w, h))
+            if w != h:  # avoid duplicates for square
+                buckets.append((h, w))
+
+    return sorted(list(set(buckets)))
 
 
 class MarkingItem(QGraphicsRectItem):
@@ -134,6 +160,52 @@ class MarkingItem(QGraphicsRectItem):
                     rect.moveRight(self.image_size.width())
                 if rect.bottom() > self.image_size.height():
                     rect.moveBottom(self.image_size.height())
+            elif ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
+                Qt.KeyboardModifier.ShiftModifier and
+                (event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
+                Qt.KeyboardModifier.ControlModifier):
+                # Shift+Ctrl: Snap to exact trainer buckets
+                if self.rect_type == ImageMarking.CROP:
+                    target_resolution = settings.value('trainer_target_resolution', type=int)
+                    trainer_buckets = generate_trainer_buckets(target_resolution)
+
+                    # Calculate what the rect would be if we just follow the mouse
+                    rect_pre = change_rect(self.rect(),
+                                           MarkingItem.handle_selected,
+                                           event.pos())
+                    # Clamp to image boundaries
+                    rect_pre = rect_pre.intersected(self.image_size)
+
+                    # Find nearest bucket by aspect ratio
+                    rect_aspect = rect_pre.width() / rect_pre.height() if rect_pre.height() > 0 else 1.0
+                    nearest_bucket = min(trainer_buckets,
+                                        key=lambda b: abs(b[0] / b[1] - rect_aspect))
+                    target_size = QSize(nearest_bucket[0], nearest_bucket[1])
+
+                    # Check if mouse is trying to drag beyond current rect
+                    rect_growing = (rect_pre.width() > self.rect().width() or
+                                   rect_pre.height() > self.rect().height())
+
+                    # Snap if bucket changed OR rect is growing
+                    if target_size != self.last_snapped_bucket_size or rect_growing:
+                        rect_candidate = change_rect_to_match_size(rect_pre,
+                                                         MarkingItem.handle_selected,
+                                                         target_size)
+                        # Only accept if it fits within image boundaries
+                        if self.image_size.contains(rect_candidate):
+                            rect = rect_candidate
+                            self.last_snapped_bucket_size = target_size
+                        else:
+                            # Can't fit this bucket, use clamped rect
+                            rect = rect_pre
+                            self.last_snapped_bucket_size = None
+                    else:
+                        # Keep current rect
+                        rect = self.rect()
+                else:
+                    rect = change_rect(self.rect(),
+                                       MarkingItem.handle_selected,
+                                       event.pos())
             elif ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
                 Qt.KeyboardModifier.ShiftModifier):
                 if self.rect_type == ImageMarking.CROP:
@@ -244,15 +316,21 @@ class MarkingItem(QGraphicsRectItem):
                 if MarkingItem.handle_selected != RectPosition.CENTER:
                     self.size_changed()
 
-            self.move()
+            # Only call move() if rect is valid
+            if self.rect().width() > 0 and self.rect().height() > 0:
+                self.move()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         MarkingItem.handle_selected = RectPosition.NONE
+        self.show_crop_hint = False  # Hide hints on release
         self.move()
         self.setZValue(2)
+        # Only activate insertion mode if Control is pressed but NOT Shift+Ctrl
         if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
-                Qt.KeyboardModifier.ControlModifier):
+                Qt.KeyboardModifier.ControlModifier and
+            (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) !=
+                Qt.KeyboardModifier.ShiftModifier):
             self.image_view.set_insertion_mode(self.rect_type)
         self.ungrabMouse()
         super().mouseReleaseEvent(event)

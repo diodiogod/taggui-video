@@ -22,6 +22,7 @@ DEFAULT_SETTINGS = {
     'export_preferred_sizes' : '1024:1024, 1408:704, 1216:832, 1152:896, 1344:768, 1536:640',
     'export_upscaling': False,
     'export_bucket_strategy': 'crop',
+    'trainer_target_resolution': 1024,
     'export_format': '.png - PNG',
     'export_quality': 100,
     'export_color_space': 'sRGB',
