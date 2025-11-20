@@ -206,6 +206,7 @@ class ImageGraphicsView(QGraphicsView):
                     self.image_viewer.delete_markings(selected)
                 else:
                     self.image_viewer.delete_markings()
+            return
         elif event.key() in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]:
             # Shift + arrow key scrolling when zoomed (avoids conflict with Ctrl+hint binding)
             shift_pressed = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
@@ -231,27 +232,41 @@ class ImageGraphicsView(QGraphicsView):
                         self.verticalScrollBar().value() + scroll_amount)
                     event.accept()
                     return
-        else:
+            return
+        elif event.key() == Qt.Key.Key_C:
+            # C key for crop mode - don't check modifiers, just activate crop
             if MarkingItem.handle_selected == RectPosition.NONE:
-                if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
-                        Qt.KeyboardModifier.ControlModifier):
-                    if ((event.modifiers() & Qt.KeyboardModifier.AltModifier) ==
-                            Qt.KeyboardModifier.AltModifier):
-                        self.set_insertion_mode(ImageMarking.EXCLUDE)
-                    else:
-                        self.set_insertion_mode(ImageMarking.HINT)
+                self.image_viewer.marking_to_add = ImageMarking.CROP
+                self.set_insertion_mode(ImageMarking.CROP)
+            event.accept()
+            # Don't call super - we handled this completely
+            return
+
+        # Handle Ctrl modifier for hint/exclude/crop modes (only if not C key)
+        if MarkingItem.handle_selected == RectPosition.NONE:
+            if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
+                    Qt.KeyboardModifier.ControlModifier):
+                if ((event.modifiers() & Qt.KeyboardModifier.AltModifier) ==
+                        Qt.KeyboardModifier.AltModifier):
+                    self.image_viewer.marking_to_add = ImageMarking.EXCLUDE
+                    self.set_insertion_mode(ImageMarking.EXCLUDE)
+                    return
+                elif ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
+                        Qt.KeyboardModifier.ShiftModifier):
+                    self.image_viewer.marking_to_add = ImageMarking.CROP
+                    self.set_insertion_mode(ImageMarking.CROP)
+                    return
+                else:
+                    self.image_viewer.marking_to_add = ImageMarking.HINT
+                    self.set_insertion_mode(ImageMarking.HINT)
+                    return
+
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
         if MarkingItem.handle_selected == RectPosition.NONE:
-            if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
-                Qt.KeyboardModifier.ControlModifier):
-                if ((event.modifiers() & Qt.KeyboardModifier.AltModifier) ==
-                        Qt.KeyboardModifier.AltModifier):
-                    self.set_insertion_mode(ImageMarking.EXCLUDE)
-                else:
-                    self.set_insertion_mode(ImageMarking.HINT)
-            else:
+            # Reset mode when Ctrl is released or any marking key (C) is released
+            if event.key() in [Qt.Key.Key_Control, Qt.Key.Key_C]:
                 self.set_insertion_mode(ImageMarking.NONE)
         super().keyReleaseEvent(event)
 
