@@ -223,10 +223,6 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         suggestions = self.spell_highlighter.get_suggestions(word)
 
-        # Don't show popup if no suggestions (user can right-click to add to dictionary)
-        if not suggestions:
-            return
-
         # Create non-modal, non-blocking popup list (Tool window, not Popup)
         popup = QListWidget()
         popup.setWindowFlags(
@@ -240,16 +236,26 @@ class DescriptiveTextEdit(QPlainTextEdit):
         popup.setMinimumWidth(200)
         popup.setMaximumHeight(150)
 
-        # Add suggestions
-        for suggestion in suggestions[:5]:
-            item = QListWidgetItem(f"→ {suggestion}")
-            item.setData(Qt.ItemDataRole.UserRole, (word_start, word_end, suggestion))
-            popup.addItem(item)
+        # Add suggestions if available
+        if suggestions:
+            for suggestion in suggestions[:5]:
+                item = QListWidgetItem(f"→ {suggestion}")
+                item.setData(Qt.ItemDataRole.UserRole, (word_start, word_end, suggestion))
+                popup.addItem(item)
 
-        # Add separator
-        separator = QListWidgetItem("─" * 20)
-        separator.setFlags(Qt.ItemFlag.NoItemFlags)
-        popup.addItem(separator)
+            # Add separator
+            separator = QListWidgetItem("─" * 20)
+            separator.setFlags(Qt.ItemFlag.NoItemFlags)
+            popup.addItem(separator)
+        else:
+            # No suggestions available
+            no_sugg = QListWidgetItem("(No suggestions)")
+            no_sugg.setFlags(Qt.ItemFlag.NoItemFlags)
+            popup.addItem(no_sugg)
+
+            separator = QListWidgetItem("─" * 20)
+            separator.setFlags(Qt.ItemFlag.NoItemFlags)
+            popup.addItem(separator)
 
         # Add "Add to dictionary" option
         add_dict_item = QListWidgetItem(f"+ Add \"{word}\" to dictionary")
