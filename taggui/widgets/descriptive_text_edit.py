@@ -5,9 +5,9 @@ Provides real-time spell checking with red underlines and context menu
 for corrections and grammar checking.
 """
 
-from PySide6.QtCore import Qt, Slot, Signal, QTimer
+from PySide6.QtCore import Qt, Slot, Signal, QTimer, QPoint
 from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent, QMouseEvent
-from PySide6.QtWidgets import QPlainTextEdit, QMenu
+from PySide6.QtWidgets import QPlainTextEdit, QMenu, QListWidget, QListWidgetItem
 
 from utils.spell_highlighter import SpellHighlighter
 from utils.grammar_checker import GrammarChecker, GrammarCheckMode, GrammarIssue, IssueType
@@ -55,6 +55,9 @@ class DescriptiveTextEdit(QPlainTextEdit):
         self._spell_menu_timer.timeout.connect(self._show_delayed_spell_menu)
         self._pending_spell_menu = None
 
+        # Non-blocking spell suggestion popup
+        self._spell_popup = None
+
         # Initialize zoom level from settings
         self.min_zoom = 50  # Percent
         self.max_zoom = 300  # Percent
@@ -97,6 +100,10 @@ class DescriptiveTextEdit(QPlainTextEdit):
         super().mousePressEvent(event)
         # Cancel any pending spell check menu
         self._spell_menu_timer.stop()
+        # Close popup if clicking outside it
+        if self._spell_popup and not self._spell_popup.geometry().contains(event.globalPosition().toPoint()):
+            self._spell_popup.close()
+            self._spell_popup = None
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         """Handle mouse release to show spell check suggestions on left-click."""
@@ -146,41 +153,41 @@ class DescriptiveTextEdit(QPlainTextEdit):
         word_start = cursor.selectionStart()
         word_end = cursor.selectionEnd()
 
-        menu = QMenu(self)
-
-        # Spelling suggestions if word is misspelled
-        if word and self.spell_highlighter.is_misspelled(word):
-            suggestions = self.spell_highlighter.get_suggestions(word)
-
-            if suggestions:
-                # Add header for suggestions
-                header_action = QAction(f'Suggestions for "{word}":', menu)
-                header_action.setEnabled(False)
-                menu.addAction(header_action)
-
-                for suggestion in suggestions[:5]:  # Limit to 5 suggestions
-                    action = QAction(f'  → {suggestion}', menu)
-                    action.triggered.connect(
-                        lambda checked, s=suggestion, start=word_start, end=word_end:
-                        self._replace_word_at_range(start, end, s))
-                    menu.addAction(action)
-                menu.addSeparator()
-            else:
-                # No suggestions available
-                no_suggestions_action = QAction(f'No suggestions for "{word}"', menu)
-                no_suggestions_action.setEnabled(False)
-                menu.addAction(no_suggestions_action)
-                menu.addSeparator()
-
-            # Add to dictionary option
-            add_to_dict_action = QAction(f'Add "{word}" to dictionary', menu)
-            add_to_dict_action.triggered.connect(
-                lambda: self._add_to_dictionary(word))
-            menu.addAction(add_to_dict_action)
-            menu.addSeparator()
-
-        # Grammar check and standard actions (only in right-click context menu)
+        # For right-click context menu, use standard blocking menu
         if include_standard_actions:
+            menu = QMenu(self)
+
+            # Spelling suggestions if word is misspelled
+            if word and self.spell_highlighter.is_misspelled(word):
+                suggestions = self.spell_highlighter.get_suggestions(word)
+
+                if suggestions:
+                    # Add header for suggestions
+                    header_action = QAction(f'Suggestions for "{word}":', menu)
+                    header_action.setEnabled(False)
+                    menu.addAction(header_action)
+
+                    for suggestion in suggestions[:5]:  # Limit to 5 suggestions
+                        action = QAction(f'  → {suggestion}', menu)
+                        action.triggered.connect(
+                            lambda checked, s=suggestion, start=word_start, end=word_end:
+                            self._replace_word_at_range(start, end, s))
+                        menu.addAction(action)
+                    menu.addSeparator()
+                else:
+                    # No suggestions available
+                    no_suggestions_action = QAction(f'No suggestions for "{word}"', menu)
+                    no_suggestions_action.setEnabled(False)
+                    menu.addAction(no_suggestions_action)
+                    menu.addSeparator()
+
+                # Add to dictionary option
+                add_to_dict_action = QAction(f'Add "{word}" to dictionary', menu)
+                add_to_dict_action.triggered.connect(
+                    lambda: self._add_to_dictionary(word))
+                menu.addAction(add_to_dict_action)
+                menu.addSeparator()
+
             # Grammar check action
             if self.grammar_check_mode != GrammarCheckMode.DISABLED:
                 check_grammar_action = QAction('Check Grammar...', menu)
@@ -202,7 +209,67 @@ class DescriptiveTextEdit(QPlainTextEdit):
             menu.addSeparator()
             menu.addAction(self.createStandardContextMenu().actions()[8])  # Select All
 
-        menu.exec(global_pos)
+            menu.exec(global_pos)
+        else:
+            # For left-click on misspelled word, show non-blocking popup
+            if word and self.spell_highlighter.is_misspelled(word):
+                self._show_spell_popup(word, word_start, word_end, global_pos)
+
+    def _show_spell_popup(self, word: str, word_start: int, word_end: int, global_pos):
+        """Show non-blocking spell suggestion popup."""
+        # Close existing popup if any
+        if self._spell_popup:
+            self._spell_popup.close()
+
+        suggestions = self.spell_highlighter.get_suggestions(word)
+
+        # Create non-modal, non-blocking popup list (Tool window, not Popup)
+        popup = QListWidget()
+        popup.setWindowFlags(
+            Qt.WindowType.Tool |
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.X11BypassWindowManagerHint
+        )
+        popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)  # Critical: don't steal focus
+        popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        popup.setMinimumWidth(200)
+        popup.setMaximumHeight(150)
+
+        if suggestions:
+            for suggestion in suggestions[:5]:
+                item = QListWidgetItem(f"→ {suggestion}")
+                item.setData(Qt.ItemDataRole.UserRole, (word_start, word_end, suggestion))
+                popup.addItem(item)
+
+            # Add separator
+            separator = QListWidgetItem("─" * 20)
+            separator.setFlags(Qt.ItemFlag.NoItemFlags)
+            popup.addItem(separator)
+
+        # Add "Add to dictionary" option
+        add_dict_item = QListWidgetItem(f"+ Add \"{word}\" to dictionary")
+        add_dict_item.setData(Qt.ItemDataRole.UserRole, ('add_dict', word))
+        popup.addItem(add_dict_item)
+
+        # Handle item click
+        def on_item_clicked(item):
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                if isinstance(data, tuple) and data[0] == 'add_dict':
+                    self._add_to_dictionary(data[1])
+                elif isinstance(data, tuple) and len(data) == 3:
+                    start, end, replacement = data
+                    self._replace_word_at_range(start, end, replacement)
+            popup.close()
+
+        popup.itemClicked.connect(on_item_clicked)
+
+        # Position popup below cursor
+        popup.move(global_pos)
+        popup.show()
+
+        self._spell_popup = popup
 
     def _replace_word_at_range(self, start: int, end: int, replacement: str):
         """Replace text in the given range with replacement."""
