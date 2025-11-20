@@ -5,8 +5,8 @@ Provides real-time spell checking with red underlines and context menu
 for corrections and grammar checking.
 """
 
-from PySide6.QtCore import Qt, Slot, Signal
-from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent
+from PySide6.QtCore import Qt, Slot, Signal, QTimer
+from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent, QMouseEvent
 from PySide6.QtWidgets import QPlainTextEdit, QMenu
 
 from utils.spell_highlighter import SpellHighlighter
@@ -49,6 +49,12 @@ class DescriptiveTextEdit(QPlainTextEdit):
         # Track grammar issues for highlighting
         self.grammar_issues = []
 
+        # Timer to delay showing spell check menu (allows double-click to cancel)
+        self._spell_menu_timer = QTimer()
+        self._spell_menu_timer.setSingleShot(True)
+        self._spell_menu_timer.timeout.connect(self._show_delayed_spell_menu)
+        self._pending_spell_menu = None
+
         # Initialize zoom level from settings
         self.min_zoom = 50  # Percent
         self.max_zoom = 300  # Percent
@@ -86,10 +92,55 @@ class DescriptiveTextEdit(QPlainTextEdit):
             print(f"Failed to initialize grammar checker: {e}")
             self.grammar_checker = None
 
+    def mousePressEvent(self, event: QMouseEvent):
+        """Cancel pending spell menu on any mouse press (handles double-click)."""
+        super().mousePressEvent(event)
+        # Cancel any pending spell check menu
+        self._spell_menu_timer.stop()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """Handle mouse release to show spell check suggestions on left-click."""
+        # Call parent to handle normal behavior first
+        super().mouseReleaseEvent(event)
+
+        # Only handle left-click
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # Get cursor and check for selection
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return  # User is selecting text, don't show menu
+
+        # Select word under cursor
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        word = cursor.selectedText()
+
+        # Schedule spell check menu if word is misspelled (with delay to allow double-click)
+        if word and self.spell_highlighter.is_misspelled(word):
+            cursor_rect = self.cursorRect(cursor)
+            global_pos = self.mapToGlobal(cursor_rect.bottomLeft())
+            self._pending_spell_menu = (cursor, global_pos)
+            self._spell_menu_timer.start(200)  # 200ms delay
+
+    def _show_delayed_spell_menu(self):
+        """Show spell check menu after delay (if not cancelled by double-click)."""
+        if self._pending_spell_menu:
+            cursor, global_pos = self._pending_spell_menu
+            self._pending_spell_menu = None
+            self._show_spelling_menu(cursor, global_pos)
+
     def contextMenuEvent(self, event: QContextMenuEvent):
         """Show custom context menu with spelling/grammar corrections."""
         cursor = self.cursorForPosition(event.pos())
         cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        word = cursor.selectedText()
+
+        # Show full context menu (spelling + grammar + standard actions)
+        self._show_spelling_menu(cursor, event.globalPos(), include_standard_actions=True)
+
+    def _show_spelling_menu(self, cursor: QTextCursor, global_pos, include_standard_actions=False):
+        """Show spelling suggestions menu."""
         word = cursor.selectedText()
         # Store the actual selection positions to avoid issues with punctuation
         word_start = cursor.selectionStart()
@@ -128,28 +179,30 @@ class DescriptiveTextEdit(QPlainTextEdit):
             menu.addAction(add_to_dict_action)
             menu.addSeparator()
 
-        # Grammar check action
-        if self.grammar_check_mode != GrammarCheckMode.DISABLED:
-            check_grammar_action = QAction('Check Grammar...', menu)
-            check_grammar_action.triggered.connect(self.check_grammar)
-            menu.addAction(check_grammar_action)
+        # Grammar check and standard actions (only in right-click context menu)
+        if include_standard_actions:
+            # Grammar check action
+            if self.grammar_check_mode != GrammarCheckMode.DISABLED:
+                check_grammar_action = QAction('Check Grammar...', menu)
+                check_grammar_action.triggered.connect(self.check_grammar)
+                menu.addAction(check_grammar_action)
+                menu.addSeparator()
+
+            # Standard text editing actions
+            if menu.actions():
+                menu.addSeparator()
+
+            menu.addAction(self.createStandardContextMenu().actions()[0])  # Undo
+            menu.addAction(self.createStandardContextMenu().actions()[1])  # Redo
             menu.addSeparator()
-
-        # Standard text editing actions
-        if menu.actions():
+            menu.addAction(self.createStandardContextMenu().actions()[3])  # Cut
+            menu.addAction(self.createStandardContextMenu().actions()[4])  # Copy
+            menu.addAction(self.createStandardContextMenu().actions()[5])  # Paste
+            menu.addAction(self.createStandardContextMenu().actions()[6])  # Delete
             menu.addSeparator()
+            menu.addAction(self.createStandardContextMenu().actions()[8])  # Select All
 
-        menu.addAction(self.createStandardContextMenu().actions()[0])  # Undo
-        menu.addAction(self.createStandardContextMenu().actions()[1])  # Redo
-        menu.addSeparator()
-        menu.addAction(self.createStandardContextMenu().actions()[3])  # Cut
-        menu.addAction(self.createStandardContextMenu().actions()[4])  # Copy
-        menu.addAction(self.createStandardContextMenu().actions()[5])  # Paste
-        menu.addAction(self.createStandardContextMenu().actions()[6])  # Delete
-        menu.addSeparator()
-        menu.addAction(self.createStandardContextMenu().actions()[8])  # Select All
-
-        menu.exec(event.globalPos())
+        menu.exec(global_pos)
 
     def _replace_word_at_range(self, start: int, end: int, replacement: str):
         """Replace text in the given range with replacement."""
