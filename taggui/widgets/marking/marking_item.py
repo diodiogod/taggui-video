@@ -137,7 +137,26 @@ class MarkingItem(QGraphicsRectItem):
             elif ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
                 Qt.KeyboardModifier.ShiftModifier):
                 if self.rect_type == ImageMarking.CROP:
-                    bucket_res = settings.value('export_bucket_res_size', type=int)
+                    # Aspect ratio snapping for trainer compatibility
+                    # All aspect ratios that trainers (WAN, HunyuanVideo, etc.) can generate
+                    # Format: (width, height, numeric_ratio, "display_name")
+                    aspect_ratios = [
+                        (1, 1, 1.0, "1:1"),
+                        (6, 5, 1.2, "6:5"),
+                        (4, 3, 1.333, "4:3"),
+                        (3, 2, 1.5, "3:2"),
+                        (16, 9, 1.778, "16:9"),
+                        (2, 1, 2.0, "2:1"),
+                        (3, 1, 3.0, "3:1"),
+                        (4, 1, 4.0, "4:1"),
+                        (5, 6, 0.833, "5:6"),
+                        (3, 4, 0.75, "3:4"),
+                        (2, 3, 0.667, "2:3"),
+                        (9, 16, 0.5625, "9:16"),
+                        (1, 2, 0.5, "1:2"),
+                        (1, 3, 0.333, "1:3"),
+                        (1, 4, 0.25, "1:4"),
+                    ]
 
                     # First, calculate what the rect would be if we just follow the mouse
                     rect_pre = change_rect(self.rect(),
@@ -146,21 +165,32 @@ class MarkingItem(QGraphicsRectItem):
                     # Clamp to image boundaries
                     rect_pre = rect_pre.intersected(self.image_size)
 
-                    # Simple bucket snapping: round to nearest multiple of bucket_res
-                    # Don't use target_dimension.get() as it applies export constraints
-                    from math import floor
-                    target_width = (floor(rect_pre.width() / bucket_res)) * bucket_res
-                    target_height = (floor(rect_pre.height() / bucket_res)) * bucket_res
-                    target_size = QSize(max(bucket_res, target_width),
-                                       max(bucket_res, target_height))
+                    # Find nearest aspect ratio
+                    rect_aspect = rect_pre.width() / rect_pre.height() if rect_pre.height() > 0 else 1.0
+                    nearest_ar = min(aspect_ratios,
+                                    key=lambda ar: abs(ar[2] - rect_aspect))
+                    target_ar_w, target_ar_h, target_numeric_ratio, target_ar_name = nearest_ar
+                    target_aspect = target_numeric_ratio
+
+                    # Scale rect_pre to match the target aspect ratio
+                    if rect_aspect > target_aspect:
+                        # rect_pre is wider, reduce width
+                        target_width = int(rect_pre.height() * target_aspect)
+                        target_height = int(rect_pre.height())
+                    else:
+                        # rect_pre is taller, reduce height
+                        target_width = int(rect_pre.width())
+                        target_height = int(rect_pre.width() / target_aspect)
+
+                    target_size = QSize(max(16, target_width), max(16, target_height))
 
                     # Check if mouse is trying to drag beyond current rect
                     rect_growing = (rect_pre.width() > self.rect().width() or
                                    rect_pre.height() > self.rect().height())
 
-                    # Sticky snapping: recalculate if target bucket size changed OR rect is growing
+                    # Sticky snapping: recalculate if target aspect ratio changed OR rect is growing
                     if target_size != self.last_snapped_bucket_size or rect_growing:
-                        # Use the bucket-aligned resolution
+                        # Use the aspect-ratio-aligned resolution
                         rect_candidate = change_rect_to_match_size(rect_pre,
                                                          MarkingItem.handle_selected,
                                                          target_size)
@@ -173,7 +203,7 @@ class MarkingItem(QGraphicsRectItem):
                             rect = rect_pre
                             self.last_snapped_bucket_size = None
                     else:
-                        # Keep current rect - bucket resolutions are discrete, can't scale freely
+                        # Keep current rect - same aspect ratio
                         rect = self.rect()
                 else:
                     rect = change_rect(self.rect(),

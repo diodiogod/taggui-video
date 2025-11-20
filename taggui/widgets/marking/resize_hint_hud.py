@@ -158,9 +158,34 @@ class ResizeHintHUD(QGraphicsItem):
         painter.setPen(pen)
         painter.drawPath(self.path_ar)
 
-        # Display current crop resolution
+        # Display current crop resolution and aspect ratio
         if self.rect.width() > 0 and self.rect.height() > 0:
-            text = f"{int(self.rect.width())}x{int(self.rect.height())}"
+            # Calculate and find nearest aspect ratio
+            # Format: (width, height, numeric_ratio, "display_name")
+            aspect_ratios = [
+                (1, 1, 1.0, "1:1"),
+                (6, 5, 1.2, "6:5"),
+                (4, 3, 1.333, "4:3"),
+                (3, 2, 1.5, "3:2"),
+                (16, 9, 1.778, "16:9"),
+                (2, 1, 2.0, "2:1"),
+                (3, 1, 3.0, "3:1"),
+                (4, 1, 4.0, "4:1"),
+                (5, 6, 0.833, "5:6"),
+                (3, 4, 0.75, "3:4"),
+                (2, 3, 0.667, "2:3"),
+                (9, 16, 0.5625, "9:16"),
+                (1, 2, 0.5, "1:2"),
+                (1, 3, 0.333, "1:3"),
+                (1, 4, 0.25, "1:4"),
+            ]
+
+            rect_aspect = self.rect.width() / self.rect.height()
+            nearest_ar = min(aspect_ratios,
+                            key=lambda ar: abs(ar[2] - rect_aspect))
+            ar_name = nearest_ar[3]
+
+            text = f"{int(self.rect.width())}x{int(self.rect.height())} ({ar_name})"
 
             # Set up font
             font = QFont("Arial", max(12, int(14 / self.zoom_factor)))
