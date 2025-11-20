@@ -20,8 +20,8 @@ class ImageGraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         # Don't steal focus when clicked - prevents image list selection changes
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Also set on viewport
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Also set on viewport
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.image_viewer = image_viewer
         MarkingItem.image_view = self
@@ -200,7 +200,12 @@ class ImageGraphicsView(QGraphicsView):
             if not (isinstance(edited_item, MarkingLabel) and
                 edited_item.textInteractionFlags() == Qt.TextEditorInteraction):
                 # Delete marking only when not editing the label
-                self.image_viewer.delete_markings()
+                # Get selected items from scene
+                selected = self.scene().selectedItems()
+                if selected:
+                    self.image_viewer.delete_markings(selected)
+                else:
+                    self.image_viewer.delete_markings()
         else:
             if MarkingItem.handle_selected == RectPosition.NONE:
                 if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
