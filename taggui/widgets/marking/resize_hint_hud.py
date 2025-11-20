@@ -24,6 +24,7 @@ class ResizeHintHUD(QGraphicsItem):
         self.setZValue(3)
         self.last_point: QPointF | float = QPointF(-1, -1)
         self.last_pos = RectPosition.NONE
+        self.has_crop = False  # Track if there's an active crop marking
 
     def shape(self):
         """Return empty path so this item is never hit by mouse events.
@@ -35,11 +36,12 @@ class ResizeHintHUD(QGraphicsItem):
 
     @Slot(QRectF, RectPosition)
     def setValues(self, rect: QRectF, pos: RectPosition):
-        if self.rect == rect and self.isVisible() == (pos != RectPosition.NONE):
+        if self.rect == rect and self.last_pos == pos:
             return
 
         self.rect = rect
-        self.setVisible(pos != RectPosition.NONE)
+        self.has_crop = True  # A crop exists if setValues is called
+        # Don't hide the HUD itself - just update visibility of guide lines via pos
         pos_change = self.last_pos != pos
         self.last_pos = pos
 
@@ -164,8 +166,8 @@ class ResizeHintHUD(QGraphicsItem):
         painter.setPen(pen)
         painter.drawPath(self.path_ar)
 
-        # Display current crop resolution and aspect ratio
-        if self.rect.width() > 0 and self.rect.height() > 0:
+        # Display current crop resolution and aspect ratio (only when crop marking exists)
+        if self.has_crop and self.rect.width() > 0 and self.rect.height() > 0:
             # Calculate and find nearest aspect ratio
             # Format: (width, height, numeric_ratio, "display_name")
             aspect_ratios = [

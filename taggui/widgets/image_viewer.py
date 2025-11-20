@@ -295,6 +295,9 @@ class ImageViewer(QWidget):
         if image.crop is not None:
             self.add_rectangle(image.crop, ImageMarking.CROP, interactive=False)
         else:
+            # No crop - reset HUD state
+            if hasattr(self, 'hud_item'):
+                self.hud_item.has_crop = False
             calculate_grid(MarkingItem.image_size)
         for marking in image.markings:
             self.add_rectangle(marking.rect, marking.type, interactive=False,
@@ -475,6 +478,11 @@ class ImageViewer(QWidget):
         if rect_type == ImageMarking.CROP:
             self.crop_marking = marking_item
             marking_item.size_changed() # call after self.crop_marking was set!
+            # Enable HUD text display when crop marking exists
+            if hasattr(self, 'hud_item'):
+                self.hud_item.has_crop = True
+                self.hud_item.rect = marking_item.rect()
+                self.hud_item.update()
             if interactive:
                 image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
                 image.crop = rect
@@ -547,6 +555,11 @@ class ImageViewer(QWidget):
             image.thumbnail = None
             image.crop = marking.rect().toRect() # ensure int!
             image.target_dimension = grid.target
+            # Update HUD rect for crop display
+            if hasattr(self, 'hud_item'):
+                self.hud_item.has_crop = True
+                self.hud_item.rect = marking.rect()
+                self.hud_item.update()
             if not self.proxy_image_list_model.does_image_match_filter(
                     image, self.proxy_image_list_model.filter):
                 # don't call .invalidate() as the displayed list shouldn't
@@ -592,6 +605,10 @@ class ImageViewer(QWidget):
                 image.thumbnail = None
                 image.crop = None
                 image.target_dimension = None
+                # Reset HUD when crop is deleted
+                if hasattr(self, 'hud_item'):
+                    self.hud_item.has_crop = False
+                    self.hud_item.update()
                 self.accept_crop_addition.emit(True)
                 calculate_grid(MarkingItem.image_size)
                 self.proxy_image_list_model.sourceModel().dataChanged.emit(
