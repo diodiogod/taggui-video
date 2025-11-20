@@ -138,12 +138,17 @@ class MarkingItem(QGraphicsRectItem):
                 Qt.KeyboardModifier.ShiftModifier):
                 if self.rect_type == ImageMarking.CROP:
                     bucket_res = settings.value('export_bucket_res_size', type=int)
+
+                    # First, calculate what the rect would be if we just follow the mouse
                     rect_pre = change_rect(self.rect(),
                                            MarkingItem.handle_selected,
                                            event.pos())
+                    # Clamp to image boundaries
+                    rect_pre = rect_pre.intersected(self.image_size)
+
                     target_size = target_dimension.get(rect_pre.toRect().size())
 
-                    # Sticky snapping: only update if target bucket size changed
+                    # Sticky snapping: only recalculate if target bucket size changed
                     if target_size != self.last_snapped_bucket_size:
                         self.last_snapped_bucket_size = target_size
                         # target is the final size, so anticipate the scaling
@@ -152,20 +157,32 @@ class MarkingItem(QGraphicsRectItem):
                         target = target_size.toSizeF() * scale
                         target = QSize(max(bucket_res, ceil(target.width())),
                                        max(bucket_res, ceil(target.height())))
-                        rect_candidate = change_rect_to_match_size(self.rect(),
+                        rect_candidate = change_rect_to_match_size(rect_pre,
                                                          MarkingItem.handle_selected,
                                                          target)
                         # Only accept the snap if it fits within image boundaries
                         if self.image_size.contains(rect_candidate):
                             rect = rect_candidate
                         else:
-                            # Reject snap - keep current rect
-                            rect = self.rect()
-                            # Revert to previous valid bucket size
-                            self.last_snapped_bucket_size = target_dimension.get(self.rect().toRect().size())
+                            # Reject snap - use the clamped rect without snapping
+                            rect = rect_pre
                     else:
-                        # Keep current rect - locked to current bucket size
-                        rect = self.rect()
+                        # Same bucket size - but allow rect to grow if mouse moved significantly
+                        # Try to fit the current bucket to the new mouse position
+                        scale = min(rect_pre.width() / target_size.width(),
+                                    rect_pre.height() / target_size.height())
+                        target = target_size.toSizeF() * scale
+                        target = QSize(max(bucket_res, ceil(target.width())),
+                                       max(bucket_res, ceil(target.height())))
+                        rect_candidate = change_rect_to_match_size(rect_pre,
+                                                         MarkingItem.handle_selected,
+                                                         target)
+                        # Only update if it still fits
+                        if self.image_size.contains(rect_candidate):
+                            rect = rect_candidate
+                        else:
+                            # Keep current rect - can't grow further with this bucket size
+                            rect = self.rect()
                 else:
                     rect = change_rect(self.rect(),
                                        MarkingItem.handle_selected,
