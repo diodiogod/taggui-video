@@ -168,7 +168,9 @@ class ResizeHintHUD(QGraphicsItem):
 
         # Display current crop resolution and aspect ratio (only when crop marking exists)
         if self.has_crop and self.rect.width() > 0 and self.rect.height() > 0:
-            # Calculate and find nearest aspect ratio
+            # Calculate actual aspect ratio
+            rect_aspect = self.rect.width() / self.rect.height()
+
             # Format: (width, height, numeric_ratio, "display_name")
             aspect_ratios = [
                 (1, 1, 1.0, "1:1"),
@@ -188,10 +190,17 @@ class ResizeHintHUD(QGraphicsItem):
                 (1, 4, 0.25, "1:4"),
             ]
 
-            rect_aspect = self.rect.width() / self.rect.height()
+            # Find nearest standard ratio
             nearest_ar = min(aspect_ratios,
                             key=lambda ar: abs(ar[2] - rect_aspect))
-            ar_name = nearest_ar[3]
+
+            # If very close to a standard ratio (within 1%), use the standard name
+            # Otherwise show the actual calculated ratio
+            if abs(nearest_ar[2] - rect_aspect) < 0.01:
+                ar_name = nearest_ar[3]
+            else:
+                # Show actual ratio as decimal
+                ar_name = f"{rect_aspect:.2f}:1" if rect_aspect >= 1 else f"1:{1/rect_aspect:.2f}"
 
             text = f"{int(self.rect.width())}x{int(self.rect.height())} ({ar_name})"
 
