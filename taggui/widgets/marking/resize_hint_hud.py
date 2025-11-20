@@ -1,7 +1,7 @@
 """Visual crop hints/guides HUD for marking operations."""
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Slot
-from PySide6.QtGui import QColor, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem
 
 from utils.settings import settings
@@ -157,3 +157,22 @@ class ResizeHintHUD(QGraphicsItem):
         pen = QPen(QColor(0, 0, 0), 1 / self.zoom_factor)
         painter.setPen(pen)
         painter.drawPath(self.path_ar)
+
+        # Display current crop resolution
+        if self.rect.width() > 0 and self.rect.height() > 0:
+            text = f"{int(self.rect.width())}x{int(self.rect.height())}"
+
+            # Set up font
+            font = QFont("Arial", max(12, int(14 / self.zoom_factor)))
+            font.setBold(True)
+            painter.setFont(font)
+
+            # Position text at top-left of crop rect with some padding
+            text_pos = QPointF(self.rect.x() + 10 / self.zoom_factor,
+                              self.rect.y() + 20 / self.zoom_factor)
+
+            # Draw text with white outline for visibility
+            painter.setPen(QPen(QColor(255, 255, 255), 3 / self.zoom_factor))
+            painter.drawText(text_pos, text)
+            painter.setPen(QPen(QColor(0, 0, 0), 1 / self.zoom_factor))
+            painter.drawText(text_pos, text)
