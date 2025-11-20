@@ -6,8 +6,8 @@ for corrections and grammar checking.
 """
 
 from PySide6.QtCore import Qt, Slot, Signal, QTimer, QPoint
-from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent, QMouseEvent
-from PySide6.QtWidgets import QPlainTextEdit, QMenu, QListWidget, QListWidgetItem
+from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent, QMouseEvent, QScreen
+from PySide6.QtWidgets import QPlainTextEdit, QMenu, QListWidget, QListWidgetItem, QApplication
 
 from utils.spell_highlighter import SpellHighlighter
 from utils.grammar_checker import GrammarChecker, GrammarCheckMode, GrammarIssue, IssueType
@@ -223,6 +223,10 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         suggestions = self.spell_highlighter.get_suggestions(word)
 
+        # Don't show popup if no suggestions (user can right-click to add to dictionary)
+        if not suggestions:
+            return
+
         # Create non-modal, non-blocking popup list (Tool window, not Popup)
         popup = QListWidget()
         popup.setWindowFlags(
@@ -236,16 +240,16 @@ class DescriptiveTextEdit(QPlainTextEdit):
         popup.setMinimumWidth(200)
         popup.setMaximumHeight(150)
 
-        if suggestions:
-            for suggestion in suggestions[:5]:
-                item = QListWidgetItem(f"→ {suggestion}")
-                item.setData(Qt.ItemDataRole.UserRole, (word_start, word_end, suggestion))
-                popup.addItem(item)
+        # Add suggestions
+        for suggestion in suggestions[:5]:
+            item = QListWidgetItem(f"→ {suggestion}")
+            item.setData(Qt.ItemDataRole.UserRole, (word_start, word_end, suggestion))
+            popup.addItem(item)
 
-            # Add separator
-            separator = QListWidgetItem("─" * 20)
-            separator.setFlags(Qt.ItemFlag.NoItemFlags)
-            popup.addItem(separator)
+        # Add separator
+        separator = QListWidgetItem("─" * 20)
+        separator.setFlags(Qt.ItemFlag.NoItemFlags)
+        popup.addItem(separator)
 
         # Add "Add to dictionary" option
         add_dict_item = QListWidgetItem(f"+ Add \"{word}\" to dictionary")
@@ -265,8 +269,36 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         popup.itemClicked.connect(on_item_clicked)
 
-        # Position popup below cursor
-        popup.move(global_pos)
+        # Calculate popup size before positioning
+        popup.adjustSize()
+        popup_width = popup.sizeHint().width()
+        popup_height = popup.sizeHint().height()
+
+        # Get screen geometry
+        screen = QApplication.screenAt(global_pos)
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geom = screen.availableGeometry()
+
+        # Calculate position (prefer below and to the right)
+        pos_x = global_pos.x()
+        pos_y = global_pos.y()
+
+        # Adjust horizontal position if clipping right edge
+        if pos_x + popup_width > screen_geom.right():
+            pos_x = screen_geom.right() - popup_width
+
+        # Adjust vertical position if clipping bottom edge
+        if pos_y + popup_height > screen_geom.bottom():
+            # Show above cursor instead
+            pos_y = global_pos.y() - popup_height - 20
+
+        # Ensure not clipping left/top edges
+        pos_x = max(screen_geom.left(), pos_x)
+        pos_y = max(screen_geom.top(), pos_y)
+
+        # Position popup
+        popup.move(pos_x, pos_y)
         popup.show()
 
         self._spell_popup = popup
