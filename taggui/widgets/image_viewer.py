@@ -421,6 +421,38 @@ class ImageViewer(QWidget):
                 marking.area.setVisible(checked)
 
     def wheelEvent(self, event):
+        shift_pressed = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
+        alt_pressed = (event.modifiers() & Qt.KeyboardModifier.AltModifier) == Qt.KeyboardModifier.AltModifier
+
+        # Shift + scroll: horizontal pan; Alt + scroll: vertical pan
+        if shift_pressed or alt_pressed:
+            scroll_amount = 50  # pixels per scroll step
+            if shift_pressed and not alt_pressed:
+                # Shift + scroll: horizontal pan
+                if event.angleDelta().y() > 0:
+                    self.view.horizontalScrollBar().setValue(
+                        self.view.horizontalScrollBar().value() - scroll_amount)
+                else:
+                    self.view.horizontalScrollBar().setValue(
+                        self.view.horizontalScrollBar().value() + scroll_amount)
+            elif alt_pressed:
+                # Alt + scroll: vertical pan
+                # Check both x and y deltas in case Alt transforms the scroll
+                delta_y = event.angleDelta().y()
+                delta_x = event.angleDelta().x()
+                delta = delta_y if delta_y != 0 else delta_x
+
+                current = self.view.verticalScrollBar().value()
+                if delta > 0:
+                    self.view.verticalScrollBar().setValue(current - scroll_amount)
+                else:
+                    self.view.verticalScrollBar().setValue(current + scroll_amount)
+                event.accept()
+                return
+            event.accept()
+            return
+
+        # Standard zoom behavior
         old_pos = self.view.mapToScene(event.position().toPoint())
 
         if event.angleDelta().y() > 0:

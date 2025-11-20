@@ -206,6 +206,31 @@ class ImageGraphicsView(QGraphicsView):
                     self.image_viewer.delete_markings(selected)
                 else:
                     self.image_viewer.delete_markings()
+        elif event.key() in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]:
+            # Shift + arrow key scrolling when zoomed (avoids conflict with Ctrl+hint binding)
+            shift_pressed = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
+            if MarkingItem.handle_selected == RectPosition.NONE and shift_pressed and not event.isAutoRepeat():
+                scroll_amount = 30  # pixels per arrow key press
+                if event.key() == Qt.Key.Key_Left:
+                    self.horizontalScrollBar().setValue(
+                        self.horizontalScrollBar().value() - scroll_amount)
+                    event.accept()
+                    return
+                elif event.key() == Qt.Key.Key_Right:
+                    self.horizontalScrollBar().setValue(
+                        self.horizontalScrollBar().value() + scroll_amount)
+                    event.accept()
+                    return
+                elif event.key() == Qt.Key.Key_Up:
+                    self.verticalScrollBar().setValue(
+                        self.verticalScrollBar().value() - scroll_amount)
+                    event.accept()
+                    return
+                elif event.key() == Qt.Key.Key_Down:
+                    self.verticalScrollBar().setValue(
+                        self.verticalScrollBar().value() + scroll_amount)
+                    event.accept()
+                    return
         else:
             if MarkingItem.handle_selected == RectPosition.NONE:
                 if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
