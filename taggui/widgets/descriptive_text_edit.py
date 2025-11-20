@@ -91,6 +91,9 @@ class DescriptiveTextEdit(QPlainTextEdit):
         cursor = self.cursorForPosition(event.pos())
         cursor.select(QTextCursor.SelectionType.WordUnderCursor)
         word = cursor.selectedText()
+        # Store the actual selection positions to avoid issues with punctuation
+        word_start = cursor.selectionStart()
+        word_end = cursor.selectionEnd()
 
         menu = QMenu(self)
 
@@ -107,8 +110,8 @@ class DescriptiveTextEdit(QPlainTextEdit):
                 for suggestion in suggestions[:5]:  # Limit to 5 suggestions
                     action = QAction(f'  → {suggestion}', menu)
                     action.triggered.connect(
-                        lambda checked, s=suggestion, c=cursor.position():
-                        self._replace_word_at_position(c, word, s))
+                        lambda checked, s=suggestion, start=word_start, end=word_end:
+                        self._replace_word_at_range(start, end, s))
                     menu.addAction(action)
                 menu.addSeparator()
             else:
@@ -147,6 +150,17 @@ class DescriptiveTextEdit(QPlainTextEdit):
         menu.addAction(self.createStandardContextMenu().actions()[8])  # Select All
 
         menu.exec(event.globalPos())
+
+    def _replace_word_at_range(self, start: int, end: int, replacement: str):
+        """Replace text in the given range with replacement."""
+        cursor = self.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+        cursor.beginEditBlock()
+        cursor.removeSelectedText()
+        cursor.insertText(replacement)
+        cursor.endEditBlock()
 
     def _replace_word_at_position(self, position: int, old_word: str, replacement: str):
         """Replace word at given position with replacement."""
