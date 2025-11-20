@@ -111,9 +111,15 @@ class ResizeHintHUD(QGraphicsItem):
         target_area = max(settings.value('export_resolution', type=int)**2, 1)
         res_size = max(settings.value('export_bucket_res_size', type=int), 1)
         if td < 0:
-            distance_x = target_area / (pos.y() - self._boundingRect.y())
+            divisor = pos.y() - self._boundingRect.y()
+            if divisor == 0:
+                return False
+            distance_x = target_area / divisor
         else:
-            distance_x = target_area / (self._boundingRect.bottom() - pos.y())
+            divisor = self._boundingRect.bottom() - pos.y()
+            if divisor == 0:
+                return False
+            distance_x = target_area / divisor
         x = self._boundingRect.x() if lr < 0 else pos.x() + distance_x
         end_x = pos.x() - distance_x if lr < 0 else self._boundingRect.right()
         first = True
