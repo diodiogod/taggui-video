@@ -60,6 +60,17 @@ class ProxyImageListModel(QSortFilterProxyModel):
 
     def set_filter(self, new_filter: list | None):
         self.filter = new_filter
+
+        # Suppress enrichment signals while filtering to prevent layout issues
+        source_model = self.sourceModel()
+        if source_model and hasattr(source_model, '_suppress_enrichment_signals'):
+            # Enable suppression if filter is active, disable if cleared
+            source_model._suppress_enrichment_signals = (new_filter is not None)
+            if new_filter:
+                print("[FILTER] Suppressing enrichment layout updates during filtering")
+            else:
+                print("[FILTER] Re-enabling enrichment layout updates")
+
         self.invalidateFilter()
         self.filter_changed.emit()
 

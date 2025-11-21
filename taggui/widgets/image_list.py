@@ -1844,6 +1844,11 @@ class ImageList(QDockWidget):
         if not source_model or not hasattr(source_model, 'images'):
             return
 
+        # Cancel any ongoing background enrichment (indices will be invalid after sort)
+        if hasattr(source_model, '_enrichment_cancelled'):
+            source_model._enrichment_cancelled.set()
+            print("[SORT] Cancelled background enrichment (reordering images)")
+
         # Natural sort key function for filenames (handles numbers correctly)
         def natural_sort_key(text):
             import re
@@ -1876,8 +1881,16 @@ class ImageList(QDockWidget):
                 import random
                 random.shuffle(source_model.images)
 
+            # Rebuild aspect ratio cache after reordering
+            if hasattr(source_model, '_rebuild_aspect_ratio_cache'):
+                source_model._rebuild_aspect_ratio_cache()
+
             # Emit layoutChanged after sorting
             source_model.layoutChanged.emit()
+
+            # Restart background enrichment with new sorted order
+            if hasattr(source_model, '_restart_enrichment'):
+                source_model._restart_enrichment()
         except Exception as e:
             import traceback
             print(f"Sort error: {e}")

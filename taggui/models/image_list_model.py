@@ -12,9 +12,9 @@ import cv2
 import exifread
 import imagesize
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
-                            QRect, QSize, Qt, QUrl, Signal, Slot)
+                            QRect, QSize, Qt, QUrl, Signal, Slot, QEvent)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QApplication
 import pillow_jxl
 from PIL import Image as pilimage  # Import Pillow's Image class
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +30,22 @@ from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
 
 UNDO_STACK_SIZE = 32
+
+# Custom event for background load completion
+class BackgroundLoadCompleteEvent(QEvent):
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self, images):
+        super().__init__(self.EVENT_TYPE)
+        self.images = images
+
+# Custom event for background dimension enrichment progress
+class BackgroundEnrichmentProgressEvent(QEvent):
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self, count):
+        super().__init__(self.EVENT_TYPE)
+        self.count = count
 
 def pil_to_qimage(pil_image):
     """Convert PIL image to QImage properly"""
@@ -230,6 +246,15 @@ class ImageListModel(QAbstractListModel):
         self._thumbnail_futures = {}  # Maps image index to Future
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
 
+        # Track cache saves for reporting
+        self._cache_saves_count = 0
+        self._cache_saves_lock = threading.Lock()
+        self._last_reported_saves = 0
+
+        # Track background enrichment
+        self._enrichment_cancelled = threading.Event()
+        self._suppress_enrichment_signals = False  # Suppress dataChanged during filtering
+
         # Queue for QImages waiting to be converted to QPixmap on main thread
         self._qimage_queue = []  # List of (idx, qimage, was_cached) tuples
         self._qimage_queue_lock = threading.Lock()
@@ -307,6 +332,20 @@ class ImageListModel(QAbstractListModel):
 
         print(f"[THUMBNAIL] Submitted {submitted} images to load executor (6 workers)")
 
+        # Start a timer to report cache save progress every 30 seconds
+        from PySide6.QtCore import QTimer
+        self._cache_report_timer = QTimer()
+        self._cache_report_timer.timeout.connect(self._report_cache_progress)
+        self._cache_report_timer.start(30000)  # 30 seconds
+
+    def _report_cache_progress(self):
+        """Periodically report thumbnail cache save progress."""
+        with self._cache_saves_lock:
+            if self._cache_saves_count > self._last_reported_saves:
+                new_saves = self._cache_saves_count - self._last_reported_saves
+                print(f"[THUMBNAIL CACHE] {new_saves} thumbnails saved to cache (total: {self._cache_saves_count})")
+                self._last_reported_saves = self._cache_saves_count
+
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
         try:
@@ -334,10 +373,12 @@ class ImageListModel(QAbstractListModel):
     def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, thumbnail: QIcon):
         """Worker function that saves thumbnail to disk cache in background thread."""
         import threading
-        print(f"[CACHE SAVE] Background thread {threading.current_thread().name} saving: {path.name}")
+        # Removed noisy log: print(f"[CACHE SAVE] Background thread {threading.current_thread().name} saving: {path.name}")
         try:
             from utils.thumbnail_cache import get_thumbnail_cache
             get_thumbnail_cache().save_thumbnail(path, mtime, width, thumbnail)
+            with self._cache_saves_lock:
+                self._cache_saves_count += 1
         except Exception as e:
             print(f"[CACHE] ERROR saving in background: {e}")
             import traceback
@@ -349,6 +390,35 @@ class ImageListModel(QAbstractListModel):
         if idx < len(self.images):
             model_index = self.index(idx, 0)
             self.dataChanged.emit(model_index, model_index, [Qt.ItemDataRole.DecorationRole])
+
+    def event(self, event):
+        """Handle custom events (background load completion and enrichment)."""
+        if event.type() == BackgroundLoadCompleteEvent.EVENT_TYPE:
+            # Append background-loaded images to the model
+            start_idx = len(self.images)
+            self.beginInsertRows(QModelIndex(), start_idx, start_idx + len(event.images) - 1)
+            self.images.extend(event.images)
+            self.endInsertRows()
+
+            # Rebuild aspect ratio cache with new images
+            self._rebuild_aspect_ratio_cache()
+
+            print(f"[PROGRESSIVE] Model updated: {len(self.images)} total images")
+            return True
+        elif event.type() == BackgroundEnrichmentProgressEvent.EVENT_TYPE:
+            # Dimensions were enriched for specific indices
+            indices = event.count  # Now contains list of indices instead of count
+            if isinstance(indices, list) and len(indices) > 0:
+                # Rebuild aspect ratio cache (cheap operation)
+                self._rebuild_aspect_ratio_cache()
+
+                # Only emit layoutChanged if NOT filtering (to prevent layout bugs)
+                # When filtering is active, layout stays stable with placeholders
+                # When filter is cleared, layout will update with final dimensions
+                if not self._suppress_enrichment_signals:
+                    self.layoutChanged.emit()
+            return True
+        return super().event(event)
 
     def flags(self, index):
         default_flags = super().flags(index)
@@ -488,8 +558,27 @@ class ImageListModel(QAbstractListModel):
             if not suffix.startswith('.'):
                 suffix = '.' + suffix
             image_suffixes.append(suffix)
-        image_paths = {path for path in file_paths
-                       if path.suffix.lower() in image_suffixes}
+        image_paths = list(path for path in file_paths
+                           if path.suffix.lower() in image_suffixes)
+
+        # Debug: check what extensions are being filtered out
+        print(f"[FILTER] Total files found: {len(file_paths)}")
+        print(f"[FILTER] Image files after filter: {len(image_paths)}")
+        if len(file_paths) != len(image_paths):
+            excluded = len(file_paths) - len(image_paths)
+            excluded_exts = {}
+            for path in file_paths:
+                if path.suffix.lower() not in image_suffixes:
+                    ext = path.suffix.lower() or '(no extension)'
+                    excluded_exts[ext] = excluded_exts.get(ext, 0) + 1
+            print(f"[FILTER] Excluded {excluded} files by extension:")
+            for ext, count in sorted(excluded_exts.items(), key=lambda x: -x[1])[:10]:
+                print(f"  - {count:5d} files with extension '{ext}'")
+            print(f"[FILTER] Accepted extensions: {', '.join(sorted(image_suffixes))}")
+
+        # Sort paths early for consistent ordering
+        image_paths.sort(key=natural_sort_key)
+
         # Comparing paths is slow on some systems, so convert the paths to
         # strings.
         text_file_path_strings = {str(path) for path in file_paths
@@ -504,7 +593,15 @@ class ImageListModel(QAbstractListModel):
 
         # Create progress dialog
         total_images = len(image_paths)
-        progress = QProgressDialog("Loading images...", "Cancel", 0, total_images)
+
+        # Fast metadata-only loading for large folders
+        if total_images > 5000:
+            use_fast_load = True
+            progress = QProgressDialog(f"Loading {total_images} images...", "Cancel", 0, total_images)
+        else:
+            use_fast_load = False
+            progress = QProgressDialog("Loading images...", "Cancel", 0, total_images)
+
         progress.setWindowTitle("Loading Directory")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(500)  # Show after 500ms if still loading
@@ -516,6 +613,7 @@ class ImageListModel(QAbstractListModel):
         cache_misses = 0
         corrupted_files = 0
         failed_video_extractions = 0
+        skip_reasons = {}  # Track why images were skipped
 
         # Scale processEvents frequency for large folders (max 100 updates)
         update_interval = max(10, total_images // 100)
@@ -533,76 +631,92 @@ class ImageListModel(QAbstractListModel):
             video_metadata = None
             first_frame_pixmap = None
             dimensions = None
+            cached = None
 
-            # Try to load from DB cache first
-            try:
-                mtime = image_path.stat().st_mtime
-                # Use relative path from directory root to handle subdirectories
-                relative_path = str(image_path.relative_to(directory_path))
-                cached = db.get_cached_info(relative_path, mtime)
-
-                if cached:
-                    # Cache hit! Use cached dimensions
-                    dimensions = cached['dimensions']
-                    is_video = cached['is_video']
-                    video_metadata = cached.get('video_metadata')
-                    cache_hits += 1
-                else:
-                    # Cache miss - need to read from file
-                    cache_misses += 1
-
-                    if is_video:
-                        # Handle video files
-                        dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
-                        if dimensions is None:
-                            failed_video_extractions += 1
-                            error_messages.append(f'Failed to extract video info from '
-                                                f'{image_path}')
-                            continue
-                    elif str(image_path).endswith('jxl'):
-                        dimensions = get_jxl_size(image_path)
-                    else:
-                        # Use imagesize library for fast header-only reading (10x faster than PIL)
-                        dimensions = imagesize.get(str(image_path))
-                        if dimensions == (-1, -1):
-                            # Fallback to PIL if imagesize can't read it
-                            dimensions = pilimage.open(image_path).size
-
-                    # Save to cache for next time
-                    if dimensions:
-                        db.save_info(relative_path, dimensions[0], dimensions[1],
-                                    is_video, mtime, video_metadata)
-
-                        # Commit every 100 images to avoid losing too much on crash
-                        if cache_misses % 100 == 0:
-                            db.commit()
-
-            except (ValueError, OSError) as exception:
-                # Skip corrupted/unreadable images silently
-                corrupted_files += 1
-                print(f'Skipping corrupted/unreadable image: {image_path.name}', file=sys.stderr)
-                continue
-
-            # Only check EXIF orientation if not from cache (cache already has corrected dimensions)
-            if not cached and not is_video:
-                # Only get EXIF for images, not videos
+            if use_fast_load:
+                # Fast load: only check cache, skip expensive operations
                 try:
-                    with open(image_path, 'rb') as image_file:
-                        exif_tags = exifread.process_file(
-                            image_file, details=False, extract_thumbnail=False,
-                            stop_tag='Image Orientation')
-                        if 'Image Orientation' in exif_tags:
-                            orientations = (exif_tags['Image Orientation']
-                                            .values)
-                            if any(value in orientations
-                                   for value in (5, 6, 7, 8)):
-                                dimensions = (dimensions[1], dimensions[0])
-                                # Update cache with corrected dimensions
-                                db.save_info(relative_path, dimensions[0], dimensions[1],
-                                           is_video, mtime, video_metadata)
-                except Exception as exception:
-                    error_messages.append(f'Failed to get Exif tags for '
-                                          f'{image_path}: {exception}')
+                    mtime = image_path.stat().st_mtime
+                    relative_path = str(image_path.relative_to(directory_path))
+                    cached = db.get_cached_info(relative_path, mtime)
+
+                    if cached:
+                        dimensions = cached['dimensions']
+                        is_video = cached['is_video']
+                        video_metadata = cached.get('video_metadata')
+                        cache_hits += 1
+                    else:
+                        # No cache - use placeholder dimensions, will enrich in background
+                        cache_misses += 1
+                        dimensions = (512, 512)  # Placeholder for uncached images
+                except (ValueError, OSError) as e:
+                    corrupted_files += 1
+                    reason = f"stat error: {type(e).__name__}"
+                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                    continue
+            else:
+                # Normal load: read dimensions from files as before
+                try:
+                    mtime = image_path.stat().st_mtime
+                    relative_path = str(image_path.relative_to(directory_path))
+                    cached = db.get_cached_info(relative_path, mtime)
+
+                    if cached:
+                        dimensions = cached['dimensions']
+                        is_video = cached['is_video']
+                        video_metadata = cached.get('video_metadata')
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
+
+                        if is_video:
+                            dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
+                            if dimensions is None:
+                                failed_video_extractions += 1
+                                reason = "video extraction failed"
+                                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                                error_messages.append(f'Failed to extract video info from '
+                                                    f'{image_path}')
+                                continue
+                        elif str(image_path).endswith('jxl'):
+                            dimensions = get_jxl_size(image_path)
+                        else:
+                            dimensions = imagesize.get(str(image_path))
+                            if dimensions == (-1, -1):
+                                dimensions = pilimage.open(image_path).size
+
+                        if dimensions:
+                            db.save_info(relative_path, dimensions[0], dimensions[1],
+                                        is_video, mtime, video_metadata)
+
+                            if cache_misses % 100 == 0:
+                                db.commit()
+
+                except (ValueError, OSError) as exception:
+                    corrupted_files += 1
+                    reason = f"corrupted: {type(exception).__name__}"
+                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                    print(f'Skipping corrupted/unreadable image: {image_path.name}', file=sys.stderr)
+                    continue
+
+                # Only check EXIF orientation if not from cache (cache already has corrected dimensions)
+                if not cached and not is_video:
+                    try:
+                        with open(image_path, 'rb') as image_file:
+                            exif_tags = exifread.process_file(
+                                image_file, details=False, extract_thumbnail=False,
+                                stop_tag='Image Orientation')
+                            if 'Image Orientation' in exif_tags:
+                                orientations = (exif_tags['Image Orientation']
+                                                .values)
+                                if any(value in orientations
+                                       for value in (5, 6, 7, 8)):
+                                    dimensions = (dimensions[1], dimensions[0])
+                                    db.save_info(relative_path, dimensions[0], dimensions[1],
+                                               is_video, mtime, video_metadata)
+                    except Exception as exception:
+                        error_messages.append(f'Failed to get Exif tags for '
+                                              f'{image_path}: {exception}')
 
             tags = []
             text_file_path = image_path.with_suffix('.txt')
@@ -624,13 +738,11 @@ class ImageListModel(QAbstractListModel):
                     try:
                         meta = json.load(source)
                     except json.JSONDecodeError as e:
-                        error_messages.append(f'Invalid JSON in '
-                                              f'"{json_file_path}": {e.msg}')
-                        break
+                        # Silently skip invalid JSON files
+                        pass
                     except UnicodeDecodeError as e:
-                        error_messages.append(f'Invalid Unicode in JSON in '
-                                              f'"{json_file_path}": {e.reason}')
-                        break
+                        # Silently skip files with invalid unicode
+                        pass
 
                     if meta.get('version') == 1:
                         crop = meta.get('crop')
@@ -651,29 +763,34 @@ class ImageListModel(QAbstractListModel):
                         image.loop_start_frame = loop_start if isinstance(loop_start, int) else None
                         loop_end = meta.get('loop_end_frame')
                         image.loop_end_frame = loop_end if isinstance(loop_end, int) else None
-                    else:
-                        error_messages.append(f'Invalid version '
-                                              f'"{meta.get('version')}" in '
-                                              f'"{json_file_path}"')
+                    # Silently ignore unsupported JSON versions (like ComfyUI workflow files)
             new_images.append(image)
 
-        progress.setValue(total_images)  # Complete
+        progress.setValue(total_images)  # Complete load
 
-        # Close database and print cache statistics
+        # Close database (will reopen for background enrichment if needed)
         db.commit()
         db.close()
 
+        # Print loading summary
+        print("\n" + "="*80)
+        print(f"LOAD SUMMARY: {len(new_images)} images loaded from {total_images} image files")
+        if total_images != len(new_images):
+            skipped = total_images - len(new_images)
+            print(f"  ⚠ WARNING: {skipped} images were SKIPPED")
+            if skip_reasons:
+                print(f"  Skip reasons:")
+                for reason, count in sorted(skip_reasons.items(), key=lambda x: -x[1]):
+                    print(f"    - {count:5d} {reason}")
+            else:
+                print(f"    - No skip reasons tracked (unknown cause)")
+
         if cache_hits > 0 or cache_misses > 0:
             cache_rate = (cache_hits / (cache_hits + cache_misses)) * 100 if (cache_hits + cache_misses) > 0 else 0
-            report = f'Database cache: {cache_hits} hits, {cache_misses} misses ({cache_rate:.1f}% hit rate)'
-            if corrupted_files > 0:
-                report += f', {corrupted_files} corrupted files'
-            if failed_video_extractions > 0:
-                report += f', {failed_video_extractions} failed video extractions'
-            print(report)
+            print(f"Database cache: {cache_hits} hits, {cache_misses} misses ({cache_rate:.1f}% hit rate)")
+        print("="*80 + "\n")
 
-        # Sort the new image list
-        new_images.sort(key=lambda image_: natural_sort_key(image_.path))
+        # new_images already sorted by image_paths ordering (no need to re-sort)
 
         # NOW reset the model (fast swap of data, minimal UI blocking)
         self.beginResetModel()
@@ -688,13 +805,216 @@ class ImageListModel(QAbstractListModel):
         # Start background thumbnail loading (parallel I/O)
         self._preload_thumbnails_async()
 
-        if len(error_messages) > 0:
-            print('\n'.join(error_messages), file=sys.stderr)
-            error_message_box = QMessageBox()
-            error_message_box.setWindowTitle('Directory reading error')
-            error_message_box.setIcon(QMessageBox.Icon.Warning)
-            error_message_box.setText('\n'.join(error_messages))
-            error_message_box.exec()
+        # If using fast load with uncached images, enrich dimensions in background
+        if use_fast_load and cache_misses > 0:
+            print(f"[FAST_LOAD] {cache_misses} images need dimension enrichment, starting background worker...")
+
+            # Enrich dimensions in background thread
+            def enrich_dimensions():
+                db_bg = ImageIndexDB(directory_path)
+                enriched_count = 0
+                enriched_indices = []  # Track which indices changed
+
+                for idx, image in enumerate(self.images):
+                    # Check if cancelled (e.g., due to sort/filter)
+                    if self._enrichment_cancelled.is_set():
+                        print(f"[FAST_LOAD] Background enrichment cancelled after {enriched_count} images")
+                        db_bg.commit()
+                        db_bg.close()
+                        return
+
+                    # Skip if already has real dimensions (from cache)
+                    if image.dimensions != (512, 512):
+                        continue
+
+                    try:
+                        is_video = image.path.suffix.lower() in video_extensions
+                        relative_path = str(image.path.relative_to(directory_path))
+                        mtime = image.path.stat().st_mtime
+
+                        # Read actual dimensions
+                        if is_video:
+                            dimensions, video_metadata, _ = extract_video_info(image.path)
+                            if dimensions is None:
+                                continue
+                            image.video_metadata = video_metadata
+                        elif str(image.path).endswith('jxl'):
+                            dimensions = get_jxl_size(image.path)
+                        else:
+                            dimensions = imagesize.get(str(image.path))
+                            if dimensions == (-1, -1):
+                                dimensions = pilimage.open(image.path).size
+
+                        if not dimensions:
+                            continue
+
+                        # Check EXIF orientation
+                        if not is_video:
+                            try:
+                                with open(image.path, 'rb') as image_file:
+                                    exif_tags = exifread.process_file(
+                                        image_file, details=False, extract_thumbnail=False,
+                                        stop_tag='Image Orientation')
+                                    if 'Image Orientation' in exif_tags:
+                                        orientations = exif_tags['Image Orientation'].values
+                                        if any(value in orientations for value in (5, 6, 7, 8)):
+                                            dimensions = (dimensions[1], dimensions[0])
+                            except Exception:
+                                pass
+
+                        # Update image dimensions
+                        image.dimensions = dimensions
+                        enriched_indices.append(idx)
+
+                        # Save to cache
+                        db_bg.save_info(relative_path, dimensions[0], dimensions[1],
+                                      is_video, mtime, image.video_metadata)
+
+                        enriched_count += 1
+                        if enriched_count % 100 == 0:
+                            db_bg.commit()
+                            # Trigger layout recalculation with specific indices
+                            QApplication.instance().postEvent(
+                                self,
+                                BackgroundEnrichmentProgressEvent(enriched_indices.copy())
+                            )
+                            enriched_indices.clear()
+
+                    except Exception:
+                        pass  # Skip problematic images silently
+
+                db_bg.commit()
+                db_bg.close()
+
+                print(f"[FAST_LOAD] Background enrichment complete: {enriched_count} images updated")
+
+                # Final layout update with remaining indices
+                if len(enriched_indices) > 0:
+                    QApplication.instance().postEvent(
+                        self,
+                        BackgroundEnrichmentProgressEvent(enriched_indices)
+                    )
+
+            # Submit background enrichment task
+            self._load_executor.submit(enrich_dimensions)
+
+    def _restart_enrichment(self):
+        """Restart background enrichment after sorting/filtering (with new indices)."""
+        # Clear cancellation flag
+        self._enrichment_cancelled.clear()
+
+        # Count how many images still need enrichment
+        needs_enrichment = sum(1 for img in self.images if img.dimensions == (512, 512))
+
+        if needs_enrichment == 0:
+            return  # Nothing to enrich
+
+        print(f"[SORT] Restarting background enrichment for {needs_enrichment} images")
+
+        # Reuse the same enrichment logic
+        def enrich_dimensions():
+            from utils.image_index_db import ImageIndexDB
+            from utils.settings import settings
+            import sys
+
+            directory_path = self.images[0].path.parent if self.images else None
+            if not directory_path:
+                return
+
+            db_bg = ImageIndexDB(directory_path)
+            enriched_count = 0
+            enriched_indices = []
+            video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+
+            for idx, image in enumerate(self.images):
+                # Check if cancelled
+                if self._enrichment_cancelled.is_set():
+                    print(f"[SORT] Background enrichment cancelled after {enriched_count} images")
+                    db_bg.commit()
+                    db_bg.close()
+                    return
+
+                # Skip if already has real dimensions
+                if image.dimensions != (512, 512):
+                    continue
+
+                try:
+                    is_video = image.path.suffix.lower() in video_extensions
+                    relative_path = str(image.path.relative_to(directory_path))
+                    mtime = image.path.stat().st_mtime
+
+                    # Read actual dimensions
+                    if is_video:
+                        from models.image_list_model import extract_video_info
+                        dimensions, video_metadata, _ = extract_video_info(image.path)
+                        if dimensions is None:
+                            continue
+                        image.video_metadata = video_metadata
+                    elif str(image.path).endswith('jxl'):
+                        from utils.jxlutil import get_jxl_size
+                        dimensions = get_jxl_size(image.path)
+                    else:
+                        import imagesize
+                        dimensions = imagesize.get(str(image.path))
+                        if dimensions == (-1, -1):
+                            from PIL import Image as pilimage
+                            dimensions = pilimage.open(image.path).size
+
+                    if not dimensions:
+                        continue
+
+                    # Check EXIF orientation
+                    if not is_video:
+                        try:
+                            import exifread
+                            with open(image.path, 'rb') as image_file:
+                                exif_tags = exifread.process_file(
+                                    image_file, details=False, extract_thumbnail=False,
+                                    stop_tag='Image Orientation')
+                                if 'Image Orientation' in exif_tags:
+                                    orientations = exif_tags['Image Orientation'].values
+                                    if any(value in orientations for value in (5, 6, 7, 8)):
+                                        dimensions = (dimensions[1], dimensions[0])
+                        except Exception:
+                            pass
+
+                    # Update image dimensions
+                    image.dimensions = dimensions
+                    enriched_indices.append(idx)
+
+                    # Save to cache
+                    db_bg.save_info(relative_path, dimensions[0], dimensions[1],
+                                  is_video, mtime, image.video_metadata)
+
+                    enriched_count += 1
+                    if enriched_count % 100 == 0:
+                        db_bg.commit()
+                        # Trigger layout recalculation
+                        from PySide6.QtWidgets import QApplication
+                        QApplication.instance().postEvent(
+                            self,
+                            BackgroundEnrichmentProgressEvent(enriched_indices.copy())
+                        )
+                        enriched_indices.clear()
+
+                except Exception:
+                    pass
+
+            db_bg.commit()
+            db_bg.close()
+
+            print(f"[SORT] Background enrichment complete: {enriched_count} images updated")
+
+            # Final layout update
+            if len(enriched_indices) > 0:
+                from PySide6.QtWidgets import QApplication
+                QApplication.instance().postEvent(
+                    self,
+                    BackgroundEnrichmentProgressEvent(enriched_indices)
+                )
+
+        # Submit enrichment task
+        self._load_executor.submit(enrich_dimensions)
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):
