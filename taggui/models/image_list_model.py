@@ -458,12 +458,10 @@ class ImageListModel(QAbstractListModel):
         from PySide6.QtWidgets import QProgressDialog, QApplication
         from PySide6.QtCore import Qt
 
-        self.beginResetModel()
-        self.images.clear()
-        self.undo_stack.clear()
-        self.redo_stack.clear()
-        self.update_undo_and_redo_actions_requested.emit()
+        # DON'T call beginResetModel() here - it clears the view immediately
+        # Load all metadata first, THEN reset the model (keeps old images visible during loading)
         error_messages: list[str] = []
+        new_images = []  # Build new image list without clearing old one
         file_paths = get_file_paths(directory_path)
         image_suffixes_string = settings.value(
             'image_list_file_formats',
@@ -638,7 +636,7 @@ class ImageListModel(QAbstractListModel):
                         error_messages.append(f'Invalid version '
                                               f'"{meta.get('version')}" in '
                                               f'"{json_file_path}"')
-            self.images.append(image)
+            new_images.append(image)
 
         progress.setValue(total_images)  # Complete
 
@@ -655,7 +653,16 @@ class ImageListModel(QAbstractListModel):
                 report += f', {failed_video_extractions} failed video extractions'
             print(report)
 
-        self.images.sort(key=lambda image_: natural_sort_key(image_.path))
+        # Sort the new image list
+        new_images.sort(key=lambda image_: natural_sort_key(image_.path))
+
+        # NOW reset the model (fast swap of data, minimal UI blocking)
+        self.beginResetModel()
+        self.images.clear()
+        self.images = new_images
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
         self._rebuild_aspect_ratio_cache()  # Build cache after loading
         self.endResetModel()
 
