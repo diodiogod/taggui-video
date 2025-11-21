@@ -30,12 +30,6 @@ class FieldHistoryPopup(QMenu):
         search_layout.addWidget(self.search_box)
 
         # Add search widget as custom widget action
-        search_action = self.addAction("")
-        self.setDefaultAction(search_action)
-        search_widget_action = self.widgetAction(search_action)
-        if search_widget_action:
-            self.removeAction(search_action)
-
         from PySide6.QtWidgets import QWidgetAction
         search_widget_action = QWidgetAction(self)
         search_widget_action.setDefaultWidget(search_container)
