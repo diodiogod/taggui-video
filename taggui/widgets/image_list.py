@@ -653,6 +653,10 @@ class ImageListView(QListView):
         self.scheduleDelayedItemsLayout()
         self.viewport().update()
 
+        # Start thumbnail preloading after layout is ready
+        if not self._preload_complete:
+            self._idle_preload_timer.start(100)  # Start preloading after 100ms
+
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
         # Get directory from model
