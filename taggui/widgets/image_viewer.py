@@ -17,6 +17,35 @@ from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
 from widgets.marking_view import ImageGraphicsView
 
 
+def pil_to_qimage(pil_image):
+    """Convert PIL image to QImage properly"""
+    pil_image = pil_image.convert("RGBA")
+    data = pil_image.tobytes("raw", "RGBA")
+    qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
+    return qimage
+
+
+def smart_prescale(pil_image, target_width, target_height):
+    """Pre-scale image using high-quality Lanczos if downscaling needed.
+
+    This matches ImageGlass's approach: use PhotoSauce-quality Lanczos resampling
+    when the image is larger than the viewport, avoiding Qt's basic bilinear.
+    """
+    orig_width, orig_height = pil_image.size
+
+    # Only prescale if we're actually downscaling (image larger than target)
+    if orig_width <= target_width and orig_height <= target_height:
+        return pil_image  # No scaling needed
+
+    # Calculate aspect-preserving dimensions
+    scale = min(target_width / orig_width, target_height / orig_height)
+    new_width = int(orig_width * scale)
+    new_height = int(orig_height * scale)
+
+    # Use Lanczos for high-quality downsampling (like ImageGlass MagicScaler)
+    return pil_image.resize((new_width, new_height), pilimage.Resampling.LANCZOS)
+
+
 class ImageViewer(QWidget):
     """Main widget coordinating image/video display, marking, and zoom functionality."""
 
@@ -39,6 +68,7 @@ class ImageViewer(QWidget):
         self.show_marking_latent_state = True
         self.marking_to_add = ImageMarking.NONE
         self.scene = QGraphicsScene()
+        self.original_pil_image = None  # Store original for high-quality rescaling
 
         self.view = ImageGraphicsView(self.scene, self)
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
@@ -220,6 +250,8 @@ class ImageViewer(QWidget):
             if image.is_video:
                 # Create a pixmap item for video frames BEFORE cleanup
                 image_item = QGraphicsPixmapItem()
+                # Enable high-quality smooth transformation for video frame downscaling
+                image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
                 image_item.setZValue(0)
                 self.scene.addItem(image_item)
                 self.current_video_item = image_item
@@ -261,21 +293,19 @@ class ImageViewer(QWidget):
                 self._controls_hide_timer.stop()
                 self.video_controls.setVisible(False)
                 self._controls_visible = False
-                # Load static image
-                if image.path.suffix.lower() == ".jxl":
-                     pil_image = pilimage.open(image.path)  # Decode JXL using Pillow
-                     pil_image = pil_image.convert("RGBA")  # Ensure RGBA format
+                # Load static image at full resolution
+                pil_image = pilimage.open(image.path)
+                self.original_pil_image = pil_image  # Store original
 
-                     pixmap = QPixmap(QImage(
-                         pil_image.tobytes("raw", "RGBA"),
-                         pil_image.width,
-                         pil_image.height,
-                         QImage.Format_RGBA8888
-                     ))
-                else:
-                    pixmap = QPixmap(str(image.path))
+                # Convert to QPixmap at full resolution (needed for markings and zoom)
+                qimage = pil_to_qimage(pil_image)
+                pixmap = QPixmap.fromImage(qimage)
                 image_item = QGraphicsPixmapItem(pixmap)
+                # Enable smooth transformation
+                image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
                 image_item.setZValue(0)
+                # Store reference to swap pixmaps when zoom changes
+                self.current_image_item = image_item
                 self.scene.setSceneRect(image_item.boundingRect()
                                         .adjusted(-1, -1, 1, 1)) # space for rect border
                 self.scene.addItem(image_item)
@@ -334,8 +364,14 @@ class ImageViewer(QWidget):
 
     @Slot()
     def zoom_in(self, center_pos: QPoint = None):
+        old_zoom = MarkingItem.zoom_factor
         MarkingItem.zoom_factor = min(MarkingItem.zoom_factor * 1.25, 16)
         self.is_zoom_to_fit = False
+
+        # Switch to full-res when zooming past 1:1
+        if old_zoom < 1.0 and MarkingItem.zoom_factor >= 0.95 and self.original_pil_image:
+            self._update_display_quality()
+
         self.zoom_emit()
 
     @Slot()
@@ -345,14 +381,25 @@ class ImageViewer(QWidget):
         if scene.width() < 1 or scene.height() < 1:
             return
         limit = min(view.width()/scene.width(), view.height()/scene.height())
+        old_zoom = MarkingItem.zoom_factor
         MarkingItem.zoom_factor = max(MarkingItem.zoom_factor / 1.25, limit)
         self.is_zoom_to_fit = MarkingItem.zoom_factor == limit
+
+        # Switch to prescaled when zooming below 1:1
+        if old_zoom >= 1.0 and MarkingItem.zoom_factor < 0.95 and self.original_pil_image:
+            self._update_display_quality()
+
         self.zoom_emit()
 
     @Slot()
     def zoom_original(self):
         MarkingItem.zoom_factor = 1.0
         self.is_zoom_to_fit = False
+
+        # Always use full-res at 1:1
+        if self.original_pil_image and hasattr(self, 'current_image_item'):
+            self._update_display_quality()
+
         self.zoom_emit()
 
     @Slot()
@@ -360,7 +407,55 @@ class ImageViewer(QWidget):
         self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
         MarkingItem.zoom_factor = self.view.transform().m11()
         self.is_zoom_to_fit = True
+
+        # If downscaling significantly, swap to high-quality prescaled pixmap
+        if MarkingItem.zoom_factor < 0.95 and self.original_pil_image and hasattr(self, 'current_image_item'):
+            self._update_display_quality()
+
         self.zoom_emit()
+
+    def _update_display_quality(self):
+        """Swap pixmap between full-res and prescaled based on zoom level.
+
+        Like ImageGlass: use high-quality Lanczos prescaling for downscaling,
+        full resolution for 1:1 or zoom-in.
+
+        CRITICAL: Scene rect and markings stay in full-resolution coordinates.
+        We only swap the displayed pixmap and scale the item transform.
+        """
+        if not self.original_pil_image or not hasattr(self, 'current_image_item'):
+            return
+
+        orig_w, orig_h = self.original_pil_image.size
+
+        # Determine target resolution based on zoom
+        if MarkingItem.zoom_factor >= 0.95:
+            # At or near 1:1 - use full resolution, no item scaling
+            display_image = self.original_pil_image
+            item_scale = 1.0
+        else:
+            # Downscaling - prescale with Lanczos for quality
+            target_w = int(orig_w * MarkingItem.zoom_factor)
+            target_h = int(orig_h * MarkingItem.zoom_factor)
+
+            # Prescale with high-quality Lanczos (like ImageGlass MagicScaler)
+            display_image = self.original_pil_image.resize(
+                (target_w, target_h),
+                pilimage.Resampling.LANCZOS
+            )
+            # Scale the item back up to full resolution coordinates
+            item_scale = orig_w / target_w
+
+        # Convert and swap pixmap
+        qimage = pil_to_qimage(display_image)
+        pixmap = QPixmap.fromImage(qimage)
+        self.current_image_item.setPixmap(pixmap)
+
+        # Apply item scale to maintain scene coordinates at full resolution
+        self.current_image_item.setScale(item_scale)
+
+        # Scene rect stays at original full resolution (so markings stay correct)
+        # MarkingItem.image_size stays at original resolution
 
     def zoom_emit(self):
         ResizeHintHUD.zoom_factor = MarkingItem.zoom_factor
