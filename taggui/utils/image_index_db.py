@@ -6,7 +6,7 @@ from typing import Optional
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 1  # Increment to force cache invalidation
+DB_VERSION = 2  # Increment to force cache invalidation (v2: use relative paths instead of filenames)
 
 
 class ImageIndexDB:
