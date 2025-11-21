@@ -36,3 +36,11 @@ class Image:
     video_metadata: dict | None = None  # fps, duration, frame_count, current_frame
     loop_start_frame: int | None = None
     loop_end_frame: int | None = None
+
+    @property
+    def aspect_ratio(self) -> float:
+        """Get aspect ratio (width/height), cached to avoid recalculation."""
+        if self.dimensions:
+            width, height = self.dimensions
+            return width / height if height > 0 else 1.0
+        return 1.0  # Default square for images without dimensions

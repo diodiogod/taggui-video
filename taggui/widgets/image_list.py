@@ -624,6 +624,21 @@ class ImageListView(QListView):
             self._masonry_recalc_timer.start(100)
             return
 
+        # CRITICAL: Skip ALL masonry calculations until user stops typing completely
+        # Python's GIL means ANY computation in ANY thread blocks keyboard input
+        # Even with time.sleep(0) every 10 items, 385-1147 items still blocks for 900ms
+        # Solution: Keep showing old layout, only recalculate after typing stops for 3+ seconds
+        if time_since_last_key < 3000:
+            print(f"[{timestamp}] ⚠️ SKIP: Only {time_since_last_key:.0f}ms since last key, waiting for typing to fully stop")
+            # Check again in 1 second
+            self._masonry_recalc_timer.start(1000)
+            return
+
+        # Clear rapid input flag since user has stopped typing
+        if self._rapid_input_detected:
+            print(f"[{timestamp}] ✓ User stopped typing for 3+ seconds, clearing rapid input flag")
+            self._rapid_input_detected = False
+
         print(f"[{timestamp}] ⚡ EXECUTE: Timer expired, starting masonry calculation")
         if self.use_masonry:
             self._calculate_masonry_layout()
@@ -660,21 +675,16 @@ class ImageListView(QListView):
             self._masonry_calculating = False
             return
 
-        # Collect all items with their aspect ratios
-        # WARNING: Cannot use processEvents() here - causes re-entrant crashes
+        # Get aspect ratios from cache (fast, no Qt model iteration)
+        # This is MUCH faster than looping through .index() and .data() calls
         import time
         timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
-        row_count = self.model().rowCount()
-        items_data = []
-        for row in range(row_count):
-            index = self.model().index(row, 0)
-            image = index.data(Qt.ItemDataRole.UserRole)
-            if image and hasattr(image, 'dimensions') and image.dimensions:
-                width, height = image.dimensions
-                aspect_ratio = width / height if height > 0 else 1.0
-            else:
-                aspect_ratio = 1.0  # Default to square
-            items_data.append((row, aspect_ratio))
+        start_time = time.time()
+
+        items_data = self.model().get_filtered_aspect_ratios()
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        print(f"[{timestamp}]   ✓ Got {len(items_data)} aspect ratios from cache in {elapsed_ms:.1f}ms")
 
         # Generate cache key based on directory and settings
         cache_key = self._get_masonry_cache_key()
@@ -770,7 +780,6 @@ class ImageListView(QListView):
             return
 
         print(f"[{timestamp}] 🎨 APPLYING LAYOUT to UI...")
-        t1 = time.time()
 
         # Apply the calculated layout
         self.masonry_layout = masonry_layout
@@ -786,16 +795,26 @@ class ImageListView(QListView):
         self.verticalScrollBar().setRange(0, max_scroll)
         self.verticalScrollBar().setPageStep(viewport_height)
 
-        # Trigger UI update after calculation completes (EXPENSIVE - blocks UI thread)
+        # Defer expensive UI update to next event loop iteration
+        # This prevents blocking keyboard events that are already queued
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._apply_layout_to_ui(timestamp))
+
+        # Start thumbnail preloading after layout is ready
+        if not self._preload_complete:
+            self._idle_preload_timer.start(100)  # Start preloading after 100ms
+
+    def _apply_layout_to_ui(self, timestamp):
+        """Apply masonry layout to UI (deferred to avoid blocking keyboard events)."""
+        import time
+        t1 = time.time()
+
+        # Trigger UI update (EXPENSIVE - can block for 900ms)
         self.scheduleDelayedItemsLayout()
         self.viewport().update()
 
         elapsed = (time.time() - t1) * 1000
         print(f"[{timestamp}] ✓ UI UPDATE DONE in {elapsed:.0f}ms")
-
-        # Start thumbnail preloading after layout is ready
-        if not self._preload_complete:
-            self._idle_preload_timer.start(100)  # Start preloading after 100ms
 
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
