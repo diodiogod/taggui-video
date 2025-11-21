@@ -3,7 +3,7 @@ from pathlib import Path
 from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QIcon, QKeySequence, QShortcut, QMouseEvent)
-from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
                                QLabel, QPushButton)
@@ -276,12 +276,38 @@ class MainWindow(QMainWindow):
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
         self.all_tags_editor.filter_line_edit.clear()
+
+        # Apply saved sort order after loading
+        saved_sort = self.image_list.sort_combo_box.currentText()
+        if saved_sort:
+            self.image_list._on_sort_changed(saved_sort)
+
         # Clear the current index first to make sure that the `currentChanged`
         # signal is emitted even if the image at the index is already selected.
         self.image_list_selection_model.clearCurrentIndex()
-        self.image_list.list_view.setCurrentIndex(
-            self.proxy_image_list_model.index(select_index, 0))
+        selected_index = self.proxy_image_list_model.index(select_index, 0)
+        self.image_list.list_view.setCurrentIndex(selected_index)
         self.centralWidget().setCurrentWidget(self.image_viewer)
+
+        # Scroll to selected image after layout is ready
+        # Use layout_ready signal which fires when masonry calculation completes
+        scroll_done = [False]
+
+        def do_scroll():
+            if scroll_done[0]:
+                return
+            scroll_done[0] = True
+            self.image_list.list_view.scrollTo(
+                selected_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            try:
+                self.image_list.list_view.layout_ready.disconnect(do_scroll)
+            except:
+                pass
+
+        self.image_list.list_view.layout_ready.connect(do_scroll)
+
+        # Fallback timeout in case layout_ready doesn't fire (e.g., grid layout)
+        QTimer.singleShot(2000, do_scroll)
         self.menu_manager.reload_directory_action.setDisabled(False)
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)

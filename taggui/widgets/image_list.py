@@ -18,6 +18,7 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
                        infix_notation, nums, one_of, printables)
 
 from models.proxy_image_list_model import ProxyImageListModel
+from models.image_list_model import natural_sort_key
 from utils.image import Image
 from utils.settings import settings
 from utils.settings_widgets import SettingsComboBox
@@ -328,6 +329,7 @@ class ImageDelegate(QStyledItemDelegate):
 class ImageListView(QListView):
     tags_paste_requested = Signal(list, list)
     directory_reload_requested = Signal()
+    layout_ready = Signal()  # Emitted when masonry layout is fully calculated and applied
 
 
     def __init__(self, parent, proxy_image_list_model: ProxyImageListModel,
@@ -717,7 +719,12 @@ class ImageListView(QListView):
         # Defer expensive UI update to next event loop iteration
         # This prevents blocking keyboard events that are already queued
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: self._apply_layout_to_ui(timestamp))
+        def apply_and_signal():
+            self._apply_layout_to_ui(timestamp)
+            # Emit signal that layout is ready for scrolling
+            self.layout_ready.emit()
+
+        QTimer.singleShot(0, apply_and_signal)
 
         # Start thumbnail preloading after layout is ready
         if not self._preload_complete:
@@ -1766,7 +1773,7 @@ class ImageList(QDockWidget):
 
         sort_label = QLabel('Sort')
         self.sort_combo_box = SettingsComboBox(key='image_list_sort_by')
-        self.sort_combo_box.addItems(['Name', 'Modified', 'Created',
+        self.sort_combo_box.addItems(['Default', 'Name', 'Modified', 'Created',
                                        'Size', 'Type', 'Random'])
 
         selection_sort_layout.addWidget(selection_mode_label)
@@ -1865,12 +1872,6 @@ class ImageList(QDockWidget):
             source_model._enrichment_cancelled.set()
             print("[SORT] Cancelled background enrichment (reordering images)")
 
-        # Natural sort key function for filenames (handles numbers correctly)
-        def natural_sort_key(text):
-            import re
-            return [int(c) if c.isdigit() else c.lower()
-                    for c in re.split(r'(\d+)', text)]
-
         # Safe file stat getter with fallback
         def safe_stat(img, attr, default=0):
             try:
@@ -1883,8 +1884,12 @@ class ImageList(QDockWidget):
             # Emit layoutAboutToBeChanged before sorting
             source_model.layoutAboutToBeChanged.emit()
 
-            if sort_by == 'Name':
-                source_model.images.sort(key=lambda img: natural_sort_key(img.path.name))
+            if sort_by == 'Default':
+                # Use natural sort from image_list_model (same as initial load)
+                source_model.images.sort(key=lambda img: natural_sort_key(img.path))
+            elif sort_by == 'Name':
+                # Natural sort by filename only (not full path)
+                source_model.images.sort(key=lambda img: natural_sort_key(Path(img.path.name)))
             elif sort_by == 'Modified':
                 source_model.images.sort(key=lambda img: safe_stat(img, 'st_mtime'), reverse=True)
             elif sort_by == 'Created':
