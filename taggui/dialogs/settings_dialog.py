@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout, QComboBox)
+                               QLineEdit, QPushButton, QVBoxLayout, QComboBox,
+                               QScrollArea, QWidget)
 
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
@@ -12,9 +13,24 @@ class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle('Settings')
-        layout = QVBoxLayout(self)
+
+        # Main layout for dialog
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area for settings
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        # Container widget for scroll area
+        scroll_widget = QWidget()
+        layout = QVBoxLayout(scroll_widget)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
+
+        scroll_area.setWidget(scroll_widget)
+        main_layout.addWidget(scroll_area)
 
         grid_layout = QGridLayout()
         grid_layout.addWidget(QLabel('Font size (pt)'), 0, 0,
@@ -38,6 +54,12 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(QLabel('Grammar check mode'), 11, 0,
                               Qt.AlignmentFlag.AlignRight)
         grid_layout.addWidget(QLabel('Trainer target resolution (for exact bucket snap)'), 12, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Enable dimension cache (.taggui_index.db)'), 13, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Enable thumbnail cache'), 14, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Thumbnail cache location'), 15, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         font_size_spin_box = SettingsSpinBox(
@@ -123,6 +145,29 @@ class SettingsDialog(QDialog):
             'Set your trainer\'s target resolution (e.g., 1024 for 1024x1024). '
             'Use Shift+Ctrl+drag to snap crops to exact buckets for this resolution.')
 
+        # Cache settings
+        enable_dimension_cache_check_box = SettingsBigCheckBox(
+            key='enable_dimension_cache')
+        enable_dimension_cache_check_box.setToolTip(
+            'Cache image dimensions in .taggui_index.db files for instant folder reloads')
+
+        enable_thumbnail_cache_check_box = SettingsBigCheckBox(
+            key='enable_thumbnail_cache')
+        enable_thumbnail_cache_check_box.setToolTip(
+            'Cache generated thumbnails to disk for instant display on reload')
+
+        self.thumbnail_cache_location_line_edit = SettingsLineEdit(
+            key='thumbnail_cache_location')
+        self.thumbnail_cache_location_line_edit.setMinimumWidth(400)
+        self.thumbnail_cache_location_line_edit.setPlaceholderText(
+            'Default: ~/.taggui_cache/thumbnails')
+        self.thumbnail_cache_location_line_edit.setToolTip(
+            'Leave empty for default location. Change to move cache to custom directory.')
+
+        thumbnail_cache_location_button = QPushButton('Browse...')
+        thumbnail_cache_location_button.clicked.connect(
+            self.choose_thumbnail_cache_location)
+
         grid_layout.addWidget(font_size_spin_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(file_types_line_edit, 1, 1,
@@ -148,6 +193,14 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(self.grammar_check_mode_combo, 11, 1,
                               Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(trainer_target_resolution_spin_box, 12, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(enable_dimension_cache_check_box, 13, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(enable_thumbnail_cache_check_box, 14, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(self.thumbnail_cache_location_line_edit, 15, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(thumbnail_cache_location_button, 16, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 
@@ -187,6 +240,25 @@ class SettingsDialog(QDialog):
             self.insert_space_after_tag_separator_check_box.setEnabled(True)
         settings.setValue('tag_separator', tag_separator)
         self.show_restart_warning()
+
+    @Slot()
+    def choose_thumbnail_cache_location(self):
+        """Browse for thumbnail cache directory."""
+        current_location = settings.value(
+            'thumbnail_cache_location',
+            defaultValue=DEFAULT_SETTINGS['thumbnail_cache_location'], type=str)
+
+        if not current_location:
+            # Use default location as starting point
+            from pathlib import Path
+            current_location = str(Path.home() / '.taggui_cache' / 'thumbnails')
+
+        directory = QFileDialog.getExistingDirectory(
+            self, 'Select Thumbnail Cache Location', current_location)
+
+        if directory:
+            self.thumbnail_cache_location_line_edit.setText(directory)
+            settings.setValue('thumbnail_cache_location', directory)
 
     @Slot()
     def set_models_directory_path(self):
