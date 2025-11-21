@@ -747,12 +747,13 @@ class ImageListView(QListView):
             if index.isValid():
                 # Trigger thumbnail generation
                 _ = index.data(Qt.ItemDataRole.DecorationRole)
-                # Track this thumbnail as loaded
+                # Track this thumbnail as loaded (even if already loaded via scroll)
+                was_new = i not in self._thumbnails_loaded
                 self._thumbnails_loaded.add(i)
                 # Process events after each thumbnail to keep UI responsive
                 QApplication.processEvents()
 
-        # Update progress
+        # Update progress to show actual loaded count (not sequential index)
         self._preload_index = end_index
         self._update_thumbnail_progress(len(self._thumbnails_loaded), total_items)
 
