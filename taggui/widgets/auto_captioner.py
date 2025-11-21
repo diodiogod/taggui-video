@@ -509,13 +509,16 @@ class AutoCaptioner(QDockWidget):
         # Connect field history buttons
         self.caption_settings_form.caption_start_history_button.clicked.connect(
             lambda: self.show_field_history('caption_start',
-                                           self.caption_settings_form.caption_start_line_edit))
+                                           self.caption_settings_form.caption_start_line_edit,
+                                           self.caption_settings_form.caption_start_history_button))
         self.caption_settings_form.bad_words_history_button.clicked.connect(
             lambda: self.show_field_history('bad_words',
-                                           self.caption_settings_form.bad_words_line_edit))
+                                           self.caption_settings_form.bad_words_line_edit,
+                                           self.caption_settings_form.bad_words_history_button))
         self.caption_settings_form.forced_words_history_button.clicked.connect(
             lambda: self.show_field_history('forced_words',
-                                           self.caption_settings_form.forced_words_line_edit))
+                                           self.caption_settings_form.forced_words_line_edit,
+                                           self.caption_settings_form.forced_words_history_button))
 
     @Slot()
     def start_or_cancel_captioning(self):
@@ -585,17 +588,14 @@ class AutoCaptioner(QDockWidget):
         """Load a prompt from history into the prompt field."""
         self.caption_settings_form.prompt_text_edit.setPlainText(prompt)
 
-    def show_field_history(self, field_key: str, line_edit):
+    def show_field_history(self, field_key: str, line_edit, button):
         """Show field history popup menu."""
-        from PySide6.QtWidgets import QLineEdit
         popup = FieldHistoryPopup(field_key, line_edit)
         popup.value_selected.connect(line_edit.setText)
 
         # Position popup below the button
-        button = self.sender()
-        if button:
-            pos = button.mapToGlobal(button.rect().bottomLeft())
-            popup.exec(pos)
+        pos = button.mapToGlobal(button.rect().bottomLeft())
+        popup.popup(pos)
 
     @Slot()
     def generate_captions(self):
