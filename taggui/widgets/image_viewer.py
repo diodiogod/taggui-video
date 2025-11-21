@@ -85,27 +85,6 @@ class HighQualityPixmapItem(QGraphicsPixmapItem):
         super().paint(painter, option, widget)
 
 
-def smart_prescale(pil_image, target_width, target_height):
-    """Pre-scale image using high-quality Lanczos if downscaling needed.
-
-    This matches ImageGlass's approach: use PhotoSauce-quality Lanczos resampling
-    when the image is larger than the viewport, avoiding Qt's basic bilinear.
-    """
-    orig_width, orig_height = pil_image.size
-
-    # Only prescale if we're actually downscaling (image larger than target)
-    if orig_width <= target_width and orig_height <= target_height:
-        return pil_image  # No scaling needed
-
-    # Calculate aspect-preserving dimensions
-    scale = min(target_width / orig_width, target_height / orig_height)
-    new_width = int(orig_width * scale)
-    new_height = int(orig_height * scale)
-
-    # Use Lanczos for high-quality downsampling (like ImageGlass MagicScaler)
-    return pil_image.resize((new_width, new_height), pilimage.Resampling.LANCZOS)
-
-
 class ImageViewer(QWidget):
     """Main widget coordinating image/video display, marking, and zoom functionality."""
 
