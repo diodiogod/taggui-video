@@ -17,6 +17,8 @@ from dialogs.prompt_history_dialog import PromptHistoryDialog
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
 from utils.prompt_history import get_prompt_history
+from utils.field_history import get_field_history
+from widgets.field_history_popup import FieldHistoryPopup
 from utils.enums import CaptionDevice, CaptionPosition
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
@@ -92,8 +94,21 @@ class CaptionSettingsForm(QVBoxLayout):
         prompt_layout.addWidget(self.prompt_text_edit)
         prompt_layout.addWidget(self.prompt_history_button)
 
+        # Caption start field with history button
+        caption_start_container = QWidget()
+        caption_start_layout = QHBoxLayout(caption_start_container)
+        caption_start_layout.setContentsMargins(0, 0, 0, 0)
+        caption_start_layout.setSpacing(4)
+
         self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
         self.caption_start_line_edit.setClearButtonEnabled(True)
+
+        self.caption_start_history_button = QPushButton("📜")
+        self.caption_start_history_button.setToolTip("View History")
+        self.caption_start_history_button.setMaximumWidth(30)
+
+        caption_start_layout.addWidget(self.caption_start_line_edit)
+        caption_start_layout.addWidget(self.caption_start_history_button)
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
             key='caption_position')
         self.caption_position_combo_box.addItems(list(CaptionPosition))
@@ -145,7 +160,7 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow(self.prompt_label, prompt_container)
         self.caption_start_label = QLabel('Start caption with')
         basic_settings_form.addRow(self.caption_start_label,
-                                   self.caption_start_line_edit)
+                                   caption_start_container)
         basic_settings_form.addRow('Caption position',
                                    self.caption_position_combo_box)
         basic_settings_form.addRow(self.skip_hash_container)
@@ -200,14 +215,42 @@ class CaptionSettingsForm(QVBoxLayout):
             QFormLayout.RowWrapPolicy.WrapAllRows)
         bad_forced_words_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        # Bad words field with history button
+        bad_words_container = QWidget()
+        bad_words_layout = QHBoxLayout(bad_words_container)
+        bad_words_layout.setContentsMargins(0, 0, 0, 0)
+        bad_words_layout.setSpacing(4)
+
         self.bad_words_line_edit = SettingsLineEdit(key='bad_words')
         self.bad_words_line_edit.setClearButtonEnabled(True)
+
+        self.bad_words_history_button = QPushButton("📜")
+        self.bad_words_history_button.setToolTip("View History")
+        self.bad_words_history_button.setMaximumWidth(30)
+
+        bad_words_layout.addWidget(self.bad_words_line_edit)
+        bad_words_layout.addWidget(self.bad_words_history_button)
+
+        # Forced words field with history button
+        forced_words_container = QWidget()
+        forced_words_layout = QHBoxLayout(forced_words_container)
+        forced_words_layout.setContentsMargins(0, 0, 0, 0)
+        forced_words_layout.setSpacing(4)
+
         self.forced_words_line_edit = SettingsLineEdit(key='forced_words')
         self.forced_words_line_edit.setClearButtonEnabled(True)
+
+        self.forced_words_history_button = QPushButton("📜")
+        self.forced_words_history_button.setToolTip("View History")
+        self.forced_words_history_button.setMaximumWidth(30)
+
+        forced_words_layout.addWidget(self.forced_words_line_edit)
+        forced_words_layout.addWidget(self.forced_words_history_button)
+
         bad_forced_words_form.addRow('Discourage from caption',
-                                     self.bad_words_line_edit)
+                                     bad_words_container)
         bad_forced_words_form.addRow('Include in caption',
-                                     self.forced_words_line_edit)
+                                     forced_words_container)
         self.min_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
             key='min_new_tokens', default=1, minimum=1, maximum=999)
         self.max_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
@@ -463,6 +506,17 @@ class AutoCaptioner(QDockWidget):
         self.caption_settings_form.prompt_history_button.clicked.connect(
             self.show_prompt_history)
 
+        # Connect field history buttons
+        self.caption_settings_form.caption_start_history_button.clicked.connect(
+            lambda: self.show_field_history('caption_start',
+                                           self.caption_settings_form.caption_start_line_edit))
+        self.caption_settings_form.bad_words_history_button.clicked.connect(
+            lambda: self.show_field_history('bad_words',
+                                           self.caption_settings_form.bad_words_line_edit))
+        self.caption_settings_form.forced_words_history_button.clicked.connect(
+            lambda: self.show_field_history('forced_words',
+                                           self.caption_settings_form.forced_words_line_edit))
+
     @Slot()
     def start_or_cancel_captioning(self):
         if self.is_captioning:
@@ -531,6 +585,18 @@ class AutoCaptioner(QDockWidget):
         """Load a prompt from history into the prompt field."""
         self.caption_settings_form.prompt_text_edit.setPlainText(prompt)
 
+    def show_field_history(self, field_key: str, line_edit):
+        """Show field history popup menu."""
+        from PySide6.QtWidgets import QLineEdit
+        popup = FieldHistoryPopup(field_key, line_edit)
+        popup.value_selected.connect(line_edit.setText)
+
+        # Position popup below the button
+        button = self.sender()
+        if button:
+            pos = button.mapToGlobal(button.rect().bottomLeft())
+            popup.exec(pos)
+
     @Slot()
     def generate_captions(self):
         # Save current prompt to history before generating captions
@@ -538,6 +604,21 @@ class AutoCaptioner(QDockWidget):
         if current_prompt and current_prompt.strip():
             history = get_prompt_history()
             history.add_prompt(current_prompt.strip())
+
+        # Save field values to history
+        field_history = get_field_history()
+
+        caption_start = self.caption_settings_form.caption_start_line_edit.text()
+        if caption_start and caption_start.strip():
+            field_history.add_value('caption_start', caption_start.strip())
+
+        bad_words = self.caption_settings_form.bad_words_line_edit.text()
+        if bad_words and bad_words.strip():
+            field_history.add_value('bad_words', bad_words.strip())
+
+        forced_words = self.caption_settings_form.forced_words_line_edit.text()
+        if forced_words and forced_words.strip():
+            field_history.add_value('forced_words', forced_words.strip())
 
         selected_image_indices = self.image_list.get_selected_image_indices()
         selected_image_count = len(selected_image_indices)
