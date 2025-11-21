@@ -33,6 +33,16 @@ class SettingsDialog(QDialog):
         tab_widget.addTab(self._create_spell_check_tab(), 'Spell Check')
         tab_widget.addTab(self._create_advanced_tab(), 'Advanced')
 
+        # Restore last selected tab
+        last_tab = settings.value('settings_dialog_last_tab', defaultValue=0, type=int)
+        if 0 <= last_tab < tab_widget.count():
+            tab_widget.setCurrentIndex(last_tab)
+
+        # Save tab index when changed
+        tab_widget.currentChanged.connect(
+            lambda index: settings.setValue('settings_dialog_last_tab', index)
+        )
+
         # Restart warning at bottom of main dialog
         self.restart_warning = ('Restart the application to apply the new '
                                 'settings.')
