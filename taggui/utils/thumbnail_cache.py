@@ -16,8 +16,6 @@ class ThumbnailCache:
         self.enabled = settings.value('enable_thumbnail_cache',
                                      defaultValue=DEFAULT_SETTINGS['enable_thumbnail_cache'],
                                      type=bool)
-        print(f"[CACHE] Thumbnail cache enabled: {self.enabled}")
-
         # Get cache location from settings (or use default)
         cache_location = settings.value('thumbnail_cache_location',
                                        defaultValue=DEFAULT_SETTINGS['thumbnail_cache_location'],
@@ -37,11 +35,9 @@ class ThumbnailCache:
         settings.setValue('_last_thumbnail_cache_location', str(new_cache_dir))
 
         self.cache_dir = new_cache_dir
-        print(f"[CACHE] Cache directory: {self.cache_dir}")
 
         if self.enabled:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[CACHE] Created cache directory")
             # Clean up old PNG cache files (we use WebP now)
             self._cleanup_old_png_cache()
 
@@ -222,7 +218,7 @@ class ThumbnailCache:
             pixmap = icon.pixmap(size, size)
             if not pixmap.isNull():
                 result = pixmap.save(str(cache_path), 'WEBP', quality=85)
-                print(f"[CACHE] Saved thumbnail: {file_path.name} -> {cache_path} (success={result})")
+                # Removed noisy log: print(f"[CACHE] Saved thumbnail: {file_path.name} -> {cache_path} (success={result})")
         except Exception as e:
             print(f'[CACHE] Failed to save thumbnail cache: {e}')
 
