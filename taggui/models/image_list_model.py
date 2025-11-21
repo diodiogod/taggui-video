@@ -320,6 +320,7 @@ class ImageListModel(QAbstractListModel):
         loaded_count = 0
         cache_hits = 0
         cache_misses = 0
+        corrupted_files = 0
 
         for image_path in image_paths:
             # Update progress every 10 images to keep UI responsive
@@ -377,6 +378,7 @@ class ImageListModel(QAbstractListModel):
 
             except (ValueError, OSError) as exception:
                 # Skip corrupted/unreadable images silently
+                corrupted_files += 1
                 print(f'Skipping corrupted/unreadable image: {image_path.name}', file=sys.stderr)
                 continue
 
@@ -460,9 +462,12 @@ class ImageListModel(QAbstractListModel):
         db.commit()
         db.close()
 
-        if cache_hits > 0:
-            cache_rate = (cache_hits / (cache_hits + cache_misses)) * 100
-            print(f'Database cache: {cache_hits} hits, {cache_misses} misses ({cache_rate:.1f}% hit rate)')
+        if cache_hits > 0 or cache_misses > 0:
+            cache_rate = (cache_hits / (cache_hits + cache_misses)) * 100 if (cache_hits + cache_misses) > 0 else 0
+            report = f'Database cache: {cache_hits} hits, {cache_misses} misses ({cache_rate:.1f}% hit rate)'
+            if corrupted_files > 0:
+                report += f', {corrupted_files} corrupted/unreadable files skipped'
+            print(report)
 
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
         self.endResetModel()

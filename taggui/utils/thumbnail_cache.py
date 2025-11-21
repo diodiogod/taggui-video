@@ -39,6 +39,33 @@ class ThumbnailCache:
 
         if self.enabled:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+            # Clean up old PNG cache files (we use WebP now)
+            self._cleanup_old_png_cache()
+
+    def _cleanup_old_png_cache(self):
+        """Remove old PNG cache files (we use WebP now for better compression)."""
+        if not self.cache_dir.exists():
+            return
+
+        try:
+            png_files = list(self.cache_dir.rglob('*.png'))
+            if not png_files:
+                return
+
+            print(f'Cleaning up {len(png_files)} old PNG cache files...')
+            removed = 0
+            for png_file in png_files:
+                try:
+                    png_file.unlink()
+                    removed += 1
+                except Exception:
+                    pass
+
+            if removed > 0:
+                print(f'Removed {removed} PNG files, cache will be rebuilt in WebP format')
+
+        except Exception as e:
+            print(f'Failed to cleanup PNG cache: {e}')
 
     def _migrate_cache(self, old_dir: Path, new_dir: Path):
         """
@@ -57,8 +84,8 @@ class ThumbnailCache:
             # Create new directory
             new_dir.mkdir(parents=True, exist_ok=True)
 
-            # Count total files for progress
-            cache_files = list(old_dir.rglob('*.png'))
+            # Count total files for progress (support both PNG and WebP)
+            cache_files = list(old_dir.rglob('*.png')) + list(old_dir.rglob('*.webp'))
             total_files = len(cache_files)
 
             if total_files == 0:
@@ -129,7 +156,7 @@ class ThumbnailCache:
         subdir = cache_key[:2]
         cache_subdir = self.cache_dir / subdir
         cache_subdir.mkdir(exist_ok=True)
-        return cache_subdir / f"{cache_key}.png"
+        return cache_subdir / f"{cache_key}.webp"
 
     def get_thumbnail(self, file_path: Path, mtime: float, size: int) -> QIcon | None:
         """
@@ -184,10 +211,10 @@ class ThumbnailCache:
         cache_path = self._get_cache_path(cache_key)
 
         try:
-            # Get pixmap from icon and save as PNG
+            # Get pixmap from icon and save as WebP (much smaller than PNG)
             pixmap = icon.pixmap(size, size)
             if not pixmap.isNull():
-                pixmap.save(str(cache_path), 'PNG', quality=95)
+                pixmap.save(str(cache_path), 'WEBP', quality=85)
         except Exception as e:
             print(f'Failed to save thumbnail cache: {e}')
 
@@ -207,7 +234,7 @@ class ThumbnailCache:
                 if not subdir.is_dir():
                     continue
                 for cache_file in subdir.iterdir():
-                    if cache_file.suffix != '.png':
+                    if cache_file.suffix not in ['.png', '.webp']:
                         continue
                     age = current_time - cache_file.stat().st_mtime
                     if age > max_age_seconds:
