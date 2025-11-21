@@ -55,6 +55,7 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `caption_multiple_images_dialog.py`: Dialog for batch captioning
 - `export_dialog.py`: Export settings dialog
 - `find_and_replace_dialog.py`: Find/replace tags dialog
+- `prompt_history_dialog.py`: Prompt history browser with search (autocaptioner)
 - `settings_dialog.py`: Application settings dialog
 
 ### Models (models/)
@@ -70,6 +71,7 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `big_widgets.py`: Large UI widget components
 - `crop_applier.py`: In-place crop application to images/videos
 - `enums.py`: Application enumerations
+- `field_history.py`: Field history manager for single-line inputs (100 entries per field)
 - `focused_scroll_mixin.py`: Scroll behavior mixin
 - `grammar_checker.py`: LanguageTool grammar checking integration
 - `grid.py`: Grid layout utilities
@@ -78,13 +80,14 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `jxlutil.py`: JPEG XL format utilities
 - `key_press_forwarder.py`: Keyboard event forwarding
 - `ModelThread.py`: Thread for model operations
+- `prompt_history.py`: Prompt history manager with LRU ordering (10k prompts max)
 - `rect.py`: Rectangle utilities
-- `settings_widgets.py`: Settings UI widgets
+- `settings_widgets.py`: Settings UI widgets with spell checking support
 - `settings.py`: Application settings management
 - `shortcut_remover.py`: Shortcut conflict resolution
 - `spell_highlighter.py`: Real-time spell checking with pyspellchecker
 - `target_dimension.py`: Dimension calculation utilities
-- `text_edit_item_delegate.py`: Text editing delegate
+- `text_edit_item_delegate.py`: Text editing delegate with spell checking
 - `utils.py`: General utility functions
 - `video_editor.py`: Video editing compatibility shim (delegates to utils/video/)
 
@@ -99,9 +102,10 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 ### Widgets (widgets/)
 - `__init__.py`: Widgets subpackage init
 - `all_tags_editor.py`: Widget for editing all tags
-- `auto_captioner.py`: Auto-captioning widget
+- `auto_captioner.py`: Auto-captioning widget with prompt/field history
 - `auto_markings.py`: Auto-marking widget
-- `descriptive_text_edit.py`: Text editor with spell/grammar checking support
+- `descriptive_text_edit.py`: Text editor with spell/grammar checking and non-blocking suggestions
+- `field_history_popup.py`: Popup menu for field history with inline search
 - `image_list.py`: Image list widget with masonry layout support (1472 lines)
 - `image_tags_editor.py`: Image tags editor widget with descriptive mode
 - `image_viewer.py`: Image display and marking widget (605 lines - refactored from 1274)
