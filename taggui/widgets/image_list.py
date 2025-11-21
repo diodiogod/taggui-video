@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
-                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint)
+                            Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint, QThread)
 from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -24,6 +24,40 @@ from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
 from utils.grid import Grid
 from widgets.masonry_layout import MasonryLayout
+
+
+class MasonryCalculationThread(QThread):
+    """Background thread for calculating masonry layout without blocking UI."""
+    finished = Signal(object)  # Emits the calculated MasonryLayout
+    progress = Signal(int, int)  # (current, total) progress updates
+
+    def __init__(self, items_data, column_width, spacing, viewport_width, cache_key):
+        super().__init__()
+        self.items_data = items_data
+        self.column_width = column_width
+        self.spacing = spacing
+        self.viewport_width = viewport_width
+        self.cache_key = cache_key
+
+    def run(self):
+        """Run the calculation in background thread."""
+        try:
+            # Emit initial progress
+            self.progress.emit(0, len(self.items_data))
+
+            masonry_layout = MasonryLayout(column_width=self.column_width, spacing=self.spacing)
+            masonry_layout.set_viewport_width(self.viewport_width)
+
+            # Calculate with progress callback
+            masonry_layout.calculate_all(self.items_data, cache_key=self.cache_key,
+                                        progress_callback=lambda current, total: self.progress.emit(current, total))
+
+            self.finished.emit(masonry_layout)
+        except Exception as e:
+            print(f"Masonry calculation error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.finished.emit(None)
 
 
 def replace_filter_wildcards(filter_: str | list) -> str | list:
@@ -350,6 +384,7 @@ class ImageListView(QListView):
         self.masonry_layout = None
         self.use_masonry = False
         self._masonry_calculating = False  # Re-entry guard for layout calculation
+        self._masonry_calc_thread = None  # Background calculation thread
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
@@ -497,7 +532,7 @@ class ImageListView(QListView):
             self.viewport().update()
 
     def _calculate_masonry_layout(self):
-        """Calculate masonry layout positions for all items."""
+        """Calculate masonry layout positions for all items (async with thread)."""
         if not self.use_masonry or not self.model():
             return
 
@@ -505,91 +540,122 @@ class ImageListView(QListView):
         if self.model().rowCount() == 0:
             return
 
-        # Prevent re-entry during calculation (processEvents can trigger resize/wheel events)
+        # Cancel existing calculation thread if running
+        if self._masonry_calc_thread and self._masonry_calc_thread.isRunning():
+            self._masonry_calc_thread.quit()
+            self._masonry_calc_thread.wait()
+
+        # Prevent re-entry during calculation
         if self._masonry_calculating:
             return
 
         self._masonry_calculating = True
-        try:
-            # Initialize masonry layout
-            column_width = self.current_thumbnail_size
-            spacing = 2
-            viewport_width = self.viewport().width()
 
-            if viewport_width <= 0:
-                return
+        # Initialize parameters
+        column_width = self.current_thumbnail_size
+        spacing = 2
+        viewport_width = self.viewport().width()
 
-            self.masonry_layout = MasonryLayout(column_width=column_width, spacing=spacing)
-            self.masonry_layout.set_viewport_width(viewport_width)
+        if viewport_width <= 0:
+            self._masonry_calculating = False
+            return
 
-            # Show loading label
-            if not hasattr(self, '_masonry_loading_label'):
-                self._masonry_loading_label = QLabel("Calculating layout...", self.viewport())
-                self._masonry_loading_label.setStyleSheet("""
-                    QLabel {
-                        background-color: rgba(0, 0, 0, 180);
-                        color: white;
-                        padding: 10px 20px;
-                        border-radius: 5px;
-                        font-size: 14px;
-                    }
-                """)
-                self._masonry_loading_label.setAlignment(Qt.AlignCenter)
+        # Collect all items with their aspect ratios (fast, just metadata)
+        items_data = []
+        for row in range(self.model().rowCount()):
+            index = self.model().index(row, 0)
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image and hasattr(image, 'dimensions') and image.dimensions:
+                width, height = image.dimensions
+                aspect_ratio = width / height if height > 0 else 1.0
+            else:
+                aspect_ratio = 1.0  # Default to square
+            items_data.append((row, aspect_ratio))
 
-            self._masonry_loading_label.setGeometry(
-                (self.viewport().width() - 200) // 2,
-                (self.viewport().height() - 50) // 2,
-                200, 50
-            )
-            self._masonry_loading_label.show()
-            self._masonry_loading_label.raise_()
-            # Don't call processEvents - it causes re-entry and blocks UI updates
+        # Generate cache key based on directory and settings
+        cache_key = self._get_masonry_cache_key()
 
-            # Collect all items with their aspect ratios
-            items_data = []
-            for row in range(self.model().rowCount()):
-                index = self.model().index(row, 0)
-                image = index.data(Qt.ItemDataRole.UserRole)
-                if image and hasattr(image, 'dimensions') and image.dimensions:
-                    width, height = image.dimensions
-                    aspect_ratio = width / height if height > 0 else 1.0
-                else:
-                    aspect_ratio = 1.0  # Default to square
-                items_data.append((row, aspect_ratio))
+        # Show progress bar
+        if not hasattr(self, '_masonry_progress_bar'):
+            self._masonry_progress_bar = QProgressBar(self.viewport())
+            self._masonry_progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 2px solid #555;
+                    border-radius: 5px;
+                    background-color: rgba(0, 0, 0, 180);
+                    text-align: center;
+                    color: white;
+                    font-size: 13px;
+                    min-height: 30px;
+                }
+                QProgressBar::chunk {
+                    background-color: #4CAF50;
+                    border-radius: 3px;
+                }
+            """)
 
-            # Generate cache key based on directory and settings
-            cache_key = self._get_masonry_cache_key()
+        bar_width = min(400, self.viewport().width() - 40)
+        self._masonry_progress_bar.setGeometry(
+            (self.viewport().width() - bar_width) // 2,
+            (self.viewport().height() - 35) // 2,
+            bar_width, 35
+        )
+        self._masonry_progress_bar.setFormat("Calculating layout: %v/%m")
+        self._masonry_progress_bar.setMaximum(len(items_data))
+        self._masonry_progress_bar.setValue(0)
+        self._masonry_progress_bar.show()
+        self._masonry_progress_bar.raise_()
 
-            # Calculate all positions (with caching!)
-            self.masonry_layout.calculate_all(items_data, cache_key=cache_key)
+        # Start background calculation thread
+        self._masonry_calc_thread = MasonryCalculationThread(
+            items_data, column_width, spacing, viewport_width, cache_key
+        )
+        self._masonry_calc_thread.progress.connect(self._on_masonry_calculation_progress)
+        self._masonry_calc_thread.finished.connect(self._on_masonry_calculation_complete)
+        self._masonry_calc_thread.start()
 
-            # Hide loading label
+    def _on_masonry_calculation_progress(self, current, total):
+        """Update progress bar during calculation."""
+        if hasattr(self, '_masonry_progress_bar'):
+            self._masonry_progress_bar.setValue(current)
+
+    def _on_masonry_calculation_complete(self, masonry_layout):
+        """Called when background masonry calculation completes."""
+        self._masonry_calculating = False
+
+        # Hide progress bar
+        if hasattr(self, '_masonry_progress_bar'):
+            self._masonry_progress_bar.hide()
+
+        # Hide old loading label if it exists
+        if hasattr(self, '_masonry_loading_label') and self._masonry_loading_label:
             self._masonry_loading_label.hide()
 
-            # Stop idle preload timer to prevent showing progress bar unnecessarily
-            self._idle_preload_timer.stop()
+        if masonry_layout is None:
+            # Calculation failed
+            return
 
-            # Hide thumbnail progress bar if visible
-            if self._thumbnail_progress_bar:
-                self._thumbnail_progress_bar.hide()
+        # Apply the calculated layout
+        self.masonry_layout = masonry_layout
 
-            # Don't reset preload state - thumbnails are already loaded, just re-arranged
-            # Only the layout positions changed, not the actual thumbnail images
+        # Stop idle preload timer to prevent showing progress bar unnecessarily
+        self._idle_preload_timer.stop()
 
-            # Update scroll area to accommodate total height
-            # The maximum scroll position should be: total_height - viewport_height
-            # So the last items are visible at the bottom
-            total_height = self.masonry_layout.get_total_height()
-            viewport_height = self.viewport().height()
-            max_scroll = max(0, total_height - viewport_height)
+        # Hide thumbnail progress bar if visible
+        if self._thumbnail_progress_bar:
+            self._thumbnail_progress_bar.hide()
 
-            self.verticalScrollBar().setRange(0, max_scroll)
-            self.verticalScrollBar().setPageStep(viewport_height)
-        finally:
-            self._masonry_calculating = False
-            # Always hide loading label, even if early return or exception
-            if hasattr(self, '_masonry_loading_label') and self._masonry_loading_label:
-                self._masonry_loading_label.hide()
+        # Update scroll area to accommodate total height
+        total_height = self.masonry_layout.get_total_height()
+        viewport_height = self.viewport().height()
+        max_scroll = max(0, total_height - viewport_height)
+
+        self.verticalScrollBar().setRange(0, max_scroll)
+        self.verticalScrollBar().setPageStep(viewport_height)
+
+        # Force UI update
+        self.scheduleDelayedItemsLayout()
+        self.viewport().update()
 
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
