@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 from PySide6.QtGui import QIcon, QPixmap
+from utils.settings import settings, DEFAULT_SETTINGS
 
 
 class ThumbnailCache:
@@ -10,8 +11,23 @@ class ThumbnailCache:
 
     def __init__(self):
         """Initialize thumbnail cache directory."""
-        self.cache_dir = Path.home() / '.taggui_cache' / 'thumbnails'
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Check if caching is enabled
+        self.enabled = settings.value('enable_thumbnail_cache',
+                                     defaultValue=DEFAULT_SETTINGS['enable_thumbnail_cache'],
+                                     type=bool)
+
+        # Get cache location from settings (or use default)
+        cache_location = settings.value('thumbnail_cache_location',
+                                       defaultValue=DEFAULT_SETTINGS['thumbnail_cache_location'],
+                                       type=str)
+
+        if cache_location:
+            self.cache_dir = Path(cache_location)
+        else:
+            self.cache_dir = Path.home() / '.taggui_cache' / 'thumbnails'
+
+        if self.enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_cache_key(self, file_path: Path, mtime: float, size: int) -> str:
         """
@@ -49,6 +65,9 @@ class ThumbnailCache:
         Returns:
             Cached QIcon or None if cache miss
         """
+        if not self.enabled:
+            return None
+
         cache_key = self._get_cache_key(file_path, mtime, size)
         cache_path = self._get_cache_path(cache_key)
 
@@ -80,7 +99,7 @@ class ThumbnailCache:
             size: Thumbnail size in pixels
             icon: QIcon to cache
         """
-        if icon.isNull():
+        if not self.enabled or icon.isNull():
             return
 
         cache_key = self._get_cache_key(file_path, mtime, size)

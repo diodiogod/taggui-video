@@ -3,6 +3,7 @@
 import sqlite3
 from pathlib import Path
 from typing import Optional
+from utils.settings import settings, DEFAULT_SETTINGS
 
 
 DB_VERSION = 1  # Increment to force cache invalidation
@@ -13,9 +14,16 @@ class ImageIndexDB:
 
     def __init__(self, directory_path: Path):
         """Initialize database for given directory."""
+        # Check if caching is enabled
+        self.enabled = settings.value('enable_dimension_cache',
+                                     defaultValue=DEFAULT_SETTINGS['enable_dimension_cache'],
+                                     type=bool)
+
         self.db_path = directory_path / '.taggui_index.db'
         self.conn = None
-        self._init_db()
+
+        if self.enabled:
+            self._init_db()
 
     def _init_db(self):
         """Create database and tables if they don't exist."""
@@ -83,7 +91,7 @@ class ImageIndexDB:
         Returns:
             Dict with dimensions and metadata, or None if cache miss/stale
         """
-        if not self.conn:
+        if not self.enabled or not self.conn:
             return None
 
         try:
@@ -134,7 +142,7 @@ class ImageIndexDB:
             mtime: File modification time
             video_metadata: Optional dict with fps, duration, frame_count
         """
-        if not self.conn:
+        if not self.enabled or not self.conn:
             return
 
         try:
