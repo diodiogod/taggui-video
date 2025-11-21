@@ -332,9 +332,10 @@ class ImageListModel(QAbstractListModel):
                         error_messages.append(f'Failed to get Exif tags for '
                                               f'{image_path}: {exception}')
             except (ValueError, OSError) as exception:
-                error_messages.append(f'Failed to get dimensions for '
-                                      f'{image_path}: {exception}')
-                dimensions = None
+                # Skip corrupted/unreadable images silently (don't add to error list)
+                # Just log to console for debugging
+                print(f'Skipping corrupted/unreadable image: {image_path.name}', file=sys.stderr)
+                continue  # Skip this image entirely instead of adding it with None dimensions
             tags = []
             text_file_path = image_path.with_suffix('.txt')
             if str(text_file_path) in text_file_path_strings:
