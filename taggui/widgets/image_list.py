@@ -1154,6 +1154,22 @@ class ImageListView(QListView):
         else:
             super().mouseMoveEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        """Handle double-click events."""
+        # Alt+double-click opens image in default app
+        if event.modifiers() & Qt.AltModifier:
+            index = self.indexAt(event.pos())
+            if index.isValid():
+                # Get the image at this index
+                image = index.data(Qt.ItemDataRole.UserRole)
+                if image:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path)))
+                event.accept()
+                return
+
+        # Default behavior for other double-clicks
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
         if self.use_masonry and self._masonry_items:
