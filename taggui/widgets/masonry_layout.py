@@ -97,15 +97,24 @@ class MasonryLayout:
         """
         # Try to load from cache first
         if cache_key and self._load_from_cache(cache_key, items_data):
+            print(f"    ✓ CACHE HIT: Loaded {len(items_data)} items from cache")
             if progress_callback:
                 progress_callback(len(items_data), len(items_data))  # Report 100% immediately
             return  # Successfully loaded from cache
+
+        if cache_key:
+            print(f"    ✗ CACHE MISS: Calculating {len(items_data)} items...")
 
         # Calculate positions with progress updates
         self._reset_columns()
         total = len(items_data)
         for i, (index, aspect_ratio) in enumerate(items_data):
             self.add_item(index, aspect_ratio)
+            # Release GIL every 10 items to let UI thread process keyboard events
+            # Python's GIL can block UI even in background threads
+            if i % 10 == 0:
+                import time
+                time.sleep(0)  # Releases GIL, allows UI thread to run
             # Report progress every 50 items to avoid too many signals
             if progress_callback and (i % 50 == 0 or i == total - 1):
                 progress_callback(i + 1, total)
@@ -181,6 +190,7 @@ class MasonryLayout:
             # Validate aspect ratios match (same images in same order)
             # This prevents using cached layouts when sort order changes the image sequence
             cached_items = cache_data['items']
+            import time
             for i, (index, aspect_ratio) in enumerate(items_data):
                 if i >= len(cached_items):
                     return False
@@ -188,28 +198,39 @@ class MasonryLayout:
                 # Allow small floating point differences
                 if abs(cached_aspect - aspect_ratio) > 0.001:
                     return False
+                # Release GIL every 10 items
+                if i % 10 == 0:
+                    time.sleep(0)
 
             # Restore item positions
             self._reset_columns()
-            self._item_positions = [
-                MasonryItem(
-                    index=item['index'],
-                    rect=QRect(item['x'], item['y'], item['width'], item['height']),
-                    aspect_ratio=item['aspect_ratio']
+            self._item_positions = []
+            for i, item in enumerate(cache_data['items']):
+                self._item_positions.append(
+                    MasonryItem(
+                        index=item['index'],
+                        rect=QRect(item['x'], item['y'], item['width'], item['height']),
+                        aspect_ratio=item['aspect_ratio']
+                    )
                 )
-                for item in cache_data['items']
-            ]
+                # Release GIL every 10 items
+                if i % 10 == 0:
+                    time.sleep(0)
+
             self._total_height = cache_data['total_height']
 
             # Restore column heights (reconstruct from items)
             self._column_heights = [0] * self.num_columns
-            for item in self._item_positions:
+            for i, item in enumerate(self._item_positions):
                 col = item.rect.x() // (self.column_width + self.spacing)
                 if 0 <= col < self.num_columns:
                     self._column_heights[col] = max(
                         self._column_heights[col],
                         item.rect.bottom() + self.spacing
                     )
+                # Release GIL every 10 items
+                if i % 10 == 0:
+                    time.sleep(0)
 
             return True
         except Exception as e:

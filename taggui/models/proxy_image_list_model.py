@@ -33,6 +33,31 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.filter: list | None = None
         self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
 
+    def get_filtered_aspect_ratios(self) -> list[tuple[int, float]]:
+        """Get (row, aspect_ratio) pairs for filtered items without iterating Qt model.
+
+        Returns list of (proxy_row, aspect_ratio) tuples. This is MUCH faster than
+        calling .index() and .data() in a loop on the UI thread.
+        """
+        source_model = self.sourceModel()
+        if not source_model:
+            return []
+
+        # Get all aspect ratios from source model (fast, no Qt calls)
+        all_aspect_ratios = source_model.get_aspect_ratios()
+
+        # Build filtered list by mapping proxy rows to source rows
+        result = []
+        for proxy_row in range(self.rowCount()):
+            proxy_index = self.index(proxy_row, 0)
+            source_index = self.mapToSource(proxy_index)
+            if source_index.isValid():
+                source_row = source_index.row()
+                if source_row < len(all_aspect_ratios):
+                    result.append((proxy_row, all_aspect_ratios[source_row]))
+
+        return result
+
     def set_filter(self, new_filter: list | None):
         self.filter = new_filter
         self.invalidateFilter()

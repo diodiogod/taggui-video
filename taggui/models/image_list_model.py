@@ -142,6 +142,17 @@ class ImageListModel(QAbstractListModel):
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
 
+        # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
+        self._aspect_ratio_cache: list[float] = []
+
+    def get_aspect_ratios(self) -> list[float]:
+        """Get cached aspect ratios for all images (fast, no Qt calls)."""
+        return self._aspect_ratio_cache
+
+    def _rebuild_aspect_ratio_cache(self):
+        """Rebuild aspect ratio cache when images change."""
+        self._aspect_ratio_cache = [img.aspect_ratio for img in self.images]
+
     def flags(self, index):
         default_flags = super().flags(index)
         if index.isValid():
@@ -482,6 +493,7 @@ class ImageListModel(QAbstractListModel):
             print(report)
 
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
+        self._rebuild_aspect_ratio_cache()  # Build cache after loading
         self.endResetModel()
 
         if len(error_messages) > 0:
