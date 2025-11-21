@@ -501,6 +501,10 @@ class ImageListView(QListView):
         if not self.use_masonry or not self.model():
             return
 
+        # Skip if model is empty
+        if self.model().rowCount() == 0:
+            return
+
         # Prevent re-entry during calculation (processEvents can trigger resize/wheel events)
         if self._masonry_calculating:
             return
@@ -539,7 +543,7 @@ class ImageListView(QListView):
             )
             self._masonry_loading_label.show()
             self._masonry_loading_label.raise_()
-            QApplication.processEvents()  # Force UI update
+            # Don't call processEvents - it causes re-entry and blocks UI updates
 
             # Collect all items with their aspect ratios
             items_data = []
@@ -772,8 +776,9 @@ class ImageListView(QListView):
             self.setGridSize(QSize(-1, -1))
             # Calculate masonry layout
             self._calculate_masonry_layout()
-            # Force item delegate to recalculate sizes
+            # Force item delegate to recalculate sizes and update viewport
             self.scheduleDelayedItemsLayout()
+            self.viewport().update()
 
     def startDrag(self, supportedActions: Qt.DropAction):
         indices = self.selectedIndexes()
