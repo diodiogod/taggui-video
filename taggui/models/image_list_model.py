@@ -249,6 +249,9 @@ class ImageListModel(QAbstractListModel):
             return f'{path}\n{dimensions} 🠮 {target}'
 
     def load_directory(self, directory_path: Path):
+        from PySide6.QtWidgets import QProgressDialog, QApplication
+        from PySide6.QtCore import Qt
+
         self.beginResetModel()
         self.images.clear()
         self.undo_stack.clear()
@@ -276,7 +279,25 @@ class ImageListModel(QAbstractListModel):
         # Define video extensions
         video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
+        # Create progress dialog
+        total_images = len(image_paths)
+        progress = QProgressDialog("Loading images...", "Cancel", 0, total_images)
+        progress.setWindowTitle("Loading Directory")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(500)  # Show after 500ms if still loading
+        progress.setAutoClose(True)
+        progress.setAutoReset(False)
+
+        loaded_count = 0
         for image_path in image_paths:
+            # Update progress every 10 images to keep UI responsive
+            if loaded_count % 10 == 0:
+                progress.setValue(loaded_count)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    break
+
+            loaded_count += 1
             is_video = image_path.suffix.lower() in video_extensions
             video_metadata = None
             first_frame_pixmap = None
@@ -366,8 +387,11 @@ class ImageListModel(QAbstractListModel):
                                               f'"{meta.get('version')}" in '
                                               f'"{json_file_path}"')
             self.images.append(image)
+
+        progress.setValue(total_images)  # Complete
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
         self.endResetModel()
+
         if len(error_messages) > 0:
             print('\n'.join(error_messages), file=sys.stderr)
             error_message_box = QMessageBox()

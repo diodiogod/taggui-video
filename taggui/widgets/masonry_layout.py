@@ -86,22 +86,29 @@ class MasonryLayout:
 
         return rect
 
-    def calculate_all(self, items_data: list[tuple[int, float]], cache_key: str = None):
+    def calculate_all(self, items_data: list[tuple[int, float]], cache_key: str = None, progress_callback=None):
         """
         Calculate positions for all items at once.
 
         Args:
             items_data: List of (index, aspect_ratio) tuples
             cache_key: Optional cache key for saving/loading positions
+            progress_callback: Optional callback(current, total) for progress updates
         """
         # Try to load from cache first
         if cache_key and self._load_from_cache(cache_key, items_data):
+            if progress_callback:
+                progress_callback(len(items_data), len(items_data))  # Report 100% immediately
             return  # Successfully loaded from cache
 
-        # Calculate positions
+        # Calculate positions with progress updates
         self._reset_columns()
-        for index, aspect_ratio in items_data:
+        total = len(items_data)
+        for i, (index, aspect_ratio) in enumerate(items_data):
             self.add_item(index, aspect_ratio)
+            # Report progress every 50 items to avoid too many signals
+            if progress_callback and (i % 50 == 0 or i == total - 1):
+                progress_callback(i + 1, total)
 
         # Save to cache
         if cache_key:
