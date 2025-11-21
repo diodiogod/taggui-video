@@ -1,6 +1,7 @@
 """Disk caching for generated thumbnails to speed up reloads."""
 
 import hashlib
+import shutil
 from pathlib import Path
 from PySide6.QtGui import QIcon, QPixmap
 from utils.settings import settings, DEFAULT_SETTINGS
@@ -22,12 +23,89 @@ class ThumbnailCache:
                                        type=str)
 
         if cache_location:
-            self.cache_dir = Path(cache_location)
+            new_cache_dir = Path(cache_location)
         else:
-            self.cache_dir = Path.home() / '.taggui_cache' / 'thumbnails'
+            new_cache_dir = Path.home() / '.taggui_cache' / 'thumbnails'
+
+        # Check if cache location changed and migrate if needed
+        old_cache_location = settings.value('_last_thumbnail_cache_location', type=str)
+        if old_cache_location and old_cache_location != str(new_cache_dir):
+            self._migrate_cache(Path(old_cache_location), new_cache_dir)
+
+        # Save current location for next time
+        settings.setValue('_last_thumbnail_cache_location', str(new_cache_dir))
+
+        self.cache_dir = new_cache_dir
 
         if self.enabled:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _migrate_cache(self, old_dir: Path, new_dir: Path):
+        """
+        Migrate cache from old location to new location.
+
+        Args:
+            old_dir: Old cache directory
+            new_dir: New cache directory
+        """
+        if not old_dir.exists():
+            return  # Nothing to migrate
+
+        try:
+            print(f'Migrating thumbnail cache from {old_dir} to {new_dir}...')
+
+            # Create new directory
+            new_dir.mkdir(parents=True, exist_ok=True)
+
+            # Count total files for progress
+            cache_files = list(old_dir.rglob('*.png'))
+            total_files = len(cache_files)
+
+            if total_files == 0:
+                print('No cache files to migrate')
+                return
+
+            print(f'Moving {total_files} cached thumbnails...')
+
+            moved = 0
+            for old_file in cache_files:
+                # Preserve subdirectory structure
+                relative_path = old_file.relative_to(old_dir)
+                new_file = new_dir / relative_path
+
+                # Create subdirectory if needed
+                new_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # Move file (faster than copy+delete)
+                try:
+                    shutil.move(str(old_file), str(new_file))
+                    moved += 1
+
+                    # Print progress every 100 files
+                    if moved % 100 == 0:
+                        print(f'Moved {moved}/{total_files} thumbnails...')
+                except Exception as e:
+                    print(f'Failed to move {old_file}: {e}')
+
+            print(f'Cache migration complete: {moved}/{total_files} thumbnails moved')
+
+            # Try to remove old directory if empty
+            try:
+                # Remove empty subdirectories
+                for subdir in old_dir.iterdir():
+                    if subdir.is_dir() and not any(subdir.iterdir()):
+                        subdir.rmdir()
+
+                # Remove main directory if empty
+                if not any(old_dir.iterdir()):
+                    old_dir.rmdir()
+                    print(f'Removed old cache directory: {old_dir}')
+            except Exception:
+                pass  # Leave old directory if it's not empty
+
+        except Exception as e:
+            print(f'Cache migration failed: {e}')
+            print('Cache will be rebuilt at new location')
 
     def _get_cache_key(self, file_path: Path, mtime: float, size: int) -> str:
         """
