@@ -308,6 +308,10 @@ class MainWindow(QMainWindow):
 
         # Fallback timeout in case layout_ready doesn't fire (e.g., grid layout)
         QTimer.singleShot(2000, do_scroll)
+
+        # Set focus to image list so arrow keys work immediately
+        self.image_list.list_view.setFocus()
+
         self.menu_manager.reload_directory_action.setDisabled(False)
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
