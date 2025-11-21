@@ -60,7 +60,7 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 
 ### Models (models/)
 - `__init__.py`: Models subpackage init
-- `image_list_model.py`: Data model for image list
+- `image_list_model.py`: Data model for image list with parallel thumbnail loading (6 workers) and cache saving (2 workers)
 - `image_tag_list_model.py`: Data model for image tags
 - `proxy_image_list_model.py`: Proxy model for filtered image list
 - `proxy_tag_counter_model.py`: Proxy model for tag counting
@@ -76,7 +76,8 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `grammar_checker.py`: LanguageTool grammar checking integration
 - `grid.py`: Grid layout utilities
 - `icons.py`: Icon management
-- `image.py`: Image processing utilities
+- `image.py`: Image processing utilities (includes QImage dataclass field for lazy QPixmap conversion)
+- `image_index_db.py`: SQLite-based image metadata database for fast filtering
 - `jxlutil.py`: JPEG XL format utilities
 - `key_press_forwarder.py`: Keyboard event forwarding
 - `ModelThread.py`: Thread for model operations
@@ -88,6 +89,7 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `spell_highlighter.py`: Real-time spell checking with pyspellchecker
 - `target_dimension.py`: Dimension calculation utilities
 - `text_edit_item_delegate.py`: Text editing delegate with spell checking
+- `thumbnail_cache.py`: Disk-based thumbnail cache with WebP compression and migration support
 - `utils.py`: General utility functions
 - `video_editor.py`: Video editing compatibility shim (delegates to utils/video/)
 
@@ -111,6 +113,7 @@ TagGUI is a cross-platform desktop app for tagging images and captions for AI da
 - `image_viewer.py`: Image display and marking widget (605 lines - refactored from 1274)
 - `marking_view.py`: Graphics view for marking insertion mode (226 lines)
 - `masonry_layout.py`: Pinterest-style masonry layout calculator with disk caching (224 lines)
+- `masonry_worker.py`: Multiprocessing worker for non-blocking masonry calculations (avoids Python GIL)
 - `main_window.py`: Main application window (460 lines - refactored from 1661)
 - `video_controls.py`: Video playback controls (1065 lines - needs refactoring)
 - `video_player.py`: Video player widget
