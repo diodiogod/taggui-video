@@ -638,12 +638,8 @@ class ImageListView(QListView):
         # Apply the calculated layout
         self.masonry_layout = masonry_layout
 
-        # Stop idle preload timer to prevent showing progress bar unnecessarily
-        self._idle_preload_timer.stop()
-
-        # Hide thumbnail progress bar if visible
-        if self._thumbnail_progress_bar:
-            self._thumbnail_progress_bar.hide()
+        # Don't stop preload timer - let thumbnails load as user scrolls
+        # The progress bar will show during scroll if needed
 
         # Update scroll area to accommodate total height
         total_height = self.masonry_layout.get_total_height()
