@@ -182,6 +182,8 @@ class ImageListModel(QAbstractListModel):
             # The thumbnail. If the image already has a thumbnail stored, use
             # it. Otherwise, check disk cache, or generate and save it.
             if image.thumbnail:
+                # Mark as cache hit for progress tracking
+                image._last_thumbnail_was_cached = True
                 return image.thumbnail
 
             # Try to load from disk cache
@@ -193,9 +195,13 @@ class ImageListModel(QAbstractListModel):
                 )
                 if cached_thumbnail:
                     image.thumbnail = cached_thumbnail
+                    image._last_thumbnail_was_cached = True
                     return cached_thumbnail
             except Exception:
                 pass  # Cache miss or error, continue to generate
+
+            # Mark as cache miss (will generate new thumbnail)
+            image._last_thumbnail_was_cached = False
 
             crop = image.crop
             try:
