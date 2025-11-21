@@ -321,6 +321,7 @@ class ImageListModel(QAbstractListModel):
         cache_hits = 0
         cache_misses = 0
         corrupted_files = 0
+        failed_video_extractions = 0
 
         for image_path in image_paths:
             # Update progress every 10 images to keep UI responsive
@@ -339,7 +340,9 @@ class ImageListModel(QAbstractListModel):
             # Try to load from DB cache first
             try:
                 mtime = image_path.stat().st_mtime
-                cached = db.get_cached_info(image_path.name, mtime)
+                # Use relative path from directory root to handle subdirectories
+                relative_path = str(image_path.relative_to(directory_path))
+                cached = db.get_cached_info(relative_path, mtime)
 
                 if cached:
                     # Cache hit! Use cached dimensions
@@ -355,6 +358,7 @@ class ImageListModel(QAbstractListModel):
                         # Handle video files
                         dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
                         if dimensions is None:
+                            failed_video_extractions += 1
                             error_messages.append(f'Failed to extract video info from '
                                                 f'{image_path}')
                             continue
@@ -369,7 +373,7 @@ class ImageListModel(QAbstractListModel):
 
                     # Save to cache for next time
                     if dimensions:
-                        db.save_info(image_path.name, dimensions[0], dimensions[1],
+                        db.save_info(relative_path, dimensions[0], dimensions[1],
                                     is_video, mtime, video_metadata)
 
                         # Commit every 100 images to avoid losing too much on crash
@@ -397,7 +401,7 @@ class ImageListModel(QAbstractListModel):
                                    for value in (5, 6, 7, 8)):
                                 dimensions = (dimensions[1], dimensions[0])
                                 # Update cache with corrected dimensions
-                                db.save_info(image_path.name, dimensions[0], dimensions[1],
+                                db.save_info(relative_path, dimensions[0], dimensions[1],
                                            is_video, mtime, video_metadata)
                 except Exception as exception:
                     error_messages.append(f'Failed to get Exif tags for '
@@ -466,7 +470,9 @@ class ImageListModel(QAbstractListModel):
             cache_rate = (cache_hits / (cache_hits + cache_misses)) * 100 if (cache_hits + cache_misses) > 0 else 0
             report = f'Database cache: {cache_hits} hits, {cache_misses} misses ({cache_rate:.1f}% hit rate)'
             if corrupted_files > 0:
-                report += f', {corrupted_files} corrupted/unreadable files skipped'
+                report += f', {corrupted_files} corrupted files'
+            if failed_video_extractions > 0:
+                report += f', {failed_video_extractions} failed video extractions'
             print(report)
 
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
