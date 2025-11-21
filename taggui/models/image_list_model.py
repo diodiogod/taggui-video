@@ -17,6 +17,8 @@ from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox
 import pillow_jxl
 from PIL import Image as pilimage  # Import Pillow's Image class
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 
 from utils.image import Image, ImageMarking, Marking
@@ -35,6 +37,80 @@ def pil_to_qimage(pil_image):
     data = pil_image.tobytes("raw", "RGBA")
     qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
     return qimage
+
+def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool) -> tuple[QImage | None, bool]:
+    """
+    Load thumbnail data (can run in background thread - uses QImage which IS thread-safe).
+
+    Args:
+        image_path: Path to the image/video file
+        crop: Crop rectangle (or None for full image)
+        thumbnail_width: Width to scale thumbnail to
+        is_video: Whether this is a video file
+
+    Returns:
+        (qimage, was_cached): QImage and whether it was loaded from cache
+    """
+    from utils.thumbnail_cache import get_thumbnail_cache
+
+    # DON'T load from cache in background thread - cache contains QIcon which isn't thread-safe
+    # Cache check happens on main thread in data() method
+
+    # Generate new thumbnail using QImage (thread-safe for creation)
+    try:
+        if is_video:
+            # For videos, extract first frame as thumbnail
+            _, _, first_frame_pixmap = extract_video_info(image_path)
+            if first_frame_pixmap:
+                # Convert QPixmap to QImage (thread-safe)
+                qimage = first_frame_pixmap.toImage().scaledToWidth(
+                    thumbnail_width,
+                    Qt.TransformationMode.SmoothTransformation)
+            else:
+                # Fallback to a placeholder
+                qimage = QImage(thumbnail_width, thumbnail_width, QImage.Format_RGB888)
+                qimage.fill(Qt.gray)
+        elif image_path.suffix.lower() == ".jxl":
+            pil_image = pilimage.open(image_path)  # Uses pillow-jxl
+            qimage = pil_to_qimage(pil_image)
+            if not crop:
+                crop = QRect(QPoint(0, 0), qimage.size())
+            if crop.height() > crop.width()*3:
+                # keep it reasonable, higher than 3x the width doesn't make sense
+                crop.setTop((crop.height() - crop.width()*3)//2) # center crop
+                crop.setHeight(crop.width()*3)
+
+            qimage = qimage.scaledToWidth(
+                thumbnail_width,
+                Qt.TransformationMode.SmoothTransformation)
+        else:
+            image_reader = QImageReader(str(image_path))
+            # Rotate the image based on the orientation tag.
+            image_reader.setAutoTransform(True)
+            if not crop:
+                crop = QRect(QPoint(0, 0), image_reader.size())
+            if crop.height() > crop.width()*3:
+                # keep it reasonable, higher than 3x the width doesn't make sense
+                crop.setTop((crop.height() - crop.width()*3)//2) # center crop
+                crop.setHeight(crop.width()*3)
+            image_reader.setClipRect(crop)
+            # Read as QImage (thread-safe)
+            qimage = image_reader.read()
+            if qimage.isNull():
+                raise Exception("Failed to read image")
+            qimage = qimage.scaledToWidth(
+                thumbnail_width,
+                Qt.TransformationMode.SmoothTransformation)
+
+        # Return QImage - caller will convert to QPixmap/QIcon on main thread
+        return qimage, False
+    except Exception as e:
+        print(f"Error loading image/video {image_path}: {e}")
+        # Return a placeholder QImage
+        qimage = QImage(thumbnail_width, thumbnail_width, QImage.Format_RGB888)
+        qimage.fill(Qt.gray)
+        return qimage, False
+
 
 def natural_sort_key(path: Path):
     """
@@ -145,6 +221,17 @@ class ImageListModel(QAbstractListModel):
         # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
         self._aspect_ratio_cache: list[float] = []
 
+        # ThreadPoolExecutor for parallel thumbnail loading (I/O bound work)
+        # Use 4-8 workers for good parallelism without overwhelming disk I/O
+        self._thumbnail_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_loader")
+        self._thumbnail_futures = {}  # Maps image index to Future
+        self._thumbnail_lock = threading.Lock()  # Protects futures dict
+
+        # Queue for QImages waiting to be converted to QPixmap on main thread
+        self._qimage_queue = []  # List of (idx, qimage, was_cached) tuples
+        self._qimage_queue_lock = threading.Lock()
+        self._qimage_timer = None  # QTimer for processing queue gradually
+
     def get_aspect_ratios(self) -> list[float]:
         """Get cached aspect ratios for all images (fast, no Qt calls)."""
         return self._aspect_ratio_cache
@@ -152,6 +239,97 @@ class ImageListModel(QAbstractListModel):
     def _rebuild_aspect_ratio_cache(self):
         """Rebuild aspect ratio cache when images change."""
         self._aspect_ratio_cache = [img.aspect_ratio for img in self.images]
+
+    def _preload_thumbnails_async(self):
+        """Preload thumbnails in background (only helps for uncached images)."""
+        # Check how many images need loading (not in cache)
+        from utils.thumbnail_cache import get_thumbnail_cache
+        cache = get_thumbnail_cache()
+
+        uncached_count = 0
+        for image in self.images:
+            if image.thumbnail or image.thumbnail_qimage:
+                continue
+            # Quick cache check (doesn't load, just checks if file exists)
+            try:
+                mtime = image.path.stat().st_mtime
+                if not cache.get_thumbnail(image.path, mtime, self.thumbnail_generation_width):
+                    uncached_count += 1
+            except:
+                uncached_count += 1
+
+        # If most images are cached, don't bother with parallel loading
+        # It adds overhead without benefit
+        if uncached_count < 50:
+            print(f"[THUMBNAIL] Only {uncached_count} uncached, using on-demand loading")
+            return
+
+        print(f"[THUMBNAIL] {uncached_count} uncached images, starting parallel loading")
+
+        # Cancel any existing thumbnail loading
+        with self._thumbnail_lock:
+            for future in self._thumbnail_futures.values():
+                future.cancel()
+            self._thumbnail_futures.clear()
+
+        # Submit ALL uncached images (they load as QImage, lazy QPixmap conversion)
+        submitted = 0
+        for idx, image in enumerate(self.images):
+            if image.thumbnail or image.thumbnail_qimage:
+                continue
+
+            future = self._thumbnail_executor.submit(
+                self._load_thumbnail_worker, idx, image.path, image.crop,
+                self.thumbnail_generation_width, image.is_video
+            )
+            with self._thumbnail_lock:
+                self._thumbnail_futures[idx] = future
+            submitted += 1
+
+        print(f"[THUMBNAIL] Submitted {submitted} images to thread pool")
+
+    def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
+        """Worker function that runs in background thread to load thumbnail data (QImage)."""
+        try:
+            # Load QImage in background thread (thread-safe, I/O bound)
+            qimage, was_cached = load_thumbnail_data(path, crop, width, is_video)
+
+            if qimage and not qimage.isNull() and idx < len(self.images):
+                # Store QImage directly (NO main thread blocking!)
+                # QIcon creation happens lazily when data() is called
+                self.images[idx].thumbnail_qimage = qimage
+                self.images[idx]._last_thumbnail_was_cached = was_cached
+
+                # DON'T emit dataChanged - let Qt request thumbnails on-demand
+                # Emitting 1147 dataChanged signals floods the event queue
+                # Qt will call data() when it needs to paint visible items
+        except Exception as e:
+            print(f"Error in thumbnail worker for {path}: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Remove from futures dict
+            with self._thumbnail_lock:
+                self._thumbnail_futures.pop(idx, None)
+
+    def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, thumbnail: QIcon):
+        """Worker function that saves thumbnail to disk cache in background thread."""
+        import threading
+        print(f"[CACHE SAVE] Background thread {threading.current_thread().name} saving: {path.name}")
+        try:
+            from utils.thumbnail_cache import get_thumbnail_cache
+            get_thumbnail_cache().save_thumbnail(path, mtime, width, thumbnail)
+        except Exception as e:
+            print(f"[CACHE] ERROR saving in background: {e}")
+            import traceback
+            traceback.print_exc()
+
+    @Slot(int)
+    def _notify_thumbnail_ready(self, idx: int):
+        """Called on main thread when thumbnail QImage is ready (just emit dataChanged)."""
+        if idx < len(self.images):
+            model_index = self.index(idx, 0)
+            self.dataChanged.emit(model_index, model_index, [Qt.ItemDataRole.DecorationRole])
 
     def flags(self, index):
         default_flags = super().flags(index)
@@ -190,14 +368,32 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
-            # The thumbnail. If the image already has a thumbnail stored, use
-            # it. Otherwise, check disk cache, or generate and save it.
+            # Check if we already have a QIcon (from cache or previous lazy conversion)
             if image.thumbnail:
-                # Mark as cache hit for progress tracking
-                image._last_thumbnail_was_cached = True
                 return image.thumbnail
 
-            # Try to load from disk cache
+            # Check if background thread loaded a QImage for us
+            if image.thumbnail_qimage and not image.thumbnail_qimage.isNull():
+                # Lazy conversion: QImage → QPixmap → QIcon (on main thread, but only for visible items)
+                pixmap = QPixmap.fromImage(image.thumbnail_qimage)
+                thumbnail = QIcon(pixmap)
+                image.thumbnail = thumbnail
+
+                # Save to disk cache in background thread if not from cache
+                if not image._last_thumbnail_was_cached:
+                    # Submit to background thread (QPixmap.save() is thread-safe)
+                    self._thumbnail_executor.submit(
+                        self._save_thumbnail_worker,
+                        image.path,
+                        image.path.stat().st_mtime,
+                        self.thumbnail_generation_width,
+                        thumbnail
+                    )
+
+                return thumbnail
+
+            # Fallback: Load synchronously (for cache hits or if background loading didn't start yet)
+            from utils.thumbnail_cache import get_thumbnail_cache
             thumbnail_cache = get_thumbnail_cache()
             try:
                 mtime = image.path.stat().st_mtime
@@ -209,66 +405,30 @@ class ImageListModel(QAbstractListModel):
                     image._last_thumbnail_was_cached = True
                     return cached_thumbnail
             except Exception:
-                pass  # Cache miss or error, continue to generate
+                pass
 
-            # Mark as cache miss (will generate new thumbnail)
-            image._last_thumbnail_was_cached = False
+            # Generate thumbnail synchronously (blocking, but only happens once per uncached item)
+            qimage, _ = load_thumbnail_data(
+                image.path, image.crop, self.thumbnail_generation_width, image.is_video
+            )
 
-            crop = image.crop
-            try:
-                if image.is_video:
-                    # For videos, extract first frame as thumbnail
-                    _, _, first_frame_pixmap = extract_video_info(image.path)
-                    if first_frame_pixmap:
-                        pixmap = first_frame_pixmap.scaledToWidth(
-                            self.thumbnail_generation_width,
-                            Qt.TransformationMode.SmoothTransformation)
-                    else:
-                        # Fallback to a placeholder if extraction fails
-                        pixmap = QPixmap(self.thumbnail_generation_width, self.thumbnail_generation_width)
-                        pixmap.fill(Qt.gray)
-                elif image.path.suffix.lower() == ".jxl":
-                    pil_image = pilimage.open(image.path)  # Uses pillow-jxl
-                    qimage = pil_to_qimage(pil_image)
-                    if not crop:
-                        crop = QRect(QPoint(0, 0), qimage.size())
-                    if crop.height() > crop.width()*3:
-                        # keep it reasonable, higher than 3x the width doesn't make sense
-                        crop.setTop((crop.height() - crop.width()*3)//2) # center crop
-                        crop.setHeight(crop.width()*3)
+            if qimage and not qimage.isNull():
+                pixmap = QPixmap.fromImage(qimage)
+                thumbnail = QIcon(pixmap)
+                image.thumbnail = thumbnail
+                image._last_thumbnail_was_cached = False
 
-                    pixmap = QPixmap.fromImage(qimage).scaledToWidth(
-                        self.thumbnail_generation_width,
-                        Qt.TransformationMode.SmoothTransformation)
-                else:
-                    image_reader = QImageReader(str(image.path))
-                    # Rotate the image based on the orientation tag.
-                    image_reader.setAutoTransform(True)
-                    if not crop:
-                        crop = QRect(QPoint(0, 0), image_reader.size())
-                    if crop.height() > crop.width()*3:
-                        # keep it reasonable, higher than 3x the width doesn't make sense
-                        crop.setTop((crop.height() - crop.width()*3)//2) # center crop
-                        crop.setHeight(crop.width()*3)
-                    image_reader.setClipRect(crop)
-                    pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
-                        self.thumbnail_generation_width,
-                        Qt.TransformationMode.SmoothTransformation)
-            except Exception as e:
-                print(f"Error loading image/video {image.path}: {e}")
-            thumbnail = QIcon(pixmap)
-            image.thumbnail = thumbnail
-
-            # Save to disk cache for next time
-            try:
-                mtime = image.path.stat().st_mtime
-                thumbnail_cache.save_thumbnail(
-                    image.path, mtime, self.thumbnail_generation_width, thumbnail
+                # Save to disk cache in background thread (non-blocking)
+                self._thumbnail_executor.submit(
+                    self._save_thumbnail_worker,
+                    image.path,
+                    mtime,
+                    self.thumbnail_generation_width,
+                    thumbnail
                 )
-            except Exception:
-                pass  # Failed to cache, but thumbnail still works
 
-            return thumbnail
+                return thumbnail
+            return None
         if role == Qt.ItemDataRole.SizeHintRole:
             # Don't use thumbnail.availableSizes() - that returns the 512px generation size
             # Instead, calculate based on the actual image dimensions
@@ -495,6 +655,9 @@ class ImageListModel(QAbstractListModel):
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
         self._rebuild_aspect_ratio_cache()  # Build cache after loading
         self.endResetModel()
+
+        # Start background thumbnail loading (parallel I/O)
+        self._preload_thumbnails_async()
 
         if len(error_messages) > 0:
             print('\n'.join(error_messages), file=sys.stderr)

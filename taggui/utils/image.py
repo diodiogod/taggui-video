@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QImage
 
 
 class ImageMarking(str, Enum):
@@ -32,6 +32,7 @@ class Image:
     markings: list[Marking] = field(default_factory=list)
     rating: float = 0.0
     thumbnail: QIcon | None = None
+    thumbnail_qimage: QImage | None = None  # Store QImage, convert to QPixmap/QIcon lazily
     is_video: bool = False
     video_metadata: dict | None = None  # fps, duration, frame_count, current_frame
     loop_start_frame: int | None = None
