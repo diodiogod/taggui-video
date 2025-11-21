@@ -69,8 +69,22 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
     """
     from utils.thumbnail_cache import get_thumbnail_cache
 
-    # DON'T load from cache in background thread - cache contains QIcon which isn't thread-safe
-    # Cache check happens on main thread in data() method
+    # Check disk cache FIRST (thread-safe: we load as QImage, not QIcon)
+    try:
+        cache = get_thumbnail_cache()
+        if cache.enabled:
+            mtime = image_path.stat().st_mtime
+            # Get cache path directly and load as QImage (thread-safe)
+            cache_key = cache._get_cache_key(image_path, mtime, thumbnail_width)
+            cache_path = cache._get_cache_path(cache_key)
+
+            if cache_path.exists():
+                # Load directly as QImage (thread-safe, no QIcon/QPixmap needed)
+                cached_qimage = QImage(str(cache_path))
+                if not cached_qimage.isNull():
+                    return (cached_qimage, True)  # Cache hit!
+    except Exception:
+        pass  # Cache check failed, fall through to generation
 
     # Generate new thumbnail using QImage (thread-safe for creation)
     try:
@@ -265,8 +279,15 @@ class ImageListModel(QAbstractListModel):
         return self._aspect_ratio_cache
 
     def _rebuild_aspect_ratio_cache(self):
-        """Rebuild aspect ratio cache when images change."""
-        self._aspect_ratio_cache = [img.aspect_ratio for img in self.images]
+        """Rebuild aspect ratio cache when images change (thread-safe)."""
+        # Take snapshot to avoid issues if images list is being modified
+        try:
+            images_snapshot = self.images[:]
+            self._aspect_ratio_cache = [img.aspect_ratio for img in images_snapshot]
+        except Exception as e:
+            print(f"[CACHE] Error rebuilding aspect ratio cache: {e}")
+            # Keep old cache if rebuild fails
+            pass
 
     def _preload_thumbnails_async(self):
         """Preload thumbnails in background (only helps for uncached images)."""
@@ -276,11 +297,11 @@ class ImageListModel(QAbstractListModel):
         if total_images > 10000:
             # Huge folders: only preload first 1000 to avoid flooding executor
             preload_limit = 1000
-            print(f"[THUMBNAIL] Huge folder ({total_images} images), preloading first {preload_limit}")
+            print(f"[THUMBNAIL] Huge folder ({total_images} images), will check cache for first {preload_limit}")
         elif total_images > 5000:
             # Large folders: preload first 500
             preload_limit = 500
-            print(f"[THUMBNAIL] Large folder ({total_images} images), preloading first {preload_limit}")
+            print(f"[THUMBNAIL] Large folder ({total_images} images), will check cache for first {preload_limit}")
         else:
             # Normal folders: check cache and decide
             from utils.thumbnail_cache import get_thumbnail_cache
@@ -313,14 +334,37 @@ class ImageListModel(QAbstractListModel):
             self._thumbnail_futures.clear()
 
         # Submit images up to preload_limit (or all if None)
+        # But skip images that already have thumbnails loaded OR cached on disk
+        from utils.thumbnail_cache import get_thumbnail_cache
+        cache = get_thumbnail_cache()
+
         submitted = 0
+        checked = 0
+        skipped_memory = 0
+        skipped_cache = 0
+
         for idx, image in enumerate(self.images):
+            # Stop if we've checked enough images (preload_limit)
+            if preload_limit is not None and checked >= preload_limit:
+                break
+            checked += 1
+
+            # Skip if already loaded in memory
             if image.thumbnail or image.thumbnail_qimage:
+                skipped_memory += 1
                 continue
 
-            # Apply preload limit if set
-            if preload_limit is not None and submitted >= preload_limit:
-                break
+            # Skip if cached on disk (no need to submit to worker)
+            if cache.enabled:
+                try:
+                    mtime = image.path.stat().st_mtime
+                    cache_key = cache._get_cache_key(image.path, mtime, self.thumbnail_generation_width)
+                    cache_path = cache._get_cache_path(cache_key)
+                    if cache_path.exists():
+                        skipped_cache += 1
+                        continue  # Don't submit - will be loaded on-demand from cache
+                except Exception:
+                    pass  # Can't check cache, submit to worker
 
             future = self._load_executor.submit(
                 self._load_thumbnail_worker, idx, image.path, image.crop,
@@ -330,7 +374,10 @@ class ImageListModel(QAbstractListModel):
                 self._thumbnail_futures[idx] = future
             submitted += 1
 
-        print(f"[THUMBNAIL] Submitted {submitted} images to load executor (6 workers)")
+        if checked < total_images:
+            print(f"[THUMBNAIL] Checked first {checked} images: {skipped_memory} in memory, {skipped_cache} cached, {submitted} submitted")
+        else:
+            print(f"[THUMBNAIL] Checked all {checked} images: {skipped_memory} in memory, {skipped_cache} cached, {submitted} submitted")
 
         # Start a timer to report cache save progress every 30 seconds
         from PySide6.QtCore import QTimer
@@ -406,18 +453,42 @@ class ImageListModel(QAbstractListModel):
             print(f"[PROGRESSIVE] Model updated: {len(self.images)} total images")
             return True
         elif event.type() == BackgroundEnrichmentProgressEvent.EVENT_TYPE:
-            # Dimensions were enriched for specific indices
-            indices = event.count  # Now contains list of indices instead of count
-            if isinstance(indices, list) and len(indices) > 0:
-                # Rebuild aspect ratio cache (cheap operation)
-                self._rebuild_aspect_ratio_cache()
+            try:
+                # Dimensions were enriched for specific indices
+                indices = event.count  # Now contains list of indices instead of count
 
-                # Only emit layoutChanged if NOT filtering (to prevent layout bugs)
-                # When filtering is active, layout stays stable with placeholders
-                # When filter is cleared, layout will update with final dimensions
-                if not self._suppress_enrichment_signals:
-                    self.layoutChanged.emit()
-            return True
+                if isinstance(indices, list) and len(indices) > 0:
+                    # Validate indices are still in bounds (images might have changed)
+                    valid_indices = [idx for idx in indices if 0 <= idx < len(self.images)]
+
+                    if not valid_indices:
+                        return True  # All indices invalid, skip update
+
+                    # Rebuild aspect ratio cache (cheap operation)
+                    self._rebuild_aspect_ratio_cache()
+
+                    # Only emit layoutChanged if NOT filtering (to prevent layout bugs)
+                    # When filtering is active, layout stays stable with placeholders
+                    # When filter is cleared, layout will update with final dimensions
+                    if not self._suppress_enrichment_signals:
+                        # Check if thumbnail loading is still in progress
+                        # Emitting layoutChanged during active thumbnail loading can cause crashes
+                        active_thumbnails = 0
+                        with self._thumbnail_lock:
+                            active_thumbnails = len(self._thumbnail_futures)
+
+                        if active_thumbnails > 100:
+                            # Too many thumbnails still loading, defer layout update
+                            print(f"[ENRICHMENT] Deferring layout update ({active_thumbnails} thumbnails loading)")
+                        else:
+                            self.layoutChanged.emit()
+
+                return True
+            except Exception as e:
+                print(f"[ENRICHMENT ERROR] {e}")
+                import traceback
+                traceback.print_exc()
+                return True  # Don't propagate exception to Qt
         return super().event(event)
 
     def flags(self, index):
@@ -482,41 +553,35 @@ class ImageListModel(QAbstractListModel):
                 return thumbnail
 
             # Fallback: Load synchronously (for cache hits or if background loading didn't start yet)
-            from utils.thumbnail_cache import get_thumbnail_cache
-            thumbnail_cache = get_thumbnail_cache()
             try:
-                mtime = image.path.stat().st_mtime
-                cached_thumbnail = thumbnail_cache.get_thumbnail(
-                    image.path, mtime, self.thumbnail_generation_width
-                )
-                if cached_thumbnail:
-                    image.thumbnail = cached_thumbnail
-                    image._last_thumbnail_was_cached = True
-                    return cached_thumbnail
-            except Exception:
-                pass
-
-            # Generate thumbnail synchronously (blocking, but only happens once per uncached item)
-            qimage, _ = load_thumbnail_data(
-                image.path, image.crop, self.thumbnail_generation_width, image.is_video
-            )
-
-            if qimage and not qimage.isNull():
-                pixmap = QPixmap.fromImage(qimage)
-                thumbnail = QIcon(pixmap)
-                image.thumbnail = thumbnail
-                image._last_thumbnail_was_cached = False
-
-                # Save to disk cache in background thread (non-blocking)
-                self._save_executor.submit(
-                    self._save_thumbnail_worker,
-                    image.path,
-                    mtime,
-                    self.thumbnail_generation_width,
-                    thumbnail
+                # Load thumbnail on-demand (will check cache first, then generate)
+                qimage, was_cached = load_thumbnail_data(
+                    image.path, image.crop, self.thumbnail_generation_width, image.is_video
                 )
 
-                return thumbnail
+                if qimage and not qimage.isNull():
+                    pixmap = QPixmap.fromImage(qimage)
+                    thumbnail = QIcon(pixmap)
+                    image.thumbnail = thumbnail
+                    image._last_thumbnail_was_cached = was_cached
+
+                    # Save to disk cache in background thread if not from cache
+                    if not was_cached:
+                        mtime = image.path.stat().st_mtime
+                        self._save_executor.submit(
+                            self._save_thumbnail_worker,
+                            image.path,
+                            mtime,
+                            self.thumbnail_generation_width,
+                            thumbnail
+                        )
+
+                    return thumbnail
+            except Exception as e:
+                print(f"[THUMBNAIL ERROR] Failed to load thumbnail for {image.path.name}: {e}")
+                import traceback
+                traceback.print_exc()
+
             return None
         if role == Qt.ItemDataRole.SizeHintRole:
             # Don't use thumbnail.availableSizes() - that returns the 512px generation size

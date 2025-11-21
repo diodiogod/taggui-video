@@ -38,8 +38,12 @@ class ThumbnailCache:
 
         if self.enabled:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[CACHE INIT] Thumbnail cache enabled: {self.cache_dir}")
+            print(f"[CACHE INIT] Cache directory exists: {self.cache_dir.exists()}")
             # Clean up old PNG cache files (we use WebP now)
             self._cleanup_old_png_cache()
+        else:
+            print("[CACHE INIT] Thumbnail cache DISABLED")
 
     def _cleanup_old_png_cache(self):
         """Remove old PNG cache files (we use WebP now for better compression)."""
@@ -204,10 +208,10 @@ class ThumbnailCache:
             icon: QIcon to cache
         """
         if not self.enabled:
-            print(f"[CACHE] SKIP save (disabled)")
+            # Don't log every disabled save (too noisy)
             return
         if icon.isNull():
-            print(f"[CACHE] SKIP save (null icon)")
+            print(f"[CACHE ERROR] Cannot save null icon for: {file_path.name}")
             return
 
         cache_key = self._get_cache_key(file_path, mtime, size)
@@ -216,11 +220,22 @@ class ThumbnailCache:
         try:
             # Get pixmap from icon and save as WebP (much smaller than PNG)
             pixmap = icon.pixmap(size, size)
-            if not pixmap.isNull():
-                result = pixmap.save(str(cache_path), 'WEBP', quality=85)
-                # Removed noisy log: print(f"[CACHE] Saved thumbnail: {file_path.name} -> {cache_path} (success={result})")
+            if pixmap.isNull():
+                print(f"[CACHE ERROR] Icon has null pixmap for: {file_path.name}")
+                return
+
+            result = pixmap.save(str(cache_path), 'WEBP', quality=85)
+            if not result:
+                print(f"[CACHE ERROR] pixmap.save() failed for: {file_path.name} -> {cache_path}")
+                # Check if directory exists and is writable
+                if not cache_path.parent.exists():
+                    print(f"[CACHE ERROR] Cache subdirectory missing: {cache_path.parent}")
+                elif not cache_path.parent.is_dir():
+                    print(f"[CACHE ERROR] Cache path is not a directory: {cache_path.parent}")
         except Exception as e:
-            print(f'[CACHE] Failed to save thumbnail cache: {e}')
+            print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
+            import traceback
+            traceback.print_exc()
 
     def clear_old_cache(self, max_age_days: int = 30):
         """
