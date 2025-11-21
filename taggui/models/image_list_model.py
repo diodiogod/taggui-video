@@ -953,12 +953,15 @@ class ImageListModel(QAbstractListModel):
 
                 print(f"[FAST_LOAD] Background enrichment complete: {enriched_count} images updated")
 
-                # Final layout update with remaining indices
-                if len(enriched_indices) > 0:
+                # Final layout update with remaining indices (only if significant)
+                # Skip tiny batches to avoid race conditions with UI interaction
+                if len(enriched_indices) >= 10:
                     QApplication.instance().postEvent(
                         self,
                         BackgroundEnrichmentProgressEvent(enriched_indices)
                     )
+                elif len(enriched_indices) > 0:
+                    print(f"[FAST_LOAD] Skipping layout update for {len(enriched_indices)} items (too small)")
 
             # Submit background enrichment task
             self._load_executor.submit(enrich_dimensions)
