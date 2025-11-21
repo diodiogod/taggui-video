@@ -393,6 +393,8 @@ class ImageListView(QListView):
         self._preload_index = 0  # Track preload progress
         self._preload_complete = False  # Track if all thumbnails loaded
         self._thumbnails_loaded = set()  # Track which thumbnails are loaded (by index)
+        self._thumbnail_cache_hits = set()  # Track unique cache hits by index
+        self._thumbnail_cache_misses = set()  # Track unique cache misses by index
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
@@ -747,6 +749,17 @@ class ImageListView(QListView):
             if index.isValid():
                 # Trigger thumbnail generation
                 _ = index.data(Qt.ItemDataRole.DecorationRole)
+
+                # Track cache hit/miss (only count each thumbnail once)
+                if i not in self._thumbnail_cache_hits and i not in self._thumbnail_cache_misses:
+                    source_index = self.model().mapToSource(index)
+                    image = self.model().sourceModel().images[source_index.row()]
+                    if hasattr(image, '_last_thumbnail_was_cached'):
+                        if image._last_thumbnail_was_cached:
+                            self._thumbnail_cache_hits.add(i)
+                        else:
+                            self._thumbnail_cache_misses.add(i)
+
                 # Track this thumbnail as loaded (even if already loaded via scroll)
                 was_new = i not in self._thumbnails_loaded
                 self._thumbnails_loaded.add(i)
@@ -789,6 +802,7 @@ class ImageListView(QListView):
 
         self._thumbnail_progress_bar.setMaximum(total_items)
         self._thumbnail_progress_bar.setValue(0)
+        # Initial message - will update based on cache hit rate
         self._thumbnail_progress_bar.setFormat("Loading thumbnails: %v/%m")
         self._update_progress_bar_position()
         self._thumbnail_progress_bar.show()
@@ -808,9 +822,33 @@ class ImageListView(QListView):
             self._thumbnail_progress_bar.raise_()  # Keep on top
 
     def _update_thumbnail_progress(self, current, total):
-        """Update progress bar value."""
+        """Update progress bar value and message based on cache performance."""
         if self._thumbnail_progress_bar:
             self._thumbnail_progress_bar.setValue(current)
+
+            # Update message based on cache hit rate
+            total_processed = len(self._thumbnail_cache_hits) + len(self._thumbnail_cache_misses)
+            if total_processed > 10:  # Wait for at least 10 samples
+                cache_rate = (len(self._thumbnail_cache_hits) / total_processed) * 100
+
+                # Calculate how many are loading vs generating
+                cached_count = len(self._thumbnail_cache_hits)
+                generating_count = len(self._thumbnail_cache_misses)
+
+                if cache_rate > 95:
+                    # Almost all cached - fast loading
+                    self._thumbnail_progress_bar.setFormat("Loading: %v/%m")
+                elif cache_rate < 20:
+                    # Almost all generating - slow
+                    self._thumbnail_progress_bar.setFormat("Generating: %v/%m")
+                else:
+                    # Mixed - show both counts with color coding
+                    self._thumbnail_progress_bar.setFormat(
+                        f"Loading: {cached_count} | Generating: {generating_count} (%v/%m)"
+                    )
+            else:
+                # Not enough data yet, use neutral message
+                self._thumbnail_progress_bar.setFormat("Loading: %v/%m")
 
     def _hide_thumbnail_progress(self):
         """Hide progress bar when complete."""
@@ -1175,6 +1213,15 @@ class ImageListView(QListView):
         """Actually re-enable updates (called after event loop processes)."""
         self.setUpdatesEnabled(True)
         self.viewport().setUpdatesEnabled(True)
+
+        # Reset preload state and start thumbnail loading immediately
+        self._preload_index = 0
+        self._preload_complete = False
+        self._thumbnails_loaded.clear()
+        self._thumbnail_cache_hits.clear()
+        self._thumbnail_cache_misses.clear()
+        # Start preloading immediately so users see progress bar right away
+        QTimer.singleShot(100, self._preload_all_thumbnails)
 
     @Slot()
     def invert_selection(self):

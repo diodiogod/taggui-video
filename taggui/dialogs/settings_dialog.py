@@ -1,12 +1,15 @@
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
-                               QScrollArea, QWidget, QTabWidget)
+                               QScrollArea, QWidget, QTabWidget, QMessageBox)
 
+from pathlib import Path
+import shutil
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox)
 from utils.grammar_checker import GrammarCheckMode
+from utils.thumbnail_cache import get_thumbnail_cache
 
 
 class SettingsDialog(QDialog):
@@ -237,6 +240,41 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(thumbnail_cache_location_button, 3, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        # Cache management section (continue grid layout)
+        grid_layout.addWidget(QLabel(''), 4, 0)  # Spacer row
+
+        grid_layout.addWidget(QLabel('Cache Management'), 5, 0,
+                              Qt.AlignmentFlag.AlignRight)
+
+        cache_buttons_layout = QVBoxLayout()
+        cache_buttons_layout.setSpacing(5)
+
+        # Clear current directory cache button
+        clear_current_button = QPushButton('Clear Current Directory Cache')
+        clear_current_button.setToolTip(
+            'Delete dimension cache (.taggui_index.db) and thumbnails for the currently loaded directory only')
+        clear_current_button.clicked.connect(self.clear_current_directory_cache)
+
+        # Clear all cache button
+        clear_all_button = QPushButton('Clear All Thumbnail Cache')
+        clear_all_button.setToolTip(
+            'Delete all cached thumbnails (will be regenerated on next use)')
+        clear_all_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text for destructive action
+        clear_all_button.clicked.connect(self.clear_all_thumbnail_cache)
+
+        # Make both buttons the same width (use the wider one)
+        max_width = max(clear_current_button.sizeHint().width(),
+                       clear_all_button.sizeHint().width())
+        button_width = int(max_width * 1.1)
+        clear_current_button.setFixedWidth(button_width)
+        clear_all_button.setFixedWidth(button_width)
+
+        cache_buttons_layout.addWidget(clear_current_button)
+        cache_buttons_layout.addWidget(clear_all_button)
+
+        grid_layout.addLayout(cache_buttons_layout, 5, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 
@@ -409,3 +447,163 @@ class SettingsDialog(QDialog):
         mode_value = self.grammar_check_mode_combo.currentData()
         settings.setValue('grammar_check_mode', mode_value)
         self.show_restart_warning()
+
+    @Slot()
+    def clear_current_directory_cache(self):
+        """Clear cache for currently loaded directory only."""
+        # Get current directory from settings
+        current_dir = None
+        if settings.contains('directory_path'):
+            directory_path_str = settings.value('directory_path', type=str)
+            if directory_path_str:
+                current_dir = Path(directory_path_str)
+
+        if not current_dir or not current_dir.exists():
+            QMessageBox.warning(
+                self,
+                'No Directory Loaded',
+                'No directory is currently loaded. Please load a directory first.'
+            )
+            return
+
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            'Confirm Clear Current Directory Cache',
+            f'This will delete:\n\n'
+            f'• Dimension cache (.taggui_index.db)\n'
+            f'• All thumbnails for images in:\n'
+            f'  {current_dir}\n\n'
+            f'Cache will be rebuilt when you reload this directory.\n\n'
+            f'Continue?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            deleted_count = 0
+
+            # Delete dimension cache database
+            db_path = current_dir / '.taggui_index.db'
+            if db_path.exists():
+                db_path.unlink()
+                deleted_count += 1
+
+            # Delete thumbnails for this directory
+            # We need to delete cached thumbnails that match files in this directory
+            thumbnail_cache = get_thumbnail_cache()
+            if thumbnail_cache.enabled and thumbnail_cache.cache_dir.exists():
+                # Get all image files in current directory
+                from models.image_list_model import get_file_paths
+                image_suffixes_string = settings.value(
+                    'image_list_file_formats',
+                    defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+                image_suffixes = []
+                for suffix in image_suffixes_string.split(','):
+                    suffix = suffix.strip().lower()
+                    if not suffix.startswith('.'):
+                        suffix = '.' + suffix
+                    image_suffixes.append(suffix)
+
+                file_paths = get_file_paths(current_dir)
+                image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
+
+                # Delete cache for each image
+                for image_path in image_paths:
+                    try:
+                        mtime = image_path.stat().st_mtime
+                        cache_key = thumbnail_cache._get_cache_key(
+                            image_path, mtime, 512  # Default thumbnail size
+                        )
+                        cache_path = thumbnail_cache._get_cache_path(cache_key)
+                        if cache_path.exists():
+                            cache_path.unlink()
+                            deleted_count += 1
+                    except Exception:
+                        pass  # Skip files that fail
+
+            QMessageBox.information(
+                self,
+                'Cache Cleared',
+                f'Successfully cleared cache for current directory.\n'
+                f'Deleted {deleted_count} cache files.'
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                'Error',
+                f'Failed to clear cache: {str(e)}'
+            )
+
+    @Slot()
+    def clear_all_thumbnail_cache(self):
+        """Clear all thumbnail cache."""
+        thumbnail_cache = get_thumbnail_cache()
+
+        if not thumbnail_cache.enabled:
+            QMessageBox.information(
+                self,
+                'Cache Disabled',
+                'Thumbnail cache is currently disabled in settings.'
+            )
+            return
+
+        if not thumbnail_cache.cache_dir.exists():
+            QMessageBox.information(
+                self,
+                'Cache Empty',
+                'Thumbnail cache directory does not exist or is already empty.'
+            )
+            return
+
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            'Confirm Clear All Thumbnail Cache',
+            f'This will permanently delete ALL cached thumbnails from:\n'
+            f'{thumbnail_cache.cache_dir}\n\n'
+            f'Thumbnails will be regenerated when needed.\n\n'
+            f'Continue?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            deleted_count = 0
+
+            # Delete all cache files
+            for cache_file in thumbnail_cache.cache_dir.rglob('*.webp'):
+                try:
+                    cache_file.unlink()
+                    deleted_count += 1
+                except Exception:
+                    pass
+
+            # Also delete old PNG files if any remain
+            for cache_file in thumbnail_cache.cache_dir.rglob('*.png'):
+                try:
+                    cache_file.unlink()
+                    deleted_count += 1
+                except Exception:
+                    pass
+
+            QMessageBox.information(
+                self,
+                'Cache Cleared',
+                f'Successfully cleared all thumbnail cache.\n'
+                f'Deleted {deleted_count} cached thumbnails.'
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                'Error',
+                f'Failed to clear cache: {str(e)}'
+            )
