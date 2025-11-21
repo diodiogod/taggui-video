@@ -42,17 +42,31 @@ class MasonryCalculationThread(QThread):
     def run(self):
         """Run the calculation in background thread."""
         try:
+            # Check if interrupted before starting
+            if self.isInterruptionRequested():
+                return
+
             # Emit initial progress
             self.progress.emit(0, len(self.items_data))
 
             masonry_layout = MasonryLayout(column_width=self.column_width, spacing=self.spacing)
             masonry_layout.set_viewport_width(self.viewport_width)
 
-            # Calculate with progress callback
-            masonry_layout.calculate_all(self.items_data, cache_key=self.cache_key,
-                                        progress_callback=lambda current, total: self.progress.emit(current, total))
+            # Calculate with progress callback that checks for interruption
+            def progress_callback(current, total):
+                if self.isInterruptionRequested():
+                    raise InterruptedError("Calculation cancelled")
+                self.progress.emit(current, total)
 
-            self.finished.emit(masonry_layout)
+            masonry_layout.calculate_all(self.items_data, cache_key=self.cache_key,
+                                        progress_callback=progress_callback)
+
+            # Check if interrupted before emitting result
+            if not self.isInterruptionRequested():
+                self.finished.emit(masonry_layout)
+        except InterruptedError:
+            # Gracefully exit when interrupted
+            pass
         except Exception as e:
             print(f"Masonry calculation error: {e}")
             import traceback
@@ -373,9 +387,9 @@ class ImageListView(QListView):
         source_model.modelReset.connect(self._enable_updates)
 
         # Recalculate masonry layout when model changes (including filter changes)
-        proxy_image_list_model.modelReset.connect(self._recalculate_masonry_if_needed)
-        proxy_image_list_model.layoutChanged.connect(self._recalculate_masonry_if_needed)
-        proxy_image_list_model.filter_changed.connect(self._recalculate_masonry_if_needed)
+        proxy_image_list_model.modelReset.connect(lambda: self._recalculate_masonry_if_needed("modelReset"))
+        proxy_image_list_model.layoutChanged.connect(lambda: self._recalculate_masonry_if_needed("layoutChanged"))
+        proxy_image_list_model.filter_changed.connect(lambda: self._recalculate_masonry_if_needed("filter_changed"))
 
         self.setWordWrap(True)
         self.setDragEnabled(True)
@@ -385,6 +399,16 @@ class ImageListView(QListView):
         self.use_masonry = False
         self._masonry_calculating = False  # Re-entry guard for layout calculation
         self._masonry_calc_thread = None  # Background calculation thread
+
+        # Debounce timer for masonry recalculation (separate from filter debounce)
+        self._masonry_recalc_timer = QTimer(self)
+        self._masonry_recalc_timer.setSingleShot(True)
+        self._masonry_recalc_timer.timeout.connect(self._do_recalculate_masonry)
+        self._masonry_recalc_delay = 500  # Base delay
+        self._masonry_recalc_min_delay = 500
+        self._masonry_recalc_max_delay = 2000  # Max delay for rapid key holds
+        self._last_filter_keystroke_time = 0
+        self._rapid_input_detected = False
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
@@ -526,12 +550,86 @@ class ImageListView(QListView):
                 # Default scroll behavior in ListMode
                 super().wheelEvent(event)
 
-    def _recalculate_masonry_if_needed(self):
-        """Recalculate masonry layout if in masonry mode."""
+    def on_filter_keystroke(self):
+        """Called on every filter keystroke (before debounce) to detect rapid input."""
+        import time
+        current_time = time.time()
+        timestamp = time.strftime("%H:%M:%S.") + f"{int(current_time * 1000) % 1000:03d}"
+
+        if self._last_filter_keystroke_time > 0:
+            time_since_last = (current_time - self._last_filter_keystroke_time) * 1000
+
+            if time_since_last < 100:  # Less than 100ms = rapid typing/deletion
+                self._rapid_input_detected = True
+                print(f"[{timestamp}]   🚀 RAPID: {time_since_last:.0f}ms since last key")
+            else:
+                self._rapid_input_detected = False
+                print(f"[{timestamp}]   📝 Normal: {time_since_last:.0f}ms since last key")
+        else:
+            # First keystroke - assume normal
+            self._rapid_input_detected = False
+            print(f"[{timestamp}]   📝 First keystroke")
+
+        self._last_filter_keystroke_time = current_time
+
+    def _recalculate_masonry_if_needed(self, signal_name="unknown"):
+        """Recalculate masonry layout if in masonry mode (debounced with adaptive delay)."""
+        import time
+        if not self.use_masonry:
+            return
+
+        current_time = time.time()
+        timestamp = time.strftime("%H:%M:%S.") + f"{int(current_time * 1000) % 1000:03d}"
+
+        # Adaptive delay: check if rapid input was detected at keystroke level
+        if self._rapid_input_detected:
+            self._masonry_recalc_delay = self._masonry_recalc_max_delay
+            print(f"[{timestamp}] SIGNAL: {signal_name}, RAPID INPUT FLAG SET - using max delay {self._masonry_recalc_delay}ms")
+        else:
+            # Reset to base delay if typing slowed down
+            self._masonry_recalc_delay = self._masonry_recalc_min_delay
+            print(f"[{timestamp}] SIGNAL: {signal_name}, normal input - delay={self._masonry_recalc_delay}ms")
+
+        # Cancel any in-flight masonry calculation (non-blocking)
+        if self._masonry_calc_thread and self._masonry_calc_thread.isRunning():
+            self._masonry_calc_thread.requestInterruption()  # Signal to stop
+            print(f"[{timestamp}]   -> Requested thread interruption")
+
+        # Restart debounce timer
+        if self._masonry_recalc_timer.isActive():
+            self._masonry_recalc_timer.stop()
+            print(f"[{timestamp}]   -> Restarting {self._masonry_recalc_delay}ms countdown")
+        else:
+            print(f"[{timestamp}]   -> Starting {self._masonry_recalc_delay}ms countdown")
+        self._masonry_recalc_timer.start(self._masonry_recalc_delay)
+
+    def _do_recalculate_masonry(self):
+        """Actually perform the masonry recalculation (called after debounce)."""
+        import time
+        timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
+
+        # Check if more keystrokes came in while timer was running (race condition)
+        current_time = time.time()
+        time_since_last_key = (current_time - self._last_filter_keystroke_time) * 1000
+        if time_since_last_key < 50:  # Keystroke came in very recently (< 50ms ago)
+            print(f"[{timestamp}] ⚠️ SKIP: Keystroke {time_since_last_key:.0f}ms ago, user still typing")
+            # Restart timer to wait for user to finish
+            self._masonry_recalc_timer.start(self._masonry_recalc_delay)
+            return
+
+        # CRITICAL: Skip calculation entirely if already calculating
+        # Even spawning threads can block the UI due to Qt/GIL overhead
+        if self._masonry_calculating:
+            print(f"[{timestamp}] ⚠️ SKIP: Already calculating, will retry in 100ms")
+            self._masonry_recalc_timer.start(100)
+            return
+
+        print(f"[{timestamp}] ⚡ EXECUTE: Timer expired, starting masonry calculation")
         if self.use_masonry:
             self._calculate_masonry_layout()
-            self.scheduleDelayedItemsLayout()
-            self.viewport().update()
+            # Don't call scheduleDelayedItemsLayout() or update() here!
+            # They block the UI thread and should only be called when calculation completes
+        print(f"[{timestamp}] ⚡ Masonry thread spawned (async)")
 
     def _calculate_masonry_layout(self):
         """Calculate masonry layout positions for all items (async with thread)."""
@@ -542,12 +640,12 @@ class ImageListView(QListView):
         if self.model().rowCount() == 0:
             return
 
-        # Cancel existing calculation thread if running
+        # Don't start new calculation if one is already running
+        # (cancellation is handled in _recalculate_masonry_if_needed)
         if self._masonry_calc_thread and self._masonry_calc_thread.isRunning():
-            self._masonry_calc_thread.quit()
-            self._masonry_calc_thread.wait()
+            return
 
-        # Prevent re-entry during calculation
+        # Don't start if we're still collecting data (prevents UI lag during rapid filter changes)
         if self._masonry_calculating:
             return
 
@@ -562,9 +660,13 @@ class ImageListView(QListView):
             self._masonry_calculating = False
             return
 
-        # Collect all items with their aspect ratios (fast, just metadata)
+        # Collect all items with their aspect ratios
+        # WARNING: Cannot use processEvents() here - causes re-entrant crashes
+        import time
+        timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
+        row_count = self.model().rowCount()
         items_data = []
-        for row in range(self.model().rowCount()):
+        for row in range(row_count):
             index = self.model().index(row, 0)
             image = index.data(Qt.ItemDataRole.UserRole)
             if image and hasattr(image, 'dimensions') and image.dimensions:
@@ -577,44 +679,64 @@ class ImageListView(QListView):
         # Generate cache key based on directory and settings
         cache_key = self._get_masonry_cache_key()
 
-        # Show progress bar
-        if not hasattr(self, '_masonry_progress_bar'):
-            self._masonry_progress_bar = QProgressBar(self.viewport())
-            self._masonry_progress_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 2px solid #555;
-                    border-radius: 5px;
-                    background-color: rgba(0, 0, 0, 180);
-                    text-align: center;
-                    color: white;
-                    font-size: 13px;
-                    min-height: 30px;
-                }
-                QProgressBar::chunk {
-                    background-color: #4CAF50;
-                    border-radius: 3px;
-                }
-            """)
+        # Skip progress bar for fast calculations (< 500 items) to avoid UI blocking
+        # Progress bar creation/update is expensive and causes stuttering during rapid filter changes
+        show_progress = len(items_data) > 500
 
-        bar_width = min(400, self.viewport().width() - 40)
-        self._masonry_progress_bar.setGeometry(
-            (self.viewport().width() - bar_width) // 2,
-            (self.viewport().height() - 35) // 2,
-            bar_width, 35
-        )
-        self._masonry_progress_bar.setFormat("Calculating layout: %v/%m")
-        self._masonry_progress_bar.setMaximum(len(items_data))
-        self._masonry_progress_bar.setValue(0)
-        self._masonry_progress_bar.show()
-        self._masonry_progress_bar.raise_()
+        if show_progress:
+            # Show progress bar
+            if not hasattr(self, '_masonry_progress_bar'):
+                self._masonry_progress_bar = QProgressBar(self.viewport())
+                self._masonry_progress_bar.setStyleSheet("""
+                    QProgressBar {
+                        border: 2px solid #555;
+                        border-radius: 5px;
+                        background-color: rgba(0, 0, 0, 180);
+                        text-align: center;
+                        color: white;
+                        font-size: 13px;
+                        min-height: 30px;
+                    }
+                    QProgressBar::chunk {
+                        background-color: #4CAF50;
+                        border-radius: 3px;
+                    }
+                """)
+
+            bar_width = min(400, self.viewport().width() - 40)
+            self._masonry_progress_bar.setGeometry(
+                (self.viewport().width() - bar_width) // 2,
+                (self.viewport().height() - 35) // 2,
+                bar_width, 35
+            )
+            self._masonry_progress_bar.setFormat("Calculating layout: %v/%m")
+            self._masonry_progress_bar.setMaximum(len(items_data))
+            self._masonry_progress_bar.setValue(0)
+            self._masonry_progress_bar.show()
+            self._masonry_progress_bar.raise_()
 
         # Start background calculation thread
+        import time
+        t1 = time.time()
         self._masonry_calc_thread = MasonryCalculationThread(
             items_data, column_width, spacing, viewport_width, cache_key
         )
-        self._masonry_calc_thread.progress.connect(self._on_masonry_calculation_progress)
+        t2 = time.time()
+        # Only connect progress signal if we're showing progress bar
+        # Progress emissions can cause UI stuttering even when bar is hidden
+        if show_progress:
+            self._masonry_calc_thread.progress.connect(self._on_masonry_calculation_progress)
+        t3 = time.time()
         self._masonry_calc_thread.finished.connect(self._on_masonry_calculation_complete)
+        t4 = time.time()
         self._masonry_calc_thread.start()
+        t5 = time.time()
+
+        print(f"      Thread init: {(t2-t1)*1000:.0f}ms")
+        print(f"      Progress connect: {(t3-t2)*1000:.0f}ms")
+        print(f"      Finished connect: {(t4-t3)*1000:.0f}ms")
+        print(f"      Thread start: {(t5-t4)*1000:.0f}ms")
+        print(f"      TOTAL: {(t5-t1)*1000:.0f}ms")
 
     def _on_masonry_calculation_progress(self, current, total):
         """Update progress bar during calculation."""
@@ -623,6 +745,9 @@ class ImageListView(QListView):
 
     def _on_masonry_calculation_complete(self, masonry_layout):
         """Called when background masonry calculation completes."""
+        import time
+        timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
+
         self._masonry_calculating = False
 
         # Hide progress bar
@@ -636,6 +761,16 @@ class ImageListView(QListView):
         if masonry_layout is None:
             # Calculation failed
             return
+
+        # Check if another calculation is pending (user is still typing)
+        if self._masonry_recalc_timer.isActive():
+            print(f"[{timestamp}] ⏭️  SKIP UI UPDATE: Another calculation pending")
+            # Just store the layout but don't trigger expensive UI updates
+            self.masonry_layout = masonry_layout
+            return
+
+        print(f"[{timestamp}] 🎨 APPLYING LAYOUT to UI...")
+        t1 = time.time()
 
         # Apply the calculated layout
         self.masonry_layout = masonry_layout
@@ -651,9 +786,12 @@ class ImageListView(QListView):
         self.verticalScrollBar().setRange(0, max_scroll)
         self.verticalScrollBar().setPageStep(viewport_height)
 
-        # Force UI update
+        # Trigger UI update after calculation completes (EXPENSIVE - blocks UI thread)
         self.scheduleDelayedItemsLayout()
         self.viewport().update()
+
+        elapsed = (time.time() - t1) * 1000
+        print(f"[{timestamp}] ✓ UI UPDATE DONE in {elapsed:.0f}ms")
 
         # Start thumbnail preloading after layout is ready
         if not self._preload_complete:

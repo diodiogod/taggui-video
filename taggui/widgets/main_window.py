@@ -192,8 +192,8 @@ class MainWindow(QMainWindow):
 
         self._filter_timer = QTimer()
         self._filter_timer.setSingleShot(True)
-        self._filter_timer.timeout.connect(self.delayed_filter)
-        self._filter_delay = 100
+        self._filter_timer.timeout.connect(self._execute_delayed_filter)
+        self._filter_delay = 250  # 250ms - balanced between responsive and smooth
         self._max_delay = 500
         self._filter_timer_running = False
 
@@ -343,25 +343,49 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def set_image_list_filter(self):
+        import time
+        timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
+        current_text = self.image_list.filter_line_edit.text()
+        print(f"[{timestamp}] 🔤 KEYSTROKE: filter_text='{current_text}'")
+
+        # Notify image list of rapid input for adaptive masonry delay
+        self.image_list.list_view.on_filter_keystroke()
+
+        # CRITICAL: Stop any filter timer on new keystroke
         if self._filter_timer.isActive():
             self._filter_timer.stop()
-        
+            print(f"[{timestamp}]   -> CANCELLED filter timer")
+
+        # CRITICAL: Cancel any pending masonry recalculation on new keystroke
+        if self.image_list.list_view._masonry_recalc_timer.isActive():
+            self.image_list.list_view._masonry_recalc_timer.stop()
+            print(f"[{timestamp}]   -> CANCELLED pending masonry timer")
+
         if hasattr(self, '_filter_timer_running') and self._filter_timer_running:
             self._filter_delay = min(self._filter_delay + 5, self._max_delay)
-        
+
         self._filter_timer_running = True
         self._filter_timer.start(self._filter_delay)
+
+        # Visual feedback - subtle opacity change (works with any theme)
+        # self.image_list.filter_line_edit.setStyleSheet(
+        #     "QLineEdit { opacity: 0.7; }"
+        # )
         
     def _execute_delayed_filter(self):
         """Execute the actual filter and reset state"""
         self._filter_timer_running = False
-        self._filter_delay = 100  # Reset to initial delay
+        self._filter_delay = 250  # Reset to initial delay
+
+        # Reset visual feedback
+        self.image_list.filter_line_edit.setStyleSheet("")
+
         self.delayed_filter()
 
     def delayed_filter(self):
         filter_ = self.image_list.filter_line_edit.parse_filter_text()
         self.proxy_image_list_model.set_filter(filter_)
-        self.proxy_image_list_model.filter_changed.emit()
+        # filter_changed.emit() is already called by set_filter() - don't emit twice!
         if filter_ is None:
             all_tags_list_selection_model = (self.all_tags_editor
                                              .all_tags_list.selectionModel())
