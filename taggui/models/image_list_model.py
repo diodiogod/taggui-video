@@ -360,7 +360,11 @@ class ImageListModel(QAbstractListModel):
                     elif str(image_path).endswith('jxl'):
                         dimensions = get_jxl_size(image_path)
                     else:
-                        dimensions = pilimage.open(image_path).size
+                        # Use imagesize library for fast header-only reading (10x faster than PIL)
+                        dimensions = imagesize.get(str(image_path))
+                        if dimensions == (-1, -1):
+                            # Fallback to PIL if imagesize can't read it
+                            dimensions = pilimage.open(image_path).size
 
                     # Save to cache for next time
                     if dimensions:

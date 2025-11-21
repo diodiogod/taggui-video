@@ -34,7 +34,11 @@ DEFAULT_SETTINGS = {
     'spell_check_enabled': True,
     'grammar_check_mode': 'free_api',
     'speed_slider_theme_index': 12,  # Forest Light
-    'recent_directories': []
+    'recent_directories': [],
+    # Cache settings
+    'enable_dimension_cache': True,
+    'enable_thumbnail_cache': True,
+    'thumbnail_cache_location': '',  # Empty = default (~/.taggui_cache/thumbnails)
 }
 
 
