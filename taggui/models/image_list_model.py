@@ -23,6 +23,7 @@ from utils.image import Image, ImageMarking, Marking
 from utils.image_index_db import ImageIndexDB
 from utils.jxlutil import get_jxl_size
 from utils.settings import DEFAULT_SETTINGS, settings
+from utils.thumbnail_cache import get_thumbnail_cache
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
 
@@ -179,9 +180,23 @@ class ImageListModel(QAbstractListModel):
             return text
         if role == Qt.ItemDataRole.DecorationRole:
             # The thumbnail. If the image already has a thumbnail stored, use
-            # it. Otherwise, generate a thumbnail and save it to the image.
+            # it. Otherwise, check disk cache, or generate and save it.
             if image.thumbnail:
                 return image.thumbnail
+
+            # Try to load from disk cache
+            thumbnail_cache = get_thumbnail_cache()
+            try:
+                mtime = image.path.stat().st_mtime
+                cached_thumbnail = thumbnail_cache.get_thumbnail(
+                    image.path, mtime, self.thumbnail_generation_width
+                )
+                if cached_thumbnail:
+                    image.thumbnail = cached_thumbnail
+                    return cached_thumbnail
+            except Exception:
+                pass  # Cache miss or error, continue to generate
+
             crop = image.crop
             try:
                 if image.is_video:
@@ -226,6 +241,16 @@ class ImageListModel(QAbstractListModel):
                 print(f"Error loading image/video {image.path}: {e}")
             thumbnail = QIcon(pixmap)
             image.thumbnail = thumbnail
+
+            # Save to disk cache for next time
+            try:
+                mtime = image.path.stat().st_mtime
+                thumbnail_cache.save_thumbnail(
+                    image.path, mtime, self.thumbnail_generation_width, thumbnail
+                )
+            except Exception:
+                pass  # Failed to cache, but thumbnail still works
+
             return thumbnail
         if role == Qt.ItemDataRole.SizeHintRole:
             # Don't use thumbnail.availableSizes() - that returns the 512px generation size
