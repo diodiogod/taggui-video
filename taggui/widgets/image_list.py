@@ -493,6 +493,7 @@ class ImageListView(QListView):
         """Recalculate masonry layout if in masonry mode."""
         if self.use_masonry:
             self._calculate_masonry_layout()
+            self.scheduleDelayedItemsLayout()
             self.viewport().update()
 
     def _calculate_masonry_layout(self):
@@ -561,10 +562,15 @@ class ImageListView(QListView):
             # Hide loading label
             self._masonry_loading_label.hide()
 
-            # Reset preload state when layout changes
-            self._preload_complete = False
-            self._preload_index = 0
-            self._thumbnails_loaded.clear()
+            # Stop idle preload timer to prevent showing progress bar unnecessarily
+            self._idle_preload_timer.stop()
+
+            # Hide thumbnail progress bar if visible
+            if self._thumbnail_progress_bar:
+                self._thumbnail_progress_bar.hide()
+
+            # Don't reset preload state - thumbnails are already loaded, just re-arranged
+            # Only the layout positions changed, not the actual thumbnail images
 
             # Update scroll area to accommodate total height
             # The maximum scroll position should be: total_height - viewport_height
@@ -577,6 +583,9 @@ class ImageListView(QListView):
             self.verticalScrollBar().setPageStep(viewport_height)
         finally:
             self._masonry_calculating = False
+            # Always hide loading label, even if early return or exception
+            if hasattr(self, '_masonry_loading_label') and self._masonry_loading_label:
+                self._masonry_loading_label.hide()
 
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
