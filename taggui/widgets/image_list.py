@@ -409,7 +409,6 @@ class ImageListView(QListView):
         self._masonry_recalc_max_delay = 2000  # Max delay for rapid key holds
         self._last_filter_keystroke_time = 0
         self._rapid_input_detected = False
-        self._last_masonry_completion_time = 0  # Track when calculations finish
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
@@ -579,32 +578,6 @@ class ImageListView(QListView):
         if not self.use_masonry:
             return
 
-        # CRITICAL: Disable masonry during filtering to prevent GIL blocking
-        # Check if filter is active (row count < total images)
-        if self.model():
-            total_images = 0
-            if hasattr(self.model(), 'sourceModel'):
-                source = self.model().sourceModel()
-                if source and hasattr(source, 'rowCount'):
-                    total_images = source.rowCount()
-
-            current_rows = self.model().rowCount()
-            is_filtered = current_rows < total_images and total_images > 0
-
-            if is_filtered:
-                # Filtering active - force list mode to avoid GIL blocking
-                print(f"  ⚠️ FORCING LIST MODE: Filtering active ({current_rows}/{total_images} items)")
-                # Cancel any running calculation immediately
-                if self._masonry_calc_thread and self._masonry_calc_thread.isRunning():
-                    self._masonry_calc_thread.requestInterruption()
-                    print(f"    -> Cancelled running masonry thread")
-                # Switch to list mode temporarily
-                if self.use_masonry:
-                    self.setViewMode(QListView.ViewMode.ListMode)
-                    self.scheduleDelayedItemsLayout()
-                    print(f"    -> Switched to ListMode during filter")
-                return
-
         current_time = time.time()
         timestamp = time.strftime("%H:%M:%S.") + f"{int(current_time * 1000) % 1000:03d}"
 
@@ -651,24 +624,14 @@ class ImageListView(QListView):
             self._masonry_recalc_timer.start(100)
             return
 
-        # CRITICAL: Skip if a calculation completed recently (prevents blocking during keyboard repeat delay)
-        # When user holds a key, OS has ~500-1000ms repeat delay before sending rapid repeats
-        # If masonry runs during this delay, it blocks the upcoming rapid repeats for 900ms
-        time_since_completion = (current_time - self._last_masonry_completion_time) * 1000 if self._last_masonry_completion_time > 0 else 999999
-        if time_since_completion < 2000:
-            print(f"[{timestamp}] ⚠️ SKIP: Calculation finished only {time_since_completion:.0f}ms ago, preventing new calc during keyboard repeat")
-            self._masonry_recalc_timer.start(500)
-            return
-
         # CRITICAL: Skip ALL masonry calculations until user stops typing completely
         # Python's GIL means ANY computation in ANY thread blocks keyboard input
         # Even with time.sleep(0) every 10 items, 385-1147 items still blocks for 900ms
-        # OS keyboard repeat delay (~500-1000ms) means masonry timer can fire before rapid repeats arrive
-        # Solution: Keep showing old layout, only recalculate after typing stops for 5+ seconds
-        if time_since_last_key < 5000:
-            print(f"[{timestamp}] ⚠️ SKIP: Only {time_since_last_key:.0f}ms since last key, waiting 5s for typing to fully stop")
-            # Check again in 2 seconds
-            self._masonry_recalc_timer.start(2000)
+        # Solution: Keep showing old layout, only recalculate after typing stops for 3+ seconds
+        if time_since_last_key < 3000:
+            print(f"[{timestamp}] ⚠️ SKIP: Only {time_since_last_key:.0f}ms since last key, waiting for typing to fully stop")
+            # Check again in 1 second
+            self._masonry_recalc_timer.start(1000)
             return
 
         # Clear rapid input flag since user has stopped typing
@@ -796,7 +759,6 @@ class ImageListView(QListView):
         timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
 
         self._masonry_calculating = False
-        self._last_masonry_completion_time = time.time()  # Track completion time
 
         # Hide progress bar
         if hasattr(self, '_masonry_progress_bar'):
@@ -809,20 +771,6 @@ class ImageListView(QListView):
         if masonry_layout is None:
             # Calculation failed
             return
-
-        # Check if filter is currently active - if so, discard this result
-        if self.model():
-            total_images = 0
-            if hasattr(self.model(), 'sourceModel'):
-                source = self.model().sourceModel()
-                if source and hasattr(source, 'rowCount'):
-                    total_images = source.rowCount()
-            current_rows = self.model().rowCount()
-            is_filtered = current_rows < total_images and total_images > 0
-
-            if is_filtered:
-                print(f"[{timestamp}] ⏭️  DISCARD: Filter active ({current_rows}/{total_images}), ignoring stale masonry result")
-                return
 
         # Check if another calculation is pending (user is still typing)
         if self._masonry_recalc_timer.isActive():
