@@ -20,6 +20,7 @@ from PIL import Image as pilimage  # Import Pillow's Image class
 
 
 from utils.image import Image, ImageMarking, Marking
+from utils.image_index_db import ImageIndexDB
 from utils.jxlutil import get_jxl_size
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.utils import get_confirmation_dialog_reply, pluralize
@@ -279,6 +280,9 @@ class ImageListModel(QAbstractListModel):
         # Define video extensions
         video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
+        # Initialize database cache
+        db = ImageIndexDB(directory_path)
+
         # Create progress dialog
         total_images = len(image_paths)
         progress = QProgressDialog("Loading images...", "Cancel", 0, total_images)
@@ -289,6 +293,9 @@ class ImageListModel(QAbstractListModel):
         progress.setAutoReset(False)
 
         loaded_count = 0
+        cache_hits = 0
+        cache_misses = 0
+
         for image_path in image_paths:
             # Update progress every 10 images to keep UI responsive
             if loaded_count % 10 == 0:
@@ -301,41 +308,70 @@ class ImageListModel(QAbstractListModel):
             is_video = image_path.suffix.lower() in video_extensions
             video_metadata = None
             first_frame_pixmap = None
+            dimensions = None
 
+            # Try to load from DB cache first
             try:
-                if is_video:
-                    # Handle video files
-                    dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
-                    if dimensions is None:
-                        error_messages.append(f'Failed to extract video info from '
-                                            f'{image_path}')
-                        continue
-                elif str(image_path).endswith('jxl'):
-                    dimensions = get_jxl_size(image_path)
-                else:
-                    dimensions = pilimage.open(image_path).size
+                mtime = image_path.stat().st_mtime
+                cached = db.get_cached_info(image_path.name, mtime)
 
-                if not is_video:
-                    # Only get EXIF for images, not videos
-                    try:
-                        with open(image_path, 'rb') as image_file:
-                            exif_tags = exifread.process_file(
-                                image_file, details=False, extract_thumbnail=False,
-                                stop_tag='Image Orientation')
-                            if 'Image Orientation' in exif_tags:
-                                orientations = (exif_tags['Image Orientation']
-                                                .values)
-                                if any(value in orientations
-                                       for value in (5, 6, 7, 8)):
-                                    dimensions = (dimensions[1], dimensions[0])
-                    except Exception as exception:
-                        error_messages.append(f'Failed to get Exif tags for '
-                                              f'{image_path}: {exception}')
+                if cached:
+                    # Cache hit! Use cached dimensions
+                    dimensions = cached['dimensions']
+                    is_video = cached['is_video']
+                    video_metadata = cached.get('video_metadata')
+                    cache_hits += 1
+                else:
+                    # Cache miss - need to read from file
+                    cache_misses += 1
+
+                    if is_video:
+                        # Handle video files
+                        dimensions, video_metadata, first_frame_pixmap = extract_video_info(image_path)
+                        if dimensions is None:
+                            error_messages.append(f'Failed to extract video info from '
+                                                f'{image_path}')
+                            continue
+                    elif str(image_path).endswith('jxl'):
+                        dimensions = get_jxl_size(image_path)
+                    else:
+                        dimensions = pilimage.open(image_path).size
+
+                    # Save to cache for next time
+                    if dimensions:
+                        db.save_info(image_path.name, dimensions[0], dimensions[1],
+                                    is_video, mtime, video_metadata)
+
+                        # Commit every 100 images to avoid losing too much on crash
+                        if cache_misses % 100 == 0:
+                            db.commit()
+
             except (ValueError, OSError) as exception:
-                # Skip corrupted/unreadable images silently (don't add to error list)
-                # Just log to console for debugging
+                # Skip corrupted/unreadable images silently
                 print(f'Skipping corrupted/unreadable image: {image_path.name}', file=sys.stderr)
-                continue  # Skip this image entirely instead of adding it with None dimensions
+                continue
+
+            # Only check EXIF orientation if not from cache (cache already has corrected dimensions)
+            if not cached and not is_video:
+                # Only get EXIF for images, not videos
+                try:
+                    with open(image_path, 'rb') as image_file:
+                        exif_tags = exifread.process_file(
+                            image_file, details=False, extract_thumbnail=False,
+                            stop_tag='Image Orientation')
+                        if 'Image Orientation' in exif_tags:
+                            orientations = (exif_tags['Image Orientation']
+                                            .values)
+                            if any(value in orientations
+                                   for value in (5, 6, 7, 8)):
+                                dimensions = (dimensions[1], dimensions[0])
+                                # Update cache with corrected dimensions
+                                db.save_info(image_path.name, dimensions[0], dimensions[1],
+                                           is_video, mtime, video_metadata)
+                except Exception as exception:
+                    error_messages.append(f'Failed to get Exif tags for '
+                                          f'{image_path}: {exception}')
+
             tags = []
             text_file_path = image_path.with_suffix('.txt')
             if str(text_file_path) in text_file_path_strings:
@@ -390,6 +426,15 @@ class ImageListModel(QAbstractListModel):
             self.images.append(image)
 
         progress.setValue(total_images)  # Complete
+
+        # Close database and print cache statistics
+        db.commit()
+        db.close()
+
+        if cache_hits > 0:
+            cache_rate = (cache_hits / (cache_hits + cache_misses)) * 100
+            print(f'Database cache: {cache_hits} hits, {cache_misses} misses ({cache_rate:.1f}% hit rate)')
+
         self.images.sort(key=lambda image_: natural_sort_key(image_.path))
         self.endResetModel()
 
