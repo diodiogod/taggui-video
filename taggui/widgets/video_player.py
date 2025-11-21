@@ -23,6 +23,8 @@ class VideoPlayerWidget(QWidget):
     # Signals
     frame_changed = Signal(int, float)  # frame_number, time_ms
     playback_finished = Signal()
+    playback_started = Signal()  # Emitted when playback starts
+    playback_paused = Signal()   # Emitted when playback pauses
 
     def __init__(self):
         super().__init__()
@@ -166,6 +168,7 @@ class VideoPlayerWidget(QWidget):
             return
 
         self.is_playing = True
+        self.playback_started.emit()  # Notify that playback started
 
         if self.playback_speed < 0:
             # Use OpenCV frame-by-frame for backward playback
@@ -218,9 +221,13 @@ class VideoPlayerWidget(QWidget):
 
     def pause(self):
         """Pause playback and show exact frame with OpenCV."""
+        was_playing = self.is_playing
         self.is_playing = False
         self.position_timer.stop()
         self.media_player.pause()
+
+        if was_playing:
+            self.playback_paused.emit()  # Notify that playback paused
 
         # Switch to OpenCV frame for frame-accurate display
         try:

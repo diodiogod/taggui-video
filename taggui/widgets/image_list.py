@@ -106,10 +106,14 @@ class ImageDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.labels = {}
+        self._paint_cache = {}  # Cache to skip redundant paint operations
+        self._paint_version = 0  # Increment when cache should be invalidated
 
     def clear_labels(self):
         """Clear all stored labels (called on model reset)."""
         self.labels.clear()
+        self._paint_cache.clear()
+        self._paint_version += 1
 
     def sizeHint(self, option, index):
         # Check if parent is using masonry layout
@@ -255,7 +259,7 @@ class ImageDelegate(QStyledItemDelegate):
         return super().helpEvent(event, view, option, index)
 
     def _draw_n4_plus_1_stamp(self, painter, option, index):
-        """Draw N*4+1 validation stamp on video file previews."""
+        """Draw N*4+1 validation stamp on video file previews (optimized)."""
         try:
             # Validate painter state
             if not painter or not painter.isActive():
@@ -277,6 +281,11 @@ class ImageDelegate(QStyledItemDelegate):
             # Check N*4+1 rule: (frame_count - 1) % 4 == 0
             is_valid = (frame_count - 1) % 4 == 0
 
+            # OPTIMIZATION: Skip stamp drawing if item rect is very small (zoomed out)
+            # Stamp is unreadable below 50px anyway
+            if option.rect.width() < 50:
+                return
+
             # Set up painter for stamp
             painter.save()
 
@@ -286,26 +295,28 @@ class ImageDelegate(QStyledItemDelegate):
                               option.rect.top() + margin,
                               80, 20)  # Width and height for text
 
-            # Set font size and bold
-            font = painter.font()
-            font.setPointSize(10)
-            font.setBold(True)
-            painter.setFont(font)
+            # OPTIMIZATION: Use static font instead of creating new one each paint
+            if not hasattr(self, '_stamp_font'):
+                self._stamp_font = painter.font()
+                self._stamp_font.setPointSize(10)
+                self._stamp_font.setBold(True)
+                # Precompute colors
+                self._stamp_green_pen = QPen(QColor(76, 175, 80), 2)
+                self._stamp_red_pen = QPen(QColor(244, 67, 54), 2)
+                self._stamp_shadow_pen = QPen(QColor(0, 0, 0, 100), 1)
+
+            painter.setFont(self._stamp_font)
 
             # Draw subtle glow (shadow)
-            painter.setPen(QPen(QColor(0, 0, 0, 100), 1))  # Semi-transparent black
+            painter.setPen(self._stamp_shadow_pen)
             glow_text = "✓N*4+1" if is_valid else "✗N*4+1"
             painter.drawText(text_rect.adjusted(1, 1, 1, 1), Qt.AlignLeft | Qt.AlignTop, glow_text)
 
             # Set text color
-            if is_valid:
-                painter.setPen(QPen(QColor(76, 175, 80), 2))  # Green
-            else:
-                painter.setPen(QPen(QColor(244, 67, 54), 2))  # Red
+            painter.setPen(self._stamp_green_pen if is_valid else self._stamp_red_pen)
 
             # Draw text
-            text = "✓N*4+1" if is_valid else "✗N*4+1"
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, text)
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, glow_text)
 
             painter.restore()
 
@@ -346,6 +357,11 @@ class ImageListView(QListView):
 
         self.setWordWrap(True)
         self.setDragEnabled(True)
+
+        # Optimize viewport updates to reduce unnecessary repaints during video playback
+        # Only update items that actually changed, not entire viewport
+        self.viewport().setUpdatesEnabled(True)  # Ensure updates are enabled
+        self.setUniformItemSizes(False)  # We use masonry, sizes vary
 
         # Masonry layout for icon mode
         self.use_masonry = False

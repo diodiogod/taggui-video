@@ -3,6 +3,7 @@
 from PySide6.QtCore import QSize, Qt, QRect
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QMouseEvent, QPainter
 from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem, QMenu
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from utils.image import ImageMarking
 from utils.rect import RectPosition, map_rect_position_to_cursor
@@ -14,9 +15,11 @@ class ImageGraphicsView(QGraphicsView):
 
     def __init__(self, scene, image_viewer):
         super().__init__(scene)
+        self.setViewport(QOpenGLWidget())
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.showContextMenu)
         self.setRenderHint(QPainter.Antialiasing)
+        self.setRenderHint(QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         # Don't steal focus when clicked - prevents image list selection changes

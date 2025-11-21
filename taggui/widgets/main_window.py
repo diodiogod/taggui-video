@@ -127,6 +127,18 @@ class MainWindow(QMainWindow):
 
         # Connect all signals
         self.signal_manager.connect_all_signals()
+
+        # Connect video playback signals to freeze list view during playback
+        self.image_viewer.video_player.playback_started.connect(
+            lambda: self._freeze_list_view())
+        self.image_viewer.video_player.playback_paused.connect(
+            lambda: self._unfreeze_list_view())
+
+        # Unfreeze list view when user interacts with it
+        self.image_list.list_view.verticalScrollBar().valueChanged.connect(
+            lambda: self._unfreeze_list_view())
+        self.image_list_selection_model.currentChanged.connect(
+            lambda: self._unfreeze_list_view())
         # Forward any unhandled image changing key presses to the image list.
         key_press_forwarder = KeyPressForwarder(
             parent=self, target=self.image_list.list_view,
@@ -196,6 +208,22 @@ class MainWindow(QMainWindow):
         self._filter_delay = 250  # 250ms - balanced between responsive and smooth
         self._max_delay = 500
         self._filter_timer_running = False
+
+    def _freeze_list_view(self):
+        """Freeze list view updates during video playback for performance."""
+        # Small delay to allow one repaint (important when switching videos)
+        QTimer.singleShot(50, lambda: self._do_freeze_list_view())
+
+    def _do_freeze_list_view(self):
+        """Actually freeze the list view."""
+        self.image_list.list_view.setUpdatesEnabled(False)
+        print("[VIDEO] List view frozen for playback")
+
+    def _unfreeze_list_view(self):
+        """Unfreeze list view updates (but don't pause video)."""
+        if not self.image_list.list_view.updatesEnabled():
+            self.image_list.list_view.setUpdatesEnabled(True)
+            print("[VIDEO] List view unfrozen")
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
