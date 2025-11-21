@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QLineEdit,
 from utils.big_widgets import BigCheckBox
 from utils.focused_scroll_mixin import FocusedScrollMixin
 from utils.settings import DEFAULT_SETTINGS, settings
+from utils.spell_highlighter import SpellHighlighter
 
 
 class SettingsBigCheckBox(BigCheckBox):
@@ -71,6 +72,9 @@ class SettingsLineEdit(QLineEdit):
         self.setText(settings.value(key, type=str))
         self.textChanged.connect(lambda text: settings.setValue(key, text))
 
+        # Note: QLineEdit doesn't support QSyntaxHighlighter (only works with QTextDocument)
+        # Spell checking is only available for multi-line text edits
+
 
 class SettingsPlainTextEdit(QPlainTextEdit):
     def __init__(self, key: str, default: str | None = None):
@@ -80,3 +84,14 @@ class SettingsPlainTextEdit(QPlainTextEdit):
         self.setPlainText(settings.value(key, type=str))
         self.textChanged.connect(lambda: settings.setValue(key,
                                                            self.toPlainText()))
+
+        # Add spell checking if enabled
+        spell_check_enabled = settings.value('spell_check_enabled', defaultValue=True, type=bool)
+        self.spell_highlighter = SpellHighlighter(self.document())
+        self.spell_highlighter.set_enabled(spell_check_enabled)
+
+        # Load custom dictionary
+        custom_dict_list = settings.value('spell_check_custom_dictionary', [], type=list)
+        if custom_dict_list:
+            custom_dict = set(custom_dict_list)
+            self.spell_highlighter.load_custom_dictionary(custom_dict)
