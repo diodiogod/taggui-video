@@ -338,9 +338,10 @@ class ImageListView(QListView):
         source_model.modelAboutToBeReset.connect(self._disable_updates)
         source_model.modelReset.connect(self._enable_updates)
 
-        # Recalculate masonry layout when model changes
+        # Recalculate masonry layout when model changes (including filter changes)
         proxy_image_list_model.modelReset.connect(self._recalculate_masonry_if_needed)
         proxy_image_list_model.layoutChanged.connect(self._recalculate_masonry_if_needed)
+        proxy_image_list_model.filter_changed.connect(self._recalculate_masonry_if_needed)
 
         self.setWordWrap(True)
         self.setDragEnabled(True)
@@ -348,6 +349,7 @@ class ImageListView(QListView):
         # Masonry layout for icon mode
         self.masonry_layout = None
         self.use_masonry = False
+        self._masonry_calculating = False  # Re-entry guard for layout calculation
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
@@ -498,75 +500,83 @@ class ImageListView(QListView):
         if not self.use_masonry or not self.model():
             return
 
-        # Initialize masonry layout
-        column_width = self.current_thumbnail_size
-        spacing = 2
-        viewport_width = self.viewport().width()
-
-        if viewport_width <= 0:
+        # Prevent re-entry during calculation (processEvents can trigger resize/wheel events)
+        if self._masonry_calculating:
             return
 
-        self.masonry_layout = MasonryLayout(column_width=column_width, spacing=spacing)
-        self.masonry_layout.set_viewport_width(viewport_width)
+        self._masonry_calculating = True
+        try:
+            # Initialize masonry layout
+            column_width = self.current_thumbnail_size
+            spacing = 2
+            viewport_width = self.viewport().width()
 
-        # Show loading label
-        if not hasattr(self, '_masonry_loading_label'):
-            self._masonry_loading_label = QLabel("Calculating layout...", self.viewport())
-            self._masonry_loading_label.setStyleSheet("""
-                QLabel {
-                    background-color: rgba(0, 0, 0, 180);
-                    color: white;
-                    padding: 10px 20px;
-                    border-radius: 5px;
-                    font-size: 14px;
-                }
-            """)
-            self._masonry_loading_label.setAlignment(Qt.AlignCenter)
+            if viewport_width <= 0:
+                return
 
-        self._masonry_loading_label.setGeometry(
-            (self.viewport().width() - 200) // 2,
-            (self.viewport().height() - 50) // 2,
-            200, 50
-        )
-        self._masonry_loading_label.show()
-        self._masonry_loading_label.raise_()
-        QApplication.processEvents()  # Force UI update
+            self.masonry_layout = MasonryLayout(column_width=column_width, spacing=spacing)
+            self.masonry_layout.set_viewport_width(viewport_width)
 
-        # Collect all items with their aspect ratios
-        items_data = []
-        for row in range(self.model().rowCount()):
-            index = self.model().index(row, 0)
-            image = index.data(Qt.ItemDataRole.UserRole)
-            if image and hasattr(image, 'dimensions') and image.dimensions:
-                width, height = image.dimensions
-                aspect_ratio = width / height if height > 0 else 1.0
-            else:
-                aspect_ratio = 1.0  # Default to square
-            items_data.append((row, aspect_ratio))
+            # Show loading label
+            if not hasattr(self, '_masonry_loading_label'):
+                self._masonry_loading_label = QLabel("Calculating layout...", self.viewport())
+                self._masonry_loading_label.setStyleSheet("""
+                    QLabel {
+                        background-color: rgba(0, 0, 0, 180);
+                        color: white;
+                        padding: 10px 20px;
+                        border-radius: 5px;
+                        font-size: 14px;
+                    }
+                """)
+                self._masonry_loading_label.setAlignment(Qt.AlignCenter)
 
-        # Generate cache key based on directory and settings
-        cache_key = self._get_masonry_cache_key()
+            self._masonry_loading_label.setGeometry(
+                (self.viewport().width() - 200) // 2,
+                (self.viewport().height() - 50) // 2,
+                200, 50
+            )
+            self._masonry_loading_label.show()
+            self._masonry_loading_label.raise_()
+            QApplication.processEvents()  # Force UI update
 
-        # Calculate all positions (with caching!)
-        self.masonry_layout.calculate_all(items_data, cache_key=cache_key)
+            # Collect all items with their aspect ratios
+            items_data = []
+            for row in range(self.model().rowCount()):
+                index = self.model().index(row, 0)
+                image = index.data(Qt.ItemDataRole.UserRole)
+                if image and hasattr(image, 'dimensions') and image.dimensions:
+                    width, height = image.dimensions
+                    aspect_ratio = width / height if height > 0 else 1.0
+                else:
+                    aspect_ratio = 1.0  # Default to square
+                items_data.append((row, aspect_ratio))
 
-        # Hide loading label
-        self._masonry_loading_label.hide()
+            # Generate cache key based on directory and settings
+            cache_key = self._get_masonry_cache_key()
 
-        # Reset preload state when layout changes
-        self._preload_complete = False
-        self._preload_index = 0
-        self._thumbnails_loaded.clear()
+            # Calculate all positions (with caching!)
+            self.masonry_layout.calculate_all(items_data, cache_key=cache_key)
 
-        # Update scroll area to accommodate total height
-        # The maximum scroll position should be: total_height - viewport_height
-        # So the last items are visible at the bottom
-        total_height = self.masonry_layout.get_total_height()
-        viewport_height = self.viewport().height()
-        max_scroll = max(0, total_height - viewport_height)
+            # Hide loading label
+            self._masonry_loading_label.hide()
 
-        self.verticalScrollBar().setRange(0, max_scroll)
-        self.verticalScrollBar().setPageStep(viewport_height)
+            # Reset preload state when layout changes
+            self._preload_complete = False
+            self._preload_index = 0
+            self._thumbnails_loaded.clear()
+
+            # Update scroll area to accommodate total height
+            # The maximum scroll position should be: total_height - viewport_height
+            # So the last items are visible at the bottom
+            total_height = self.masonry_layout.get_total_height()
+            viewport_height = self.viewport().height()
+            max_scroll = max(0, total_height - viewport_height)
+
+            self.verticalScrollBar().setRange(0, max_scroll)
+            self.verticalScrollBar().setPageStep(viewport_height)
+        finally:
+            self._masonry_calculating = False
 
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
@@ -584,7 +594,23 @@ class ImageListView(QListView):
         # Include sort order in cache key - different orders need different layouts!
         sort_order = settings.value('image_list_sort_by', 'Name', type=str)
 
-        return f"{dir_path}_{self.current_thumbnail_size}_{viewport_width}_{sort_order}"
+        # Include filter state in cache key - different filters show different images!
+        filter_key = "no_filter"
+        try:
+            if self.model() and hasattr(self.model(), 'filter') and self.model().filter is not None:
+                # Convert filter to a stable string representation (use hash for complex filters)
+                filter_str = str(self.model().filter)
+                if len(filter_str) > 100:  # If filter string is too long, hash it
+                    import hashlib
+                    filter_key = hashlib.md5(filter_str.encode()).hexdigest()[:16]
+                else:
+                    filter_key = filter_str.replace('/', '_').replace('\\', '_')  # Sanitize for filename
+        except Exception:
+            # If anything goes wrong getting filter, use timestamp to avoid cache collision
+            import time
+            filter_key = f"filter_{int(time.time())}"
+
+        return f"{dir_path}_{self.current_thumbnail_size}_{viewport_width}_{sort_order}_{filter_key}"
 
     def _preload_nearby_thumbnails(self):
         """Preload thumbnails for items near viewport for smoother scrolling."""
