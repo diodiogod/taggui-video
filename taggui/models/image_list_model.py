@@ -245,29 +245,41 @@ class ImageListModel(QAbstractListModel):
 
     def _preload_thumbnails_async(self):
         """Preload thumbnails in background (only helps for uncached images)."""
-        # Check how many images need loading (not in cache)
-        from utils.thumbnail_cache import get_thumbnail_cache
-        cache = get_thumbnail_cache()
+        total_images = len(self.images)
 
-        uncached_count = 0
-        for image in self.images:
-            if image.thumbnail or image.thumbnail_qimage:
-                continue
-            # Quick cache check (doesn't load, just checks if file exists)
-            try:
-                mtime = image.path.stat().st_mtime
-                if not cache.get_thumbnail(image.path, mtime, self.thumbnail_generation_width):
+        # Adaptive preloading strategy based on folder size
+        if total_images > 10000:
+            # Huge folders: only preload first 1000 to avoid flooding executor
+            preload_limit = 1000
+            print(f"[THUMBNAIL] Huge folder ({total_images} images), preloading first {preload_limit}")
+        elif total_images > 5000:
+            # Large folders: preload first 500
+            preload_limit = 500
+            print(f"[THUMBNAIL] Large folder ({total_images} images), preloading first {preload_limit}")
+        else:
+            # Normal folders: check cache and decide
+            from utils.thumbnail_cache import get_thumbnail_cache
+            cache = get_thumbnail_cache()
+
+            uncached_count = 0
+            for image in self.images:
+                if image.thumbnail or image.thumbnail_qimage:
+                    continue
+                # Quick cache check (doesn't load, just checks if file exists)
+                try:
+                    mtime = image.path.stat().st_mtime
+                    if not cache.get_thumbnail(image.path, mtime, self.thumbnail_generation_width):
+                        uncached_count += 1
+                except:
                     uncached_count += 1
-            except:
-                uncached_count += 1
 
-        # If most images are cached, don't bother with parallel loading
-        # It adds overhead without benefit
-        if uncached_count < 50:
-            print(f"[THUMBNAIL] Only {uncached_count} uncached, using on-demand loading")
-            return
+            # If most images are cached, don't bother with parallel loading
+            if uncached_count < 50:
+                print(f"[THUMBNAIL] Only {uncached_count} uncached, using on-demand loading")
+                return
 
-        print(f"[THUMBNAIL] {uncached_count} uncached images, starting parallel loading")
+            print(f"[THUMBNAIL] {uncached_count} uncached images, starting parallel loading")
+            preload_limit = None  # Preload all
 
         # Cancel any existing thumbnail loading
         with self._thumbnail_lock:
@@ -275,11 +287,15 @@ class ImageListModel(QAbstractListModel):
                 future.cancel()
             self._thumbnail_futures.clear()
 
-        # Submit ALL uncached images (they load as QImage, lazy QPixmap conversion)
+        # Submit images up to preload_limit (or all if None)
         submitted = 0
         for idx, image in enumerate(self.images):
             if image.thumbnail or image.thumbnail_qimage:
                 continue
+
+            # Apply preload limit if set
+            if preload_limit is not None and submitted >= preload_limit:
+                break
 
             future = self._load_executor.submit(
                 self._load_thumbnail_worker, idx, image.path, image.crop,
@@ -501,9 +517,12 @@ class ImageListModel(QAbstractListModel):
         corrupted_files = 0
         failed_video_extractions = 0
 
+        # Scale processEvents frequency for large folders (max 100 updates)
+        update_interval = max(10, total_images // 100)
+
         for image_path in image_paths:
-            # Update progress every 10 images to keep UI responsive
-            if loaded_count % 10 == 0:
+            # Update progress at scaled intervals to reduce UI overhead
+            if loaded_count % update_interval == 0:
                 progress.setValue(loaded_count)
                 QApplication.processEvents()
                 if progress.wasCanceled():
