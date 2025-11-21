@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
-                               QScrollArea, QWidget, QTabWidget, QMessageBox)
+                               QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout)
 
 from pathlib import Path
 import shutil
@@ -247,30 +247,53 @@ class SettingsDialog(QDialog):
                               Qt.AlignmentFlag.AlignRight)
 
         cache_buttons_layout = QVBoxLayout()
-        cache_buttons_layout.setSpacing(5)
+        cache_buttons_layout.setSpacing(10)
 
         # Clear current directory cache button
-        clear_current_button = QPushButton('Clear Current Directory Cache')
-        clear_current_button.setToolTip(
+        self.clear_current_button = QPushButton('Clear Current Directory Cache')
+        self.clear_current_button.setToolTip(
             'Delete dimension cache (.taggui_index.db) and thumbnails for the currently loaded directory only')
-        clear_current_button.clicked.connect(self.clear_current_directory_cache)
+        self.clear_current_button.clicked.connect(self.clear_current_directory_cache)
+
+        # Size label for current directory
+        self.clear_current_size_label = QLabel()
+        self.clear_current_size_label.setStyleSheet('color: #666; font-size: 10px; margin-left: 10px;')
+
+        # Current directory row (button + size)
+        current_row_layout = QHBoxLayout()
+        current_row_layout.setSpacing(10)
+        current_row_layout.addWidget(self.clear_current_button)
+        current_row_layout.addWidget(self.clear_current_size_label)
+        current_row_layout.addStretch()
 
         # Clear all cache button
-        clear_all_button = QPushButton('Clear All Thumbnail Cache')
-        clear_all_button.setToolTip(
+        self.clear_all_button = QPushButton('Clear All Thumbnail Cache')
+        self.clear_all_button.setToolTip(
             'Delete all cached thumbnails (will be regenerated on next use)')
-        clear_all_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text for destructive action
-        clear_all_button.clicked.connect(self.clear_all_thumbnail_cache)
+        self.clear_all_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text for destructive action
+        self.clear_all_button.clicked.connect(self.clear_all_thumbnail_cache)
+
+        # Size label for all cache
+        self.clear_all_size_label = QLabel()
+        self.clear_all_size_label.setStyleSheet('color: #666; font-size: 10px; margin-left: 10px;')
+
+        # All cache row (button + size)
+        all_row_layout = QHBoxLayout()
+        all_row_layout.setSpacing(10)
+        all_row_layout.addWidget(self.clear_all_button)
+        all_row_layout.addWidget(self.clear_all_size_label)
+        all_row_layout.addStretch()
 
         # Make both buttons the same width (use the wider one)
-        max_width = max(clear_current_button.sizeHint().width(),
-                       clear_all_button.sizeHint().width())
+        max_width = max(self.clear_current_button.sizeHint().width(),
+                       self.clear_all_button.sizeHint().width())
         button_width = int(max_width * 1.1)
-        clear_current_button.setFixedWidth(button_width)
-        clear_all_button.setFixedWidth(button_width)
+        self.clear_current_button.setFixedWidth(button_width)
+        self.clear_all_button.setFixedWidth(button_width)
 
-        cache_buttons_layout.addWidget(clear_current_button)
-        cache_buttons_layout.addWidget(clear_all_button)
+        cache_buttons_layout.addLayout(current_row_layout)
+        cache_buttons_layout.addSpacing(10)
+        cache_buttons_layout.addLayout(all_row_layout)
 
         grid_layout.addLayout(cache_buttons_layout, 5, 1,
                               Qt.AlignmentFlag.AlignLeft)
@@ -279,6 +302,7 @@ class SettingsDialog(QDialog):
         layout.addStretch()
 
         scroll_area.setWidget(widget)
+        self._update_cache_button_labels()
         return scroll_area
 
     def _create_spell_check_tab(self):
@@ -362,6 +386,101 @@ class SettingsDialog(QDialog):
 
         scroll_area.setWidget(widget)
         return scroll_area
+
+    def _get_cache_size(self, directory: Path) -> str:
+        """
+        Calculate total cache size in human-readable format.
+
+        Args:
+            directory: Directory to calculate size for
+
+        Returns:
+            Human-readable size string (e.g., "234 MB")
+        """
+        if not directory.exists():
+            return "0 B"
+
+        try:
+            total_size = 0
+            for file_path in directory.rglob('*'):
+                if file_path.is_file():
+                    total_size += file_path.stat().st_size
+
+            # Convert to human-readable format
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if total_size < 1024:
+                    return f"{total_size:.1f} {unit}" if total_size > 0 else f"{int(total_size)} {unit}"
+                total_size /= 1024
+
+            return f"{total_size:.1f} TB"
+        except Exception:
+            return "? (error)"
+
+    def _update_cache_button_labels(self):
+        """Update cache size labels with current cache sizes."""
+        thumbnail_cache = get_thumbnail_cache()
+
+        if thumbnail_cache.enabled and thumbnail_cache.cache_dir.exists():
+            cache_size = self._get_cache_size(thumbnail_cache.cache_dir)
+            self.clear_all_size_label.setText(cache_size)
+        else:
+            self.clear_all_size_label.setText('(empty)')
+
+        # Current directory cache size
+        current_dir = None
+        if settings.contains('directory_path'):
+            directory_path_str = settings.value('directory_path', type=str)
+            if directory_path_str:
+                current_dir = Path(directory_path_str)
+
+        if current_dir and current_dir.exists():
+            # Calculate size of thumbnails for this directory only
+            if thumbnail_cache.enabled and thumbnail_cache.cache_dir.exists():
+                # Count files and calculate size for this directory's thumbnails
+                try:
+                    from models.image_list_model import get_file_paths
+                    image_suffixes_string = settings.value(
+                        'image_list_file_formats',
+                        defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+                    image_suffixes = []
+                    for suffix in image_suffixes_string.split(','):
+                        suffix = suffix.strip().lower()
+                        if not suffix.startswith('.'):
+                            suffix = '.' + suffix
+                        image_suffixes.append(suffix)
+
+                    file_paths = get_file_paths(current_dir)
+                    image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
+
+                    dir_cache_size = 0
+                    for image_path in image_paths:
+                        try:
+                            mtime = image_path.stat().st_mtime
+                            cache_key = thumbnail_cache._get_cache_key(
+                                image_path, mtime, 512
+                            )
+                            cache_path = thumbnail_cache._get_cache_path(cache_key)
+                            if cache_path.exists():
+                                dir_cache_size += cache_path.stat().st_size
+                        except Exception:
+                            pass
+
+                    cache_size_str = self._format_size(dir_cache_size)
+                    self.clear_current_size_label.setText(cache_size_str)
+                except Exception:
+                    self.clear_current_size_label.setText('(error)')
+            else:
+                self.clear_current_size_label.setText('(empty)')
+        else:
+            self.clear_current_size_label.setText('(no directory loaded)')
+
+    def _format_size(self, size: int) -> str:
+        """Format byte size to human-readable string."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}" if size > 0 else f"{int(size)} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
 
     @Slot()
     def show_restart_warning(self):
@@ -531,6 +650,7 @@ class SettingsDialog(QDialog):
                 f'Successfully cleared cache for current directory.\n'
                 f'Deleted {deleted_count} cache files.'
             )
+            self._update_cache_button_labels()
 
         except Exception as e:
             QMessageBox.critical(
@@ -600,6 +720,7 @@ class SettingsDialog(QDialog):
                 f'Successfully cleared all thumbnail cache.\n'
                 f'Deleted {deleted_count} cached thumbnails.'
             )
+            self._update_cache_button_labels()
 
         except Exception as e:
             QMessageBox.critical(
