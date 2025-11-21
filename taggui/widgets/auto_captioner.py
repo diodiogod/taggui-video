@@ -5,7 +5,7 @@ from PySide6.QtCore import QModelIndex, Qt, Signal, Slot
 from PySide6.QtGui import QFontMetrics, QTextCursor
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QScrollArea,
+                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
@@ -13,8 +13,10 @@ from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models.remote import RemoteGen
 from auto_captioning.models_list import MODELS, get_model_class
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
+from dialogs.prompt_history_dialog import PromptHistoryDialog
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
+from utils.prompt_history import get_prompt_history
 from utils.enums import CaptionDevice, CaptionPosition
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
@@ -73,8 +75,23 @@ class CaptionSettingsForm(QVBoxLayout):
         self.api_key_line_edit = SettingsLineEdit(key='api_key', default='')
 
 
+        # Prompt field with history button
+        prompt_container = QWidget()
+        prompt_layout = QHBoxLayout(prompt_container)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.setSpacing(4)
+
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
         set_text_edit_height(self.prompt_text_edit, 4)
+
+        self.prompt_history_button = QPushButton("📜")
+        self.prompt_history_button.setToolTip("View Prompt History")
+        self.prompt_history_button.setMaximumWidth(30)
+        self.prompt_history_button.setMaximumHeight(60)
+
+        prompt_layout.addWidget(self.prompt_text_edit)
+        prompt_layout.addWidget(self.prompt_history_button)
+
         self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
         self.caption_start_line_edit.setClearButtonEnabled(True)
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
@@ -125,7 +142,7 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         basic_settings_form.addRow('API Key', self.api_key_line_edit)
         self.prompt_label = QLabel('Prompt')
-        basic_settings_form.addRow(self.prompt_label, self.prompt_text_edit)
+        basic_settings_form.addRow(self.prompt_label, prompt_container)
         self.caption_start_label = QLabel('Start caption with')
         basic_settings_form.addRow(self.caption_start_label,
                                    self.caption_start_line_edit)
@@ -442,6 +459,10 @@ class AutoCaptioner(QDockWidget):
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_captioning)
 
+        # Connect prompt history button
+        self.caption_settings_form.prompt_history_button.clicked.connect(
+            self.show_prompt_history)
+
     @Slot()
     def start_or_cancel_captioning(self):
         if self.is_captioning:
@@ -499,7 +520,25 @@ class AutoCaptioner(QDockWidget):
         alert.exec()
 
     @Slot()
+    def show_prompt_history(self):
+        """Show prompt history dialog."""
+        dialog = PromptHistoryDialog(self)
+        dialog.prompt_selected.connect(self.load_prompt_from_history)
+        dialog.exec()
+
+    @Slot(str)
+    def load_prompt_from_history(self, prompt: str):
+        """Load a prompt from history into the prompt field."""
+        self.caption_settings_form.prompt_text_edit.setPlainText(prompt)
+
+    @Slot()
     def generate_captions(self):
+        # Save current prompt to history before generating captions
+        current_prompt = self.caption_settings_form.prompt_text_edit.toPlainText()
+        if current_prompt and current_prompt.strip():
+            history = get_prompt_history()
+            history.add_prompt(current_prompt.strip())
+
         selected_image_indices = self.image_list.get_selected_image_indices()
         selected_image_count = len(selected_image_indices)
         show_alert_when_finished = False
