@@ -221,9 +221,12 @@ class ImageListModel(QAbstractListModel):
         # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
         self._aspect_ratio_cache: list[float] = []
 
-        # ThreadPoolExecutor for parallel thumbnail loading (I/O bound work)
-        # Use 4-8 workers for good parallelism without overwhelming disk I/O
-        self._thumbnail_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_loader")
+        # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
+        # Load executor: 6 workers for critical thumbnail generation (user needs these NOW)
+        self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        # Save executor: 2 workers for background cache writing (low priority, can be slow)
+        self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
+
         self._thumbnail_futures = {}  # Maps image index to Future
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
 
@@ -278,7 +281,7 @@ class ImageListModel(QAbstractListModel):
             if image.thumbnail or image.thumbnail_qimage:
                 continue
 
-            future = self._thumbnail_executor.submit(
+            future = self._load_executor.submit(
                 self._load_thumbnail_worker, idx, image.path, image.crop,
                 self.thumbnail_generation_width, image.is_video
             )
@@ -286,7 +289,7 @@ class ImageListModel(QAbstractListModel):
                 self._thumbnail_futures[idx] = future
             submitted += 1
 
-        print(f"[THUMBNAIL] Submitted {submitted} images to thread pool")
+        print(f"[THUMBNAIL] Submitted {submitted} images to load executor (6 workers)")
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
@@ -381,8 +384,8 @@ class ImageListModel(QAbstractListModel):
 
                 # Save to disk cache in background thread if not from cache
                 if not image._last_thumbnail_was_cached:
-                    # Submit to background thread (QPixmap.save() is thread-safe)
-                    self._thumbnail_executor.submit(
+                    # Submit to save executor (low priority, won't compete with loads)
+                    self._save_executor.submit(
                         self._save_thumbnail_worker,
                         image.path,
                         image.path.stat().st_mtime,
@@ -419,7 +422,7 @@ class ImageListModel(QAbstractListModel):
                 image._last_thumbnail_was_cached = False
 
                 # Save to disk cache in background thread (non-blocking)
-                self._thumbnail_executor.submit(
+                self._save_executor.submit(
                     self._save_thumbnail_worker,
                     image.path,
                     mtime,
