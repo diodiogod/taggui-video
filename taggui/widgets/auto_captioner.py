@@ -153,6 +153,15 @@ class CaptionSettingsForm(QVBoxLayout):
         remove_tag_separators_layout.addWidget(remove_tag_separators_label)
         remove_tag_separators_layout.addWidget(
             self.remove_tag_separators_check_box)
+        self.remove_new_lines_container = QWidget()
+        remove_new_lines_layout = QHBoxLayout(self.remove_new_lines_container)
+        remove_new_lines_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        remove_new_lines_layout.setContentsMargins(0, 0, 0, 0)
+        self.remove_new_lines_check_box = SettingsBigCheckBox(
+            key='remove_new_lines', default=False)
+        remove_new_lines_label = QLabel('Remove new lines in caption')
+        remove_new_lines_layout.addWidget(remove_new_lines_label)
+        remove_new_lines_layout.addWidget(self.remove_new_lines_check_box)
         basic_settings_form.addRow('Model', self.model_combo_box)
         basic_settings_form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         basic_settings_form.addRow('API Key', self.api_key_line_edit)
@@ -168,6 +177,7 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow(self.device_label, self.device_combo_box)
         basic_settings_form.addRow(self.load_in_4_bit_container)
         basic_settings_form.addRow(self.remove_tag_separators_container)
+        basic_settings_form.addRow(self.remove_new_lines_container)
         basic_settings_form.addRow(self.limit_to_crop_container)
 
         self.wd_tagger_settings_form_container = QWidget()
@@ -362,6 +372,7 @@ class CaptionSettingsForm(QVBoxLayout):
             self.device_combo_box,
             self.load_in_4_bit_container,
             self.remove_tag_separators_container,
+            self.remove_new_lines_container,
             self.horizontal_line,
             self.toggle_advanced_settings_form_button,
             self.advanced_settings_form_container
@@ -417,6 +428,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'limit_to_crop': self.limit_to_crop_check_box.isChecked(),
             'remove_tag_separators':
                 self.remove_tag_separators_check_box.isChecked(),
+            'remove_new_lines': self.remove_new_lines_check_box.isChecked(),
             'bad_words': self.bad_words_line_edit.text(),
             'forced_words': self.forced_words_line_edit.text(),
             'generation_parameters': {

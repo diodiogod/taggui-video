@@ -73,6 +73,7 @@ class AutoCaptioningModel:
         self.bad_words_string = caption_settings['bad_words']
         self.forced_words_string = caption_settings['forced_words']
         self.remove_tag_separators = caption_settings['remove_tag_separators']
+        self.remove_new_lines = caption_settings['remove_new_lines']
         self.generation_parameters = caption_settings['generation_parameters']
         self.beam_count = self.generation_parameters['num_beams']
         self.processor = None
@@ -316,6 +317,8 @@ class AutoCaptioningModel:
         caption = caption.strip()
         if self.remove_tag_separators:
             caption = caption.replace(self.thread.tag_separator, ' ')
+        if self.remove_new_lines:
+            caption = caption.replace('\n', ' ')
         return caption
 
     def generate_caption(self, model_inputs: BatchFeature | dict | np.ndarray,
