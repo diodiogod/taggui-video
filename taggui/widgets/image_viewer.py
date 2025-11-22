@@ -331,6 +331,10 @@ class ImageViewer(QWidget):
                 self._controls_hide_timer.stop()
                 self.video_controls.setVisible(False)
                 self._controls_visible = False
+
+                # Stop video playback if switching from video to image
+                self.video_player.stop()
+
                 # Load static image at full resolution
                 pil_image = pilimage.open(image.path)
 

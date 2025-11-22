@@ -82,6 +82,9 @@ class MainWindow(QMainWindow):
                                     tag_separator, image_list_image_width)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self.image_list)
+
+        # Detect dock widget resize (splitter movement)
+        self.image_list.list_view.installEventFilter(self)
         self.image_tags_editor = ImageTagsEditor(
             self.proxy_image_list_model, self.tag_counter_model,
             self.image_tag_list_model, self.image_list, tokenizer,
@@ -129,16 +132,27 @@ class MainWindow(QMainWindow):
         self.signal_manager.connect_all_signals()
 
         # Connect video playback signals to freeze list view during playback
-        self.image_viewer.video_player.playback_started.connect(
-            lambda: self._freeze_list_view())
-        self.image_viewer.video_player.playback_paused.connect(
-            lambda: self._unfreeze_list_view())
+        self.image_viewer.video_player.playback_started.connect(self._freeze_list_view)
+        self.image_viewer.video_player.playback_paused.connect(self._unfreeze_list_view)
 
-        # Unfreeze list view when user interacts with it
+        # Unfreeze list view temporarily during user interaction
+        # Re-freezes automatically after 200ms of idle if video is playing
         self.image_list.list_view.verticalScrollBar().valueChanged.connect(
-            lambda: self._unfreeze_list_view())
+            self._unfreeze_for_interaction)
         self.image_list_selection_model.currentChanged.connect(
-            lambda: self._unfreeze_list_view())
+            self._unfreeze_for_interaction)
+
+        # Unfreeze on layout changes
+        self.proxy_image_list_model.layoutChanged.connect(
+            self._unfreeze_for_interaction)
+        self.proxy_image_list_model.modelReset.connect(
+            self._unfreeze_for_interaction)
+        self.proxy_image_list_model.filter_changed.connect(
+            self._unfreeze_for_interaction)
+
+        # Unfreeze on sort change
+        self.image_list.sort_combo_box.currentTextChanged.connect(
+            self._unfreeze_for_interaction)
         # Forward any unhandled image changing key presses to the image list.
         key_press_forwarder = KeyPressForwarder(
             parent=self, target=self.image_list.list_view,
@@ -209,21 +223,72 @@ class MainWindow(QMainWindow):
         self._max_delay = 500
         self._filter_timer_running = False
 
-    def _freeze_list_view(self):
-        """Freeze list view updates during video playback for performance."""
-        # Small delay to allow one repaint (important when switching videos)
-        QTimer.singleShot(50, lambda: self._do_freeze_list_view())
+        # List view freeze/unfreeze management for video playback performance
+        self._list_view_frozen = False
+        self._video_is_playing = False
+        self._unfreeze_timer = QTimer()
+        self._unfreeze_timer.setSingleShot(True)
+        self._unfreeze_timer.timeout.connect(self._refreeze_after_interaction)
 
-    def _do_freeze_list_view(self):
-        """Actually freeze the list view."""
-        self.image_list.list_view.setUpdatesEnabled(False)
-        print("[VIDEO] List view frozen for playback")
+    def _freeze_list_view(self):
+        """Called when video playback starts."""
+        self._video_is_playing = True
+        # Delay freeze slightly to allow initial frame to render
+        QTimer.singleShot(100, self._apply_freeze_if_idle)
+
+    def _apply_freeze_if_idle(self):
+        """Actually freeze the list view if no interaction is happening."""
+        if self._video_is_playing and not self._unfreeze_timer.isActive():
+            if not self._list_view_frozen:
+                self.image_list.list_view.setUpdatesEnabled(False)
+                self._list_view_frozen = True
+                print("[VIDEO] List view frozen for playback")
 
     def _unfreeze_list_view(self):
-        """Unfreeze list view updates (but don't pause video)."""
-        if not self.image_list.list_view.updatesEnabled():
+        """Called when video is paused/stopped."""
+        self._video_is_playing = False
+        # Don't unfreeze automatically - let user interaction handle it
+        # Static list doesn't need repaints whether video is playing or not
+
+    def _unfreeze_for_interaction(self):
+        """Temporarily unfreeze during user interaction, then re-freeze after idle."""
+        # Safety check - might be called before initialization completes
+        if not hasattr(self, '_list_view_frozen'):
+            return
+
+        # Unfreeze if currently frozen
+        if self._list_view_frozen:
             self.image_list.list_view.setUpdatesEnabled(True)
-            print("[VIDEO] List view unfrozen")
+            self._list_view_frozen = False
+            print("[VIDEO] List view unfrozen (user interaction)")
+
+        # Restart timer - will re-freeze after 200ms of no interaction
+        self._unfreeze_timer.stop()
+        self._unfreeze_timer.start(200)
+
+    def _refreeze_after_interaction(self):
+        """Re-freeze list view after interaction has stopped."""
+        # Only re-freeze if video is playing (otherwise keep unfrozen for responsiveness)
+        if self._video_is_playing and not self._list_view_frozen:
+            self.image_list.list_view.setUpdatesEnabled(False)
+            self._list_view_frozen = True
+            print("[VIDEO] List view re-frozen (interaction ended)")
+        elif not self._video_is_playing and self._list_view_frozen:
+            # Video stopped while frozen - unfreeze for normal use
+            self.image_list.list_view.setUpdatesEnabled(True)
+            self._list_view_frozen = False
+            print("[VIDEO] List view unfrozen (no video playing)")
+
+    def eventFilter(self, obj, event):
+        """Filter events for list view to detect splitter resize."""
+        if obj == self.image_list.list_view and event.type() == event.Type.Resize:
+            self._unfreeze_for_interaction()
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        """Handle window resize - unfreeze list to allow layout update."""
+        super().resizeEvent(event)
+        self._unfreeze_for_interaction()
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
