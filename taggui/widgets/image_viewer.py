@@ -6,8 +6,6 @@ from PySide6.QtWidgets import (QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
 from PIL import Image as pilimage
-import cv2
-import numpy as np
 from utils.settings import settings
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image, ImageMarking, Marking
@@ -27,62 +25,6 @@ def pil_to_qimage(pil_image):
     return qimage
 
 
-class HighQualityPixmapItem(QGraphicsPixmapItem):
-    """QGraphicsPixmapItem with high-quality downsampling like ImageGlass.
-
-    Overrides paint() to use OpenCV INTER_AREA when downscaling, which is
-    equivalent to Direct2D's MultiSampleLinear interpolation mode.
-    """
-
-    def __init__(self, pixmap=None):
-        super().__init__(pixmap)
-        self._original_image = None  # Store as numpy array for fast OpenCV access
-
-    def set_original_image(self, pil_image):
-        """Store the original PIL image for high-quality rendering."""
-        img_array = np.array(pil_image.convert('RGB'))
-        self._original_image = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-
-    def paint(self, painter, option, widget=None):
-        """Override paint to use high-quality downsampling when scaling down."""
-        if self._original_image is None or painter.transform().m11() >= 0.99:
-            # No original image or at/above 1:1 zoom - use default Qt rendering
-            super().paint(painter, option, widget)
-            return
-
-        # Get the current transform to determine scale
-        transform = painter.transform()
-        scale_x = transform.m11()
-        scale_y = transform.m22()
-
-        # Only use custom rendering when downscaling significantly
-        if scale_x < 0.99 or scale_y < 0.99:
-            # Calculate target size
-            orig_h, orig_w = self._original_image.shape[:2]
-            target_w = int(orig_w * scale_x)
-            target_h = int(orig_h * scale_y)
-
-            if target_w > 0 and target_h > 0:
-                # Use INTER_AREA for high-quality downsampling (like ImageGlass)
-                downscaled = cv2.resize(self._original_image, (target_w, target_h),
-                                       interpolation=cv2.INTER_AREA)
-
-                # Convert to QImage
-                img_rgb = cv2.cvtColor(downscaled, cv2.COLOR_BGR2RGB)
-                height, width, channel = img_rgb.shape
-                bytes_per_line = 3 * width
-                qimage = QImage(img_rgb.data, width, height, bytes_per_line,
-                               QImage.Format_RGB888)
-
-                # Draw without the transform (we already scaled)
-                painter.save()
-                painter.setTransform(QTransform())
-                painter.drawImage(transform.map(self.boundingRect().topLeft()), qimage)
-                painter.restore()
-                return
-
-        # Fallback to default rendering
-        super().paint(painter, option, widget)
 
 
 class ImageViewer(QWidget):
@@ -335,16 +277,23 @@ class ImageViewer(QWidget):
                 # Stop video playback if switching from video to image
                 self.video_player.stop()
 
-                # Load static image at full resolution
-                pil_image = pilimage.open(image.path)
+                # Load static image using QImageReader (like thumbnails for best quality)
+                from PySide6.QtGui import QImageReader
+                image_reader = QImageReader(str(image.path))
+                image_reader.setAutoTransform(True)
+                qimage = image_reader.read()
 
-                # Convert to QPixmap at full resolution
-                qimage = pil_to_qimage(pil_image)
+                if qimage.isNull():
+                    # Fallback to PIL if QImageReader fails
+                    pil_image = pilimage.open(image.path)
+                    qimage = pil_to_qimage(pil_image)
+
                 pixmap = QPixmap.fromImage(qimage)
 
-                # Use custom high-quality pixmap item (like ImageGlass MultiSampleLinear)
-                image_item = HighQualityPixmapItem(pixmap)
-                image_item.set_original_image(pil_image)  # Store for high-quality rendering
+                # Use standard pixmap item with SmoothTransformation
+                # OpenGL viewport + render hints should provide high-quality GPU scaling
+                image_item = QGraphicsPixmapItem(pixmap)
+                image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
                 image_item.setZValue(0)
                 self.scene.setSceneRect(image_item.boundingRect()
                                         .adjusted(-1, -1, 1, 1)) # space for rect border
