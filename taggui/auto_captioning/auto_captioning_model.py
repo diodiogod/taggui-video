@@ -319,6 +319,7 @@ class AutoCaptioningModel:
             caption = caption.replace(self.thread.tag_separator, ' ')
         if self.remove_new_lines:
             caption = caption.replace('\n', ' ')
+            caption = re.sub(r' +', ' ', caption)
         return caption
 
     def generate_caption(self, model_inputs: BatchFeature | dict | np.ndarray,
