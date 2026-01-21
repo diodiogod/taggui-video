@@ -1,6 +1,7 @@
 """Database caching for image dimensions and metadata to speed up directory loading."""
 
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 from utils.settings import settings, DEFAULT_SETTINGS
@@ -28,8 +29,17 @@ class ImageIndexDB:
     def _init_db(self):
         """Create database and tables if they don't exist."""
         try:
-            self.conn = sqlite3.connect(str(self.db_path))
+            self.conn = sqlite3.connect(str(self.db_path), timeout=30.0)  # 30s timeout for large folders
             self.conn.row_factory = sqlite3.Row  # Access columns by name
+
+            # Enable WAL mode for better concurrency (allows simultaneous reads/writes)
+            self.conn.execute('PRAGMA journal_mode=WAL')
+            self.conn.execute('PRAGMA synchronous=NORMAL')  # Faster writes, still safe with WAL
+            self.conn.execute('PRAGMA cache_size=-64000')  # 64MB cache for large folders
+
+            # Use immediate transactions to reduce lock contention
+            self.conn.isolation_level = 'IMMEDIATE'
+
             cursor = self.conn.cursor()
 
             # Create schema
@@ -145,36 +155,64 @@ class ImageIndexDB:
         if not self.enabled or not self.conn:
             return
 
-        try:
-            cursor = self.conn.cursor()
+        video_fps = None
+        video_duration = None
+        video_frame_count = None
 
-            video_fps = None
-            video_duration = None
-            video_frame_count = None
+        if is_video and video_metadata:
+            video_fps = video_metadata.get('fps')
+            video_duration = video_metadata.get('duration')
+            video_frame_count = video_metadata.get('frame_count')
 
-            if is_video and video_metadata:
-                video_fps = video_metadata.get('fps')
-                video_duration = video_metadata.get('duration')
-                video_frame_count = video_metadata.get('frame_count')
+        # Retry with exponential backoff for locked database
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO images
+                    (file_name, width, height, is_video, video_fps, video_duration,
+                     video_frame_count, mtime)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (file_name, width, height, int(is_video), video_fps,
+                      video_duration, video_frame_count, mtime))
+                return  # Success
 
-            cursor.execute('''
-                INSERT OR REPLACE INTO images
-                (file_name, width, height, is_video, video_fps, video_duration,
-                 video_frame_count, mtime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (file_name, width, height, int(is_video), video_fps,
-                  video_duration, video_frame_count, mtime))
+            except sqlite3.OperationalError as e:
+                if 'locked' in str(e).lower() and attempt < max_retries - 1:
+                    # Database locked, retry with backoff
+                    time.sleep(0.1 * (2 ** attempt))  # 0.1s, 0.2s, 0.4s
+                    continue
+                print(f'Database write error: {e}')
+                return
 
-        except sqlite3.Error as e:
-            print(f'Database write error: {e}')
+            except sqlite3.Error as e:
+                print(f'Database write error: {e}')
+                return
 
     def commit(self):
         """Commit pending transactions."""
-        if self.conn:
+        if not self.conn:
+            return
+
+        # Retry with exponential backoff for locked database
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
                 self.conn.commit()
+                return  # Success
+
+            except sqlite3.OperationalError as e:
+                if 'locked' in str(e).lower() and attempt < max_retries - 1:
+                    # Database locked, retry with backoff
+                    time.sleep(0.1 * (2 ** attempt))  # 0.1s, 0.2s, 0.4s
+                    continue
+                print(f'Database commit error: {e}')
+                return
+
             except sqlite3.Error as e:
                 print(f'Database commit error: {e}')
+                return
 
     def close(self):
         """Close database connection."""
