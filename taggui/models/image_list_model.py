@@ -477,7 +477,11 @@ class ImageListModel(QAbstractListModel):
                         with self._thumbnail_lock:
                             active_thumbnails = len(self._thumbnail_futures)
 
-                        if active_thumbnails > 100:
+                        # Adaptive threshold based on folder size
+                        total = len(self.images)
+                        defer_threshold = 500 if total > 20000 else 100
+
+                        if active_thumbnails > defer_threshold:
                             # Too many thumbnails still loading, defer layout update
                             print(f"[ENRICHMENT] Deferring layout update ({active_thumbnails} thumbnails loading)")
                         else:
@@ -680,8 +684,14 @@ class ImageListModel(QAbstractListModel):
         failed_video_extractions = 0
         skip_reasons = {}  # Track why images were skipped
 
-        # Scale processEvents frequency for large folders (max 100 updates)
-        update_interval = max(10, total_images // 100)
+        # Scale processEvents frequency for large folders
+        # Huge folders: update every 500 images, Large: every 100, Normal: every 10
+        if total_images > 20000:
+            update_interval = 500
+        elif total_images > 5000:
+            update_interval = 100
+        else:
+            update_interval = max(10, total_images // 100)
 
         for image_path in image_paths:
             # Update progress at scaled intervals to reduce UI overhead
@@ -880,6 +890,10 @@ class ImageListModel(QAbstractListModel):
                 enriched_count = 0
                 enriched_indices = []  # Track which indices changed
 
+                # Adaptive batching based on total image count
+                commit_interval = 500 if total_images > 20000 else 100
+                layout_update_interval = 1000 if total_images > 20000 else 100
+
                 for idx, image in enumerate(self.images):
                     # Check if cancelled (e.g., due to sort/filter)
                     if self._enrichment_cancelled.is_set():
@@ -936,9 +950,13 @@ class ImageListModel(QAbstractListModel):
                                       is_video, mtime, image.video_metadata)
 
                         enriched_count += 1
-                        if enriched_count % 100 == 0:
+
+                        # Commit to database at intervals
+                        if enriched_count % commit_interval == 0:
                             db_bg.commit()
-                            # Trigger layout recalculation with specific indices
+
+                        # Trigger layout updates less frequently for huge folders
+                        if enriched_count % layout_update_interval == 0:
                             QApplication.instance().postEvent(
                                 self,
                                 BackgroundEnrichmentProgressEvent(enriched_indices.copy())
@@ -953,15 +971,16 @@ class ImageListModel(QAbstractListModel):
 
                 print(f"[FAST_LOAD] Background enrichment complete: {enriched_count} images updated")
 
-                # Final layout update with remaining indices (only if significant)
-                # Skip tiny batches to avoid race conditions with UI interaction
-                if len(enriched_indices) >= 10:
+                # Final layout update with remaining indices
+                # For huge folders, only update if we have a significant batch
+                min_batch = 50 if total_images > 20000 else 10
+                if len(enriched_indices) >= min_batch:
                     QApplication.instance().postEvent(
                         self,
                         BackgroundEnrichmentProgressEvent(enriched_indices)
                     )
                 elif len(enriched_indices) > 0:
-                    print(f"[FAST_LOAD] Skipping layout update for {len(enriched_indices)} items (too small)")
+                    print(f"[FAST_LOAD] Skipping final layout update for {len(enriched_indices)} items (batch too small)")
 
             # Submit background enrichment task
             self._load_executor.submit(enrich_dimensions)
@@ -993,6 +1012,11 @@ class ImageListModel(QAbstractListModel):
             enriched_count = 0
             enriched_indices = []
             video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+
+            # Adaptive batching based on total image count
+            total_images = len(self.images)
+            commit_interval = 500 if total_images > 20000 else 100
+            layout_update_interval = 1000 if total_images > 20000 else 100
 
             for idx, image in enumerate(self.images):
                 # Check if cancelled
@@ -1055,9 +1079,13 @@ class ImageListModel(QAbstractListModel):
                                   is_video, mtime, image.video_metadata)
 
                     enriched_count += 1
-                    if enriched_count % 100 == 0:
+
+                    # Commit to database at intervals
+                    if enriched_count % commit_interval == 0:
                         db_bg.commit()
-                        # Trigger layout recalculation
+
+                    # Trigger layout updates less frequently for huge folders
+                    if enriched_count % layout_update_interval == 0:
                         from PySide6.QtWidgets import QApplication
                         QApplication.instance().postEvent(
                             self,
@@ -1073,13 +1101,16 @@ class ImageListModel(QAbstractListModel):
 
             print(f"[SORT] Background enrichment complete: {enriched_count} images updated")
 
-            # Final layout update
-            if len(enriched_indices) > 0:
+            # Final layout update with remaining indices
+            min_batch = 50 if total_images > 20000 else 10
+            if len(enriched_indices) >= min_batch:
                 from PySide6.QtWidgets import QApplication
                 QApplication.instance().postEvent(
                     self,
                     BackgroundEnrichmentProgressEvent(enriched_indices)
                 )
+            elif len(enriched_indices) > 0:
+                print(f"[SORT] Skipping final layout update for {len(enriched_indices)} items (batch too small)")
 
         # Submit enrichment task
         self._load_executor.submit(enrich_dimensions)
