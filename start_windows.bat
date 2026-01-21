@@ -129,6 +129,64 @@ if %VENV_EXISTS% EQU 0 (
     echo Upgrading pip...
     python -m pip install --upgrade pip > "%LOGFILE%" 2>&1
 
+    echo Detecting CUDA version...
+    set CUDA_VERSION=cpu
+    nvidia-smi >nul 2>&1
+    if !ERRORLEVEL! EQU 0 (
+        for /f "tokens=*" %%i in ('nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul') do set DRIVER_VERSION=%%i
+        echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+
+        :: Detect CUDA version from driver
+        for /f "tokens=2 delims=." %%v in ("!DRIVER_VERSION!") do (
+            if %%v GEQ 525 (
+                set CUDA_VERSION=cu121
+                echo Detected CUDA 12.1+
+            ) else if %%v GEQ 450 (
+                set CUDA_VERSION=cu118
+                echo Detected CUDA 11.8+
+            )
+        )
+    ) else (
+        echo No NVIDIA GPU detected, installing CPU-only PyTorch
+    )
+
+    echo Installing PyTorch for !CUDA_VERSION!...
+    if "!CUDA_VERSION!"=="cpu" (
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >> "%LOGFILE%" 2>&1
+    ) else if "!CUDA_VERSION!"=="cu118" (
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 >> "%LOGFILE%" 2>&1
+    ) else if "!CUDA_VERSION!"=="cu121" (
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 >> "%LOGFILE%" 2>&1
+    )
+
+    if !ERRORLEVEL! NEQ 0 (
+        echo ERROR: Failed to install PyTorch
+        echo Check the log file for details: %LOGFILE%
+        pause & exit /b 1
+    )
+    echo PyTorch installed successfully!
+
+    :: Install flash-attn for CUDA only
+    if not "!CUDA_VERSION!"=="cpu" (
+        echo Installing flash-attention...
+        for /f "tokens=2 delims=." %%v in ('python --version 2^>^&1') do set PY_MINOR=%%v
+
+        if "!CUDA_VERSION!"=="cu121" (
+            if "!PY_MINOR!"=="12" (
+                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu121torch2.5.1cxx11abiFALSE-cp312-cp312-win_amd64.whl >> "%LOGFILE%" 2>&1
+            ) else if "!PY_MINOR!"=="11" (
+                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu121torch2.5.1cxx11abiFALSE-cp311-cp311-win_amd64.whl >> "%LOGFILE%" 2>&1
+            )
+        ) else if "!CUDA_VERSION!"=="cu118" (
+            if "!PY_MINOR!"=="12" (
+                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu118torch2.5.1cxx11abiFALSE-cp312-cp312-win_amd64.whl >> "%LOGFILE%" 2>&1
+            ) else if "!PY_MINOR!"=="11" (
+                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu118torch2.5.1cxx11abiFALSE-cp311-cp311-win_amd64.whl >> "%LOGFILE%" 2>&1
+            )
+        )
+        echo Flash-attention installed!
+    )
+
     echo Installing requirements...
     pip install -r requirements.txt > "%LOGFILE%" 2>&1
     if !ERRORLEVEL! NEQ 0 (
