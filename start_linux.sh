@@ -99,6 +99,52 @@ if [ $VENV_EXISTS -eq 0 ]; then
     echo "Upgrading pip..."
     python -m pip install --upgrade pip >> "$LOGFILE" 2>&1
 
+    echo "Detecting CUDA version..."
+    CUDA_VERSION="cpu"
+    if command -v nvidia-smi &> /dev/null; then
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+        echo "Found NVIDIA GPU with driver: $DRIVER_VERSION"
+
+        # Extract major driver version
+        DRIVER_MAJOR=$(echo "$DRIVER_VERSION" | cut -d'.' -f1)
+
+        # Detect CUDA version from driver
+        if [ "$DRIVER_MAJOR" -ge 525 ]; then
+            CUDA_VERSION="cu121"
+            echo "Detected CUDA 12.1+"
+        elif [ "$DRIVER_MAJOR" -ge 450 ]; then
+            CUDA_VERSION="cu118"
+            echo "Detected CUDA 11.8+"
+        fi
+    else
+        echo "No NVIDIA GPU detected, installing CPU-only PyTorch"
+    fi
+
+    echo "Installing PyTorch for $CUDA_VERSION..."
+    if [ "$CUDA_VERSION" == "cpu" ]; then
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >> "$LOGFILE" 2>&1
+    elif [ "$CUDA_VERSION" == "cu118" ]; then
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 >> "$LOGFILE" 2>&1
+    elif [ "$CUDA_VERSION" == "cu121" ]; then
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 >> "$LOGFILE" 2>&1
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to install PyTorch"
+        echo "Check the log file for details: $LOGFILE"
+        exit 1
+    fi
+    echo "PyTorch installed successfully!"
+
+    # Install flash-attn for CUDA only (Linux can compile from source)
+    if [ "$CUDA_VERSION" != "cpu" ]; then
+        echo "Installing flash-attention..."
+        pip install flash-attn --no-build-isolation >> "$LOGFILE" 2>&1 || {
+            echo "WARNING: Flash-attention installation failed (optional, continuing...)"
+        }
+        echo "Flash-attention installed!"
+    fi
+
     echo "Installing requirements..."
     pip install -r requirements.txt >> "$LOGFILE" 2>&1 || {
         echo ""
