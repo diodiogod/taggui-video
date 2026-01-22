@@ -1214,11 +1214,45 @@ class ImageListView(QListView):
             # Update progress bar position to follow scroll
             self._update_progress_bar_position()
 
+            # Trigger page loading for paginated models
+            self._check_and_load_pages()
+
             # Restart idle timer - will start/resume aggressive preload when user stops scrolling
             # Only if not already complete
             if not self._preload_complete:
                 self._idle_preload_timer.stop()
                 self._idle_preload_timer.start(500)  # 500ms after scrolling stops
+
+    def _check_and_load_pages(self):
+        """Check if we need to load more pages based on scroll position."""
+        # Check if model supports pagination
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        if not hasattr(source_model, 'ensure_pages_for_range'):
+            return  # Not a paginated model
+
+        if not self._masonry_items:
+            return
+
+        # Get current scroll position and viewport
+        scroll_offset = self.verticalScrollBar().value()
+        viewport_height = self.viewport().height()
+
+        # Calculate buffer (2 screens ahead/behind)
+        buffer = viewport_height * 2
+        start_y = max(0, scroll_offset - buffer)
+        end_y = scroll_offset + viewport_height + buffer
+
+        # Find item indices in this range
+        visible_items = self._get_masonry_visible_items(
+            QRect(0, start_y, self.viewport().width(), end_y - start_y)
+        )
+
+        if visible_items:
+            start_idx = min(item['index'] for item in visible_items)
+            end_idx = max(item['index'] for item in visible_items)
+
+            # Request pages for this range
+            source_model.ensure_pages_for_range(start_idx, end_idx)
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""

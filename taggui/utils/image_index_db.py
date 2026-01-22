@@ -3,11 +3,11 @@
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 2  # Increment to force cache invalidation (v2: use relative paths instead of filenames)
+DB_VERSION = 3  # Increment to force cache invalidation (v3: add tags table and indexes for pagination)
 
 
 class ImageIndexDB:
@@ -52,16 +52,39 @@ class ImageIndexDB:
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS images (
-                    file_name TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_name TEXT UNIQUE NOT NULL,
                     width INTEGER NOT NULL,
                     height INTEGER NOT NULL,
+                    aspect_ratio REAL NOT NULL,
                     is_video INTEGER NOT NULL,
                     video_fps REAL,
                     video_duration REAL,
                     video_frame_count INTEGER,
-                    mtime REAL NOT NULL
+                    mtime REAL NOT NULL,
+                    rating REAL DEFAULT 0.0,
+                    indexed_at REAL
                 )
             ''')
+
+            # Separate tags table for efficient querying
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS image_tags (
+                    image_id INTEGER NOT NULL,
+                    tag TEXT NOT NULL,
+                    PRIMARY KEY (image_id, tag),
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create indexes for fast queries
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
 
             # Check version
             cursor.execute('SELECT value FROM meta WHERE key = ?', ('version',))
@@ -140,7 +163,8 @@ class ImageIndexDB:
             return None
 
     def save_info(self, file_name: str, width: int, height: int,
-                  is_video: bool, mtime: float, video_metadata: Optional[dict] = None):
+                  is_video: bool, mtime: float, video_metadata: Optional[dict] = None,
+                  rating: float = 0.0):
         """
         Save image info to cache.
 
@@ -151,6 +175,7 @@ class ImageIndexDB:
             is_video: Whether this is a video file
             mtime: File modification time
             video_metadata: Optional dict with fps, duration, frame_count
+            rating: Image rating (0.0 to 5.0)
         """
         if not self.enabled or not self.conn:
             return
@@ -164,6 +189,10 @@ class ImageIndexDB:
             video_duration = video_metadata.get('duration')
             video_frame_count = video_metadata.get('frame_count')
 
+        # Calculate aspect ratio
+        aspect_ratio = width / height if height > 0 else 1.0
+        indexed_at = time.time()
+
         # Retry with exponential backoff for locked database
         max_retries = 3
         for attempt in range(max_retries):
@@ -171,11 +200,11 @@ class ImageIndexDB:
                 cursor = self.conn.cursor()
                 cursor.execute('''
                     INSERT OR REPLACE INTO images
-                    (file_name, width, height, is_video, video_fps, video_duration,
-                     video_frame_count, mtime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (file_name, width, height, int(is_video), video_fps,
-                      video_duration, video_frame_count, mtime))
+                    (file_name, width, height, aspect_ratio, is_video, video_fps,
+                     video_duration, video_frame_count, mtime, rating, indexed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
+                      video_duration, video_frame_count, mtime, rating, indexed_at))
                 return  # Success
 
             except sqlite3.OperationalError as e:
@@ -227,3 +256,258 @@ class ImageIndexDB:
     def __del__(self):
         """Ensure connection is closed on deletion."""
         self.close()
+
+    # ========== Paginated Query Methods ==========
+
+    def count(self, filter_sql: str = '', bindings: tuple = ()) -> int:
+        """Get total count of images, optionally filtered."""
+        if not self.enabled or not self.conn:
+            return 0
+
+        try:
+            cursor = self.conn.cursor()
+            query = 'SELECT COUNT(*) FROM images'
+            if filter_sql:
+                query += f' WHERE {filter_sql}'
+            cursor.execute(query, bindings)
+            return cursor.fetchone()[0]
+        except sqlite3.Error as e:
+            print(f'Database count error: {e}')
+            return 0
+
+    def get_page(self, page: int, page_size: int = 1000,
+                 sort_field: str = 'mtime', sort_dir: str = 'DESC',
+                 filter_sql: str = '', bindings: tuple = ()) -> List[Dict[str, Any]]:
+        """
+        Get a page of images from the database.
+
+        Args:
+            page: Page number (0-indexed)
+            page_size: Number of images per page
+            sort_field: Column to sort by (mtime, file_name, aspect_ratio, rating)
+            sort_dir: Sort direction (ASC or DESC)
+            filter_sql: Optional WHERE clause (without WHERE keyword)
+            bindings: Parameters for the filter_sql
+
+        Returns:
+            List of image dictionaries
+        """
+        if not self.enabled or not self.conn:
+            return []
+
+        # Validate sort field to prevent SQL injection
+        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height', 'id'}
+        if sort_field not in valid_sort_fields:
+            sort_field = 'mtime'
+        if sort_dir.upper() not in ('ASC', 'DESC'):
+            sort_dir = 'DESC'
+
+        try:
+            cursor = self.conn.cursor()
+            offset = page * page_size
+
+            query = f'''
+                SELECT id, file_name, width, height, aspect_ratio, is_video,
+                       video_fps, video_duration, video_frame_count, mtime, rating
+                FROM images
+            '''
+            if filter_sql:
+                query += f' WHERE {filter_sql}'
+            query += f' ORDER BY {sort_field} {sort_dir} LIMIT ? OFFSET ?'
+
+            cursor.execute(query, bindings + (page_size, offset))
+            rows = cursor.fetchall()
+
+            return [dict(row) for row in rows]
+
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return []
+
+    def get_image_by_id(self, image_id: int) -> Optional[Dict[str, Any]]:
+        """Get a single image by ID."""
+        if not self.enabled or not self.conn:
+            return None
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT id, file_name, width, height, aspect_ratio, is_video,
+                       video_fps, video_duration, video_frame_count, mtime, rating
+                FROM images WHERE id = ?
+            ''', (image_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return None
+
+    def get_images_by_ids(self, image_ids: List[int]) -> List[Dict[str, Any]]:
+        """Get multiple images by their IDs."""
+        if not self.enabled or not self.conn or not image_ids:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            placeholders = ','.join('?' * len(image_ids))
+            cursor.execute(f'''
+                SELECT id, file_name, width, height, aspect_ratio, is_video,
+                       video_fps, video_duration, video_frame_count, mtime, rating
+                FROM images WHERE id IN ({placeholders})
+            ''', image_ids)
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return []
+
+    # ========== Tag Management ==========
+
+    def get_tags_for_image(self, image_id: int) -> List[str]:
+        """Get all tags for a specific image."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT tag FROM image_tags WHERE image_id = ?', (image_id,))
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database tag query error: {e}')
+            return []
+
+    def get_tags_for_images(self, image_ids: List[int]) -> Dict[int, List[str]]:
+        """Get tags for multiple images in a single query."""
+        if not self.enabled or not self.conn or not image_ids:
+            return {}
+
+        try:
+            cursor = self.conn.cursor()
+            placeholders = ','.join('?' * len(image_ids))
+            cursor.execute(f'''
+                SELECT image_id, tag FROM image_tags
+                WHERE image_id IN ({placeholders})
+                ORDER BY image_id
+            ''', image_ids)
+
+            result: Dict[int, List[str]] = {img_id: [] for img_id in image_ids}
+            for row in cursor.fetchall():
+                result[row[0]].append(row[1])
+            return result
+        except sqlite3.Error as e:
+            print(f'Database tag query error: {e}')
+            return {}
+
+    def set_tags_for_image(self, image_id: int, tags: List[str]):
+        """Replace all tags for an image."""
+        if not self.enabled or not self.conn:
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            # Delete existing tags
+            cursor.execute('DELETE FROM image_tags WHERE image_id = ?', (image_id,))
+            # Insert new tags
+            if tags:
+                cursor.executemany(
+                    'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
+                    [(image_id, tag) for tag in tags]
+                )
+        except sqlite3.Error as e:
+            print(f'Database tag write error: {e}')
+
+    def add_tag_to_image(self, image_id: int, tag: str):
+        """Add a single tag to an image."""
+        if not self.enabled or not self.conn:
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                'INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
+                (image_id, tag)
+            )
+        except sqlite3.Error as e:
+            print(f'Database tag write error: {e}')
+
+    def remove_tag_from_image(self, image_id: int, tag: str):
+        """Remove a single tag from an image."""
+        if not self.enabled or not self.conn:
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                'DELETE FROM image_tags WHERE image_id = ? AND tag = ?',
+                (image_id, tag)
+            )
+        except sqlite3.Error as e:
+            print(f'Database tag write error: {e}')
+
+    def get_all_tags(self) -> List[Dict[str, Any]]:
+        """Get all unique tags with their usage counts."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT tag, COUNT(*) as count
+                FROM image_tags
+                GROUP BY tag
+                ORDER BY count DESC
+            ''')
+            return [{'tag': row[0], 'count': row[1]} for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database tag query error: {e}')
+            return []
+
+    def get_images_with_tag(self, tag: str, page: int = 0, page_size: int = 1000) -> List[Dict[str, Any]]:
+        """Get paginated images that have a specific tag."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            offset = page * page_size
+            cursor.execute('''
+                SELECT i.id, i.file_name, i.width, i.height, i.aspect_ratio, i.is_video,
+                       i.video_fps, i.video_duration, i.video_frame_count, i.mtime, i.rating
+                FROM images i
+                INNER JOIN image_tags t ON i.id = t.image_id
+                WHERE t.tag = ?
+                ORDER BY i.mtime DESC
+                LIMIT ? OFFSET ?
+            ''', (tag, page_size, offset))
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return []
+
+    # ========== Rating Management ==========
+
+    def set_rating(self, image_id: int, rating: float):
+        """Set rating for an image."""
+        if not self.enabled or not self.conn:
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('UPDATE images SET rating = ? WHERE id = ?', (rating, image_id))
+        except sqlite3.Error as e:
+            print(f'Database rating write error: {e}')
+
+    # ========== Image ID Lookup ==========
+
+    def get_image_id(self, file_name: str) -> Optional[int]:
+        """Get image ID by file name."""
+        if not self.enabled or not self.conn:
+            return None
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT id FROM images WHERE file_name = ?', (file_name,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return None
