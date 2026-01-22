@@ -289,8 +289,8 @@ class ImageListModel(QAbstractListModel):
         self._aspect_ratio_cache: list[float] = []
 
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
-        # Load executor: 6 workers for thumbnail loading (same as main branch)
-        self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        # Load executor: 2 workers to minimize GIL contention (PIL blocks other threads)
+        self._load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_load")
         # Save executor: 2 workers for background cache writing (low priority, can be slow)
         self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
         # Page loader executor for paginated mode
@@ -725,6 +725,29 @@ class ImageListModel(QAbstractListModel):
         self._cache_report_timer = QTimer()
         self._cache_report_timer.timeout.connect(self._report_cache_progress)
         self._cache_report_timer.start(30000)  # 30 seconds
+
+    def queue_thumbnail_load(self, idx: int):
+        """Queue a single thumbnail for async loading (non-blocking)."""
+        if idx < 0 or idx >= len(self.images):
+            return
+
+        image = self.images[idx]
+
+        # Skip if already loaded or loading
+        if image.thumbnail or image.thumbnail_qimage:
+            return
+
+        with self._thumbnail_lock:
+            if idx in self._thumbnail_futures:
+                return  # Already queued
+
+        # Submit async load
+        future = self._load_executor.submit(
+            self._load_thumbnail_worker, idx, image.path, image.crop,
+            self.thumbnail_generation_width, image.is_video
+        )
+        with self._thumbnail_lock:
+            self._thumbnail_futures[idx] = future
 
     def _report_cache_progress(self):
         """Periodically report thumbnail cache save progress."""
