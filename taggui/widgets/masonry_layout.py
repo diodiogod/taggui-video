@@ -267,3 +267,110 @@ class MasonryLayout:
         """Get the total size needed for the layout."""
         width = self.num_columns * (self.column_width + self.spacing) - self.spacing
         return QSize(width, self._total_height)
+
+    # ========== Pagination Support ==========
+
+    def calculate_page(self, page_num: int, items_data: list[tuple[int, float]],
+                       append: bool = False) -> int:
+        """
+        Calculate layout for a single page of items.
+
+        Args:
+            page_num: Page number (for tracking)
+            items_data: List of (index, aspect_ratio) tuples for this page
+            append: If True, append to existing layout. If False, reset first.
+
+        Returns:
+            The starting Y position for this page
+        """
+        if not append:
+            self._reset_columns()
+
+        page_start_y = max(self._column_heights) if self._column_heights else 0
+
+        for index, aspect_ratio in items_data:
+            self.add_item(index, aspect_ratio)
+
+        return page_start_y
+
+    def estimate_total_height(self, total_items: int, loaded_items: int) -> int:
+        """
+        Estimate total height based on loaded items.
+
+        Args:
+            total_items: Total number of items in dataset
+            loaded_items: Number of items already laid out
+
+        Returns:
+            Estimated total height for scrollbar
+        """
+        if loaded_items == 0 or self._total_height == 0:
+            # No data yet, use rough estimate
+            avg_height = self.column_width  # Assume square items
+            items_per_row = self.num_columns
+            estimated_rows = (total_items + items_per_row - 1) // items_per_row
+            return estimated_rows * (avg_height + self.spacing)
+
+        # Calculate average height per item from loaded data
+        avg_height_per_item = self._total_height / loaded_items
+
+        # Extrapolate to total items
+        return int(avg_height_per_item * total_items)
+
+    def get_page_at_position(self, y_position: int, page_size: int) -> int:
+        """
+        Estimate which page contains a given Y position.
+
+        Args:
+            y_position: Y scroll position
+            page_size: Number of items per page
+
+        Returns:
+            Estimated page number
+        """
+        if not self._item_positions:
+            return 0
+
+        # Binary search for item at this Y position
+        # Find first item whose rect.y() > y_position
+        low, high = 0, len(self._item_positions) - 1
+        result_idx = 0
+
+        while low <= high:
+            mid = (low + high) // 2
+            if self._item_positions[mid].rect.y() <= y_position:
+                result_idx = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        # Convert item index to page number
+        return result_idx // page_size
+
+    def get_items_in_range(self, start_y: int, end_y: int) -> list[MasonryItem]:
+        """
+        Get items within a Y range (for efficient rendering).
+
+        Args:
+            start_y: Start of range
+            end_y: End of range
+
+        Returns:
+            List of items intersecting the range
+        """
+        items = []
+        for item in self._item_positions:
+            item_top = item.rect.y()
+            item_bottom = item.rect.bottom()
+
+            # Skip items completely above the range
+            if item_bottom < start_y:
+                continue
+
+            # Stop if we've passed the range
+            if item_top > end_y:
+                break
+
+            items.append(item)
+
+        return items
