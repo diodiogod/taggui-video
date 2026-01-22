@@ -29,7 +29,7 @@ class ImageIndexDB:
     def _init_db(self):
         """Create database and tables if they don't exist."""
         try:
-            self.conn = sqlite3.connect(str(self.db_path), timeout=30.0)  # 30s timeout for large folders
+            self.conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)  # 30s timeout for large folders
             self.conn.row_factory = sqlite3.Row  # Access columns by name
 
             # Enable WAL mode for better concurrency (allows simultaneous reads/writes)

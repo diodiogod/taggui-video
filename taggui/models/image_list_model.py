@@ -254,7 +254,7 @@ class ImageListModel(QAbstractListModel):
     indexing_progress = Signal(int, int)  # (current, total) during initial indexing
 
     # Threshold for enabling pagination mode (number of images)
-    PAGINATION_THRESHOLD = 50000
+    PAGINATION_THRESHOLD = 10000
     PAGE_SIZE = 1000
     MAX_PAGES_IN_MEMORY = 5
 
@@ -317,6 +317,9 @@ class ImageListModel(QAbstractListModel):
         self._qimage_queue = []  # List of (idx, qimage, was_cached) tuples
         self._qimage_queue_lock = threading.Lock()
         self._qimage_timer = None  # QTimer for processing queue gradually
+
+        # Connect page_loaded signal to handler (for pagination mode)
+        self.page_loaded.connect(self._on_page_loaded_signal)
 
     @property
     def is_paginated(self) -> bool:
@@ -441,17 +444,22 @@ class ImageListModel(QAbstractListModel):
             if not self._db:
                 return
 
+            import time
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[PAGE {timestamp}] Loading page {page_num} in background...")
+
             images = self._load_images_from_db(page_num)
             self._store_page(page_num, images)
 
-            # Emit signal on main thread
-            QApplication.instance().postEvent(
-                self,
-                PageLoadedEvent(page_num)
-            )
+            print(f"[PAGE {timestamp}] Page {page_num} loaded: {len(images)} images")
+
+            # Emit signal (will be handled on main thread via signal/slot mechanism)
+            self.page_loaded.emit(page_num)
 
         except Exception as e:
             print(f"[PAGE] Error loading page {page_num}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             with self._page_load_lock:
                 self._loading_pages.discard(page_num)
@@ -535,12 +543,15 @@ class ImageListModel(QAbstractListModel):
     def event(self, event):
         """Handle custom events for page loading."""
         if isinstance(event, PageLoadedEvent):
+            import time
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[PAGE {timestamp}] Received PageLoadedEvent for page {event.page_num}")
             self._on_page_loaded(event.page_num)
             return True
         return super().event(event)
 
-    def _on_page_loaded(self, page_num: int):
-        """Called on main thread when a page finishes loading."""
+    def _on_page_loaded_signal(self, page_num: int):
+        """Called on main thread when a page finishes loading (via signal)."""
         # Notify views that data changed for this page's range
         start_idx = page_num * self.PAGE_SIZE
         end_idx = min(start_idx + self.PAGE_SIZE - 1, self._total_count - 1)
@@ -554,8 +565,11 @@ class ImageListModel(QAbstractListModel):
         # Rebuild aspect ratio cache
         self._rebuild_aspect_ratio_cache()
 
-        # Emit signal
-        self.page_loaded.emit(page_num)
+        # Emit layoutChanged to trigger masonry recalculation
+        import time
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[PAGE {timestamp}] Page {page_num} loaded, emitting layoutChanged for masonry update")
+        self.layoutChanged.emit()
 
     def _process_enrichment_queue(self):
         """Process dimension updates from background thread (runs on main thread via timer)."""
@@ -1396,6 +1410,7 @@ class ImageListModel(QAbstractListModel):
         self.beginResetModel()
         self.images = []  # Clear in-memory list (we use pages now)
         self._load_page_sync(0)
+        print(f"[PAGINATION] Page 0 loaded: {len(self._pages.get(0, []))} images")
         self.endResetModel()
 
         # Build initial aspect ratio cache

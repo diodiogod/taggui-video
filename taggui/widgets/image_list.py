@@ -382,11 +382,18 @@ class ImageListView(QListView):
         self._masonry_recalc_max_delay = 2000  # Max delay for rapid key holds
         self._last_filter_keystroke_time = 0
         self._rapid_input_detected = False
+        self._last_masonry_signal = "unknown"  # Track which signal triggered masonry
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
         self._idle_preload_timer.setSingleShot(True)
         self._idle_preload_timer.timeout.connect(self._preload_all_thumbnails)
+
+        # Page indicator overlay for pagination mode
+        self._page_indicator_label = None
+        self._page_indicator_timer = QTimer(self)
+        self._page_indicator_timer.setSingleShot(True)
+        self._page_indicator_timer.timeout.connect(self._fade_out_page_indicator)
         self._preload_index = 0  # Track preload progress
         self._preload_complete = False  # Track if all thumbnails loaded
         self._thumbnails_loaded = set()  # Track which thumbnails are loaded (by index)
@@ -554,17 +561,21 @@ class ImageListView(QListView):
         current_time = time.time()
         timestamp = time.strftime("%H:%M:%S.") + f"{int(current_time * 1000) % 1000:03d}"
 
+        # Store signal name for _do_recalculate_masonry to check
+        self._last_masonry_signal = signal_name
+
         # Adaptive delay: check if rapid input was detected at keystroke level
         if self._rapid_input_detected:
             self._masonry_recalc_delay = self._masonry_recalc_max_delay
-            # print(f"[{timestamp}] SIGNAL: {signal_name}, RAPID INPUT FLAG SET - using max delay {self._masonry_recalc_delay}ms")
-        elif signal_name == "layoutChanged":
-            # For layoutChanged (from enrichment), use shorter delay for faster updates
+            print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, RAPID INPUT FLAG SET - using max delay {self._masonry_recalc_delay}ms")
+        elif signal_name == "layoutChanged" or signal_name == "user_click":
+            # For layoutChanged (from page load or enrichment) or user clicks, use shorter delay for faster updates
             self._masonry_recalc_delay = 100
+            print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, using fast delay {self._masonry_recalc_delay}ms")
         else:
             # Reset to base delay if typing slowed down
             self._masonry_recalc_delay = self._masonry_recalc_min_delay
-            # print(f"[{timestamp}] SIGNAL: {signal_name}, normal input - delay={self._masonry_recalc_delay}ms")
+            print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, normal input - delay={self._masonry_recalc_delay}ms")
 
         # Cancel any in-flight masonry calculation (futures can't be cancelled once started)
         # Just let it finish in background, newer calculation will override results
@@ -606,16 +617,27 @@ class ImageListView(QListView):
         # Python's GIL means ANY computation in ANY thread blocks keyboard input
         # Even with time.sleep(0) every 10 items, 385-1147 items still blocks for 900ms
         # Solution: Keep showing old layout, only recalculate after typing stops for 3+ seconds
-        if time_since_last_key < 3000:
-            # print(f"[{timestamp}] ⚠️ SKIP: Only {time_since_last_key:.0f}ms since last key, waiting for typing to fully stop")
-            # Check again in 1 second
-            self._masonry_recalc_timer.start(1000)
-            return
+        # EXCEPTION: layoutChanged and user_click signals bypass this check (not related to typing)
+        if hasattr(self, '_last_masonry_signal') and self._last_masonry_signal not in ['layoutChanged', 'user_click']:
+            if time_since_last_key < 3000:
+                # print(f"[{timestamp}] ⚠️ SKIP: Only {time_since_last_key:.0f}ms since last key, waiting for typing to fully stop")
+                # Check again in 1 second
+                self._masonry_recalc_timer.start(1000)
+                return
 
         # Clear rapid input flag since user has stopped typing
         if self._rapid_input_detected:
             # print(f"[{timestamp}] ✓ User stopped typing for 3+ seconds, clearing rapid input flag")
             self._rapid_input_detected = False
+
+        # Check if in pagination mode with large dataset - skip heavy recalculations
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            # In pagination mode, masonry calculation for 32K+ items is too heavy and crashes
+            # TODO: Implement per-page masonry layouts instead of global layout
+            print(f"[{timestamp}] ⚠️ SKIP: Pagination mode - masonry recalc disabled (would crash with 32K items)")
+            print(f"[{timestamp}]        Need per-page masonry architecture for proper fix")
+            return
 
         # print(f"[{timestamp}] ⚡ EXECUTE: Timer expired, starting masonry calculation")
         if self.use_masonry:
@@ -1242,6 +1264,9 @@ class ImageListView(QListView):
             # Trigger page loading for paginated models
             self._check_and_load_pages()
 
+            # Show page indicator in pagination mode
+            self._show_page_indicator()
+
             # Restart idle timer - will start/resume aggressive preload when user stops scrolling
             # Only if not already complete
             if not self._preload_complete:
@@ -1812,10 +1837,90 @@ class ImageListView(QListView):
         has_backup = False
         if selected_image_count > 0:
             selected_images = self.get_selected_images()
-            has_backup = any((Path(str(img.path) + '.backup')).exists() for img in selected_images)
+            has_backup = any((Path(str(img.path) + '.backup')).exists() for img in selected_images if img is not None)
         restore_action_name = f'Restore {pluralize("Backup", selected_image_count)}'
         self.restore_backup_action.setText(restore_action_name)
         self.restore_backup_action.setVisible(has_backup)
+
+    def _show_page_indicator(self):
+        """Show page indicator overlay when scrolling in pagination mode."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            return
+
+        # Get current visible page from first visible item (use masonry if available)
+        visible_items = self._get_masonry_visible_items(self.viewport().rect())
+        if visible_items and len(visible_items) > 0:
+            first_visible_idx = visible_items[0]['index']
+        else:
+            # Fallback: estimate from scroll position
+            # This happens when masonry isn't calculated yet
+            scrollbar = self.verticalScrollBar()
+            scroll_value = scrollbar.value()
+            scroll_max = scrollbar.maximum()
+            scroll_ratio = scroll_value / max(scroll_max, 1) if scroll_max > 0 else 0
+            first_visible_idx = int(scroll_ratio * source_model._total_count)
+
+            # Debug logging
+            import time
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[PAGE_IND {timestamp}] Fallback: scroll={scroll_value}/{scroll_max}, ratio={scroll_ratio:.2f}, idx={first_visible_idx}")
+
+        current_page = source_model._get_page_for_index(first_visible_idx)
+        total_pages = (source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
+
+        import time
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[PAGE_IND {timestamp}] Showing page {current_page + 1}/{total_pages} (first_idx={first_visible_idx})")
+
+        # Create label if needed
+        if not self._page_indicator_label:
+            from PySide6.QtWidgets import QLabel
+            from PySide6.QtCore import Qt
+            self._page_indicator_label = QLabel(self.viewport())
+            self._page_indicator_label.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(0, 0, 0, 180);
+                    color: white;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    font-size: 16px;
+                    font-weight: bold;
+                }
+            """)
+            self._page_indicator_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Update text and position
+        self._page_indicator_label.setText(f"Page {current_page + 1} / {total_pages}")
+        self._page_indicator_label.adjustSize()
+
+        # Position at top-right corner
+        viewport_rect = self.viewport().rect()
+        label_x = viewport_rect.width() - self._page_indicator_label.width() - 20
+        label_y = 20
+        self._page_indicator_label.move(label_x, label_y)
+
+        # Show and reset fade timer
+        self._page_indicator_label.setWindowOpacity(1.0)
+        self._page_indicator_label.show()
+        self._page_indicator_timer.stop()
+        self._page_indicator_timer.start(1500)  # Fade after 1.5s
+
+    def _fade_out_page_indicator(self):
+        """Fade out page indicator after delay."""
+        if not self._page_indicator_label:
+            return
+
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+
+        # Animate opacity from 1.0 to 0.0
+        self._page_fade_animation = QPropertyAnimation(self._page_indicator_label, b"windowOpacity")
+        self._page_fade_animation.setDuration(500)  # 500ms fade
+        self._page_fade_animation.setStartValue(1.0)
+        self._page_fade_animation.setEndValue(0.0)
+        self._page_fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._page_fade_animation.finished.connect(self._page_indicator_label.hide)
+        self._page_fade_animation.start()
 
 
 class ImageList(QDockWidget):
