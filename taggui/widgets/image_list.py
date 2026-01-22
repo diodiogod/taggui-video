@@ -372,6 +372,7 @@ class ImageListView(QListView):
         self._masonry_executor = ThreadPoolExecutor(max_workers=1)  # Single worker thread (ProcessPoolExecutor fails on Windows with heavy threading)
         self._masonry_items = []  # Positioned items from multiprocessing
         self._masonry_total_height = 0  # Total layout height
+        self._recenter_after_layout = False  # Flag to re-center selected item after layout
 
         # Debounce timer for masonry recalculation (separate from filter debounce)
         self._masonry_recalc_timer = QTimer(self)
@@ -763,6 +764,13 @@ class ImageListView(QListView):
             self._apply_layout_to_ui(timestamp)
             # Emit signal that layout is ready for scrolling
             self.layout_ready.emit()
+
+            # Re-center selected item if requested (after resize/zoom)
+            if self._recenter_after_layout:
+                self._recenter_after_layout = False
+                current_index = self.currentIndex()
+                if current_index.isValid():
+                    self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
         QTimer.singleShot(0, apply_and_signal)
 
@@ -1244,6 +1252,8 @@ class ImageListView(QListView):
 
     def _update_view_mode(self):
         """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
+        previous_mode = self.viewMode()
+
         if self.current_thumbnail_size >= self.column_switch_threshold:
             # Large thumbnails: single column list view
             self.use_masonry = False
@@ -1253,6 +1263,11 @@ class ImageListView(QListView):
             self.setWrapping(False)
             self.setSpacing(0)
             self.setGridSize(QSize(-1, -1))  # Reset grid size to default
+
+            # Re-center selected item when switching to ListMode
+            if previous_mode != QListView.ViewMode.ListMode:
+                QTimer.singleShot(0, lambda: self.scrollTo(
+                    self.currentIndex(), QAbstractItemView.ScrollHint.PositionAtCenter))
         else:
             # Small thumbnails: masonry grid view (Pinterest-style)
             self.use_masonry = True
@@ -1264,7 +1279,8 @@ class ImageListView(QListView):
             self.setUniformItemSizes(False)  # Allow varying sizes
             # Disable default grid - we'll handle positioning with masonry
             self.setGridSize(QSize(-1, -1))
-            # Calculate masonry layout
+            # Calculate masonry layout (will re-center via flag)
+            self._recenter_after_layout = True
             self._calculate_masonry_layout()
             # Force item delegate to recalculate sizes and update viewport
             self.scheduleDelayedItemsLayout()
@@ -1313,6 +1329,7 @@ class ImageListView(QListView):
         """Called after resize stops (debounced)."""
         if self.use_masonry:
             print("[RESIZE] Window resize finished, recalculating masonry...")
+            self._recenter_after_layout = True
             self._calculate_masonry_layout()
             self.viewport().update()
 
@@ -1510,9 +1527,11 @@ class ImageListView(QListView):
                 # Update view mode (single column vs multi-column)
                 self._update_view_mode()
 
-                # If masonry, recalculate layout
+                # If masonry, recalculate layout and re-center after zoom stops
                 if self.use_masonry:
-                    self._calculate_masonry_layout()
+                    # Debounce: recalculate and re-center after user stops zooming
+                    self._resize_timer.stop()
+                    self._resize_timer.start(300)
 
                 # Save to settings
                 settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)
