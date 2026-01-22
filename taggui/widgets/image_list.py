@@ -1489,8 +1489,38 @@ class ImageListView(QListView):
             super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        """Detect mouse wheel scrolling and pause heavy preloading."""
-        # Mark as mouse scrolling and restart timer
+        """Handle Ctrl+scroll for zooming thumbnails."""
+        if event.modifiers() == Qt.ControlModifier:
+            # Get scroll direction
+            delta = event.angleDelta().y()
+
+            # Adjust thumbnail size
+            zoom_step = 20  # Pixels per scroll step
+            if delta > 0:
+                # Scroll up = zoom in (larger thumbnails)
+                new_size = min(self.current_thumbnail_size + zoom_step, self.max_thumbnail_size)
+            else:
+                # Scroll down = zoom out (smaller thumbnails)
+                new_size = max(self.current_thumbnail_size - zoom_step, self.min_thumbnail_size)
+
+            if new_size != self.current_thumbnail_size:
+                self.current_thumbnail_size = new_size
+                self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
+
+                # Update view mode (single column vs multi-column)
+                self._update_view_mode()
+
+                # If masonry, recalculate layout
+                if self.use_masonry:
+                    self._calculate_masonry_layout()
+
+                # Save to settings
+                settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)
+
+            event.accept()
+            return
+
+        # Mark as mouse scrolling and restart timer (for pagination preloading)
         if not self._mouse_scrolling:
             self._mouse_scrolling = True
             # print("[SCROLL] Mouse scroll started - pausing background preloading")
@@ -1499,8 +1529,17 @@ class ImageListView(QListView):
         self._mouse_scroll_timer.stop()
         self._mouse_scroll_timer.start(150)  # Shorter delay for faster resume
 
-        # Let Qt handle the actual scrolling
-        super().wheelEvent(event)
+        # Normal scroll behavior - but boost scroll speed in IconMode
+        if self.viewMode() == QListView.ViewMode.IconMode:
+            # In icon mode, manually scroll by a reasonable pixel amount
+            delta = event.angleDelta().y()
+            scroll_amount = delta * 2  # Multiply by 2 for faster scrolling
+            current_value = self.verticalScrollBar().value()
+            self.verticalScrollBar().setValue(current_value - scroll_amount)
+            event.accept()
+        else:
+            # Default scroll behavior in ListMode
+            super().wheelEvent(event)
 
     def _on_mouse_scroll_stopped(self):
         """Called when mouse scrolling stops (200ms after last wheel event)."""

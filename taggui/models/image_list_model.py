@@ -12,7 +12,7 @@ import cv2
 import exifread
 import imagesize
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
-                            QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG)
+                            QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG, QTimer)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication
 import pillow_jxl
@@ -299,6 +299,13 @@ class ImageListModel(QAbstractListModel):
         self._thumbnail_futures = {}  # Maps image index to Future
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
         self._images_lock = threading.RLock()  # Protects images list and image objects from race conditions
+
+        # Batch thumbnail updates to reduce Qt repaint overhead
+        self._pending_thumbnail_updates = set()  # Indices with loaded thumbnails pending UI update
+        self._thumbnail_batch_timer = QTimer(self)
+        self._thumbnail_batch_timer.setSingleShot(True)
+        self._thumbnail_batch_timer.setInterval(50)  # Batch updates every 50ms
+        self._thumbnail_batch_timer.timeout.connect(self._flush_thumbnail_updates)
 
         # Track cache saves for reporting
         self._cache_saves_count = 0
@@ -827,10 +834,46 @@ class ImageListModel(QAbstractListModel):
 
     @Slot(int)
     def _notify_thumbnail_ready(self, idx: int):
-        """Called on main thread when thumbnail QImage is ready (just emit dataChanged)."""
+        """Called on main thread when thumbnail QImage is ready (batched to reduce repaints)."""
         if idx < len(self.images):
-            model_index = self.index(idx, 0)
-            self.dataChanged.emit(model_index, model_index, [Qt.ItemDataRole.DecorationRole])
+            self._pending_thumbnail_updates.add(idx)
+            # Restart timer to batch updates (coalesces rapid thumbnail loads)
+            self._thumbnail_batch_timer.start()
+
+    def _flush_thumbnail_updates(self):
+        """Emit batched dataChanged for all pending thumbnail updates."""
+        if not self._pending_thumbnail_updates:
+            return
+
+        # Emit single dataChanged for contiguous ranges (more efficient than individual)
+        indices = sorted(self._pending_thumbnail_updates)
+        self._pending_thumbnail_updates.clear()
+
+        # Group into contiguous ranges
+        if not indices:
+            return
+
+        range_start = indices[0]
+        range_end = indices[0]
+
+        for idx in indices[1:]:
+            if idx == range_end + 1:
+                # Extend current range
+                range_end = idx
+            else:
+                # Emit current range and start new one
+                self.dataChanged.emit(
+                    self.index(range_start), self.index(range_end),
+                    [Qt.ItemDataRole.DecorationRole]
+                )
+                range_start = idx
+                range_end = idx
+
+        # Emit final range
+        self.dataChanged.emit(
+            self.index(range_start), self.index(range_end),
+            [Qt.ItemDataRole.DecorationRole]
+        )
 
     def event(self, event):
         """Handle custom events (background load completion and enrichment)."""
