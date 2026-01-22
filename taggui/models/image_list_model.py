@@ -12,7 +12,7 @@ import cv2
 import exifread
 import imagesize
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
-                            QRect, QSize, Qt, QUrl, Signal, Slot, QEvent)
+                            QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication
 import pillow_jxl
@@ -256,7 +256,7 @@ class ImageListModel(QAbstractListModel):
     # Threshold for enabling pagination mode (number of images)
     PAGINATION_THRESHOLD = 10000
     PAGE_SIZE = 1000
-    MAX_PAGES_IN_MEMORY = 5
+    MAX_PAGES_IN_MEMORY = 20  # Increased from 5 to reduce evictions and crashes
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
@@ -283,12 +283,13 @@ class ImageListModel(QAbstractListModel):
         self._directory_path: Path = None
         self._sort_field = 'mtime'
         self._sort_dir = 'DESC'
+        self._pause_thumbnail_loading = False  # Pause during scrollbar drag for smooth dragging
 
         # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
         self._aspect_ratio_cache: list[float] = []
 
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
-        # Load executor: 6 workers for critical thumbnail generation (user needs these NOW)
+        # Load executor: 6 workers for thumbnail loading (same as main branch)
         self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
         # Save executor: 2 workers for background cache writing (low priority, can be slow)
         self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
@@ -329,28 +330,16 @@ class ImageListModel(QAbstractListModel):
     def get_all_loaded_images(self) -> list[Image]:
         """Get all currently loaded images (handles both modes).
 
-        In regular mode: returns self.images
-        In paginated mode: returns images from all loaded pages
+        Both modes use self.images now (pagination just lazy-loads thumbnails).
         """
-        if not self._paginated_mode:
-            return self.images
-
-        # Collect images from all loaded pages
-        all_images = []
-        for page_num in sorted(self._pages.keys()):
-            all_images.extend(self._pages[page_num])
-        return all_images
+        return self.images
 
     def iter_all_images(self):
         """Iterate through all images that are currently loaded.
 
-        Use this instead of accessing .images directly for compatibility with pagination.
+        Both modes use self.images now (pagination just lazy-loads thumbnails).
         """
-        if not self._paginated_mode:
-            yield from self.images
-        else:
-            for page_num in sorted(self._pages.keys()):
-                yield from self._pages[page_num]
+        yield from self.images
 
     def get_aspect_ratios(self) -> list[float]:
         """Get cached aspect ratios for all images (fast, no Qt calls)."""
@@ -358,11 +347,7 @@ class ImageListModel(QAbstractListModel):
 
     def _rebuild_aspect_ratio_cache(self):
         """Rebuild aspect ratio cache when images change (thread-safe)."""
-        if self._paginated_mode:
-            self._rebuild_aspect_ratio_cache_paginated()
-            return
-
-        # Take snapshot to avoid issues if images list is being modified
+        # Both modes use self.images now
         try:
             images_snapshot = self.images[:]
             self._aspect_ratio_cache = [img.aspect_ratio for img in images_snapshot]
@@ -370,23 +355,6 @@ class ImageListModel(QAbstractListModel):
             print(f"[CACHE] Error rebuilding aspect ratio cache: {e}")
             # Keep old cache if rebuild fails
             pass
-
-    def _rebuild_aspect_ratio_cache_paginated(self):
-        """Rebuild aspect ratio cache for paginated mode (estimates unloaded pages)."""
-        if self._total_count == 0:
-            self._aspect_ratio_cache = []
-            return
-
-        # Initialize with default aspect ratios
-        self._aspect_ratio_cache = [1.0] * self._total_count
-
-        # Fill in actual ratios from loaded pages
-        for page_num, page_images in self._pages.items():
-            start_idx = page_num * self.PAGE_SIZE
-            for i, img in enumerate(page_images):
-                idx = start_idx + i
-                if idx < self._total_count:
-                    self._aspect_ratio_cache[idx] = img.aspect_ratio
 
     # ========== Pagination Methods ==========
 
@@ -515,7 +483,18 @@ class ImageListModel(QAbstractListModel):
             self._pages[page_num] = images
             self._touch_page(page_num)
 
-            # Evict old pages if over limit
+            # Check if we need to evict pages (but don't do it here - background thread unsafe)
+            if len(self._pages) > self.MAX_PAGES_IN_MEMORY:
+                # Schedule eviction on main thread via QTimer
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, self._evict_old_pages)
+
+    def _evict_old_pages(self):
+        """Evict old pages (called on main thread via QTimer)."""
+        # TEMPORARY: Disable eviction to test if that's causing crashes
+        return
+
+        with self._page_load_lock:
             while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
                 oldest_page = self._page_load_order.pop(0)
                 if oldest_page in self._pages:
@@ -523,6 +502,10 @@ class ImageListModel(QAbstractListModel):
                     self._cancel_page_thumbnails(oldest_page)
                     del self._pages[oldest_page]
                     print(f"[PAGE] Evicted page {oldest_page}")
+
+            # Rebuild aspect ratio cache after all evictions
+            if len(self._pages) <= self.MAX_PAGES_IN_MEMORY:
+                self._rebuild_aspect_ratio_cache()
 
     def _cancel_page_thumbnails(self, page_num: int):
         """Cancel pending thumbnail loading futures for an evicted page."""
@@ -676,8 +659,9 @@ class ImageListModel(QAbstractListModel):
                 except:
                     uncached_count += 1
 
-            # If most images are cached, don't bother with parallel loading
-            if uncached_count < 50:
+            # Pagination mode always needs smart preload for smoothness
+            # Normal mode can skip if mostly cached
+            if not self._paginated_mode and uncached_count < 50:
                 print(f"[THUMBNAIL] Only {uncached_count} uncached, using on-demand loading")
                 return
 
@@ -788,6 +772,36 @@ class ImageListModel(QAbstractListModel):
             import traceback
             traceback.print_exc()
 
+    def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
+        """Load thumbnail in background thread, then notify UI."""
+        try:
+            qimage, was_cached = load_thumbnail_data(
+                path, crop, self.thumbnail_generation_width, is_video
+            )
+            # Notify main thread that thumbnail is ready
+            QMetaObject.invokeMethod(
+                self,
+                "_notify_thumbnail_ready",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(int, row)
+            )
+            return qimage, was_cached
+        except Exception as e:
+            print(f"[THUMBNAIL ASYNC] Error loading {path.name}: {e}")
+            return None, False
+
+    def _get_placeholder_icon(self):
+        """Return a placeholder icon for thumbnails being loaded."""
+        # Cache the placeholder to avoid recreating it
+        if not hasattr(self, '_placeholder_icon'):
+            # Create a simple grey square as placeholder
+            from PySide6.QtGui import QPixmap, QColor
+            size = self.image_list_image_width
+            pixmap = QPixmap(size, size)
+            pixmap.fill(QColor(200, 200, 200))  # Light grey
+            self._placeholder_icon = QIcon(pixmap)
+        return self._placeholder_icon
+
     @Slot(int)
     def _notify_thumbnail_ready(self, idx: int):
         """Called on main thread when thumbnail QImage is ready (just emit dataChanged)."""
@@ -832,8 +846,7 @@ class ImageListModel(QAbstractListModel):
         return mimeData
 
     def rowCount(self, parent=None) -> int:
-        if self._paginated_mode:
-            return self._total_count
+        # Both modes use self.images (pagination just lazy-loads thumbnails)
         return len(self.images)
 
     def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
@@ -843,29 +856,15 @@ class ImageListModel(QAbstractListModel):
             if not index.isValid():
                 return None
 
-            # Get image - different logic for paginated vs regular mode
-            # Use lock to prevent race conditions with background enrichment
-            with self._images_lock:
-                if self._paginated_mode:
-                    if row >= self._total_count or row < 0:
-                        return None
-                    image = self._get_image_at_index(row)
-                    if image is None:
-                        # Page not loaded yet - return placeholder data
-                        if role == Qt.ItemDataRole.DisplayRole:
-                            return "Loading..."
-                        elif role == Qt.ItemDataRole.SizeHintRole:
-                            return QSize(self.image_list_image_width, self.image_list_image_width)
-                        return None
-                else:
-                    if row >= len(self.images) or row < 0:
-                        return None
-                    image = self.images[row]
+            # Get image - same logic for both modes (all images in self.images now)
+            # No lock needed - Python GIL protects simple reads, and lock was blocking thumbnail loads
+            if row >= len(self.images) or row < 0:
+                return None
+            image = self.images[row]
 
-                if role == Qt.ItemDataRole.UserRole:
-                    return image
+            if role == Qt.ItemDataRole.UserRole:
+                return image
 
-            # Check if image is None (page evicted in pagination mode)
             if image is None:
                 return None
         except Exception as e:
@@ -880,6 +879,14 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
+            # During scrollbar drag ONLY: return placeholders to keep drag smooth
+            # Mouse wheel scroll: allow loading (async is fast enough)
+            if self._pause_thumbnail_loading:
+                if image.thumbnail:
+                    return image.thumbnail  # Show already loaded
+                else:
+                    return self._get_placeholder_icon()  # Don't load new ones during drag
+
             # Check if we already have a QIcon (from cache or previous lazy conversion)
             if image.thumbnail:
                 return image.thumbnail
@@ -904,37 +911,87 @@ class ImageListModel(QAbstractListModel):
 
                 return thumbnail
 
-            # Fallback: Load synchronously (for cache hits or if background loading didn't start yet)
-            try:
-                # Load thumbnail on-demand (will check cache first, then generate)
-                qimage, was_cached = load_thumbnail_data(
-                    image.path, image.crop, self.thumbnail_generation_width, image.is_video
+            # Async loading ONLY in pagination mode (keeps normal mode smooth with preloading)
+            # In normal mode, preloading needs synchronous loads to work
+            if not self._paginated_mode:
+                # Normal mode: Load synchronously (enables preloading to work)
+                try:
+                    qimage, was_cached = load_thumbnail_data(
+                        image.path, image.crop, self.thumbnail_generation_width, image.is_video
+                    )
+
+                    if qimage and not qimage.isNull():
+                        pixmap = QPixmap.fromImage(qimage)
+                        thumbnail = QIcon(pixmap)
+                        image.thumbnail = thumbnail
+                        image._last_thumbnail_was_cached = was_cached
+
+                        # Save to disk cache in background thread if not from cache
+                        if not was_cached:
+                            mtime = image.path.stat().st_mtime
+                            self._save_executor.submit(
+                                self._save_thumbnail_worker,
+                                image.path,
+                                mtime,
+                                self.thumbnail_generation_width,
+                                thumbnail
+                            )
+
+                        return thumbnail
+                except Exception as e:
+                    print(f"[THUMBNAIL ERROR] Failed to load thumbnail for {image.path.name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+                return None
+
+            # Pagination mode: Async loading with placeholders for smooth scrolling
+            with self._thumbnail_lock:
+                # Check if already loading
+                if row in self._thumbnail_futures:
+                    future = self._thumbnail_futures[row]
+                    if not future.done():
+                        # Still loading - return placeholder
+                        return self._get_placeholder_icon()
+                    # Future done - check result
+                    try:
+                        qimage, was_cached = future.result()
+                        if qimage and not qimage.isNull():
+                            pixmap = QPixmap.fromImage(qimage)
+                            thumbnail = QIcon(pixmap)
+                            image.thumbnail = thumbnail
+                            image._last_thumbnail_was_cached = was_cached
+
+                            # Save to cache if needed
+                            if not was_cached:
+                                mtime = image.path.stat().st_mtime
+                                self._save_executor.submit(
+                                    self._save_thumbnail_worker,
+                                    image.path,
+                                    mtime,
+                                    self.thumbnail_generation_width,
+                                    thumbnail
+                                )
+
+                            del self._thumbnail_futures[row]
+                            return thumbnail
+                    except Exception as e:
+                        print(f"[THUMBNAIL ERROR] Failed to load thumbnail for {image.path.name}: {e}")
+                        del self._thumbnail_futures[row]
+                        return None
+
+                # Not loading yet - submit to background thread
+                future = self._load_executor.submit(
+                    self._load_thumbnail_async,
+                    image.path,
+                    image.crop,
+                    image.is_video,
+                    row
                 )
+                self._thumbnail_futures[row] = future
 
-                if qimage and not qimage.isNull():
-                    pixmap = QPixmap.fromImage(qimage)
-                    thumbnail = QIcon(pixmap)
-                    image.thumbnail = thumbnail
-                    image._last_thumbnail_was_cached = was_cached
-
-                    # Save to disk cache in background thread if not from cache
-                    if not was_cached:
-                        mtime = image.path.stat().st_mtime
-                        self._save_executor.submit(
-                            self._save_thumbnail_worker,
-                            image.path,
-                            mtime,
-                            self.thumbnail_generation_width,
-                            thumbnail
-                        )
-
-                    return thumbnail
-            except Exception as e:
-                print(f"[THUMBNAIL ERROR] Failed to load thumbnail for {image.path.name}: {e}")
-                import traceback
-                traceback.print_exc()
-
-            return None
+                # Return placeholder immediately (smooth scrolling)
+                return self._get_placeholder_icon()
         if role == Qt.ItemDataRole.SizeHintRole:
             # Don't use thumbnail.availableSizes() - that returns the 512px generation size
             # Instead, calculate based on the actual image dimensions
@@ -999,6 +1056,9 @@ class ImageListModel(QAbstractListModel):
             print(f"[PAGINATION] Large folder detected ({total_images} images), switching to paginated mode")
             self._load_directory_paginated(directory_path, image_paths, file_paths)
             return
+
+        # Normal folder - reset pagination flag
+        self._paginated_mode = False
 
         # Sort paths early for consistent ordering
         image_paths.sort(key=natural_sort_key)
@@ -1336,119 +1396,161 @@ class ImageListModel(QAbstractListModel):
             self._load_executor.submit(enrich_dimensions)
 
     def _load_directory_paginated(self, directory_path: Path, image_paths: list[Path], file_paths: set[Path]):
-        """Load a large directory using pagination mode (50K+ images)."""
+        """Load a large directory using pagination mode (10K+ images).
+
+        Strategy: Load all Image objects upfront (cheap metadata ~16MB for 32K images),
+        but lazy-load thumbnails on-demand (expensive ~40MB VRAM for visible items only).
+
+        This prevents Qt crashes from rendering 32K items where data() returns None.
+        """
         from PySide6.QtWidgets import QProgressDialog, QApplication
         from PySide6.QtCore import Qt
 
         total_images = len(image_paths)
         video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
-        # Initialize database and pagination state
+        # Initialize database
         self._directory_path = directory_path
         self._db = ImageIndexDB(directory_path)
         self._paginated_mode = True
-        self._pages = {}
-        self._page_load_order = []
-        self._loading_pages = set()
 
-        # Create progress dialog for indexing
-        progress = QProgressDialog(f"Indexing {total_images} images...", "Cancel", 0, total_images)
-        progress.setWindowTitle("Indexing Directory")
+        # Check if we need indexing or can use fast load
+        db_count = self._db.count()
+        needs_full_index = abs(db_count - total_images) >= 100
+
+        if needs_full_index:
+            # Only index if significantly out of sync (new directory or many new files)
+            # For small differences, use fast load with background enrichment
+            print(f"[PAGINATION] Database has {db_count} entries, folder has {total_images} files")
+            print(f"[PAGINATION] Using fast load - will index missing files in background")
+
+        # No blocking indexing - just load with placeholders and enrich in background
+
+        # Load ALL Image objects with fast load (use placeholders for uncached)
+        print(f"[PAGINATION] Fast loading {total_images} images...")
+        progress = QProgressDialog(f"Loading {total_images} images...", None, 0, total_images)
+        progress.setWindowTitle("Loading Images")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(500)
         progress.setAutoClose(True)
         progress.setAutoReset(False)
 
-        # Check how many files need indexing
-        db_count = self._db.count()
-        if abs(db_count - total_images) < 100:
-            # Database is up to date, skip indexing
-            print(f"[PAGINATION] Database up to date ({db_count} images), skipping index")
-        else:
-            # Index files into database
-            print(f"[PAGINATION] Indexing {total_images} files into database...")
-            indexed_count = 0
-            update_interval = max(100, total_images // 100)
+        self.beginResetModel()
+        self.images = []
 
-            for i, image_path in enumerate(image_paths):
-                if i % update_interval == 0:
-                    progress.setValue(i)
-                    QApplication.processEvents()
-                    if progress.wasCanceled():
-                        break
+        # Load cached info from DB into dict (fast bulk load)
+        cached_files = {}
+        try:
+            cursor = self._db.conn.cursor()
+            cursor.execute('SELECT file_name, width, height, is_video, mtime, video_fps, video_duration, video_frame_count, rating FROM images')
+            for row in cursor:
+                cached_files[row[0]] = {
+                    'dimensions': (row[1], row[2]),
+                    'is_video': bool(row[3]),
+                    'mtime': row[4],
+                    'video_metadata': {
+                        'fps': row[5],
+                        'duration': row[6],
+                        'frame_count': row[7]
+                    } if row[3] else None,
+                    'rating': row[8] if row[8] is not None else 0.0
+                }
+            print(f"[PAGINATION] Loaded {len(cached_files)} cached entries from DB")
+        except Exception as e:
+            print(f"[PAGINATION] Warning: Could not load cache: {e}")
 
-                try:
-                    relative_path = str(image_path.relative_to(directory_path))
-                    mtime = image_path.stat().st_mtime
+        # Gather text file paths for tag loading
+        text_file_paths = set()
+        for path in directory_path.rglob("*.txt"):
+            text_file_paths.add(str(path))
 
-                    # Check if already cached and up-to-date
-                    cached = self._db.get_cached_info(relative_path, mtime)
-                    if cached:
-                        continue  # Already indexed
+        # Load all images (from cache or with placeholders)
+        update_interval = max(100, total_images // 100)
+        cache_hits = 0
+        cache_misses = 0
 
-                    # Get dimensions
+        for i, image_path in enumerate(image_paths):
+            # Update progress
+            if i % update_interval == 0:
+                progress.setValue(i)
+                QApplication.processEvents()
+
+            try:
+                relative_path = str(image_path.relative_to(directory_path))
+                mtime = image_path.stat().st_mtime
+
+                # Check cache
+                cached = cached_files.get(relative_path)
+                if cached and cached['mtime'] == mtime:
+                    # Use cached dimensions
+                    dimensions = cached['dimensions']
+                    is_video = cached['is_video']
+                    video_metadata = cached['video_metadata']
+                    rating = cached['rating']
+                    cache_hits += 1
+                else:
+                    # Use placeholder - will enrich in background
+                    dimensions = (512, 512)
                     is_video = image_path.suffix.lower() in video_extensions
-                    if is_video:
-                        dimensions, video_metadata, _ = extract_video_info(image_path)
-                    else:
-                        try:
-                            dimensions = imagesize.get(str(image_path))
-                            if dimensions == (-1, -1):
-                                dimensions = pilimage.open(image_path).size
-                            video_metadata = None
-                        except Exception:
-                            dimensions = None
-                            video_metadata = None
+                    video_metadata = None
+                    rating = 0.0
+                    cache_misses += 1
 
-                    if dimensions and dimensions[0] > 0 and dimensions[1] > 0:
-                        self._db.save_info(
-                            relative_path,
-                            dimensions[0],
-                            dimensions[1],
-                            is_video,
-                            mtime,
-                            video_metadata
-                        )
-                        indexed_count += 1
+                # Load tags from text file
+                tags = []
+                text_file_path = image_path.with_suffix('.txt')
+                if str(text_file_path) in text_file_paths:
+                    try:
+                        caption = text_file_path.read_text(encoding='utf-8', errors='replace')
+                        if caption:
+                            tags = [tag.strip() for tag in caption.split(self.tag_separator) if tag.strip()]
+                    except Exception:
+                        pass
 
-                        if indexed_count % 500 == 0:
-                            self._db.commit()
+                image = Image(
+                    path=image_path,
+                    dimensions=dimensions,
+                    tags=tags,
+                    is_video=is_video,
+                    rating=rating
+                )
 
-                except Exception as e:
-                    print(f"[PAGINATION] Error indexing {image_path.name}: {e}")
+                if is_video and video_metadata:
+                    image.video_metadata = video_metadata
 
-            self._db.commit()
-            print(f"[PAGINATION] Indexed {indexed_count} new files")
+                self.images.append(image)
+
+            except Exception as e:
+                print(f"[PAGINATION] Error loading {image_path.name}: {e}")
 
         progress.close()
+        print(f"[PAGINATION] Loaded {len(self.images)} images ({cache_hits} cached, {cache_misses} need enrichment)")
 
-        # Get total count from database
-        self._total_count = self._db.count()
-        print(f"[PAGINATION] Total images in database: {self._total_count}")
+        self._total_count = len(self.images)
+        print(f"[PAGINATION] Loaded {self._total_count} Image objects (~{self._total_count * 300 / 1024 / 1024:.1f} MB)")
 
-        # Reset model and load first page
-        self.beginResetModel()
-        self.images = []  # Clear in-memory list (we use pages now)
-        self._load_page_sync(0)
-        print(f"[PAGINATION] Page 0 loaded: {len(self._pages.get(0, []))} images")
         self.endResetModel()
 
-        # Build initial aspect ratio cache
+        # Build aspect ratio cache
         self._rebuild_aspect_ratio_cache()
 
         # Emit signal
         self.total_count_changed.emit(self._total_count)
 
         print(f"================================================================================")
-        print(f"PAGINATION MODE: {self._total_count} images loaded")
-        print(f"Page size: {self.PAGE_SIZE}, Max pages in memory: {self.MAX_PAGES_IN_MEMORY}")
+        print(f"PAGINATION MODE: {self._total_count} images loaded (thumbnails lazy-load)")
+        print(f"Memory: ~{self._total_count * 300 / 1024 / 1024:.1f} MB for Image objects")
+        print(f"VRAM: ~40 MB max (only visible thumbnails loaded)")
         print(f"================================================================================")
+
+        # Start background enrichment if needed
+        if cache_misses > 0:
+            print(f"[PAGINATION] Starting background enrichment for {cache_misses} uncached images...")
+            self._restart_enrichment()
 
     def _restart_enrichment(self):
         """Restart background enrichment after sorting/filtering (with new indices)."""
-        # Pagination mode pre-indexes everything, no enrichment needed
-        if self._paginated_mode:
-            return
+        # Pagination mode now uses enrichment too for uncached files
 
         # Clear cancellation flag
         self._enrichment_cancelled.clear()

@@ -294,16 +294,39 @@ class SettingsDialog(QDialog):
         all_row_layout.addWidget(self.clear_all_size_label)
         all_row_layout.addStretch()
 
-        # Make both buttons the same width (use the wider one)
+        # Clear all databases button
+        self.clear_all_db_button = QPushButton('Clear All Image Index Databases')
+        self.clear_all_db_button.setToolTip(
+            'Delete all .taggui_index.db files from all previously opened directories. '
+            'Use this if databases are corrupted or to free disk space.')
+        self.clear_all_db_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text
+        self.clear_all_db_button.clicked.connect(self.clear_all_databases)
+
+        # Size label for all databases
+        self.clear_all_db_size_label = QLabel()
+        self.clear_all_db_size_label.setStyleSheet('color: #666; font-size: 10px; margin-left: 10px;')
+
+        # All databases row (button + size)
+        all_db_row_layout = QHBoxLayout()
+        all_db_row_layout.setSpacing(10)
+        all_db_row_layout.addWidget(self.clear_all_db_button)
+        all_db_row_layout.addWidget(self.clear_all_db_size_label)
+        all_db_row_layout.addStretch()
+
+        # Make all buttons the same width (use the wider one)
         max_width = max(self.clear_current_button.sizeHint().width(),
-                       self.clear_all_button.sizeHint().width())
+                       self.clear_all_button.sizeHint().width(),
+                       self.clear_all_db_button.sizeHint().width())
         button_width = int(max_width * 1.1)
         self.clear_current_button.setFixedWidth(button_width)
         self.clear_all_button.setFixedWidth(button_width)
+        self.clear_all_db_button.setFixedWidth(button_width)
 
         cache_buttons_layout.addLayout(current_row_layout)
         cache_buttons_layout.addSpacing(10)
         cache_buttons_layout.addLayout(all_row_layout)
+        cache_buttons_layout.addSpacing(10)
+        cache_buttons_layout.addLayout(all_db_row_layout)
 
         grid_layout.addLayout(cache_buttons_layout, 5, 1,
                               Qt.AlignmentFlag.AlignLeft)
@@ -435,6 +458,27 @@ class SettingsDialog(QDialog):
             self.clear_all_size_label.setText(cache_size)
         else:
             self.clear_all_size_label.setText('(empty)')
+
+        # Calculate total size of all .taggui_index.db files
+        try:
+            recent_dirs = settings.value('recent_directories', [], type=list)
+            total_db_size = 0
+            db_count = 0
+
+            for dir_path_str in recent_dirs:
+                db_path = Path(dir_path_str) / '.taggui_index.db'
+                if db_path.exists():
+                    total_db_size += db_path.stat().st_size
+                    db_count += 1
+
+            if db_count > 0:
+                # Format size
+                size_str = self._format_size(total_db_size)
+                self.clear_all_db_size_label.setText(f"{size_str} ({db_count} files)")
+            else:
+                self.clear_all_db_size_label.setText('(no databases found)')
+        except Exception:
+            self.clear_all_db_size_label.setText('(error)')
 
         # Current directory cache size
         current_dir = None
@@ -737,4 +781,78 @@ class SettingsDialog(QDialog):
                 self,
                 'Error',
                 f'Failed to clear cache: {str(e)}'
+            )
+
+    @Slot()
+    def clear_all_databases(self):
+        """Clear all .taggui_index.db files from all recent directories."""
+        # Get list of recent directories
+        recent_dirs = settings.value('recent_directories', [], type=list)
+
+        if not recent_dirs:
+            QMessageBox.information(
+                self,
+                'No Databases Found',
+                'No image index databases found in recent directories.'
+            )
+            return
+
+        # Find all database files
+        db_files = []
+        for dir_path_str in recent_dirs:
+            db_path = Path(dir_path_str) / '.taggui_index.db'
+            if db_path.exists():
+                db_files.append(db_path)
+
+        if not db_files:
+            QMessageBox.information(
+                self,
+                'No Databases Found',
+                'No .taggui_index.db files found in recent directories.'
+            )
+            return
+
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            'Confirm Clear All Image Index Databases',
+            f'This will permanently delete {len(db_files)} database file(s):\n\n'
+            f'{chr(10).join([f"• {db.parent.name}/.taggui_index.db" for db in db_files[:5]])}'
+            f'{f"{chr(10)}...and {len(db_files) - 5} more" if len(db_files) > 5 else ""}\n\n'
+            f'Databases will be rebuilt when you open these directories.\n\n'
+            f'Continue?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            deleted_count = 0
+            failed_count = 0
+
+            for db_path in db_files:
+                try:
+                    db_path.unlink()
+                    deleted_count += 1
+                except Exception:
+                    failed_count += 1
+
+            message = f'Successfully deleted {deleted_count} database file(s).'
+            if failed_count > 0:
+                message += f'\n{failed_count} file(s) could not be deleted (may be in use).'
+
+            QMessageBox.information(
+                self,
+                'Databases Cleared',
+                message
+            )
+            self._update_cache_button_labels()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                'Error',
+                f'Failed to clear databases: {str(e)}'
             )
