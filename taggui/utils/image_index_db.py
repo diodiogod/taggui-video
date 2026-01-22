@@ -40,6 +40,17 @@ class ImageIndexDB:
             # Use immediate transactions to reduce lock contention
             self.conn.isolation_level = 'IMMEDIATE'
 
+            # Register custom regex function for SQLite
+            import re
+            def regexp(pattern, string):
+                if string is None:
+                    return False
+                try:
+                    return re.search(pattern, string) is not None
+                except re.error:
+                    return False
+            self.conn.create_function("REGEXP", 2, regexp)
+
             cursor = self.conn.cursor()
 
             # Create schema
@@ -511,3 +522,116 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
             return None
+
+    # ========== Bulk Tag Operations ==========
+
+    def count_tag_matches(self, pattern: str, use_regex: bool = False, whole_tag_only: bool = True) -> int:
+        """Count tag matches across all images in database."""
+        if not self.enabled or not self.conn:
+            return 0
+
+        try:
+            cursor = self.conn.cursor()
+            if whole_tag_only:
+                if use_regex:
+                    # Use custom REGEXP function (full match)
+                    cursor.execute('SELECT COUNT(*) FROM image_tags WHERE tag REGEXP ?', (f'^{pattern}$',))
+                else:
+                    # Exact match
+                    cursor.execute('SELECT COUNT(*) FROM image_tags WHERE tag = ?', (pattern,))
+            else:
+                if use_regex:
+                    # Partial match with regex
+                    cursor.execute('SELECT COUNT(*) FROM image_tags WHERE tag REGEXP ?', (pattern,))
+                else:
+                    # Match within tag (substring)
+                    cursor.execute('SELECT COUNT(*) FROM image_tags WHERE tag LIKE ?', (f'%{pattern}%',))
+
+            return cursor.fetchone()[0]
+        except sqlite3.Error as e:
+            print(f'Database tag count error: {e}')
+            return 0
+
+    def find_replace_tags(self, find_text: str, replace_text: str, use_regex: bool = False) -> int:
+        """
+        Find and replace text in all tags across the database.
+
+        Returns number of affected images.
+        """
+        if not self.enabled or not self.conn:
+            return 0
+
+        try:
+            cursor = self.conn.cursor()
+
+            if use_regex:
+                # For regex, need to fetch tags, modify in Python, update back
+                import re
+                pattern = re.compile(find_text)
+
+                # Get all tags
+                cursor.execute('SELECT DISTINCT tag FROM image_tags')
+                tags_to_update = []
+                for row in cursor.fetchall():
+                    old_tag = row[0]
+                    new_tag = pattern.sub(replace_text, old_tag)
+                    if new_tag != old_tag:
+                        tags_to_update.append((old_tag, new_tag))
+
+                # Update each tag
+                affected_images = set()
+                for old_tag, new_tag in tags_to_update:
+                    # Get image IDs with this tag
+                    cursor.execute('SELECT image_id FROM image_tags WHERE tag = ?', (old_tag,))
+                    image_ids = [row[0] for row in cursor.fetchall()]
+                    affected_images.update(image_ids)
+
+                    # Delete old tag entries
+                    cursor.execute('DELETE FROM image_tags WHERE tag = ?', (old_tag,))
+
+                    # Insert new tag entries (or ignore if already exists)
+                    for image_id in image_ids:
+                        cursor.execute('INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
+                                     (image_id, new_tag))
+
+                self.conn.commit()
+                return len(affected_images)
+            else:
+                # Simple string replace - can do with SQL REPLACE function
+                # Get affected images first
+                cursor.execute('''
+                    SELECT DISTINCT image_id FROM image_tags
+                    WHERE tag LIKE ?
+                ''', (f'%{find_text}%',))
+                affected_images = [row[0] for row in cursor.fetchall()]
+
+                # Update tags using REPLACE
+                cursor.execute('''
+                    UPDATE image_tags
+                    SET tag = REPLACE(tag, ?, ?)
+                    WHERE tag LIKE ?
+                ''', (find_text, replace_text, f'%{find_text}%'))
+
+                self.conn.commit()
+                return len(affected_images)
+
+        except Exception as e:
+            print(f'Database find/replace error: {e}')
+            self.conn.rollback()
+            return 0
+
+    def get_all_image_ids(self, filter_sql: str = '', bindings: tuple = ()) -> List[int]:
+        """Get all image IDs, optionally filtered."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            query = 'SELECT id FROM images'
+            if filter_sql:
+                query += f' WHERE {filter_sql}'
+            cursor.execute(query, bindings)
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return []

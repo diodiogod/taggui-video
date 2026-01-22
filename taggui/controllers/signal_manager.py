@@ -106,9 +106,9 @@ class SignalManager:
         image_list_selection_model.currentChanged.connect(
             image_tags_editor.load_image_tags)
         image_list_model.modelReset.connect(
-            lambda: tag_counter_model.count_tags(image_list_model.images))
+            lambda: tag_counter_model.count_tags(image_list_model.get_all_loaded_images()))
         image_list_model.dataChanged.connect(
-            lambda: tag_counter_model.count_tags(image_list_model.images))
+            lambda: tag_counter_model.count_tags(image_list_model.get_all_loaded_images()))
         image_list_model.dataChanged.connect(
             image_tags_editor.reload_image_tags_if_changed)
         image_list_model.dataChanged.connect(

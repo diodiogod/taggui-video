@@ -176,6 +176,12 @@ class ProxyImageListModel(QSortFilterProxyModel):
         image_index = self.sourceModel().index(source_row, 0)
         image: Image = self.sourceModel().data(image_index,
                                                Qt.ItemDataRole.UserRole)
+
+        # In paginated mode, image might be None if page isn't loaded yet.
+        # Accept unloaded images to allow them to appear and trigger loading.
+        if image is None:
+            return True
+
         return self.does_image_match_filter(image, self.filter)
 
     def is_image_in_filtered_images(self, image: Image) -> bool:
@@ -183,5 +189,10 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 or self.does_image_match_filter(image, self.filter))
 
     def get_list(self) -> list[Image]:
-        return [self.data(self.index(row, 0, QModelIndex()), Qt.UserRole)
-                for row in range(self.rowCount())]
+        """Get filtered image list, skipping None entries (unloaded pages in pagination mode)."""
+        images = []
+        for row in range(self.rowCount()):
+            image = self.data(self.index(row, 0, QModelIndex()), Qt.UserRole)
+            if image is not None:
+                images.append(image)
+        return images
