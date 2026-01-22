@@ -392,6 +392,19 @@ class ImageListView(QListView):
         # Page indicator overlay for pagination mode
         self._page_indicator_label = None
         self._page_indicator_timer = QTimer(self)
+        self._last_loaded_pages = set()  # Track which pages have thumbnails loaded
+        self._scrollbar_dragging = False  # Track if user is dragging scrollbar
+
+        # Resize debounce timer for smooth resizing with large datasets
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._on_resize_finished)
+
+        # Mouse scroll detection timer (pause loading during scroll)
+        self._mouse_scroll_timer = QTimer(self)
+        self._mouse_scroll_timer.setSingleShot(True)
+        self._mouse_scroll_timer.timeout.connect(self._on_mouse_scroll_stopped)
+        self._mouse_scrolling = False
         self._page_indicator_timer.setSingleShot(True)
         self._page_indicator_timer.timeout.connect(self._fade_out_page_indicator)
         self._preload_index = 0  # Track preload progress
@@ -423,6 +436,10 @@ class ImageListView(QListView):
 
         # Set initial view mode based on size
         self._update_view_mode()
+
+        # Connect scrollbar events to detect dragging
+        self.verticalScrollBar().sliderPressed.connect(self._on_scrollbar_pressed)
+        self.verticalScrollBar().sliderReleased.connect(self._on_scrollbar_released)
 
         invert_selection_action = self.addAction('Invert Selection')
         invert_selection_action.setShortcut('Ctrl+I')
@@ -630,14 +647,12 @@ class ImageListView(QListView):
             # print(f"[{timestamp}] ✓ User stopped typing for 3+ seconds, clearing rapid input flag")
             self._rapid_input_detected = False
 
-        # Check if in pagination mode with large dataset - skip heavy recalculations
+        # Pagination mode now loads all Image objects, so masonry should work
+        # (it will be slower for 32K items, but shouldn't crash)
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-            # In pagination mode, masonry calculation for 32K+ items is too heavy and crashes
-            # TODO: Implement per-page masonry layouts instead of global layout
-            print(f"[{timestamp}] ⚠️ SKIP: Pagination mode - masonry recalc disabled (would crash with 32K items)")
-            print(f"[{timestamp}]        Need per-page masonry architecture for proper fix")
-            return
+            # Large dataset - masonry calculation will be slower
+            print(f"[{timestamp}] Pagination mode: calculating masonry for {source_model.rowCount()} items (may be slow)...")
 
         # print(f"[{timestamp}] ⚡ EXECUTE: Timer expired, starting masonry calculation")
         if self.use_masonry:
@@ -767,16 +782,42 @@ class ImageListView(QListView):
         return QRect()
 
     def _get_masonry_visible_items(self, viewport_rect):
-        """Get masonry items that intersect with viewport_rect."""
+        """Get masonry items that intersect with viewport_rect (optimized for large datasets)."""
+        if not self._masonry_items:
+            return []
+
+        # Optimization: Use binary search to find start/end indices instead of checking all 32K items
+        # This reduces O(32000) to O(log 32000 + visible_items) per paint
+        viewport_top = viewport_rect.top()
+        viewport_bottom = viewport_rect.bottom()
+
+        # Binary search for first item that could be visible (y + height >= viewport_top)
+        left, right = 0, len(self._masonry_items) - 1
+        start_idx = 0
+        while left <= right:
+            mid = (left + right) // 2
+            item_bottom = self._masonry_items[mid]['y'] + self._masonry_items[mid]['height']
+            if item_bottom >= viewport_top:
+                start_idx = mid
+                right = mid - 1  # Keep searching left
+            else:
+                left = mid + 1
+
+        # Collect visible items starting from start_idx
         visible = []
-        for item in self._masonry_items:
+        for i in range(start_idx, len(self._masonry_items)):
+            item = self._masonry_items[i]
+            # Stop if item is below viewport
+            if item['y'] > viewport_bottom:
+                break
+
             item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
             if item_rect.intersects(viewport_rect):
-                # Return dict with index and rect (matching old MasonryItem structure)
                 visible.append({
                     'index': item['index'],
                     'rect': item_rect
                 })
+
         return visible
 
     def _get_masonry_total_height(self):
@@ -849,7 +890,8 @@ class ImageListView(QListView):
         if not self.use_masonry or not self._masonry_items or not self.model():
             return
 
-        # Get viewport bounds with large buffer for preloading
+        # Load visible + buffer (2 screens above/below) during scroll
+        # Background preloading is paused during scroll, so this has priority
         scroll_offset = self.verticalScrollBar().value()
         viewport_height = self.viewport().height()
 
@@ -861,7 +903,7 @@ class ImageListView(QListView):
         # Get items in preload range
         items_to_preload = self._get_masonry_visible_items(preload_rect)
 
-        # Trigger thumbnail loading by accessing decoration data
+        # Trigger thumbnail loading (async, non-blocking)
         for item in items_to_preload:
             index = self.model().index(item['index'], 0)
             if index.isValid():
@@ -876,8 +918,23 @@ class ImageListView(QListView):
                                                        self.model().rowCount())
 
     def _preload_all_thumbnails(self):
-        """Aggressively preload ALL thumbnails when idle for buttery smooth scrolling."""
-        if not self.use_masonry or not self.model() or self._preload_complete:
+        """Aggressively preload thumbnails when idle for buttery smooth scrolling."""
+        if not self.use_masonry or not self.model():
+            return
+
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else None
+
+        # Pagination mode: Use smart preload (visible + buffer only)
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            self._preload_pagination_pages()
+            return
+
+        # Normal mode: Preload all (< 10K images)
+        if self._preload_complete:
+            return
+
+        # Pause background preloading during scroll (both modes)
+        if self._scrollbar_dragging or self._mouse_scrolling:
             return
 
         total_items = self.model().rowCount()
@@ -890,7 +947,7 @@ class ImageListView(QListView):
 
         # Preload in smaller batches to avoid blocking UI
         # Smaller batch = more responsive UI, especially for videos
-        batch_size = 3  # Reduced from 10 - videos can take time to extract frames
+        batch_size = 3  # Small batches with processEvents after each item
         start_index = self._preload_index
         end_index = min(start_index + batch_size, total_items)
 
@@ -904,7 +961,6 @@ class ImageListView(QListView):
                 # Track cache hit/miss (only count each thumbnail once)
                 if i not in self._thumbnail_cache_hits and i not in self._thumbnail_cache_misses:
                     source_index = self.model().mapToSource(index)
-                    # Get image via data() instead of direct array access (pagination-safe)
                     image = self.model().sourceModel().data(
                         self.model().sourceModel().index(source_index.row(), 0),
                         Qt.ItemDataRole.UserRole
@@ -915,25 +971,199 @@ class ImageListView(QListView):
                         else:
                             self._thumbnail_cache_misses.add(i)
 
-                # Track this thumbnail as loaded (even if already loaded via scroll)
-                was_new = i not in self._thumbnails_loaded
+                # Track this thumbnail as loaded
                 self._thumbnails_loaded.add(i)
                 # Process events after each thumbnail to keep UI responsive
                 QApplication.processEvents()
 
-        # Update progress to show actual loaded count (not sequential index)
+        # Update progress to show actual loaded count
         self._preload_index = end_index
         self._update_thumbnail_progress(len(self._thumbnails_loaded), total_items)
 
         # Continue preloading if more items remain
         if self._preload_index < total_items:
             # Schedule next batch with minimal delay for responsiveness
-            QTimer.singleShot(10, self._preload_all_thumbnails)  # Reduced from 50ms to 10ms
+            QTimer.singleShot(10, self._preload_all_thumbnails)
         else:
             # Silently complete
             self._preload_index = 0  # Reset for next time
             self._preload_complete = True  # Mark as complete
             self._hide_thumbnail_progress()
+
+    def _on_scrollbar_pressed(self):
+        """Called when user starts dragging scrollbar."""
+        self._scrollbar_dragging = True
+
+        # Pause thumbnail loading in model
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model:
+            source_model._pause_thumbnail_loading = True
+
+        print("[SCROLL] Scrollbar drag started - pausing ALL thumbnail loading")
+
+    def _on_scrollbar_released(self):
+        """Called when user releases scrollbar."""
+        self._scrollbar_dragging = False
+
+        # Resume thumbnail loading in model
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model:
+            source_model._pause_thumbnail_loading = False
+
+        print("[SCROLL] Scrollbar drag ended - resuming thumbnail loading")
+
+        # Force repaint to trigger loading of newly visible items
+        self.viewport().update()
+
+        # Trigger immediate preload of current page
+        self._idle_preload_timer.stop()
+        self._idle_preload_timer.start(100)  # Start preloading after 100ms
+
+    def _preload_pagination_pages(self):
+        """Smart preload: prioritize visible items, then expand outward (pagination mode)."""
+        # Don't preload while user is scrolling (keeps scroll smooth)
+        if self._scrollbar_dragging or self._mouse_scrolling:
+            return
+
+        source_model = self.model().sourceModel()
+        if not source_model or not hasattr(source_model, 'PAGE_SIZE'):
+            return
+
+        # Initialize preload tracking if needed
+        if not hasattr(self, '_pagination_preload_queue'):
+            self._pagination_preload_queue = []  # Queue of indices to preload
+            self._pagination_loaded_items = set()  # Track loaded items
+
+        # Build preload queue if empty (prioritize visible → nearby → distant)
+        if not self._pagination_preload_queue:
+            # Get visible items
+            scroll_offset = self.verticalScrollBar().value()
+            viewport_height = self.viewport().height()
+            viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
+            visible_items = self._get_masonry_visible_items(viewport_rect)
+
+            if visible_items:
+                visible_indices = [item['index'] for item in visible_items]
+                min_visible = min(visible_indices)
+                max_visible = max(visible_indices)
+                mid_visible = (min_visible + max_visible) // 2
+
+                # Build smart queue: expand outward from center of visible area
+                queue = []
+
+                # 1. Visible items - expand from center outward (HIGHEST PRIORITY)
+                # Like ripples: if viewing 100-200, load: 150, 151, 149, 152, 148...
+                visited = set()
+                queue.append(mid_visible)
+                visited.add(mid_visible)
+
+                offset = 1
+                while len(visited) < len(visible_indices):
+                    # Add item after center
+                    if mid_visible + offset <= max_visible and mid_visible + offset not in visited:
+                        queue.append(mid_visible + offset)
+                        visited.add(mid_visible + offset)
+                    # Add item before center
+                    if mid_visible - offset >= min_visible and mid_visible - offset not in visited:
+                        queue.append(mid_visible - offset)
+                        visited.add(mid_visible - offset)
+                    offset += 1
+                    # Safety break
+                    if offset > len(visible_indices) + 10:
+                        break
+
+                # 2. Items just above and below visible area - expand outward (HIGH PRIORITY)
+                # Load items closest to visible edge first
+                buffer_size = 100
+
+                # Items below visible area: max_visible+1, max_visible+2, ...
+                for i in range(max_visible + 1, min(max_visible + buffer_size + 1, source_model.rowCount())):
+                    if i not in visited:
+                        queue.append(i)
+                        visited.add(i)
+
+                # Items above visible area: min_visible-1, min_visible-2, ...
+                for i in range(min_visible - 1, max(0, min_visible - buffer_size) - 1, -1):
+                    if i not in visited:
+                        queue.append(i)
+                        visited.add(i)
+
+                # 3. SKIP 3-page preload - already loaded visible + buffer (200 items)
+                # This keeps initial load fast and thread pool available for enrichment
+                # The queue will rebuild on scroll to load more as needed
+
+                self._pagination_preload_queue = queue
+
+        # Load batch (10 items per timer tick for faster loading during scroll)
+        batch_size = 10
+        loaded_count = 0
+
+        while self._pagination_preload_queue and loaded_count < batch_size:
+            idx = self._pagination_preload_queue.pop(0)
+
+            # Skip if already loaded
+            if idx in self._pagination_loaded_items:
+                continue
+
+            # Load thumbnail
+            index = self.model().index(idx, 0)
+            if index.isValid():
+                _ = index.data(Qt.ItemDataRole.DecorationRole)
+                self._pagination_loaded_items.add(idx)
+                loaded_count += 1
+
+        # Continue preloading if queue has more items
+        if self._pagination_preload_queue:
+            self._idle_preload_timer.start(30)  # Fast cadence for responsive loading (10 items every 30ms = 333 items/sec)
+
+        # Evict thumbnails far from current view (keep VRAM under control)
+        # Only evict every 10th preload call to avoid overhead
+        if not hasattr(self, '_eviction_counter'):
+            self._eviction_counter = 0
+        self._eviction_counter += 1
+
+        if self._eviction_counter >= 10:
+            self._eviction_counter = 0
+            self._evict_distant_thumbnails()
+
+    def _evict_distant_thumbnails(self):
+        """Evict thumbnails that are far from current viewport (VRAM management)."""
+        source_model = self.model().sourceModel()
+        if not source_model:
+            return
+
+        # Get current visible range
+        scroll_offset = self.verticalScrollBar().value()
+        viewport_height = self.viewport().height()
+        viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
+        visible_items = self._get_masonry_visible_items(viewport_rect)
+
+        if not visible_items:
+            return
+
+        visible_indices = set(item['index'] for item in visible_items)
+        min_visible = min(visible_indices)
+        max_visible = max(visible_indices)
+
+        # Keep items within 3 pages of visible area
+        keep_range_start = max(0, min_visible - source_model.PAGE_SIZE * 3)
+        keep_range_end = min(max_visible + source_model.PAGE_SIZE * 3, source_model.rowCount())
+
+        # Evict thumbnails outside keep range
+        evicted_count = 0
+        for i in range(len(source_model.images)):
+            if i < keep_range_start or i > keep_range_end:
+                image = source_model.images[i]
+                if image.thumbnail or image.thumbnail_qimage:
+                    image.thumbnail = None
+                    image.thumbnail_qimage = None
+                    evicted_count += 1
+                    # Remove from loaded tracking
+                    if hasattr(self, '_pagination_loaded_items'):
+                        self._pagination_loaded_items.discard(i)
+
+        if evicted_count > 0:
+            print(f"[EVICT] Evicted {evicted_count} distant thumbnails (keeping indices {keep_range_start}-{keep_range_end})")
 
     def _show_thumbnail_progress(self, total_items):
         """Show progress bar for thumbnail loading."""
@@ -1070,10 +1300,18 @@ class ImageListView(QListView):
         drag.exec(supportedActions)
 
     def resizeEvent(self, event):
-        """Recalculate masonry layout on resize."""
+        """Recalculate masonry layout on resize (debounced for large datasets)."""
         super().resizeEvent(event)
         if self.use_masonry:
-            # Recalculate layout with new width
+            # Debounce: Only recalculate after user stops resizing for 300ms
+            # This prevents janky resize with 32K items
+            self._resize_timer.stop()
+            self._resize_timer.start(300)  # Wait 300ms after last resize
+
+    def _on_resize_finished(self):
+        """Called after resize stops (debounced)."""
+        if self.use_masonry:
+            print("[RESIZE] Window resize finished, recalculating masonry...")
             self._calculate_masonry_layout()
             self.viewport().update()
 
@@ -1129,8 +1367,9 @@ class ImageListView(QListView):
 
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
-        # Pause enrichment during interaction to prevent crashes
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+
+        # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
             source_model._enrichment_timer.stop()
             # Will resume after 500ms idle (see mouseReleaseEvent)
@@ -1248,6 +1487,33 @@ class ImageListView(QListView):
         else:
             super().mouseReleaseEvent(event)
 
+    def wheelEvent(self, event):
+        """Detect mouse wheel scrolling and pause heavy preloading."""
+        # Mark as mouse scrolling and restart timer
+        if not self._mouse_scrolling:
+            self._mouse_scrolling = True
+            print("[SCROLL] Mouse scroll started - pausing background preloading")
+
+        # Reset timer - will fire 150ms after last scroll event
+        self._mouse_scroll_timer.stop()
+        self._mouse_scroll_timer.start(150)  # Shorter delay for faster resume
+
+        # Let Qt handle the actual scrolling
+        super().wheelEvent(event)
+
+    def _on_mouse_scroll_stopped(self):
+        """Called when mouse scrolling stops (200ms after last wheel event)."""
+        self._mouse_scrolling = False
+        print("[SCROLL] Mouse scroll stopped")
+
+        # Clear preload queue to rebuild based on new position
+        if hasattr(self, '_pagination_preload_queue'):
+            self._pagination_preload_queue = []
+
+        # Trigger preload
+        self._idle_preload_timer.stop()
+        self._idle_preload_timer.start(50)  # Quick start after scroll
+
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
         super().scrollContentsBy(dx, dy)
@@ -1274,35 +1540,31 @@ class ImageListView(QListView):
                 self._idle_preload_timer.start(500)  # 500ms after scrolling stops
 
     def _check_and_load_pages(self):
-        """Check if we need to load more pages based on scroll position."""
-        # Check if model supports pagination
+        """Update current page tracking (always), trigger preloading (only when not scrolling)."""
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
-        if not hasattr(source_model, 'ensure_pages_for_range'):
-            return  # Not a paginated model
 
-        if not self._masonry_items:
+        # Only for pagination mode
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
             return
 
-        # Get current scroll position and viewport
+        if not self._masonry_items or source_model.rowCount() == 0:
+            return
+
+        # Get current visible items
         scroll_offset = self.verticalScrollBar().value()
         viewport_height = self.viewport().height()
+        viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
+        visible_items = self._get_masonry_visible_items(viewport_rect)
 
-        # Calculate buffer (2 screens ahead/behind)
-        buffer = viewport_height * 2
-        start_y = max(0, scroll_offset - buffer)
-        end_y = scroll_offset + viewport_height + buffer
+        if not visible_items:
+            return
 
-        # Find item indices in this range
-        visible_items = self._get_masonry_visible_items(
-            QRect(0, start_y, self.viewport().width(), end_y - start_y)
-        )
+        # Determine current page from middle visible item
+        mid_idx = visible_items[len(visible_items) // 2]['index']
+        current_page = mid_idx // source_model.PAGE_SIZE
 
-        if visible_items:
-            start_idx = min(item['index'] for item in visible_items)
-            end_idx = max(item['index'] for item in visible_items)
-
-            # Request pages for this range
-            source_model.ensure_pages_for_range(start_idx, end_idx)
+        # ALWAYS update current page (needed for page indicator during drag)
+        self._current_page = current_page
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
@@ -1848,20 +2110,19 @@ class ImageListView(QListView):
         if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
             return
 
-        # Get current visible page from first visible item (use masonry if available)
-        visible_items = self._get_masonry_visible_items(self.viewport().rect())
-        if visible_items and len(visible_items) > 0:
-            first_visible_idx = visible_items[0]['index']
+        # Get current page (already tracked by _check_and_load_pages)
+        if hasattr(self, '_current_page'):
+            current_page = self._current_page
         else:
-            # Fallback: estimate from scroll position
-            scrollbar = self.verticalScrollBar()
-            scroll_value = scrollbar.value()
-            scroll_max = scrollbar.maximum()
-            scroll_ratio = scroll_value / max(scroll_max, 1) if scroll_max > 0 else 0
-            first_visible_idx = int(scroll_ratio * source_model._total_count)
+            # Fallback: calculate from visible items
+            visible_items = self._get_masonry_visible_items(self.viewport().rect())
+            if visible_items and len(visible_items) > 0:
+                mid_idx = visible_items[len(visible_items) // 2]['index']
+                current_page = mid_idx // source_model.PAGE_SIZE
+            else:
+                current_page = 0
 
-        current_page = source_model._get_page_for_index(first_visible_idx)
-        total_pages = (source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
+        total_pages = (source_model.rowCount() + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
 
         # Create label if needed
         if not self._page_indicator_label:
