@@ -107,7 +107,9 @@ class PaginatedImageModel(QAbstractListModel):
             return None
 
         # Return actual data (compatible with ImageListModel)
-        if role == Qt.ItemDataRole.DisplayRole:
+        if role == Qt.ItemDataRole.UserRole:
+            return image  # Return the Image object itself
+        elif role == Qt.ItemDataRole.DisplayRole:
             return ', '.join(image.tags)
         elif role == Qt.ItemDataRole.DecorationRole:
             return image.thumbnail

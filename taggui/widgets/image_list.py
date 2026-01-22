@@ -25,7 +25,7 @@ from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
 from utils.grid import Grid
 from widgets.masonry_worker import calculate_masonry_layout
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 
 def replace_filter_wildcards(filter_: str | list) -> str | list:
@@ -369,7 +369,7 @@ class ImageListView(QListView):
         self.use_masonry = False
         self._masonry_calculating = False  # Re-entry guard for layout calculation
         self._masonry_calc_future = None  # Multiprocessing future
-        self._masonry_executor = ProcessPoolExecutor(max_workers=1)  # Single worker process
+        self._masonry_executor = ThreadPoolExecutor(max_workers=1)  # Single worker thread (ProcessPoolExecutor fails on Windows with heavy threading)
         self._masonry_items = []  # Positioned items from multiprocessing
         self._masonry_total_height = 0  # Total layout height
 
@@ -558,6 +558,9 @@ class ImageListView(QListView):
         if self._rapid_input_detected:
             self._masonry_recalc_delay = self._masonry_recalc_max_delay
             # print(f"[{timestamp}] SIGNAL: {signal_name}, RAPID INPUT FLAG SET - using max delay {self._masonry_recalc_delay}ms")
+        elif signal_name == "layoutChanged":
+            # For layoutChanged (from enrichment), use shorter delay for faster updates
+            self._masonry_recalc_delay = 100
         else:
             # Reset to base delay if typing slowed down
             self._masonry_recalc_delay = self._masonry_recalc_min_delay
@@ -734,7 +737,11 @@ class ImageListView(QListView):
         """Get QRect for item at given index from masonry results."""
         if index < len(self._masonry_items):
             item = self._masonry_items[index]
-            return QRect(item['x'], item['y'], item['width'], item['height'])
+            # Validate rect dimensions to prevent crashes with corrupted data
+            width = item.get('width', 0)
+            height = item.get('height', 0)
+            if width > 0 and height > 0 and width < 100000 and height < 100000:
+                return QRect(item['x'], item['y'], width, height)
         return QRect()
 
     def _get_masonry_visible_items(self, viewport_rect):
@@ -784,8 +791,11 @@ class ImageListView(QListView):
         dir_path = "default"
         if self.model() and hasattr(self.model(), 'sourceModel'):
             source_model = self.model().sourceModel()
-            if hasattr(source_model, 'images') and len(source_model.images) > 0:
-                # Use first image's parent directory as key
+            # Handle both regular and paginated modes
+            if hasattr(source_model, '_directory_path') and source_model._directory_path:
+                dir_path = str(source_model._directory_path)
+            elif hasattr(source_model, 'images') and len(source_model.images) > 0:
+                # Fallback for regular mode
                 dir_path = str(source_model.images[0].path.parent)
 
         # Round viewport width to nearest 100px to avoid cache misses from small resizes
@@ -872,8 +882,12 @@ class ImageListView(QListView):
                 # Track cache hit/miss (only count each thumbnail once)
                 if i not in self._thumbnail_cache_hits and i not in self._thumbnail_cache_misses:
                     source_index = self.model().mapToSource(index)
-                    image = self.model().sourceModel().images[source_index.row()]
-                    if hasattr(image, '_last_thumbnail_was_cached'):
+                    # Get image via data() instead of direct array access (pagination-safe)
+                    image = self.model().sourceModel().data(
+                        self.model().sourceModel().index(source_index.row(), 0),
+                        Qt.ItemDataRole.UserRole
+                    )
+                    if image and hasattr(image, '_last_thumbnail_was_cached'):
                         if image._last_thumbnail_was_cached:
                             self._thumbnail_cache_hits.add(i)
                         else:
@@ -956,18 +970,18 @@ class ImageListView(QListView):
 
                 if cache_rate > 95:
                     # Almost all cached - fast loading
-                    self._thumbnail_progress_bar.setFormat("Loading: %v/%m")
+                    self._thumbnail_progress_bar.setFormat("Updating dimensions: %v/%m")
                 elif cache_rate < 20:
                     # Almost all generating - slow
                     self._thumbnail_progress_bar.setFormat("Generating: %v/%m")
                 else:
                     # Mixed - show both counts with color coding
                     self._thumbnail_progress_bar.setFormat(
-                        f"Loading: {cached_count} | Generating: {generating_count} (%v/%m)"
+                        f"Updating dimensions: {cached_count} | Generating: {generating_count} (%v/%m)"
                     )
             else:
                 # Not enough data yet, use neutral message
-                self._thumbnail_progress_bar.setFormat("Loading: %v/%m")
+                self._thumbnail_progress_bar.setFormat("Updating dimensions: %v/%m")
 
     def _hide_thumbnail_progress(self):
         """Hide progress bar when complete."""
@@ -1093,6 +1107,12 @@ class ImageListView(QListView):
 
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
+        # Pause enrichment during interaction to prevent crashes
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
+            source_model._enrichment_timer.stop()
+            # Will resume after 500ms idle (see mouseReleaseEvent)
+
         if self.use_masonry and self._masonry_items:
             # Get the index at click position
             index = self.indexAt(event.pos())
@@ -1195,6 +1215,11 @@ class ImageListView(QListView):
 
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
+        # Resume enrichment after 500ms idle
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
+            source_model._enrichment_timer.start(500)
+
         if self.use_masonry and self._masonry_items:
             # Just accept the event, don't let Qt handle it
             event.accept()
@@ -1257,92 +1282,100 @@ class ImageListView(QListView):
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
         if self.use_masonry and self._masonry_items and self.model():
-            import time
-            paint_start = time.time()
+            try:
+                import time
+                paint_start = time.time()
 
-            # Paint background
-            painter = QPainter(self.viewport())
-            painter.fillRect(self.viewport().rect(), self.palette().base())
+                # Paint background
+                painter = QPainter(self.viewport())
+                painter.fillRect(self.viewport().rect(), self.palette().base())
 
-            # Get visible viewport rect in absolute coordinates
-            scroll_offset = self.verticalScrollBar().value()
-            viewport_height = self.viewport().height()
-            viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
+                # Get visible viewport rect in absolute coordinates
+                scroll_offset = self.verticalScrollBar().value()
+                viewport_height = self.viewport().height()
+                viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
 
-            # Add buffer zone for smooth scrolling (render items slightly outside viewport)
-            buffer = 200  # pixels
-            expanded_viewport = viewport_rect.adjusted(0, -buffer, 0, buffer)
+                # Add buffer zone for smooth scrolling (render items slightly outside viewport)
+                buffer = 200  # pixels
+                expanded_viewport = viewport_rect.adjusted(0, -buffer, 0, buffer)
 
-            # Use masonry layout to get only visible items (OPTIMIZATION!)
-            visible_items = self._get_masonry_visible_items(expanded_viewport)
+                # Use masonry layout to get only visible items (OPTIMIZATION!)
+                visible_items = self._get_masonry_visible_items(expanded_viewport)
 
-            # Auto-correct scroll bounds if needed
-            max_allowed = self._get_masonry_total_height() - viewport_height
-            if scroll_offset > max_allowed and max_allowed > 0:
-                self.verticalScrollBar().setMaximum(max_allowed)
-                self.verticalScrollBar().setValue(max_allowed)
+                # Auto-correct scroll bounds if needed
+                max_allowed = self._get_masonry_total_height() - viewport_height
+                if scroll_offset > max_allowed and max_allowed > 0:
+                    self.verticalScrollBar().setMaximum(max_allowed)
+                    self.verticalScrollBar().setValue(max_allowed)
 
-            items_painted = 0
-            # Paint only visible items
-            for item in visible_items:
-                index = self.model().index(item['index'], 0)
-                if not index.isValid():
-                    continue
+                items_painted = 0
+                # Paint only visible items
+                for item in visible_items:
+                    index = self.model().index(item['index'], 0)
+                    if not index.isValid():
+                        continue
 
-                # Adjust rect to viewport coordinates
-                visual_rect = QRect(
-                    item['rect'].x(),
-                    item['rect'].y() - scroll_offset,
-                    item['rect'].width(),
-                    item['rect'].height()
-                )
+                    # Adjust rect to viewport coordinates
+                    visual_rect = QRect(
+                        item['rect'].x(),
+                        item['rect'].y() - scroll_offset,
+                        item['rect'].width(),
+                        item['rect'].height()
+                    )
 
-                # Skip if completely outside viewport (after buffer)
-                if visual_rect.bottom() < -buffer or visual_rect.top() > viewport_height + buffer:
-                    continue
+                    # Skip if completely outside viewport (after buffer)
+                    if visual_rect.bottom() < -buffer or visual_rect.top() > viewport_height + buffer:
+                        continue
 
-                # Create option for delegate using QStyleOptionViewItem
-                option = QStyleOptionViewItem()
-                option.rect = visual_rect
-                option.decorationSize = QSize(item['rect'].width(), item['rect'].height())
-                option.decorationAlignment = Qt.AlignCenter
-                option.palette = self.palette()  # Set palette for stamp drawing
+                    # Create option for delegate using QStyleOptionViewItem
+                    option = QStyleOptionViewItem()
+                    option.rect = visual_rect
+                    option.decorationSize = QSize(item['rect'].width(), item['rect'].height())
+                    option.decorationAlignment = Qt.AlignCenter
+                    option.palette = self.palette()  # Set palette for stamp drawing
 
-                # Set state flags
-                is_selected = self.selectionModel() and self.selectionModel().isSelected(index)
-                is_current = self.currentIndex() == index
+                    # Set state flags
+                    is_selected = self.selectionModel() and self.selectionModel().isSelected(index)
+                    is_current = self.currentIndex() == index
 
-                # Debug: log selection state for visible items
-                # if is_selected or is_current:
-                #     print(f"[DEBUG] Painting row={item.index}, is_selected={is_selected}, is_current={is_current}")
+                    # Debug: log selection state for visible items
+                    # if is_selected or is_current:
+                    #     print(f"[DEBUG] Painting row={item.index}, is_selected={is_selected}, is_current={is_current}")
 
-                if is_selected:
-                    option.state |= QStyle.StateFlag.State_Selected
-                if is_current:
-                    option.state |= QStyle.StateFlag.State_HasFocus
-
-                # Paint using delegate
-                self.itemDelegate().paint(painter, option, index)
-
-                # Draw selection border on top in masonry mode (delegate doesn't show it clearly in IconMode)
-                if is_selected or is_current:
-                    painter.save()
+                    if is_selected:
+                        option.state |= QStyle.StateFlag.State_Selected
                     if is_current:
-                        # Current item: thicker blue border
-                        pen = QPen(QColor(0, 120, 215), 4)  # Windows blue
-                    else:
-                        # Just selected: thinner blue border
-                        pen = QPen(QColor(0, 120, 215), 2)
-                    painter.setPen(pen)
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
-                    painter.restore()
-                    # Debug: show rect for selected items
-                    # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
+                        option.state |= QStyle.StateFlag.State_HasFocus
 
-                items_painted += 1
+                    # Paint using delegate
+                    self.itemDelegate().paint(painter, option, index)
 
-            painter.end()
+                    # Draw selection border on top in masonry mode (delegate doesn't show it clearly in IconMode)
+                    if is_selected or is_current:
+                        painter.save()
+                        if is_current:
+                            # Current item: thicker blue border
+                            pen = QPen(QColor(0, 120, 215), 4)  # Windows blue
+                        else:
+                            # Just selected: thinner blue border
+                            pen = QPen(QColor(0, 120, 215), 2)
+                        painter.setPen(pen)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
+                        painter.restore()
+                        # Debug: show rect for selected items
+                        # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
+
+                    items_painted += 1
+
+                painter.end()
+            except Exception as e:
+                # Catch any crashes during masonry painting to prevent segfaults
+                print(f"[PAINT ERROR] Masonry paint crashed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fall back to default painting
+                super().paintEvent(event)
         else:
             # Use default painting
             super().paintEvent(event)

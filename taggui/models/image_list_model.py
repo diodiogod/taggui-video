@@ -31,6 +31,9 @@ import utils.target_dimension as target_dimension
 
 UNDO_STACK_SIZE = 32
 
+# Global lock for video operations (OpenCV/ffmpeg is not thread-safe)
+_video_lock = threading.Lock()
+
 # Custom event for background load completion
 class BackgroundLoadCompleteEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
@@ -46,6 +49,14 @@ class BackgroundEnrichmentProgressEvent(QEvent):
     def __init__(self, count):
         super().__init__(self.EVENT_TYPE)
         self.count = count
+
+# Custom event for page loaded in paginated mode
+class PageLoadedEvent(QEvent):
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self, page_num):
+        super().__init__(self.EVENT_TYPE)
+        self.page_num = page_num
 
 def pil_to_qimage(pil_image):
     """Convert PIL image to QImage properly"""
@@ -172,50 +183,53 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
     """
     Extract metadata and first frame from a video file.
     Returns: (dimensions, video_metadata, first_frame_pixmap)
+
+    Thread-safe: Uses global lock to prevent OpenCV/ffmpeg crashes.
     """
-    try:
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
+    with _video_lock:
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                return None, None, None
+
+            # Get video properties
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration = frame_count / fps if fps > 0 else 0
+
+            # Get SAR (Sample Aspect Ratio)
+            sar_num = cap.get(cv2.CAP_PROP_SAR_NUM)
+            sar_den = cap.get(cv2.CAP_PROP_SAR_DEN)
+
+            # Read first frame
+            ret, frame = cap.read()
+            cap.release()
+
+            if not ret:
+                return (width, height), None, None
+
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame_rgb.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+
+            video_metadata = {
+                'fps': fps,
+                'duration': duration,
+                'frame_count': frame_count,
+                'current_frame': 0,
+                'sar_num': sar_num if sar_num > 0 else 1,
+                'sar_den': sar_den if sar_den > 0 else 1
+            }
+
+            return (width, height), video_metadata, pixmap
+        except Exception as e:
+            print(f"Error extracting video info from {video_path}: {e}")
             return None, None, None
-
-        # Get video properties
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration = frame_count / fps if fps > 0 else 0
-
-        # Get SAR (Sample Aspect Ratio)
-        sar_num = cap.get(cv2.CAP_PROP_SAR_NUM)
-        sar_den = cap.get(cv2.CAP_PROP_SAR_DEN)
-
-        # Read first frame
-        ret, frame = cap.read()
-        cap.release()
-
-        if not ret:
-            return (width, height), None, None
-
-        # Convert BGR to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = frame_rgb.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qt_image)
-
-        video_metadata = {
-            'fps': fps,
-            'duration': duration,
-            'frame_count': frame_count,
-            'current_frame': 0,
-            'sar_num': sar_num if sar_num > 0 else 1,
-            'sar_den': sar_den if sar_den > 0 else 1
-        }
-
-        return (width, height), video_metadata, pixmap
-    except Exception as e:
-        print(f"Error extracting video info from {video_path}: {e}")
-        return None, None, None
 
 
 @dataclass
@@ -234,6 +248,16 @@ class Scope(str, Enum):
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
 
+    # Signals for pagination
+    page_loaded = Signal(int)  # Emitted when a page finishes loading (page_num)
+    total_count_changed = Signal(int)  # Emitted when total image count changes
+    indexing_progress = Signal(int, int)  # (current, total) during initial indexing
+
+    # Threshold for enabling pagination mode (number of images)
+    PAGINATION_THRESHOLD = 50000
+    PAGE_SIZE = 1000
+    MAX_PAGES_IN_MEMORY = 5
+
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
         # Always generate thumbnails at max size (512px) for best quality and performance
@@ -248,6 +272,18 @@ class ImageListModel(QAbstractListModel):
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
 
+        # Pagination mode state
+        self._paginated_mode = False
+        self._total_count = 0  # Total images in paginated mode
+        self._pages: dict = {}  # page_num -> list[Image]
+        self._page_load_order: list = []  # LRU tracking
+        self._loading_pages: set = set()  # Pages currently being loaded
+        self._page_load_lock = threading.Lock()
+        self._db: ImageIndexDB = None
+        self._directory_path: Path = None
+        self._sort_field = 'mtime'
+        self._sort_dir = 'DESC'
+
         # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
         self._aspect_ratio_cache: list[float] = []
 
@@ -256,9 +292,12 @@ class ImageListModel(QAbstractListModel):
         self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
         # Save executor: 2 workers for background cache writing (low priority, can be slow)
         self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
+        # Page loader executor for paginated mode
+        self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
 
         self._thumbnail_futures = {}  # Maps image index to Future
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
+        self._images_lock = threading.RLock()  # Protects images list and image objects from race conditions
 
         # Track cache saves for reporting
         self._cache_saves_count = 0
@@ -269,10 +308,46 @@ class ImageListModel(QAbstractListModel):
         self._enrichment_cancelled = threading.Event()
         self._suppress_enrichment_signals = False  # Suppress dataChanged during filtering
 
+        # Queue for thread-safe dimension updates from background enrichment
+        from queue import Queue
+        self._enrichment_queue = Queue()
+        self._enrichment_timer = None  # Timer to process queue on main thread
+
         # Queue for QImages waiting to be converted to QPixmap on main thread
         self._qimage_queue = []  # List of (idx, qimage, was_cached) tuples
         self._qimage_queue_lock = threading.Lock()
         self._qimage_timer = None  # QTimer for processing queue gradually
+
+    @property
+    def is_paginated(self) -> bool:
+        """Check if model is in paginated mode."""
+        return self._paginated_mode
+
+    def get_all_loaded_images(self) -> list[Image]:
+        """Get all currently loaded images (handles both modes).
+
+        In regular mode: returns self.images
+        In paginated mode: returns images from all loaded pages
+        """
+        if not self._paginated_mode:
+            return self.images
+
+        # Collect images from all loaded pages
+        all_images = []
+        for page_num in sorted(self._pages.keys()):
+            all_images.extend(self._pages[page_num])
+        return all_images
+
+    def iter_all_images(self):
+        """Iterate through all images that are currently loaded.
+
+        Use this instead of accessing .images directly for compatibility with pagination.
+        """
+        if not self._paginated_mode:
+            yield from self.images
+        else:
+            for page_num in sorted(self._pages.keys()):
+                yield from self._pages[page_num]
 
     def get_aspect_ratios(self) -> list[float]:
         """Get cached aspect ratios for all images (fast, no Qt calls)."""
@@ -280,6 +355,10 @@ class ImageListModel(QAbstractListModel):
 
     def _rebuild_aspect_ratio_cache(self):
         """Rebuild aspect ratio cache when images change (thread-safe)."""
+        if self._paginated_mode:
+            self._rebuild_aspect_ratio_cache_paginated()
+            return
+
         # Take snapshot to avoid issues if images list is being modified
         try:
             images_snapshot = self.images[:]
@@ -288,6 +367,259 @@ class ImageListModel(QAbstractListModel):
             print(f"[CACHE] Error rebuilding aspect ratio cache: {e}")
             # Keep old cache if rebuild fails
             pass
+
+    def _rebuild_aspect_ratio_cache_paginated(self):
+        """Rebuild aspect ratio cache for paginated mode (estimates unloaded pages)."""
+        if self._total_count == 0:
+            self._aspect_ratio_cache = []
+            return
+
+        # Initialize with default aspect ratios
+        self._aspect_ratio_cache = [1.0] * self._total_count
+
+        # Fill in actual ratios from loaded pages
+        for page_num, page_images in self._pages.items():
+            start_idx = page_num * self.PAGE_SIZE
+            for i, img in enumerate(page_images):
+                idx = start_idx + i
+                if idx < self._total_count:
+                    self._aspect_ratio_cache[idx] = img.aspect_ratio
+
+    # ========== Pagination Methods ==========
+
+    def _get_page_for_index(self, index: int) -> int:
+        """Get page number containing a given image index."""
+        return index // self.PAGE_SIZE
+
+    def _get_image_at_index(self, index: int) -> Image | None:
+        """Get image at index in paginated mode, loading page if necessary."""
+        if not self._paginated_mode:
+            return self.images[index] if index < len(self.images) else None
+
+        page_num = self._get_page_for_index(index)
+        index_in_page = index % self.PAGE_SIZE
+
+        # Check if page is loaded
+        if page_num in self._pages:
+            page_images = self._pages[page_num]
+            if index_in_page < len(page_images):
+                self._touch_page(page_num)
+                return page_images[index_in_page]
+            return None
+
+        # Page not loaded - trigger async load
+        self._request_page_load(page_num)
+        return None
+
+    def _touch_page(self, page_num: int):
+        """Update LRU order for a page."""
+        if page_num in self._page_load_order:
+            self._page_load_order.remove(page_num)
+        self._page_load_order.append(page_num)
+
+    def _request_page_load(self, page_num: int):
+        """Request a page to be loaded in background."""
+        with self._page_load_lock:
+            if page_num in self._pages or page_num in self._loading_pages:
+                return  # Already loaded or loading
+            self._loading_pages.add(page_num)
+
+        # Submit background load
+        self._page_executor.submit(self._load_page_async, page_num)
+
+    def _load_page_sync(self, page_num: int):
+        """Load a page synchronously (for initial load)."""
+        if not self._db:
+            return
+
+        images = self._load_images_from_db(page_num)
+        self._store_page(page_num, images)
+
+    def _load_page_async(self, page_num: int):
+        """Load a page in background thread."""
+        try:
+            if not self._db:
+                return
+
+            images = self._load_images_from_db(page_num)
+            self._store_page(page_num, images)
+
+            # Emit signal on main thread
+            QApplication.instance().postEvent(
+                self,
+                PageLoadedEvent(page_num)
+            )
+
+        except Exception as e:
+            print(f"[PAGE] Error loading page {page_num}: {e}")
+        finally:
+            with self._page_load_lock:
+                self._loading_pages.discard(page_num)
+
+    def _load_images_from_db(self, page_num: int) -> list[Image]:
+        """Load images from database for a specific page."""
+        if not self._db or not self._directory_path:
+            return []
+
+        rows = self._db.get_page(
+            page=page_num,
+            page_size=self.PAGE_SIZE,
+            sort_field=self._sort_field,
+            sort_dir=self._sort_dir
+        )
+
+        images = []
+        text_file_paths = set()
+        # Gather text file paths for tag loading
+        for path in self._directory_path.rglob("*.txt"):
+            text_file_paths.add(str(path))
+
+        for row in rows:
+            file_path = self._directory_path / row['file_name']
+
+            # Load tags from text file
+            tags = []
+            text_file_path = file_path.with_suffix('.txt')
+            if str(text_file_path) in text_file_paths:
+                try:
+                    caption = text_file_path.read_text(encoding='utf-8', errors='replace')
+                    if caption:
+                        tags = [tag.strip() for tag in caption.split(self.tag_separator) if tag.strip()]
+                except Exception:
+                    pass
+
+            image = Image(
+                path=file_path,
+                dimensions=(row['width'], row['height']),
+                tags=tags,
+                is_video=bool(row['is_video']),
+                rating=row.get('rating', 0.0)
+            )
+
+            if row['is_video']:
+                image.video_metadata = {
+                    'fps': row.get('video_fps'),
+                    'duration': row.get('video_duration'),
+                    'frame_count': row.get('video_frame_count')
+                }
+
+            images.append(image)
+
+        return images
+
+    def _store_page(self, page_num: int, images: list[Image]):
+        """Store a loaded page and evict old pages if needed."""
+        with self._page_load_lock:
+            self._pages[page_num] = images
+            self._touch_page(page_num)
+
+            # Evict old pages if over limit
+            while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
+                oldest_page = self._page_load_order.pop(0)
+                if oldest_page in self._pages:
+                    del self._pages[oldest_page]
+                    print(f"[PAGE] Evicted page {oldest_page}")
+
+    def ensure_pages_for_range(self, start_idx: int, end_idx: int):
+        """Ensure pages covering the given index range are loaded (for scroll handler)."""
+        if not self._paginated_mode:
+            return
+
+        start_page = self._get_page_for_index(start_idx)
+        end_page = self._get_page_for_index(end_idx)
+
+        for page_num in range(start_page, end_page + 1):
+            if page_num not in self._pages and page_num not in self._loading_pages:
+                self._request_page_load(page_num)
+
+    def event(self, event):
+        """Handle custom events for page loading."""
+        if isinstance(event, PageLoadedEvent):
+            self._on_page_loaded(event.page_num)
+            return True
+        return super().event(event)
+
+    def _on_page_loaded(self, page_num: int):
+        """Called on main thread when a page finishes loading."""
+        # Notify views that data changed for this page's range
+        start_idx = page_num * self.PAGE_SIZE
+        end_idx = min(start_idx + self.PAGE_SIZE - 1, self._total_count - 1)
+
+        if end_idx >= start_idx:
+            self.dataChanged.emit(
+                self.index(start_idx),
+                self.index(end_idx)
+            )
+
+        # Rebuild aspect ratio cache
+        self._rebuild_aspect_ratio_cache()
+
+        # Emit signal
+        self.page_loaded.emit(page_num)
+
+    def _process_enrichment_queue(self):
+        """Process dimension updates from background thread (runs on main thread via timer)."""
+        try:
+            import time
+            from queue import Empty
+
+            processed = 0
+            batch_start = time.time()
+            updated_indices = []
+
+            # Process up to 100 updates per timer tick (balance responsiveness vs throughput)
+            while processed < 100:
+                try:
+                    idx, dimensions, video_metadata = self._enrichment_queue.get_nowait()
+
+                    # Update image dimensions on main thread with lock
+                    with self._images_lock:
+                        if idx < len(self.images):
+                            self.images[idx].dimensions = dimensions
+                            if video_metadata:
+                                self.images[idx].video_metadata = video_metadata
+                            updated_indices.append(idx)
+
+                    processed += 1
+                except Empty:
+                    break
+
+            # Emit layout changes for updated images
+            if updated_indices and not self._suppress_enrichment_signals:
+                # Rebuild aspect ratio cache
+                self._rebuild_aspect_ratio_cache()
+
+                # Use dataChanged instead of layoutChanged for more granular updates
+                # This only invalidates changed items, not entire layout
+                if updated_indices:
+                    min_idx = min(updated_indices)
+                    max_idx = max(updated_indices)
+                    self.dataChanged.emit(self.index(min_idx), self.index(max_idx))
+
+                batch_time = (time.time() - batch_start) * 1000
+                if processed >= 50:  # Only log significant batches
+                    timestamp = time.strftime("%H:%M:%S")
+                    print(f"[ENRICH {timestamp}] Processed {processed} dimension updates in {batch_time:.1f}ms")
+
+            # Continue processing if queue has more items
+            if not self._enrichment_queue.empty():
+                # Schedule next batch immediately
+                if self._enrichment_timer:
+                    self._enrichment_timer.start(10)  # 10ms between batches
+            else:
+                # Queue empty, check again in 100ms
+                if self._enrichment_timer:
+                    self._enrichment_timer.start(100)
+
+        except Exception as e:
+            # Catch any crashes in queue processing to prevent app crash
+            import traceback
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[ENRICH {timestamp}] ERROR in queue processing: {e}")
+            traceback.print_exc()
+            # Stop timer to prevent repeated crashes
+            if self._enrichment_timer:
+                self._enrichment_timer.stop()
 
     def _preload_thumbnails_async(self):
         """Preload thumbnails in background (only helps for uncached images)."""
@@ -452,47 +784,7 @@ class ImageListModel(QAbstractListModel):
 
             print(f"[PROGRESSIVE] Model updated: {len(self.images)} total images")
             return True
-        elif event.type() == BackgroundEnrichmentProgressEvent.EVENT_TYPE:
-            try:
-                # Dimensions were enriched for specific indices
-                indices = event.count  # Now contains list of indices instead of count
-
-                if isinstance(indices, list) and len(indices) > 0:
-                    # Validate indices are still in bounds (images might have changed)
-                    valid_indices = [idx for idx in indices if 0 <= idx < len(self.images)]
-
-                    if not valid_indices:
-                        return True  # All indices invalid, skip update
-
-                    # Rebuild aspect ratio cache (cheap operation)
-                    self._rebuild_aspect_ratio_cache()
-
-                    # Only emit layoutChanged if NOT filtering (to prevent layout bugs)
-                    # When filtering is active, layout stays stable with placeholders
-                    # When filter is cleared, layout will update with final dimensions
-                    if not self._suppress_enrichment_signals:
-                        # Check if thumbnail loading is still in progress
-                        # Emitting layoutChanged during active thumbnail loading can cause crashes
-                        active_thumbnails = 0
-                        with self._thumbnail_lock:
-                            active_thumbnails = len(self._thumbnail_futures)
-
-                        # Adaptive threshold based on folder size
-                        total = len(self.images)
-                        defer_threshold = 500 if total > 20000 else 100
-
-                        if active_thumbnails > defer_threshold:
-                            # Too many thumbnails still loading, defer layout update
-                            print(f"[ENRICHMENT] Deferring layout update ({active_thumbnails} thumbnails loading)")
-                        else:
-                            self.layoutChanged.emit()
-
-                return True
-            except Exception as e:
-                print(f"[ENRICHMENT ERROR] {e}")
-                import traceback
-                traceback.print_exc()
-                return True  # Don't propagate exception to Qt
+        # BackgroundEnrichmentProgressEvent removed - now using queue + timer approach
         return super().event(event)
 
     def flags(self, index):
@@ -515,15 +807,37 @@ class ImageListModel(QAbstractListModel):
         return mimeData
 
     def rowCount(self, parent=None) -> int:
+        if self._paginated_mode:
+            return self._total_count
         return len(self.images)
 
     def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
         # Validate index bounds to prevent errors during model reset
-        if not index.isValid() or index.row() >= len(self.images):
+        row = index.row()
+        if not index.isValid():
             return None
-        image = self.images[index.row()]
-        if role == Qt.ItemDataRole.UserRole:
-            return image
+
+        # Get image - different logic for paginated vs regular mode
+        # Use lock to prevent race conditions with background enrichment
+        with self._images_lock:
+            if self._paginated_mode:
+                if row >= self._total_count:
+                    return None
+                image = self._get_image_at_index(row)
+                if image is None:
+                    # Page not loaded yet - return placeholder data
+                    if role == Qt.ItemDataRole.DisplayRole:
+                        return "Loading..."
+                    elif role == Qt.ItemDataRole.SizeHintRole:
+                        return QSize(self.image_list_image_width, self.image_list_image_width)
+                    return None
+            else:
+                if row >= len(self.images):
+                    return None
+                image = self.images[row]
+
+            if role == Qt.ItemDataRole.UserRole:
+                return image
         if role == Qt.ItemDataRole.DisplayRole:
             # The text shown next to the thumbnail in the image list.
             text = image.path.name
@@ -610,7 +924,7 @@ class ImageListModel(QAbstractListModel):
             return f'{path}\n{dimensions} 🠮 {target}'
 
     def load_directory(self, directory_path: Path):
-        from PySide6.QtWidgets import QProgressDialog, QApplication
+        from PySide6.QtWidgets import QProgressDialog, QApplication, QMessageBox
         from PySide6.QtCore import Qt
 
         # DON'T call beginResetModel() here - it clears the view immediately
@@ -645,6 +959,13 @@ class ImageListModel(QAbstractListModel):
                 print(f"  - {count:5d} files with extension '{ext}'")
             print(f"[FILTER] Accepted extensions: {', '.join(sorted(image_suffixes))}")
 
+        # Check for pagination mode (large folders)
+        total_images = len(image_paths)
+        if total_images >= self.PAGINATION_THRESHOLD:
+            print(f"[PAGINATION] Large folder detected ({total_images} images), switching to paginated mode")
+            self._load_directory_paginated(directory_path, image_paths, file_paths)
+            return
+
         # Sort paths early for consistent ordering
         image_paths.sort(key=natural_sort_key)
 
@@ -659,9 +980,6 @@ class ImageListModel(QAbstractListModel):
 
         # Initialize database cache
         db = ImageIndexDB(directory_path)
-
-        # Create progress dialog
-        total_images = len(image_paths)
 
         # Fast metadata-only loading for large folders
         if total_images > 5000:
@@ -882,7 +1200,15 @@ class ImageListModel(QAbstractListModel):
 
         # If using fast load with uncached images, enrich dimensions in background
         if use_fast_load and cache_misses > 0:
-            print(f"[FAST_LOAD] {cache_misses} images need dimension enrichment, starting background worker...")
+            import time
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[ENRICH {timestamp}] Starting background enrichment for {cache_misses} images...")
+
+            # Start timer to process enrichment queue on main thread
+            from PySide6.QtCore import QTimer
+            self._enrichment_timer = QTimer()
+            self._enrichment_timer.timeout.connect(self._process_enrichment_queue)
+            self._enrichment_timer.start(100)  # Check queue every 100ms
 
             # Enrich dimensions in background thread
             def enrich_dimensions():
@@ -941,27 +1267,23 @@ class ImageListModel(QAbstractListModel):
                             except Exception:
                                 pass
 
-                        # Update image dimensions
-                        image.dimensions = dimensions
+                        # Send update to queue (THREAD-SAFE - no direct image modification)
+                        self._enrichment_queue.put((idx, dimensions, video_metadata if is_video else None))
                         enriched_indices.append(idx)
 
                         # Save to cache
                         db_bg.save_info(relative_path, dimensions[0], dimensions[1],
-                                      is_video, mtime, image.video_metadata)
+                                      is_video, mtime, video_metadata if is_video else None)
 
                         enriched_count += 1
 
                         # Commit to database at intervals
                         if enriched_count % commit_interval == 0:
                             db_bg.commit()
-
-                        # Trigger layout updates less frequently for huge folders
-                        if enriched_count % layout_update_interval == 0:
-                            QApplication.instance().postEvent(
-                                self,
-                                BackgroundEnrichmentProgressEvent(enriched_indices.copy())
-                            )
-                            enriched_indices.clear()
+                            # Log progress every commit
+                            import time
+                            timestamp = time.strftime("%H:%M:%S")
+                            print(f"[ENRICH {timestamp}] Progress: {enriched_count}/{total_images} images enriched, queue size: {self._enrichment_queue.qsize()}")
 
                     except Exception:
                         pass  # Skip problematic images silently
@@ -969,24 +1291,130 @@ class ImageListModel(QAbstractListModel):
                 db_bg.commit()
                 db_bg.close()
 
-                print(f"[FAST_LOAD] Background enrichment complete: {enriched_count} images updated")
+                import time
+                timestamp = time.strftime("%H:%M:%S")
+                print(f"[ENRICH {timestamp}] Background enrichment complete: {enriched_count} images updated")
+                print(f"[ENRICH {timestamp}] Queue has {self._enrichment_queue.qsize()} pending updates for main thread")
 
-                # Final layout update with remaining indices
-                # For huge folders, only update if we have a significant batch
-                min_batch = 50 if total_images > 20000 else 10
-                if len(enriched_indices) >= min_batch:
-                    QApplication.instance().postEvent(
-                        self,
-                        BackgroundEnrichmentProgressEvent(enriched_indices)
-                    )
-                elif len(enriched_indices) > 0:
-                    print(f"[FAST_LOAD] Skipping final layout update for {len(enriched_indices)} items (batch too small)")
+                # Timer will continue processing queue until empty, then stop itself
 
             # Submit background enrichment task
             self._load_executor.submit(enrich_dimensions)
 
+    def _load_directory_paginated(self, directory_path: Path, image_paths: list[Path], file_paths: set[Path]):
+        """Load a large directory using pagination mode (50K+ images)."""
+        from PySide6.QtWidgets import QProgressDialog, QApplication
+        from PySide6.QtCore import Qt
+
+        total_images = len(image_paths)
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+
+        # Initialize database and pagination state
+        self._directory_path = directory_path
+        self._db = ImageIndexDB(directory_path)
+        self._paginated_mode = True
+        self._pages = {}
+        self._page_load_order = []
+        self._loading_pages = set()
+
+        # Create progress dialog for indexing
+        progress = QProgressDialog(f"Indexing {total_images} images...", "Cancel", 0, total_images)
+        progress.setWindowTitle("Indexing Directory")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(500)
+        progress.setAutoClose(True)
+        progress.setAutoReset(False)
+
+        # Check how many files need indexing
+        db_count = self._db.count()
+        if abs(db_count - total_images) < 100:
+            # Database is up to date, skip indexing
+            print(f"[PAGINATION] Database up to date ({db_count} images), skipping index")
+        else:
+            # Index files into database
+            print(f"[PAGINATION] Indexing {total_images} files into database...")
+            indexed_count = 0
+            update_interval = max(100, total_images // 100)
+
+            for i, image_path in enumerate(image_paths):
+                if i % update_interval == 0:
+                    progress.setValue(i)
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        break
+
+                try:
+                    relative_path = str(image_path.relative_to(directory_path))
+                    mtime = image_path.stat().st_mtime
+
+                    # Check if already cached and up-to-date
+                    cached = self._db.get_cached_info(relative_path, mtime)
+                    if cached:
+                        continue  # Already indexed
+
+                    # Get dimensions
+                    is_video = image_path.suffix.lower() in video_extensions
+                    if is_video:
+                        dimensions, video_metadata, _ = extract_video_info(image_path)
+                    else:
+                        try:
+                            dimensions = imagesize.get(str(image_path))
+                            if dimensions == (-1, -1):
+                                dimensions = pilimage.open(image_path).size
+                            video_metadata = None
+                        except Exception:
+                            dimensions = None
+                            video_metadata = None
+
+                    if dimensions and dimensions[0] > 0 and dimensions[1] > 0:
+                        self._db.save_info(
+                            relative_path,
+                            dimensions[0],
+                            dimensions[1],
+                            is_video,
+                            mtime,
+                            video_metadata
+                        )
+                        indexed_count += 1
+
+                        if indexed_count % 500 == 0:
+                            self._db.commit()
+
+                except Exception as e:
+                    print(f"[PAGINATION] Error indexing {image_path.name}: {e}")
+
+            self._db.commit()
+            print(f"[PAGINATION] Indexed {indexed_count} new files")
+
+        progress.close()
+
+        # Get total count from database
+        self._total_count = self._db.count()
+        print(f"[PAGINATION] Total images in database: {self._total_count}")
+
+        # Reset model and load first page
+        self.beginResetModel()
+        self.images = []  # Clear in-memory list (we use pages now)
+        self._load_page_sync(0)
+        self.endResetModel()
+
+        # Build initial aspect ratio cache
+        self._rebuild_aspect_ratio_cache()
+
+        # Emit signal
+        self.total_count_changed.emit(self._total_count)
+
+        print(f"================================================================================")
+        print(f"PAGINATION MODE: {self._total_count} images loaded")
+        print(f"Page size: {self.PAGE_SIZE}, Max pages in memory: {self.MAX_PAGES_IN_MEMORY}")
+        print(f"================================================================================")
+
     def _restart_enrichment(self):
         """Restart background enrichment after sorting/filtering (with new indices)."""
+        # Pagination mode pre-indexes everything, no enrichment needed
+        if self._paginated_mode:
+            return
+
         # Clear cancellation flag
         self._enrichment_cancelled.clear()
 
@@ -996,7 +1424,17 @@ class ImageListModel(QAbstractListModel):
         if needs_enrichment == 0:
             return  # Nothing to enrich
 
-        print(f"[SORT] Restarting background enrichment for {needs_enrichment} images")
+        import time
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[ENRICH {timestamp}] Restarting background enrichment for {needs_enrichment} images after sort")
+
+        # Start/restart timer if not already running
+        if not self._enrichment_timer:
+            from PySide6.QtCore import QTimer
+            self._enrichment_timer = QTimer()
+            self._enrichment_timer.timeout.connect(self._process_enrichment_queue)
+        if not self._enrichment_timer.isActive():
+            self._enrichment_timer.start(100)
 
         # Reuse the same enrichment logic
         def enrich_dimensions():
@@ -1070,28 +1508,22 @@ class ImageListModel(QAbstractListModel):
                         except Exception:
                             pass
 
-                    # Update image dimensions
-                    image.dimensions = dimensions
+                    # Send update to queue (THREAD-SAFE)
+                    self._enrichment_queue.put((idx, dimensions, video_metadata if is_video else None))
                     enriched_indices.append(idx)
 
                     # Save to cache
                     db_bg.save_info(relative_path, dimensions[0], dimensions[1],
-                                  is_video, mtime, image.video_metadata)
+                                  is_video, mtime, video_metadata if is_video else None)
 
                     enriched_count += 1
 
-                    # Commit to database at intervals
+                    # Commit to database and log at intervals
                     if enriched_count % commit_interval == 0:
                         db_bg.commit()
-
-                    # Trigger layout updates less frequently for huge folders
-                    if enriched_count % layout_update_interval == 0:
-                        from PySide6.QtWidgets import QApplication
-                        QApplication.instance().postEvent(
-                            self,
-                            BackgroundEnrichmentProgressEvent(enriched_indices.copy())
-                        )
-                        enriched_indices.clear()
+                        import time
+                        timestamp = time.strftime("%H:%M:%S")
+                        print(f"[ENRICH {timestamp}] Progress: {enriched_count}/{total_images} images enriched")
 
                 except Exception:
                     pass
@@ -1101,16 +1533,10 @@ class ImageListModel(QAbstractListModel):
 
             print(f"[SORT] Background enrichment complete: {enriched_count} images updated")
 
-            # Final layout update with remaining indices
-            min_batch = 50 if total_images > 20000 else 10
-            if len(enriched_indices) >= min_batch:
-                from PySide6.QtWidgets import QApplication
-                QApplication.instance().postEvent(
-                    self,
-                    BackgroundEnrichmentProgressEvent(enriched_indices)
-                )
-            elif len(enriched_indices) > 0:
-                print(f"[SORT] Skipping final layout update for {len(enriched_indices)} items (batch too small)")
+            import time
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[ENRICH {timestamp}] Sort enrichment complete: {enriched_count} images updated")
+            print(f"[ENRICH {timestamp}] Queue has {self._enrichment_queue.qsize()} pending updates")
 
         # Submit enrichment task
         self._load_executor.submit(enrich_dimensions)
@@ -1134,12 +1560,27 @@ class ImageListModel(QAbstractListModel):
             image.path.with_suffix('.txt').write_text(
                 self.tag_separator.join(image.tags), encoding='utf-8',
                 errors='replace')
+
+            # Also update database if in paginated mode
+            if self._paginated_mode:
+                self._save_tags_to_db(image)
+
         except OSError:
             error_message_box = QMessageBox()
             error_message_box.setWindowTitle('Error')
             error_message_box.setIcon(QMessageBox.Icon.Critical)
             error_message_box.setText(f'Failed to save tags for {image.path}.')
             error_message_box.exec()
+
+    def _save_tags_to_db(self, image: Image):
+        """Save tags to database (for paginated mode)."""
+        if not self._paginated_mode or not self._db:
+            return
+
+        # Get image ID from filename
+        image_id = self._db.get_image_id(image.path.name)
+        if image_id:
+            self._db.set_tags_for_image(image_id, image.tags)
 
     def write_meta_to_disk(self, image: Image):
         does_exist = image.path.with_suffix('.json').exists()
@@ -1241,8 +1682,13 @@ class ImageListModel(QAbstractListModel):
     def get_text_match_count(self, text: str, scope: Scope | str,
                              whole_tags_only: bool, use_regex: bool) -> int:
         """Get the number of instances of a text in all captions."""
+        # In paginated mode with ALL_IMAGES scope, use database
+        if self._paginated_mode and scope == Scope.ALL_IMAGES:
+            return self._db.count_tag_matches(text, use_regex, whole_tags_only)
+
+        # For other scopes or regular mode, iterate through loaded images
         match_count = 0
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
             if whole_tags_only:
@@ -1272,8 +1718,27 @@ class ImageListModel(QAbstractListModel):
             return
         self.add_to_undo_stack(action_name='Find and Replace',
                                should_ask_for_confirmation=True)
+
+        # In paginated mode with ALL_IMAGES scope, use database
+        if self._paginated_mode and scope == Scope.ALL_IMAGES:
+            affected_count = self._db.find_replace_tags(find_text, replace_text, use_regex)
+            print(f"[FIND/REPLACE] Updated {affected_count} images in database")
+
+            # Invalidate all loaded pages to force reload with updated tags
+            self._pages.clear()
+            self._page_load_order.clear()
+
+            # Reload first page
+            self._load_page_sync(0)
+
+            # Emit full model reset
+            self.beginResetModel()
+            self.endResetModel()
+            return
+
+        # For other scopes or regular mode, iterate through loaded images
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
             caption = self.tag_separator.join(image.tags)
@@ -1289,6 +1754,11 @@ class ImageListModel(QAbstractListModel):
             changed_image_indices.append(image_index)
             image.tags = caption.split(self.tag_separator)
             self.write_image_tags_to_disk(image)
+
+            # In paginated mode, also update database
+            if self._paginated_mode:
+                self._save_tags_to_db(image)
+
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
@@ -1298,7 +1768,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Sort Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
                 continue
             old_caption = self.tag_separator.join(image.tags)
@@ -1324,7 +1794,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Sort Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
                 continue
             old_caption = self.tag_separator.join(image.tags)
@@ -1348,7 +1818,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Reverse Order of Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
                 continue
             changed_image_indices.append(image_index)
@@ -1366,7 +1836,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Shuffle Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
                 continue
             changed_image_indices.append(image_index)
@@ -1386,7 +1856,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Sort Sentence Tags',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             changed_image_indices.append(image_index)
             sentence_tags = []
             non_sentence_tags = []
@@ -1418,7 +1888,7 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name='Move Tags to Front',
                                should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if not any(tag in image.tags for tag in tags_to_move):
                 continue
             old_caption = self.tag_separator.join(image.tags)
@@ -1445,7 +1915,7 @@ class ImageListModel(QAbstractListModel):
                                should_ask_for_confirmation=True)
         changed_image_indices = []
         removed_tag_count = 0
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             tag_count = len(image.tags)
             unique_tag_count = len(set(image.tags))
             if tag_count == unique_tag_count:
@@ -1469,7 +1939,7 @@ class ImageListModel(QAbstractListModel):
                                should_ask_for_confirmation=True)
         changed_image_indices = []
         removed_tag_count = 0
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             old_tag_count = len(image.tags)
             image.tags = [tag for tag in image.tags if tag.strip()]
             new_tag_count = len(image.tags)
@@ -1515,7 +1985,7 @@ class ImageListModel(QAbstractListModel):
             action_name=f'Rename {pluralize("Tag", len(old_tags))}',
             should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
             if use_regex:
@@ -1545,7 +2015,7 @@ class ImageListModel(QAbstractListModel):
             action_name=f'Delete {pluralize("Tag", len(tags))}',
             should_ask_for_confirmation=True)
         changed_image_indices = []
-        for image_index, image in enumerate(self.images):
+        for image_index, image in enumerate(self.iter_all_images()):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
             if use_regex:
