@@ -208,6 +208,14 @@ class ImageViewer(QWidget):
 
     @Slot()
     def load_image(self, proxy_image_index: QModelIndex, is_complete = True):
+        try:
+            self._load_image_impl(proxy_image_index, is_complete)
+        except Exception as e:
+            print(f"[IMAGE_VIEWER] ERROR in load_image: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True):
         persistent_image_index = QPersistentModelIndex(proxy_image_index)
 
         # Check if we should skip this reload

@@ -444,14 +444,8 @@ class ImageListModel(QAbstractListModel):
             if not self._db:
                 return
 
-            import time
-            timestamp = time.strftime("%H:%M:%S")
-            print(f"[PAGE {timestamp}] Loading page {page_num} in background...")
-
             images = self._load_images_from_db(page_num)
             self._store_page(page_num, images)
-
-            print(f"[PAGE {timestamp}] Page {page_num} loaded: {len(images)} images")
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
             self.page_loaded.emit(page_num)
@@ -525,8 +519,28 @@ class ImageListModel(QAbstractListModel):
             while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
                 oldest_page = self._page_load_order.pop(0)
                 if oldest_page in self._pages:
+                    # Cancel pending thumbnail loads for evicted page
+                    self._cancel_page_thumbnails(oldest_page)
                     del self._pages[oldest_page]
                     print(f"[PAGE] Evicted page {oldest_page}")
+
+    def _cancel_page_thumbnails(self, page_num: int):
+        """Cancel pending thumbnail loading futures for an evicted page."""
+        start_idx = page_num * self.PAGE_SIZE
+        end_idx = start_idx + self.PAGE_SIZE
+
+        with self._thumbnail_lock:
+            cancelled_count = 0
+            for idx in range(start_idx, end_idx):
+                if idx in self._thumbnail_futures:
+                    future = self._thumbnail_futures[idx]
+                    if not future.done():
+                        future.cancel()
+                        cancelled_count += 1
+                    del self._thumbnail_futures[idx]
+
+            if cancelled_count > 0:
+                print(f"[PAGE] Cancelled {cancelled_count} pending thumbnails for evicted page {page_num}")
 
     def ensure_pages_for_range(self, start_idx: int, end_idx: int):
         """Ensure pages covering the given index range are loaded (for scroll handler)."""
@@ -566,9 +580,6 @@ class ImageListModel(QAbstractListModel):
         self._rebuild_aspect_ratio_cache()
 
         # Emit layoutChanged to trigger masonry recalculation
-        import time
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[PAGE {timestamp}] Page {page_num} loaded, emitting layoutChanged for masonry update")
         self.layoutChanged.emit()
 
     def _process_enrichment_queue(self):
@@ -827,31 +838,40 @@ class ImageListModel(QAbstractListModel):
 
     def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
         # Validate index bounds to prevent errors during model reset
-        row = index.row()
-        if not index.isValid():
+        try:
+            row = index.row()
+            if not index.isValid():
+                return None
+
+            # Get image - different logic for paginated vs regular mode
+            # Use lock to prevent race conditions with background enrichment
+            with self._images_lock:
+                if self._paginated_mode:
+                    if row >= self._total_count or row < 0:
+                        return None
+                    image = self._get_image_at_index(row)
+                    if image is None:
+                        # Page not loaded yet - return placeholder data
+                        if role == Qt.ItemDataRole.DisplayRole:
+                            return "Loading..."
+                        elif role == Qt.ItemDataRole.SizeHintRole:
+                            return QSize(self.image_list_image_width, self.image_list_image_width)
+                        return None
+                else:
+                    if row >= len(self.images) or row < 0:
+                        return None
+                    image = self.images[row]
+
+                if role == Qt.ItemDataRole.UserRole:
+                    return image
+
+            # Check if image is None (page evicted in pagination mode)
+            if image is None:
+                return None
+        except Exception as e:
+            print(f"[MODEL] ERROR in data() for row {row if 'row' in locals() else '?'}: {e}")
             return None
 
-        # Get image - different logic for paginated vs regular mode
-        # Use lock to prevent race conditions with background enrichment
-        with self._images_lock:
-            if self._paginated_mode:
-                if row >= self._total_count:
-                    return None
-                image = self._get_image_at_index(row)
-                if image is None:
-                    # Page not loaded yet - return placeholder data
-                    if role == Qt.ItemDataRole.DisplayRole:
-                        return "Loading..."
-                    elif role == Qt.ItemDataRole.SizeHintRole:
-                        return QSize(self.image_list_image_width, self.image_list_image_width)
-                    return None
-            else:
-                if row >= len(self.images):
-                    return None
-                image = self.images[row]
-
-            if role == Qt.ItemDataRole.UserRole:
-                return image
         if role == Qt.ItemDataRole.DisplayRole:
             # The text shown next to the thumbnail in the image list.
             text = image.path.name

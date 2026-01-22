@@ -567,15 +567,15 @@ class ImageListView(QListView):
         # Adaptive delay: check if rapid input was detected at keystroke level
         if self._rapid_input_detected:
             self._masonry_recalc_delay = self._masonry_recalc_max_delay
-            print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, RAPID INPUT FLAG SET - using max delay {self._masonry_recalc_delay}ms")
+            # print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, RAPID INPUT FLAG SET - using max delay {self._masonry_recalc_delay}ms")
         elif signal_name == "layoutChanged" or signal_name == "user_click":
             # For layoutChanged (from page load or enrichment) or user clicks, use shorter delay for faster updates
             self._masonry_recalc_delay = 100
-            print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, using fast delay {self._masonry_recalc_delay}ms")
+            # print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, using fast delay {self._masonry_recalc_delay}ms")
         else:
             # Reset to base delay if typing slowed down
             self._masonry_recalc_delay = self._masonry_recalc_min_delay
-            print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, normal input - delay={self._masonry_recalc_delay}ms")
+            # print(f"[MASONRY {timestamp}] SIGNAL: {signal_name}, normal input - delay={self._masonry_recalc_delay}ms")
 
         # Cancel any in-flight masonry calculation (futures can't be cancelled once started)
         # Just let it finish in background, newer calculation will override results
@@ -1854,24 +1854,14 @@ class ImageListView(QListView):
             first_visible_idx = visible_items[0]['index']
         else:
             # Fallback: estimate from scroll position
-            # This happens when masonry isn't calculated yet
             scrollbar = self.verticalScrollBar()
             scroll_value = scrollbar.value()
             scroll_max = scrollbar.maximum()
             scroll_ratio = scroll_value / max(scroll_max, 1) if scroll_max > 0 else 0
             first_visible_idx = int(scroll_ratio * source_model._total_count)
 
-            # Debug logging
-            import time
-            timestamp = time.strftime("%H:%M:%S")
-            print(f"[PAGE_IND {timestamp}] Fallback: scroll={scroll_value}/{scroll_max}, ratio={scroll_ratio:.2f}, idx={first_visible_idx}")
-
         current_page = source_model._get_page_for_index(first_visible_idx)
         total_pages = (source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
-
-        import time
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[PAGE_IND {timestamp}] Showing page {current_page + 1}/{total_pages} (first_idx={first_visible_idx})")
 
         # Create label if needed
         if not self._page_indicator_label:
