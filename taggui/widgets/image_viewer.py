@@ -220,6 +220,9 @@ class ImageViewer(QWidget):
         self.proxy_image_index = persistent_image_index
 
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        if image is None:
+            # Page not loaded yet in pagination mode - wait
+            return
         self.rating_changed.emit(image.rating)
 
         if is_complete:
