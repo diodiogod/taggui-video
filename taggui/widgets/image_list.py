@@ -999,7 +999,7 @@ class ImageListView(QListView):
         if source_model:
             source_model._pause_thumbnail_loading = True
 
-        print("[SCROLL] Scrollbar drag started - pausing ALL thumbnail loading")
+        # print("[SCROLL] Scrollbar drag started - pausing ALL thumbnail loading")
 
     def _on_scrollbar_released(self):
         """Called when user releases scrollbar."""
@@ -1010,7 +1010,7 @@ class ImageListView(QListView):
         if source_model:
             source_model._pause_thumbnail_loading = False
 
-        print("[SCROLL] Scrollbar drag ended - resuming thumbnail loading")
+        # print("[SCROLL] Scrollbar drag ended - resuming thumbnail loading")
 
         # Force repaint to trigger loading of newly visible items
         self.viewport().update()
@@ -1074,7 +1074,8 @@ class ImageListView(QListView):
 
                 # 2. Items just above and below visible area - expand outward (HIGH PRIORITY)
                 # Load items closest to visible edge first
-                buffer_size = 100
+                # Small buffer to avoid overwhelming video playback with thumbnail loads
+                buffer_size = 30
 
                 # Items below visible area: max_visible+1, max_visible+2, ...
                 for i in range(max_visible + 1, min(max_visible + buffer_size + 1, source_model.rowCount())):
@@ -1094,8 +1095,8 @@ class ImageListView(QListView):
 
                 self._pagination_preload_queue = queue
 
-        # Load batch (10 items per timer tick for faster loading during scroll)
-        batch_size = 10
+        # Load batch (smaller batches to keep video smooth)
+        batch_size = 3  # Reduced from 10 to prevent video stutter
         loaded_count = 0
 
         while self._pagination_preload_queue and loaded_count < batch_size:
@@ -1105,16 +1106,16 @@ class ImageListView(QListView):
             if idx in self._pagination_loaded_items:
                 continue
 
-            # Load thumbnail
-            index = self.model().index(idx, 0)
-            if index.isValid():
-                _ = index.data(Qt.ItemDataRole.DecorationRole)
+            # Queue thumbnail load asynchronously (don't block by calling data())
+            source_model = self.model().sourceModel()
+            if source_model and hasattr(source_model, 'queue_thumbnail_load'):
+                source_model.queue_thumbnail_load(idx)
                 self._pagination_loaded_items.add(idx)
                 loaded_count += 1
 
         # Continue preloading if queue has more items
         if self._pagination_preload_queue:
-            self._idle_preload_timer.start(30)  # Fast cadence for responsive loading (10 items every 30ms = 333 items/sec)
+            self._idle_preload_timer.start(100)  # Slower cadence (3 items every 100ms = 30 items/sec, gentle on video)
 
         # Evict thumbnails far from current view (keep VRAM under control)
         # Only evict every 10th preload call to avoid overhead
@@ -1492,7 +1493,7 @@ class ImageListView(QListView):
         # Mark as mouse scrolling and restart timer
         if not self._mouse_scrolling:
             self._mouse_scrolling = True
-            print("[SCROLL] Mouse scroll started - pausing background preloading")
+            # print("[SCROLL] Mouse scroll started - pausing background preloading")
 
         # Reset timer - will fire 150ms after last scroll event
         self._mouse_scroll_timer.stop()
@@ -1504,7 +1505,7 @@ class ImageListView(QListView):
     def _on_mouse_scroll_stopped(self):
         """Called when mouse scrolling stops (200ms after last wheel event)."""
         self._mouse_scrolling = False
-        print("[SCROLL] Mouse scroll stopped")
+        # print("[SCROLL] Mouse scroll stopped")
 
         # Clear preload queue to rebuild based on new position
         if hasattr(self, '_pagination_preload_queue'):

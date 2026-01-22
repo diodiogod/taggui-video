@@ -242,7 +242,7 @@ class MainWindow(QMainWindow):
             if not self._list_view_frozen:
                 self.image_list.list_view.setUpdatesEnabled(False)
                 self._list_view_frozen = True
-                print("[VIDEO] List view frozen for playback")
+                # print("[VIDEO] List view frozen for playback")
 
     def _unfreeze_list_view(self):
         """Called when video is paused/stopped."""
@@ -260,7 +260,7 @@ class MainWindow(QMainWindow):
         if self._list_view_frozen:
             self.image_list.list_view.setUpdatesEnabled(True)
             self._list_view_frozen = False
-            print("[VIDEO] List view unfrozen (user interaction)")
+            # print("[VIDEO] List view unfrozen (user interaction)")
 
         # Restart timer - will re-freeze after 200ms of no interaction
         self._unfreeze_timer.stop()
@@ -272,12 +272,12 @@ class MainWindow(QMainWindow):
         if self._video_is_playing and not self._list_view_frozen:
             self.image_list.list_view.setUpdatesEnabled(False)
             self._list_view_frozen = True
-            print("[VIDEO] List view re-frozen (interaction ended)")
+            # print("[VIDEO] List view re-frozen (interaction ended)")
         elif not self._video_is_playing and self._list_view_frozen:
             # Video stopped while frozen - unfreeze for normal use
             self.image_list.list_view.setUpdatesEnabled(True)
             self._list_view_frozen = False
-            print("[VIDEO] List view unfrozen (no video playing)")
+            # print("[VIDEO] List view unfrozen (no video playing)")
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
