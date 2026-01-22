@@ -101,8 +101,16 @@ class SignalManager:
             self.main_window.save_image_index)
         image_list_selection_model.currentChanged.connect(
             image_list.update_image_index_label)
-        image_list_selection_model.currentChanged.connect(
-            lambda current, previous: image_viewer.load_image(current))
+        def safe_load_image(current, previous):
+            try:
+                if current.isValid():
+                    image_viewer.load_image(current)
+            except Exception as e:
+                print(f"[SIGNAL] ERROR in currentChanged->load_image: {e}")
+                import traceback
+                traceback.print_exc()
+
+        image_list_selection_model.currentChanged.connect(safe_load_image)
         image_list_selection_model.currentChanged.connect(
             image_tags_editor.load_image_tags)
         image_list_model.modelReset.connect(
