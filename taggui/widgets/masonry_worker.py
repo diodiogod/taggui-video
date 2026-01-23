@@ -5,7 +5,7 @@ This runs in a separate process to avoid Python GIL blocking the UI thread.
 
 import json
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 
 @dataclass
@@ -33,53 +33,94 @@ def calculate_masonry_layout(items_data, column_width, spacing, num_columns, cac
     Returns:
         dict with 'items' (list of positioned items) and 'total_height'
     """
-    # Try to load from cache first
-    if cache_key:
-        cached = _load_from_cache(cache_key, items_data, column_width, spacing, num_columns)
-        if cached:
-            return cached
+    try:
+        # Try to load from cache first
+        if cache_key:
+            try:
+                cached = _load_from_cache(cache_key, items_data, column_width, spacing, num_columns)
+                if cached:
+                    return cached
+            except Exception as e:
+                # Cache load failed, proceed with calculation
+                print(f"[MASONRY] Cache load failed: {e}")
 
-    # Calculate positions
-    column_heights = [0] * num_columns
-    positioned_items = []
+        # Calculate positions
+        column_heights = [0] * num_columns
+        positioned_items = []
 
-    for index, aspect_ratio in items_data:
-        # Calculate item dimensions
-        item_width = column_width
-        item_height = int(item_width / aspect_ratio) if aspect_ratio > 0 else item_width
+        for index, aspect_ratio in items_data:
+            # Calculate item dimensions
+            item_width = column_width
 
-        # Find shortest column
-        shortest_col = min(range(num_columns), key=lambda i: column_heights[i])
+            # Validate aspect ratio to prevent crashes
+            if not aspect_ratio or aspect_ratio <= 0 or aspect_ratio != aspect_ratio:  # NaN check
+                aspect_ratio = 1.0  # Fallback to square
+            if aspect_ratio > 100:  # Extremely wide
+                aspect_ratio = 100
+            if aspect_ratio < 0.01:  # Extremely tall
+                aspect_ratio = 0.01
 
-        # Calculate position
-        x = shortest_col * (column_width + spacing)
-        y = column_heights[shortest_col]
+            item_height = int(item_width / aspect_ratio)
 
-        # Store positioned item
-        positioned_items.append(MasonryItem(
-            index=index,
-            x=x,
-            y=y,
-            width=item_width,
-            height=item_height,
-            aspect_ratio=aspect_ratio
-        ))
+            # Find shortest column
+            shortest_col = min(range(num_columns), key=lambda i: column_heights[i])
 
-        # Update column height
-        column_heights[shortest_col] += item_height + spacing
+            # Calculate position
+            x = shortest_col * (column_width + spacing)
+            y = column_heights[shortest_col]
 
-    total_height = max(column_heights) if column_heights else 0
+            # Store positioned item
+            positioned_items.append(MasonryItem(
+                index=index,
+                x=x,
+                y=y,
+                width=item_width,
+                height=item_height,
+                aspect_ratio=aspect_ratio
+            ))
 
-    result = {
-        'items': [asdict(item) for item in positioned_items],
-        'total_height': total_height
-    }
+            # Update column height
+            column_heights[shortest_col] += item_height + spacing
 
-    # Save to cache
-    if cache_key:
-        _save_to_cache(cache_key, result, items_data, column_width, spacing, num_columns)
+        total_height = max(column_heights) if column_heights else 0
 
-    return result
+        # Convert items to dicts manually (asdict() can crash on large datasets)
+        items_list = []
+        for item in positioned_items:
+            items_list.append({
+                'index': item.index,
+                'x': item.x,
+                'y': item.y,
+                'width': item.width,
+                'height': item.height,
+                'aspect_ratio': item.aspect_ratio
+            })
+
+        result = {
+            'items': items_list,
+            'total_height': total_height
+        }
+
+        # Save to cache
+        if cache_key:
+            try:
+                _save_to_cache(cache_key, result, items_data, column_width, spacing, num_columns)
+            except Exception as e:
+                # Cache save failed, but return result anyway
+                print(f"[MASONRY] Cache save failed: {e}")
+
+        return result
+
+    except Exception as e:
+        # Catch any crash and return minimal valid result to prevent app crash
+        print(f"[MASONRY] CRITICAL ERROR in calculation: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return empty but valid result
+        return {
+            'items': [],
+            'total_height': 0
+        }
 
 
 def _get_cache_path(cache_key):

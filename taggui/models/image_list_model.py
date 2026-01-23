@@ -288,6 +288,7 @@ class ImageListModel(QAbstractListModel):
 
         # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
         self._aspect_ratio_cache: list[float] = []
+        self._aspect_ratio_cache_lock = threading.Lock()  # Protect cache from race conditions
 
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
         # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
@@ -373,14 +374,19 @@ class ImageListModel(QAbstractListModel):
 
     def get_aspect_ratios(self) -> list[float]:
         """Get cached aspect ratios for all images (fast, no Qt calls)."""
-        return self._aspect_ratio_cache
+        with self._aspect_ratio_cache_lock:
+            return self._aspect_ratio_cache.copy()  # Return copy to prevent concurrent modification
 
     def _rebuild_aspect_ratio_cache(self):
         """Rebuild aspect ratio cache when images change (thread-safe)."""
         # Both modes use self.images now
         try:
             images_snapshot = self.images[:]
-            self._aspect_ratio_cache = [img.aspect_ratio for img in images_snapshot]
+            new_cache = [img.aspect_ratio for img in images_snapshot]
+
+            # Update cache atomically under lock
+            with self._aspect_ratio_cache_lock:
+                self._aspect_ratio_cache = new_cache
         except Exception as e:
             print(f"[CACHE] Error rebuilding aspect ratio cache: {e}")
             # Keep old cache if rebuild fails
