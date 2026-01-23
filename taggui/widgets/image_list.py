@@ -1610,12 +1610,70 @@ class ImageListView(QListView):
             # Get the image at this index
             image = index.data(Qt.ItemDataRole.UserRole)
             if image:
+                # Visual feedback: flash the thumbnail
+                self._flash_thumbnail(index)
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path)))
                 event.accept()
                 return
 
         # Default behavior for other double-clicks
         super().mouseDoubleClickEvent(event)
+
+    def _flash_thumbnail(self, index):
+        """Create a quick flash and scale effect on thumbnail before opening."""
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+        # Get the viewport rect for this index
+        rect = self.visualRect(index)
+
+        # Create a temporary white overlay widget
+        overlay = QWidget(self.viewport())
+        overlay.setGeometry(rect)
+        overlay.setStyleSheet("background-color: rgba(255, 255, 255, 180); border-radius: 4px;")
+        overlay.show()
+
+        # Opacity effect for fade
+        opacity_effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(opacity_effect)
+
+        # Create animation group for parallel animations
+        animation_group = QParallelAnimationGroup(self)
+
+        # Fade out animation
+        fade_animation = QPropertyAnimation(opacity_effect, b"opacity")
+        fade_animation.setDuration(250)
+        fade_animation.setStartValue(1.0)
+        fade_animation.setEndValue(0.0)
+        fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # Scale animation (grow slightly then shrink back)
+        scale_animation = QPropertyAnimation(overlay, b"geometry")
+        scale_animation.setDuration(250)
+
+        # Calculate scaled rect (10% larger)
+        center = rect.center()
+        scaled_width = int(rect.width() * 1.1)
+        scaled_height = int(rect.height() * 1.1)
+        scaled_rect = QRect(
+            center.x() - scaled_width // 2,
+            center.y() - scaled_height // 2,
+            scaled_width,
+            scaled_height
+        )
+
+        scale_animation.setStartValue(rect)
+        scale_animation.setKeyValueAt(0.4, scaled_rect)  # Peak at 40%
+        scale_animation.setEndValue(rect)  # Back to original
+        scale_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # Add both animations to group
+        animation_group.addAnimation(fade_animation)
+        animation_group.addAnimation(scale_animation)
+
+        # Clean up overlay when done
+        animation_group.finished.connect(overlay.deleteLater)
+        animation_group.start()
 
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
