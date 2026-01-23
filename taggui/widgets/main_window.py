@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self.app = app
         self.directory_path = None
         self.is_running = True
+        self.post_deletion_index = None  # Track index to focus after deletion
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -407,15 +408,40 @@ class MainWindow(QMainWindow):
         select_index_key = ('image_index'
                             if self.proxy_image_list_model.filter is None
                             else 'filtered_image_index')
-        select_index = settings.value(select_index_key, type=int) or 0
+
+        # If we have a post-deletion index, use that instead of the saved index
+        if self.post_deletion_index is not None:
+            select_index = self.post_deletion_index
+            self.post_deletion_index = None  # Clear it after use
+        else:
+            select_index = settings.value(select_index_key, type=int) or 0
+
         self.load_directory(self.directory_path)
         self.image_list.filter_line_edit.setText(filter_text)
         # If the selected image index is out of bounds due to images being
         # deleted, select the last image.
         if select_index >= self.proxy_image_list_model.rowCount():
             select_index = self.proxy_image_list_model.rowCount() - 1
-        self.image_list.list_view.setCurrentIndex(
-            self.proxy_image_list_model.index(select_index, 0))
+        target_index = self.proxy_image_list_model.index(select_index, 0)
+        self.image_list.list_view.setCurrentIndex(target_index)
+
+        # Scroll to selected image after layout is ready (same pattern as load_directory)
+        scroll_done = [False]
+
+        def do_scroll():
+            if scroll_done[0]:
+                return
+            scroll_done[0] = True
+            self.image_list.list_view.scrollTo(
+                target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            try:
+                self.image_list.list_view.layout_ready.disconnect(do_scroll)
+            except:
+                pass
+
+        self.image_list.list_view.layout_ready.connect(do_scroll)
+        # Fallback timeout in case layout_ready doesn't fire
+        QTimer.singleShot(2000, do_scroll)
 
     @Slot()
     def export_images_dialog(self):

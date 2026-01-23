@@ -2249,6 +2249,21 @@ class ImageListView(QListView):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        # Calculate the index to focus after deletion
+        # Get all selected indices and find the maximum (last in sort order)
+        selected_indices = sorted([idx.row() for idx in self.selectedIndexes()])
+        if selected_indices:
+            max_selected_row = selected_indices[-1]
+            total_rows = self.proxy_image_list_model.rowCount()
+            # Set next index: use the row after the last deleted one, or the one before if it's the last
+            next_index = max_selected_row + 1 - len(selected_indices)
+            if next_index >= total_rows - len(selected_indices):
+                # If we're deleting at the end, focus on the image before the first deleted one
+                next_index = max(0, selected_indices[0] - 1)
+            # Store in main window for use after reload
+            main_window = self.parent().parent().parent()
+            main_window.post_deletion_index = next_index
+
         # Check if any selected videos are currently loaded and unload them
         # Hierarchy: ImageListView -> container -> ImageList (QDockWidget) -> MainWindow
         main_window = self.parent().parent().parent()  # Get main window reference
@@ -2803,13 +2818,15 @@ class ImageList(QDockWidget):
         """Delete all images marked for deletion."""
         source_model = self.proxy_image_list_model.sourceModel()
         marked_images = []
+        marked_indices = []
 
-        # Collect all marked images
-        for row in range(source_model.rowCount()):
-            index = source_model.index(row, 0)
-            image = source_model.data(index, Qt.ItemDataRole.UserRole)
+        # Collect all marked images and their proxy indices
+        for row in range(self.proxy_image_list_model.rowCount()):
+            proxy_index = self.proxy_image_list_model.index(row, 0)
+            image = self.proxy_image_list_model.data(proxy_index, Qt.ItemDataRole.UserRole)
             if image and hasattr(image, 'marked_for_deletion') and image.marked_for_deletion:
                 marked_images.append(image)
+                marked_indices.append(row)
 
         if not marked_images:
             return
@@ -2823,6 +2840,19 @@ class ImageList(QDockWidget):
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
+
+        # Calculate the index to focus after deletion
+        if marked_indices:
+            max_marked_row = marked_indices[-1]
+            total_rows = self.proxy_image_list_model.rowCount()
+            # Set next index: use the row after the last deleted one, or the one before if it's the last
+            next_index = max_marked_row + 1 - len(marked_indices)
+            if next_index >= total_rows - len(marked_indices):
+                # If we're deleting at the end, focus on the image before the first deleted one
+                next_index = max(0, marked_indices[0] - 1)
+            # Store in main window for use after reload
+            main_window = self.parent()
+            main_window.post_deletion_index = next_index
 
         # Similar cleanup logic as delete_selected_images
         main_window = self.parent()
