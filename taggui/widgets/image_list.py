@@ -361,8 +361,15 @@ class ImageListView(QListView):
         if hasattr(source_model, 'cache_warm_progress'):
             source_model.cache_warm_progress.connect(self._update_cache_warm_label)
 
-        # Start background cache status check (count cached items)
-        QTimer.singleShot(2000, self._check_cache_status)
+        # Connect to model's cache save counter for live updates
+        if hasattr(source_model, '_cache_saves_count'):
+            # Update cache status every 10 seconds
+            self._cache_status_timer = QTimer(self)
+            self._cache_status_timer.timeout.connect(lambda: self._update_cache_status_from_counter())
+            self._cache_status_timer.start(10000)  # Update every 10 seconds
+
+        # Start background cache status check (count cached items) - wait longer for model to load
+        QTimer.singleShot(5000, self._check_cache_status)
 
         self.setWordWrap(True)
         self.setDragEnabled(True)
@@ -2456,7 +2463,9 @@ class ImageListView(QListView):
     def _check_cache_status(self):
         """Background check of cache status (count how many images are cached)."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
-        if not source_model or not hasattr(source_model, 'images'):
+        if not source_model or not hasattr(source_model, 'images') or len(source_model.images) == 0:
+            print(f"[CACHE STATUS] Model not ready yet, retrying in 2s...")
+            QTimer.singleShot(2000, self._check_cache_status)
             return
 
         from utils.thumbnail_cache import get_thumbnail_cache
@@ -2487,9 +2496,14 @@ class ImageListView(QListView):
         def on_done(f):
             try:
                 cached, total = f.result()
+                if total == 0:
+                    print(f"[CACHE STATUS] No images to check")
+                    return
                 # Extrapolate for full dataset
-                if total > 1000:
-                    cached = int((cached / 1000) * total)
+                full_total = len(source_model.images)
+                if full_total > 1000:
+                    cached = int((cached / 1000) * full_total)
+                    total = full_total
                 print(f"[CACHE STATUS] Checked {total} images, {cached} cached ({int(cached/total*100)}%)")
                 self._update_cache_status_label(cached, total)
             except Exception as e:
@@ -2499,6 +2513,18 @@ class ImageListView(QListView):
 
         # Use add_done_callback instead of timer
         future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: on_done(f)))
+
+    def _update_cache_status_from_counter(self):
+        """Update cache status from model's live counter."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if not source_model:
+            return
+
+        cached_count = getattr(source_model, '_cache_saves_count', 0)
+        total_count = len(source_model.images) if hasattr(source_model, 'images') else 0
+
+        if total_count > 0 and cached_count > 0:
+            self._update_cache_status_label(cached_count, total_count)
 
     def _update_cache_status_label(self, cached_count=0, total_count=0):
         """Update persistent cache status label showing total cached images."""

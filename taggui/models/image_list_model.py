@@ -801,13 +801,24 @@ class ImageListModel(QAbstractListModel):
                 future.cancel()
             self._cache_warm_futures.clear()
 
-        # Determine range to warm (500 images ahead)
+        # Determine range to warm
+        # Start with nearby images (500 ahead), then continue to entire folder
+        total_images = len(self.images)
+
         if direction == 'down':
-            end_idx = min(start_idx + 500, len(self.images))
-            indices_to_warm = list(range(start_idx, end_idx))
+            # Prioritize next 500, then rest of folder
+            priority_end = min(start_idx + 500, total_images)
+            indices_to_warm = list(range(start_idx, priority_end))
+            # Then add rest of folder (lower priority)
+            if priority_end < total_images:
+                indices_to_warm.extend(range(priority_end, total_images))
         else:  # up
-            end_idx = max(start_idx - 500, 0)
-            indices_to_warm = list(range(start_idx, end_idx, -1))
+            # Prioritize previous 500, then beginning of folder
+            priority_start = max(start_idx - 500, 0)
+            indices_to_warm = list(range(start_idx, priority_start, -1))
+            # Then add beginning of folder
+            if priority_start > 0:
+                indices_to_warm.extend(range(priority_start - 1, -1, -1))
 
         # Filter out already-cached images
         from utils.thumbnail_cache import get_thumbnail_cache
@@ -838,7 +849,7 @@ class ImageListModel(QAbstractListModel):
             uncached_indices.append(idx)
 
         if not uncached_indices:
-            print(f"[CACHE WARM] No uncached images to warm")
+            print(f"[CACHE WARM] All images cached! ({len(self.images)} total)")
             return
 
         # Store total for progress tracking
@@ -1206,6 +1217,13 @@ class ImageListModel(QAbstractListModel):
 
                         # Save to disk cache in background thread if not from cache
                         if not was_cached:
+                            # Debug: why are we saving this?
+                            if not hasattr(self, '_cache_debug_count2'):
+                                self._cache_debug_count2 = 0
+                            if self._cache_debug_count2 < 5:
+                                print(f"[CACHE DEBUG PATH2] Saving {image.path.name}: was_cached={was_cached}")
+                                self._cache_debug_count2 += 1
+
                             mtime = image.path.stat().st_mtime
                             # Defer during scroll to avoid I/O blocking
                             if self._is_scrolling:
@@ -1248,6 +1266,13 @@ class ImageListModel(QAbstractListModel):
 
                             # Save to cache if needed
                             if not was_cached:
+                                # Debug: why are we saving this?
+                                if not hasattr(self, '_cache_debug_count3'):
+                                    self._cache_debug_count3 = 0
+                                if self._cache_debug_count3 < 5:
+                                    print(f"[CACHE DEBUG PATH3] Saving {image.path.name}: was_cached={was_cached}")
+                                    self._cache_debug_count3 += 1
+
                                 mtime = image.path.stat().st_mtime
                                 # Defer during scroll to avoid I/O blocking
                                 if self._is_scrolling:
