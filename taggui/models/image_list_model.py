@@ -338,7 +338,9 @@ class ImageListModel(QAbstractListModel):
 
         # Track background enrichment
         self._enrichment_cancelled = threading.Event()
+        self._enrichment_paused = threading.Event()  # Pause enrichment during masonry recalc
         self._suppress_enrichment_signals = False  # Suppress dataChanged during filtering
+        self._enrichment_completed_flag = False  # Flag to trigger masonry recalc after enrichment
 
         # Queue for thread-safe dimension updates from background enrichment
         from queue import Queue
@@ -628,22 +630,32 @@ class ImageListModel(QAbstractListModel):
                 except Empty:
                     break
 
-            # Emit layout changes for updated images
+            # Log processing (don't emit signals during enrichment to avoid crashes)
             if updated_indices and not self._suppress_enrichment_signals:
-                # Rebuild aspect ratio cache
-                self._rebuild_aspect_ratio_cache()
-
-                # Use dataChanged instead of layoutChanged for more granular updates
-                # This only invalidates changed items, not entire layout
-                if updated_indices:
-                    min_idx = min(updated_indices)
-                    max_idx = max(updated_indices)
-                    self.dataChanged.emit(self.index(min_idx), self.index(max_idx))
-
                 batch_time = (time.time() - batch_start) * 1000
                 if processed >= 50:  # Only log significant batches
                     timestamp = time.strftime("%H:%M:%S")
                     print(f"[ENRICH {timestamp}] Processed {processed} dimension updates in {batch_time:.1f}ms")
+
+            # Trigger masonry recalc periodically during enrichment (every 1000 images)
+            # Make this conservative to avoid crashes
+            if updated_indices and not self._suppress_enrichment_signals:
+                if not hasattr(self, '_enrichment_recalc_counter'):
+                    self._enrichment_recalc_counter = 0
+                    self._last_recalc_time = time.time()  # Initialize to NOW, not 0
+                self._enrichment_recalc_counter += len(updated_indices)
+
+                # Only trigger if:
+                # 1. At least 1000 images enriched since last recalc
+                # 2. At least 5 seconds passed since last recalc (don't spam)
+                current_time = time.time()
+                if (self._enrichment_recalc_counter >= 1000 and
+                    current_time - self._last_recalc_time >= 5.0):
+                    self._enrichment_recalc_counter = 0
+                    self._last_recalc_time = current_time
+                    timestamp = time.strftime("%H:%M:%S")
+                    print(f"[ENRICH {timestamp}] Triggering incremental masonry recalc")
+                    self.layoutChanged.emit()
 
             # Continue processing if queue has more items
             if not self._enrichment_queue.empty():
@@ -651,7 +663,17 @@ class ImageListModel(QAbstractListModel):
                 if self._enrichment_timer:
                     self._enrichment_timer.start(10)  # 10ms between batches
             else:
-                # Queue empty, check again in 100ms
+                # Queue empty - check if enrichment just completed
+                if self._enrichment_completed_flag:
+                    self._enrichment_completed_flag = False
+                    timestamp = time.strftime("%H:%M:%S")
+                    print(f"[ENRICH {timestamp}] Final masonry recalc after enrichment completion")
+                    # Rebuild aspect ratio cache with final dimensions
+                    self._rebuild_aspect_ratio_cache()
+                    # Emit layoutChanged to trigger full masonry recalc
+                    self.layoutChanged.emit()
+
+                # Check again in 100ms
                 if self._enrichment_timer:
                     self._enrichment_timer.start(100)
 
@@ -1032,6 +1054,13 @@ class ImageListModel(QAbstractListModel):
         # When scrolling stops, flush all pending cache saves
         if not is_scrolling:
             self._flush_pending_cache_saves()
+
+    def set_visible_indices(self, visible_indices: set):
+        """
+        Update which indices are currently visible in viewport.
+        Used to prioritize enrichment for visible images.
+        """
+        self._visible_indices_hint = visible_indices
 
     def _flush_pending_cache_saves(self, force=False):
         """Submit pending cache saves to background executor (batched to avoid blocking)."""
@@ -2021,8 +2050,9 @@ class ImageListModel(QAbstractListModel):
         """Restart background enrichment after sorting/filtering (with new indices)."""
         # Pagination mode now uses enrichment too for uncached files
 
-        # Clear cancellation flag
+        # Clear cancellation flag and completion flag
         self._enrichment_cancelled.clear()
+        self._enrichment_completed_flag = False
 
         # Count how many images still need enrichment
         needs_enrichment = sum(1 for img in self.images if img.dimensions == (512, 512))
@@ -2031,6 +2061,11 @@ class ImageListModel(QAbstractListModel):
             return  # Nothing to enrich
 
         import time
+
+        # Reset incremental recalc counter
+        self._enrichment_recalc_counter = 0
+        self._last_recalc_time = time.time()
+
         timestamp = time.strftime("%H:%M:%S")
         print(f"[ENRICH {timestamp}] Restarting background enrichment for {needs_enrichment} images after sort")
 
@@ -2048,7 +2083,8 @@ class ImageListModel(QAbstractListModel):
             from utils.settings import settings
             import sys
 
-            directory_path = self.images[0].path.parent if self.images else None
+            # Use the root directory path, not first image's parent (images may be in subdirs)
+            directory_path = self._directory_path if self._directory_path else (self.images[0].path.parent if self.images else None)
             if not directory_path:
                 return
 
@@ -2062,7 +2098,25 @@ class ImageListModel(QAbstractListModel):
             commit_interval = 500 if total_images > 20000 else 100
             layout_update_interval = 1000 if total_images > 20000 else 100
 
-            for idx, image in enumerate(self.images):
+            # Build prioritized processing order: visible first, then rest
+            needs_enrichment_indices = [idx for idx, img in enumerate(self.images) if img.dimensions == (512, 512)]
+
+            print(f"[ENRICH] Found {len(needs_enrichment_indices)}/{len(self.images)} images needing enrichment (with placeholder 512x512)")
+
+            # Get visible indices from view (if available)
+            visible_indices = getattr(self, '_visible_indices_hint', set())
+
+            # Split into visible and non-visible
+            visible_to_enrich = [idx for idx in needs_enrichment_indices if idx in visible_indices]
+            non_visible_to_enrich = [idx for idx in needs_enrichment_indices if idx not in visible_indices]
+
+            # Process visible first, then rest
+            processing_order = visible_to_enrich + non_visible_to_enrich
+
+            if visible_to_enrich:
+                print(f"[ENRICH] Prioritizing {len(visible_to_enrich)} visible images first")
+
+            for idx in processing_order:
                 # Check if cancelled
                 if self._enrichment_cancelled.is_set():
                     print(f"[SORT] Background enrichment cancelled after {enriched_count} images")
@@ -2070,9 +2124,16 @@ class ImageListModel(QAbstractListModel):
                     db_bg.close()
                     return
 
-                # Skip if already has real dimensions
-                if image.dimensions != (512, 512):
-                    continue
+                # Wait if paused (during masonry recalc)
+                while self._enrichment_paused.is_set():
+                    if self._enrichment_cancelled.is_set():
+                        db_bg.commit()
+                        db_bg.close()
+                        return
+                    import time
+                    time.sleep(0.1)
+
+                image = self.images[idx]
 
                 try:
                     is_video = image.path.suffix.lower() in video_extensions
@@ -2131,7 +2192,10 @@ class ImageListModel(QAbstractListModel):
                         timestamp = time.strftime("%H:%M:%S")
                         print(f"[ENRICH {timestamp}] Progress: {enriched_count}/{total_images} images enriched")
 
-                except Exception:
+                except Exception as e:
+                    # Log enrichment failures
+                    if enriched_count < 10:  # Only log first 10 failures
+                        print(f"[ENRICH] Failed to enrich {image.path.name}: {type(e).__name__}: {e}")
                     pass
 
             db_bg.commit()
@@ -2143,6 +2207,10 @@ class ImageListModel(QAbstractListModel):
             timestamp = time.strftime("%H:%M:%S")
             print(f"[ENRICH {timestamp}] Sort enrichment complete: {enriched_count} images updated")
             print(f"[ENRICH {timestamp}] Queue has {self._enrichment_queue.qsize()} pending updates")
+
+            # Signal enrichment completion for masonry recalc trigger
+            if enriched_count > 0:
+                self._enrichment_completed_flag = True
 
         # Submit enrichment task
         self._load_executor.submit(enrich_dimensions)

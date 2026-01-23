@@ -698,11 +698,20 @@ class ImageListView(QListView):
         if self.model().rowCount() == 0:
             return
 
-        # Don't start if we're already calculating
+        # If already calculating, cancel the previous one first
         if self._masonry_calculating:
-            return
+            if self._masonry_calc_future and not self._masonry_calc_future.done():
+                # Cancel previous calculation
+                self._masonry_calc_future.cancel()
+            self._masonry_calculating = False
 
         self._masonry_calculating = True
+
+        # Pause enrichment during masonry calculation to prevent race conditions
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model and hasattr(source_model, '_enrichment_paused'):
+            source_model._enrichment_paused.set()
+            print("[MASONRY] Paused enrichment for recalculation")
 
         # Initialize parameters
         column_width = self.current_thumbnail_size
@@ -746,6 +755,12 @@ class ImageListView(QListView):
                 import traceback
                 traceback.print_exc()
                 self._masonry_calculating = False
+
+                # Resume enrichment even on error
+                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                if source_model and hasattr(source_model, '_enrichment_paused'):
+                    source_model._enrichment_paused.clear()
+                    print("[MASONRY] Resumed enrichment after error")
         else:
             # Check again in 50ms
             QTimer.singleShot(50, self._check_masonry_completion)
@@ -763,6 +778,11 @@ class ImageListView(QListView):
         self._masonry_calculating = False
 
         if result_dict is None:
+            # Resume enrichment even if result is None
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+            if source_model and hasattr(source_model, '_enrichment_paused'):
+                source_model._enrichment_paused.clear()
+                print("[MASONRY] Resumed enrichment after recalculation (null result)")
             return
 
         # Check if another calculation is pending (user is still typing)
@@ -798,6 +818,12 @@ class ImageListView(QListView):
                 current_index = self.currentIndex()
                 if current_index.isValid():
                     self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+            # Resume enrichment AFTER UI update completes (prevent race condition)
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+            if source_model and hasattr(source_model, '_enrichment_paused'):
+                source_model._enrichment_paused.clear()
+                print("[MASONRY] Resumed enrichment after UI update")
 
         QTimer.singleShot(0, apply_and_signal)
 
@@ -1183,6 +1209,11 @@ class ImageListView(QListView):
         max_visible = max(visible_indices)
         mid_visible = (min_visible + max_visible) // 2
         visible_count = len(visible_indices)
+
+        # Update model with visible indices for enrichment prioritization
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model and hasattr(source_model, 'set_visible_indices'):
+            source_model.set_visible_indices(set(visible_indices))
 
         # Buffer sizes
         near_buffer_size = max(visible_count * 2, 100)
