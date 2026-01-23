@@ -255,7 +255,7 @@ class ImageListModel(QAbstractListModel):
     cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
 
     # Threshold for enabling pagination mode (number of images)
-    PAGINATION_THRESHOLD = 10000
+    PAGINATION_THRESHOLD = 5000
     PAGE_SIZE = 1000
     MAX_PAGES_IN_MEMORY = 20  # Increased from 5 to reduce evictions and crashes
 
@@ -662,11 +662,11 @@ class ImageListModel(QAbstractListModel):
         total_images = len(self.images)
 
         # Adaptive preloading strategy based on folder size
-        if total_images > 10000:
+        if total_images > 5000:
             # Huge folders: only preload first 1000 to avoid flooding executor
             preload_limit = 1000
             print(f"[THUMBNAIL] Huge folder ({total_images} images), will check cache for first {preload_limit}")
-        elif total_images > 5000:
+        elif total_images > 2500:
             # Large folders: preload first 500
             preload_limit = 500
             print(f"[THUMBNAIL] Large folder ({total_images} images), will check cache for first {preload_limit}")

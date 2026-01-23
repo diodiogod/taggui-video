@@ -279,15 +279,20 @@ class SettingsDialog(QDialog):
             'Delete dimension cache (.taggui_index.db) and thumbnails for the currently loaded directory only')
         self.clear_current_button.clicked.connect(self.clear_current_directory_cache)
 
-        # Size label for current directory
-        self.clear_current_size_label = QLabel()
+        # Size label and calculate button for current directory
+        self.clear_current_size_label = QLabel('(click to calculate)')
         self.clear_current_size_label.setStyleSheet('color: #666; font-size: 10px; margin-left: 10px;')
 
-        # Current directory row (button + size)
+        self.calc_current_size_button = QPushButton('Calculate')
+        self.calc_current_size_button.setToolTip('Calculate cache size for current directory')
+        self.calc_current_size_button.clicked.connect(self._calculate_current_directory_size)
+
+        # Current directory row (button + size + calc)
         current_row_layout = QHBoxLayout()
         current_row_layout.setSpacing(10)
         current_row_layout.addWidget(self.clear_current_button)
         current_row_layout.addWidget(self.clear_current_size_label)
+        current_row_layout.addWidget(self.calc_current_size_button)
         current_row_layout.addStretch()
 
         # Clear all cache button
@@ -297,15 +302,20 @@ class SettingsDialog(QDialog):
         self.clear_all_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text for destructive action
         self.clear_all_button.clicked.connect(self.clear_all_thumbnail_cache)
 
-        # Size label for all cache
-        self.clear_all_size_label = QLabel()
+        # Size label and calculate button for all cache
+        self.clear_all_size_label = QLabel('(click to calculate)')
         self.clear_all_size_label.setStyleSheet('color: #666; font-size: 10px; margin-left: 10px;')
 
-        # All cache row (button + size)
+        self.calc_all_size_button = QPushButton('Calculate')
+        self.calc_all_size_button.setToolTip('Calculate total thumbnail cache size')
+        self.calc_all_size_button.clicked.connect(self._calculate_all_cache_size)
+
+        # All cache row (button + size + calc)
         all_row_layout = QHBoxLayout()
         all_row_layout.setSpacing(10)
         all_row_layout.addWidget(self.clear_all_button)
         all_row_layout.addWidget(self.clear_all_size_label)
+        all_row_layout.addWidget(self.calc_all_size_button)
         all_row_layout.addStretch()
 
         # Clear all databases button
@@ -316,18 +326,23 @@ class SettingsDialog(QDialog):
         self.clear_all_db_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text
         self.clear_all_db_button.clicked.connect(self.clear_all_databases)
 
-        # Size label for all databases
-        self.clear_all_db_size_label = QLabel()
+        # Size label and calculate button for all databases
+        self.clear_all_db_size_label = QLabel('(click to calculate)')
         self.clear_all_db_size_label.setStyleSheet('color: #666; font-size: 10px; margin-left: 10px;')
 
-        # All databases row (button + size)
+        self.calc_all_db_size_button = QPushButton('Calculate')
+        self.calc_all_db_size_button.setToolTip('Calculate total database size')
+        self.calc_all_db_size_button.clicked.connect(self._calculate_all_db_size)
+
+        # All databases row (button + size + calc)
         all_db_row_layout = QHBoxLayout()
         all_db_row_layout.setSpacing(10)
         all_db_row_layout.addWidget(self.clear_all_db_button)
         all_db_row_layout.addWidget(self.clear_all_db_size_label)
+        all_db_row_layout.addWidget(self.calc_all_db_size_button)
         all_db_row_layout.addStretch()
 
-        # Make all buttons the same width (use the wider one)
+        # Make all clear buttons the same width (use the wider one)
         max_width = max(self.clear_current_button.sizeHint().width(),
                        self.clear_all_button.sizeHint().width(),
                        self.clear_all_db_button.sizeHint().width())
@@ -335,6 +350,12 @@ class SettingsDialog(QDialog):
         self.clear_current_button.setFixedWidth(button_width)
         self.clear_all_button.setFixedWidth(button_width)
         self.clear_all_db_button.setFixedWidth(button_width)
+
+        # Make all calculate buttons compact and same width
+        calc_button_width = self.calc_current_size_button.sizeHint().width()
+        self.calc_current_size_button.setFixedWidth(calc_button_width)
+        self.calc_all_size_button.setFixedWidth(calc_button_width)
+        self.calc_all_db_size_button.setFixedWidth(calc_button_width)
 
         cache_buttons_layout.addLayout(current_row_layout)
         cache_buttons_layout.addSpacing(10)
@@ -349,7 +370,6 @@ class SettingsDialog(QDialog):
         layout.addStretch()
 
         scroll_area.setWidget(widget)
-        self._update_cache_button_labels()
         return scroll_area
 
     def _create_spell_check_tab(self):
@@ -463,84 +483,125 @@ class SettingsDialog(QDialog):
         except Exception:
             return "? (error)"
 
-    def _update_cache_button_labels(self):
-        """Update cache size labels with current cache sizes."""
-        thumbnail_cache = get_thumbnail_cache()
+    @Slot()
+    def _calculate_current_directory_size(self):
+        """Calculate cache size for current directory."""
+        self.clear_current_size_label.setText('Calculating...')
+        self.calc_current_size_button.setEnabled(False)
 
-        if thumbnail_cache.enabled and thumbnail_cache.cache_dir.exists():
-            cache_size = self._get_cache_size(thumbnail_cache.cache_dir)
-            self.clear_all_size_label.setText(cache_size)
-        else:
-            self.clear_all_size_label.setText('(empty)')
+        from PySide6.QtCore import QTimer
 
-        # Calculate total size of all .taggui_index.db files
-        try:
-            recent_dirs = settings.value('recent_directories', [], type=list)
-            total_db_size = 0
-            db_count = 0
+        def do_calculation():
+            thumbnail_cache = get_thumbnail_cache()
+            current_dir = None
+            if settings.contains('directory_path'):
+                directory_path_str = settings.value('directory_path', type=str)
+                if directory_path_str:
+                    current_dir = Path(directory_path_str)
 
-            for dir_path_str in recent_dirs:
-                db_path = Path(dir_path_str) / '.taggui_index.db'
-                if db_path.exists():
-                    total_db_size += db_path.stat().st_size
-                    db_count += 1
+            if not current_dir or not current_dir.exists():
+                self.clear_current_size_label.setText('(no directory loaded)')
+                self.calc_current_size_button.setEnabled(True)
+                return
 
-            if db_count > 0:
-                # Format size
-                size_str = self._format_size(total_db_size)
-                self.clear_all_db_size_label.setText(f"{size_str} ({db_count} files)")
-            else:
-                self.clear_all_db_size_label.setText('(no databases found)')
-        except Exception:
-            self.clear_all_db_size_label.setText('(error)')
-
-        # Current directory cache size
-        current_dir = None
-        if settings.contains('directory_path'):
-            directory_path_str = settings.value('directory_path', type=str)
-            if directory_path_str:
-                current_dir = Path(directory_path_str)
-
-        if current_dir and current_dir.exists():
-            # Calculate size of thumbnails for this directory only
-            if thumbnail_cache.enabled and thumbnail_cache.cache_dir.exists():
-                # Count files and calculate size for this directory's thumbnails
-                try:
-                    from models.image_list_model import get_file_paths
-                    image_suffixes_string = settings.value(
-                        'image_list_file_formats',
-                        defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-                    image_suffixes = []
-                    for suffix in image_suffixes_string.split(','):
-                        suffix = suffix.strip().lower()
-                        if not suffix.startswith('.'):
-                            suffix = '.' + suffix
-                        image_suffixes.append(suffix)
-
-                    file_paths = get_file_paths(current_dir)
-                    image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
-
-                    dir_cache_size = 0
-                    for image_path in image_paths:
-                        try:
-                            mtime = image_path.stat().st_mtime
-                            cache_key = thumbnail_cache._get_cache_key(
-                                image_path, mtime, 512
-                            )
-                            cache_path = thumbnail_cache._get_cache_path(cache_key)
-                            if cache_path.exists():
-                                dir_cache_size += cache_path.stat().st_size
-                        except Exception:
-                            pass
-
-                    cache_size_str = self._format_size(dir_cache_size)
-                    self.clear_current_size_label.setText(cache_size_str)
-                except Exception:
-                    self.clear_current_size_label.setText('(error)')
-            else:
+            if not thumbnail_cache.enabled or not thumbnail_cache.cache_dir.exists():
                 self.clear_current_size_label.setText('(empty)')
-        else:
-            self.clear_current_size_label.setText('(no directory loaded)')
+                self.calc_current_size_button.setEnabled(True)
+                return
+
+            try:
+                from models.image_list_model import get_file_paths
+                image_suffixes_string = settings.value(
+                    'image_list_file_formats',
+                    defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+                image_suffixes = []
+                for suffix in image_suffixes_string.split(','):
+                    suffix = suffix.strip().lower()
+                    if not suffix.startswith('.'):
+                        suffix = '.' + suffix
+                    image_suffixes.append(suffix)
+
+                file_paths = get_file_paths(current_dir)
+                image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
+
+                dir_cache_size = 0
+                for image_path in image_paths:
+                    try:
+                        mtime = image_path.stat().st_mtime
+                        cache_key = thumbnail_cache._get_cache_key(image_path, mtime, 512)
+                        cache_path = thumbnail_cache._get_cache_path(cache_key)
+                        if cache_path.exists():
+                            dir_cache_size += cache_path.stat().st_size
+                    except Exception:
+                        pass
+
+                cache_size_str = self._format_size(dir_cache_size)
+                self.clear_current_size_label.setText(cache_size_str)
+            except Exception:
+                self.clear_current_size_label.setText('(error)')
+            finally:
+                self.calc_current_size_button.setEnabled(True)
+
+        # Run calculation after event loop returns to prevent blocking dialog open
+        QTimer.singleShot(10, do_calculation)
+
+    @Slot()
+    def _calculate_all_cache_size(self):
+        """Calculate total thumbnail cache size."""
+        self.clear_all_size_label.setText('Calculating...')
+        self.calc_all_size_button.setEnabled(False)
+
+        from PySide6.QtCore import QTimer
+
+        def do_calculation():
+            thumbnail_cache = get_thumbnail_cache()
+
+            if not thumbnail_cache.enabled or not thumbnail_cache.cache_dir.exists():
+                self.clear_all_size_label.setText('(empty)')
+                self.calc_all_size_button.setEnabled(True)
+                return
+
+            try:
+                cache_size = self._get_cache_size(thumbnail_cache.cache_dir)
+                self.clear_all_size_label.setText(cache_size)
+            except Exception:
+                self.clear_all_size_label.setText('(error)')
+            finally:
+                self.calc_all_size_button.setEnabled(True)
+
+        QTimer.singleShot(10, do_calculation)
+
+    @Slot()
+    def _calculate_all_db_size(self):
+        """Calculate total database size."""
+        self.clear_all_db_size_label.setText('Calculating...')
+        self.calc_all_db_size_button.setEnabled(False)
+
+        from PySide6.QtCore import QTimer
+
+        def do_calculation():
+            try:
+                recent_dirs = settings.value('recent_directories', [], type=list)
+                total_db_size = 0
+                db_count = 0
+
+                for dir_path_str in recent_dirs:
+                    db_path = Path(dir_path_str) / '.taggui_index.db'
+                    if db_path.exists():
+                        total_db_size += db_path.stat().st_size
+                        db_count += 1
+
+                if db_count > 0:
+                    size_str = self._format_size(total_db_size)
+                    self.clear_all_db_size_label.setText(f"{size_str} ({db_count} files)")
+                else:
+                    self.clear_all_db_size_label.setText('(no databases found)')
+            except Exception:
+                self.clear_all_db_size_label.setText('(error)')
+            finally:
+                self.calc_all_db_size_button.setEnabled(True)
+
+        QTimer.singleShot(10, do_calculation)
 
     def _format_size(self, size: int) -> str:
         """Format byte size to human-readable string."""
@@ -673,6 +734,17 @@ class SettingsDialog(QDialog):
         try:
             deleted_count = 0
 
+            # Close database connection before deleting (avoid WinError 32)
+            try:
+                main_window = self.parent()
+                if hasattr(main_window, 'image_list_model'):
+                    image_list_model = main_window.image_list_model
+                    if hasattr(image_list_model, '_db') and image_list_model._db:
+                        image_list_model._db.close()
+                        print("[CACHE] Closed database connection before deletion")
+            except Exception as e:
+                print(f"[CACHE] Warning: couldn't close DB connection: {e}")
+
             # Delete dimension cache database
             db_path = current_dir / '.taggui_index.db'
             if db_path.exists():
@@ -716,9 +788,22 @@ class SettingsDialog(QDialog):
                 self,
                 'Cache Cleared',
                 f'Successfully cleared cache for current directory.\n'
-                f'Deleted {deleted_count} cache files.'
+                f'Deleted {deleted_count} cache files.\n\n'
+                f'Reloading directory...'
             )
-            self._update_cache_button_labels()
+
+            # Reset size label
+            self.clear_current_size_label.setText('(cleared - click to recalculate)')
+
+            # Reload directory to rebuild cache
+            try:
+                main_window = self.parent()
+                if hasattr(main_window, 'image_list_model'):
+                    # Close dialog first so user sees the reload happening
+                    self.accept()
+                    main_window.image_list_model.load_directory(current_dir)
+            except Exception as e:
+                print(f"[CACHE] Warning: couldn't reload directory: {e}")
 
         except Exception as e:
             QMessageBox.critical(
@@ -788,7 +873,8 @@ class SettingsDialog(QDialog):
                 f'Successfully cleared all thumbnail cache.\n'
                 f'Deleted {deleted_count} cached thumbnails.'
             )
-            self._update_cache_button_labels()
+            # Reset size label instead of recalculating
+            self.clear_all_size_label.setText('(cleared - click to recalculate)')
 
         except Exception as e:
             QMessageBox.critical(
@@ -862,7 +948,8 @@ class SettingsDialog(QDialog):
                 'Databases Cleared',
                 message
             )
-            self._update_cache_button_labels()
+            # Reset size label instead of recalculating
+            self.clear_all_db_size_label.setText('(cleared - click to recalculate)')
 
         except Exception as e:
             QMessageBox.critical(
