@@ -299,7 +299,8 @@ class ImageListModel(QAbstractListModel):
         # Page loader executor for paginated mode
         self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
         # Cache warming executor: 2 workers for proactive cache building when idle (low priority)
-        self._cache_warm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cache_warm")
+        # Reduced to 1 worker to minimize resource usage during idle warming
+        self._cache_warm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cache_warm")
 
         self._thumbnail_futures = {}  # Maps image index to Future
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
@@ -899,9 +900,13 @@ class ImageListModel(QAbstractListModel):
         # Emit initial progress to show label immediately
         self.cache_warm_progress.emit(0, len(uncached_indices))
 
-        # Submit cache warming tasks (use separate executor with 2 workers)
+        # Submit cache warming tasks (use separate executor with 1 worker for low resource usage)
         def cache_warm_worker(idx):
-            """Worker that generates and caches a thumbnail."""
+            """Worker that generates and caches a thumbnail (low priority, slow)."""
+            # Add small delay to avoid resource spikes
+            import time
+            time.sleep(0.1)  # 100ms delay between each thumbnail
+
             # Check if cancelled
             if self._cache_warm_cancelled.is_set():
                 return False
@@ -976,11 +981,17 @@ class ImageListModel(QAbstractListModel):
 
             return success
 
-        # Submit all warming tasks to separate executor
+        # Submit warming tasks slowly to minimize resource usage
+        # Only warm 50 images at a time, with delays between batches
+        max_batch_size = 50
+        uncached_batch = uncached_indices[:max_batch_size]
+
         with self._cache_warm_lock:
-            for idx in uncached_indices:
+            for idx in uncached_batch:
                 future = self._cache_warm_executor.submit(cache_warm_worker, idx)
                 self._cache_warm_futures.append(future)
+
+        print(f"[CACHE WARM] Starting batch of {len(uncached_batch)} thumbnails (low priority)")
 
         # Add callback to mark warming complete when all futures finish
         def on_warming_complete():

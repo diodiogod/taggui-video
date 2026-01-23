@@ -367,7 +367,7 @@ class ImageListView(QListView):
 
         # Recalculate masonry layout when model changes (including filter changes)
         proxy_image_list_model.modelReset.connect(lambda: self._recalculate_masonry_if_needed("modelReset"))
-        proxy_image_list_model.layoutChanged.connect(lambda: self._recalculate_masonry_if_needed("layoutChanged"))
+        proxy_image_list_model.layoutChanged.connect(lambda: self._on_layout_changed())
         proxy_image_list_model.filter_changed.connect(lambda: self._recalculate_masonry_if_needed("filter_changed"))
 
         # Cache status now shown in main window status bar (not floating labels here)
@@ -596,6 +596,15 @@ class ImageListView(QListView):
             # print(f"[{timestamp}]   📝 First keystroke")
 
         self._last_filter_keystroke_time = current_time
+
+    def _on_layout_changed(self):
+        """Handle layoutChanged signal - clear stale masonry data before recalculating."""
+        # Clear masonry items immediately to prevent race conditions
+        # (sorting/filtering invalidates old layout, don't let paintEvent use stale data)
+        self._masonry_items = []
+        self._masonry_total_height = 0
+        # Now trigger recalculation
+        self._recalculate_masonry_if_needed("layoutChanged")
 
     def _recalculate_masonry_if_needed(self, signal_name="unknown"):
         """Recalculate masonry layout if in masonry mode (debounced with adaptive delay)."""
@@ -2546,9 +2555,14 @@ class ImageListView(QListView):
             return
 
         # Don't start cache warming while enrichment is running (causes UI blocking)
-        if hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer and source_model._enrichment_timer.isActive():
-            print("[CACHE WARM] Skipping - enrichment still running")
-            return
+        # Check if any images still need enrichment (have placeholder dimensions)
+        if hasattr(source_model, 'images') and source_model.images:
+            needs_enrichment = any(img.dimensions == (512, 512) for img in source_model.images[:100])  # Sample first 100
+            if needs_enrichment:
+                print("[CACHE WARM] Skipping - enrichment still in progress")
+                # Retry in 5 seconds
+                self._cache_warm_idle_timer.start(5000)
+                return
 
         # Default to 'down' if never scrolled
         if not hasattr(self, '_scroll_direction') or self._scroll_direction is None:
