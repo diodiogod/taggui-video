@@ -322,6 +322,11 @@ class ImageListModel(QAbstractListModel):
         self._cache_warm_progress = 0  # How many images have been cache-warmed
         self._cache_warm_total = 0  # Total images to warm
 
+        # Defer cache writes during scrolling to avoid I/O blocking
+        self._is_scrolling = False  # Set by view during active scrolling
+        self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail) to save when idle
+        self._pending_cache_saves_lock = threading.Lock()
+
         # Track background enrichment
         self._enrichment_cancelled = threading.Event()
         self._suppress_enrichment_signals = False  # Suppress dataChanged during filtering
@@ -842,6 +847,9 @@ class ImageListModel(QAbstractListModel):
 
         print(f"[CACHE WARM] Starting background cache warming: {len(uncached_indices)} images")
 
+        # Emit initial progress to show label immediately
+        self.cache_warm_progress.emit(0, len(uncached_indices))
+
         # Submit cache warming tasks (use separate executor with 2 workers)
         def cache_warm_worker(idx):
             """Worker that generates and caches a thumbnail."""
@@ -849,30 +857,36 @@ class ImageListModel(QAbstractListModel):
             if self._cache_warm_cancelled.is_set():
                 return False
 
+            if idx >= len(self.images):
+                return False
+
             image = self.images[idx]
+            success = False
 
             try:
                 # Generate thumbnail (this is the expensive part)
-                qimage, was_cached = self._load_thumbnail_worker(idx, image.path, image.crop,
-                                                                  self.thumbnail_generation_width, image.is_video)
+                result = self._load_thumbnail_worker(idx, image.path, image.crop,
+                                                      self.thumbnail_generation_width, image.is_video)
 
-                # If was already cached, we shouldn't be here (but skip anyway)
-                if was_cached:
-                    return True
+                # Handle failed thumbnail generation (returns None)
+                if result is not None:
+                    qimage, was_cached = result
+                    success = True
 
                 # Check if cancelled after generation
                 if self._cache_warm_cancelled.is_set():
                     return False
 
-                # Increment progress and emit signal
-                self._cache_warm_progress += 1
-                self.cache_warm_progress.emit(self._cache_warm_progress, self._cache_warm_total)
-
-                return True
-
             except Exception as e:
                 print(f"[CACHE WARM] Error warming cache for {image.path.name}: {e}")
-                return False
+
+            # ALWAYS increment progress and emit (even on failure, so progress bar advances)
+            self._cache_warm_progress += 1
+            if self._cache_warm_progress % 5 == 0 or self._cache_warm_progress >= self._cache_warm_total:
+                # Emit every 5 items or on completion (reduce signal spam)
+                self.cache_warm_progress.emit(self._cache_warm_progress, self._cache_warm_total)
+
+            return success
 
         # Submit all warming tasks to separate executor
         with self._cache_warm_lock:
@@ -897,6 +911,43 @@ class ImageListModel(QAbstractListModel):
 
         # Emit signal to hide label
         self.cache_warm_progress.emit(0, 0)
+
+    def set_scrolling_state(self, is_scrolling: bool):
+        """
+        Update scrolling state to defer cache writes during scroll.
+        Called by view when scrolling starts/stops.
+        """
+        self._is_scrolling = is_scrolling
+
+        # When scrolling stops, flush all pending cache saves
+        if not is_scrolling:
+            self._flush_pending_cache_saves()
+
+    def _flush_pending_cache_saves(self, force=False):
+        """Submit pending cache saves to background executor (batched to avoid blocking)."""
+        with self._pending_cache_saves_lock:
+            if not self._pending_cache_saves:
+                return
+
+            count = len(self._pending_cache_saves)
+
+            # Only flush if we have a substantial batch (50+ items) to make it worthwhile
+            # Or force flush (e.g., on app close, or queue too large 300+)
+            if not force and count < 50:
+                return  # Accumulate more before flushing
+
+            # Show first few filenames for debugging
+            sample_names = [p.name for p, _, _, _ in self._pending_cache_saves[:3]]
+            print(f"[CACHE] Flushing {count} pending cache saves (batch write) - e.g., {sample_names}")
+
+            # Submit all pending saves to background executor (2 workers, won't block main thread)
+            for path, mtime, width, thumbnail in self._pending_cache_saves:
+                self._save_executor.submit(
+                    self._save_thumbnail_worker,
+                    path, mtime, width, thumbnail
+                )
+
+            self._pending_cache_saves.clear()
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
@@ -1099,15 +1150,42 @@ class ImageListModel(QAbstractListModel):
                 image.thumbnail = thumbnail
 
                 # Save to disk cache in background thread if not from cache
-                if not image._last_thumbnail_was_cached:
-                    # Submit to save executor (low priority, won't compete with loads)
-                    self._save_executor.submit(
-                        self._save_thumbnail_worker,
-                        image.path,
-                        image.path.stat().st_mtime,
-                        self.thumbnail_generation_width,
-                        thumbnail
-                    )
+                # Only save if flag is explicitly set AND false (not from cache)
+                # If flag doesn't exist or is True, don't save (either from cache or uncertain)
+                has_flag = hasattr(image, '_last_thumbnail_was_cached')
+                flag_value = getattr(image, '_last_thumbnail_was_cached', None) if has_flag else None
+                should_save = has_flag and not flag_value
+
+                # Debug: log first few saves to understand pattern
+                if should_save and not hasattr(self, '_cache_debug_count'):
+                    self._cache_debug_count = 0
+                if should_save and self._cache_debug_count < 5:
+                    print(f"[CACHE DEBUG] Saving {image.path.name}: has_flag={has_flag}, flag_value={flag_value}, should_save={should_save}")
+                    self._cache_debug_count += 1
+
+                if should_save:
+                    # Defer cache writes during scrolling to avoid I/O blocking
+                    if self._is_scrolling:
+                        with self._pending_cache_saves_lock:
+                            self._pending_cache_saves.append((image.path, image.path.stat().st_mtime,
+                                                              self.thumbnail_generation_width, thumbnail))
+                            queue_size = len(self._pending_cache_saves)
+
+                            # Auto-flush if queue gets too large (300+) to prevent memory buildup
+                            if queue_size >= 300:
+                                print(f"[CACHE] Queue full ({queue_size} items), force flushing...")
+                                self._flush_pending_cache_saves(force=True)
+                            elif queue_size % 50 == 0:
+                                print(f"[CACHE] Deferred {queue_size} cache writes during scroll")
+                    else:
+                        # Submit to save executor (low priority, won't compete with loads)
+                        self._save_executor.submit(
+                            self._save_thumbnail_worker,
+                            image.path,
+                            image.path.stat().st_mtime,
+                            self.thumbnail_generation_width,
+                            thumbnail
+                        )
 
                 return thumbnail
 
@@ -1129,13 +1207,19 @@ class ImageListModel(QAbstractListModel):
                         # Save to disk cache in background thread if not from cache
                         if not was_cached:
                             mtime = image.path.stat().st_mtime
-                            self._save_executor.submit(
-                                self._save_thumbnail_worker,
-                                image.path,
-                                mtime,
-                                self.thumbnail_generation_width,
-                                thumbnail
-                            )
+                            # Defer during scroll to avoid I/O blocking
+                            if self._is_scrolling:
+                                with self._pending_cache_saves_lock:
+                                    self._pending_cache_saves.append((image.path, mtime,
+                                                                      self.thumbnail_generation_width, thumbnail))
+                            else:
+                                self._save_executor.submit(
+                                    self._save_thumbnail_worker,
+                                    image.path,
+                                    mtime,
+                                    self.thumbnail_generation_width,
+                                    thumbnail
+                                )
 
                         return thumbnail
                 except Exception as e:
@@ -1165,13 +1249,19 @@ class ImageListModel(QAbstractListModel):
                             # Save to cache if needed
                             if not was_cached:
                                 mtime = image.path.stat().st_mtime
-                                self._save_executor.submit(
-                                    self._save_thumbnail_worker,
-                                    image.path,
-                                    mtime,
-                                    self.thumbnail_generation_width,
-                                    thumbnail
-                                )
+                                # Defer during scroll to avoid I/O blocking
+                                if self._is_scrolling:
+                                    with self._pending_cache_saves_lock:
+                                        self._pending_cache_saves.append((image.path, mtime,
+                                                                          self.thumbnail_generation_width, thumbnail))
+                                else:
+                                    self._save_executor.submit(
+                                        self._save_thumbnail_worker,
+                                        image.path,
+                                        mtime,
+                                        self.thumbnail_generation_width,
+                                        thumbnail
+                                    )
 
                             del self._thumbnail_futures[row]
                             return thumbnail
