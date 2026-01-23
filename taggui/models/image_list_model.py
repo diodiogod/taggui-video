@@ -252,6 +252,7 @@ class ImageListModel(QAbstractListModel):
     page_loaded = Signal(int)  # Emitted when a page finishes loading (page_num)
     total_count_changed = Signal(int)  # Emitted when total image count changes
     indexing_progress = Signal(int, int)  # (current, total) during initial indexing
+    cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
 
     # Threshold for enabling pagination mode (number of images)
     PAGINATION_THRESHOLD = 10000
@@ -295,6 +296,8 @@ class ImageListModel(QAbstractListModel):
         self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
         # Page loader executor for paginated mode
         self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
+        # Cache warming executor: 2 workers for proactive cache building when idle (low priority)
+        self._cache_warm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cache_warm")
 
         self._thumbnail_futures = {}  # Maps image index to Future
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
@@ -311,6 +314,13 @@ class ImageListModel(QAbstractListModel):
         self._cache_saves_count = 0
         self._cache_saves_lock = threading.Lock()
         self._last_reported_saves = 0
+
+        # Track background cache warming (proactive cache building when idle)
+        self._cache_warm_cancelled = threading.Event()
+        self._cache_warm_futures = []  # List of futures for cache warming tasks
+        self._cache_warm_lock = threading.Lock()
+        self._cache_warm_progress = 0  # How many images have been cache-warmed
+        self._cache_warm_total = 0  # Total images to warm
 
         # Track background enrichment
         self._enrichment_cancelled = threading.Event()
@@ -763,6 +773,130 @@ class ImageListModel(QAbstractListModel):
                 new_saves = self._cache_saves_count - self._last_reported_saves
                 print(f"[THUMBNAIL CACHE] {new_saves} thumbnails saved to cache (total: {self._cache_saves_count})")
                 self._last_reported_saves = self._cache_saves_count
+
+    def start_cache_warming(self, start_idx: int, direction: str):
+        """
+        Start proactive cache warming in background (idle state only).
+        Generates thumbnails ahead of scroll to build disk cache.
+
+        Args:
+            start_idx: Index to start warming from
+            direction: 'down' or 'up' - which direction to warm
+        """
+        # Only in pagination mode
+        if not self._paginated_mode:
+            return
+
+        # Clear cancellation flag
+        self._cache_warm_cancelled.clear()
+
+        # Cancel any existing cache warming tasks
+        with self._cache_warm_lock:
+            for future in self._cache_warm_futures:
+                future.cancel()
+            self._cache_warm_futures.clear()
+
+        # Determine range to warm (500 images ahead)
+        if direction == 'down':
+            end_idx = min(start_idx + 500, len(self.images))
+            indices_to_warm = list(range(start_idx, end_idx))
+        else:  # up
+            end_idx = max(start_idx - 500, 0)
+            indices_to_warm = list(range(start_idx, end_idx, -1))
+
+        # Filter out already-cached images
+        from utils.thumbnail_cache import get_thumbnail_cache
+        cache = get_thumbnail_cache()
+        uncached_indices = []
+
+        for idx in indices_to_warm:
+            if idx < 0 or idx >= len(self.images):
+                continue
+
+            image = self.images[idx]
+
+            # Skip if already loaded in memory
+            if image.thumbnail or image.thumbnail_qimage:
+                continue
+
+            # Check if in disk cache
+            if cache.enabled:
+                try:
+                    mtime = image.path.stat().st_mtime
+                    cache_key = cache._get_cache_key(image.path, mtime, self.thumbnail_generation_width)
+                    cache_path = cache._get_cache_path(cache_key)
+                    if cache_path.exists():
+                        continue  # Already cached
+                except Exception:
+                    pass
+
+            uncached_indices.append(idx)
+
+        if not uncached_indices:
+            print(f"[CACHE WARM] No uncached images to warm")
+            return
+
+        # Store total for progress tracking
+        self._cache_warm_total = len(uncached_indices)
+        self._cache_warm_progress = 0
+
+        print(f"[CACHE WARM] Starting background cache warming: {len(uncached_indices)} images")
+
+        # Submit cache warming tasks (use separate executor with 2 workers)
+        def cache_warm_worker(idx):
+            """Worker that generates and caches a thumbnail."""
+            # Check if cancelled
+            if self._cache_warm_cancelled.is_set():
+                return False
+
+            image = self.images[idx]
+
+            try:
+                # Generate thumbnail (this is the expensive part)
+                qimage, was_cached = self._load_thumbnail_worker(idx, image.path, image.crop,
+                                                                  self.thumbnail_generation_width, image.is_video)
+
+                # If was already cached, we shouldn't be here (but skip anyway)
+                if was_cached:
+                    return True
+
+                # Check if cancelled after generation
+                if self._cache_warm_cancelled.is_set():
+                    return False
+
+                # Increment progress and emit signal
+                self._cache_warm_progress += 1
+                self.cache_warm_progress.emit(self._cache_warm_progress, self._cache_warm_total)
+
+                return True
+
+            except Exception as e:
+                print(f"[CACHE WARM] Error warming cache for {image.path.name}: {e}")
+                return False
+
+        # Submit all warming tasks to separate executor
+        with self._cache_warm_lock:
+            for idx in uncached_indices:
+                future = self._cache_warm_executor.submit(cache_warm_worker, idx)
+                self._cache_warm_futures.append(future)
+
+    def stop_cache_warming(self):
+        """Stop background cache warming immediately (called when user interacts)."""
+        # Set cancellation flag
+        self._cache_warm_cancelled.set()
+
+        # Cancel all pending futures
+        with self._cache_warm_lock:
+            for future in self._cache_warm_futures:
+                future.cancel()
+            self._cache_warm_futures.clear()
+
+        # Reset progress
+        self._cache_warm_progress = 0
+        self._cache_warm_total = 0
+
+        # Emit signal to hide label
+        self.cache_warm_progress.emit(0, 0)
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
