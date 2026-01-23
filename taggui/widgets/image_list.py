@@ -698,11 +698,12 @@ class ImageListView(QListView):
         if self.model().rowCount() == 0:
             return
 
-        # If already calculating, cancel the previous one first
+        # If already calculating, skip this recalc (can't interrupt multiprocessing)
         if self._masonry_calculating:
             if self._masonry_calc_future and not self._masonry_calc_future.done():
-                # Cancel previous calculation
-                self._masonry_calc_future.cancel()
+                print("[MASONRY] Skipping recalc - previous calculation still running")
+                return
+            # Previous calc is done, allow new one
             self._masonry_calculating = False
 
         self._masonry_calculating = True
@@ -2542,6 +2543,11 @@ class ImageListView(QListView):
         """Start background cache warming after idle period."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            return
+
+        # Don't start cache warming while enrichment is running (causes UI blocking)
+        if hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer and source_model._enrichment_timer.isActive():
+            print("[CACHE WARM] Skipping - enrichment still running")
             return
 
         # Default to 'down' if never scrolled
