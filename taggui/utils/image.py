@@ -37,6 +37,7 @@ class Image:
     video_metadata: dict | None = None  # fps, duration, frame_count, current_frame
     loop_start_frame: int | None = None
     loop_end_frame: int | None = None
+    marked_for_deletion: bool = False
 
     @property
     def aspect_ratio(self) -> float:

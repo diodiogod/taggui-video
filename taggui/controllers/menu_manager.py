@@ -1,7 +1,7 @@
 """Manager for main window menu bar."""
 
 from pathlib import Path
-from PySide6.QtWidgets import QMenuBar
+from PySide6.QtWidgets import QMenuBar, QPushButton, QWidgetAction
 from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
 from PySide6.QtCore import QUrl
 
@@ -44,6 +44,9 @@ class MenuManager:
         # Help menu
         self._create_help_menu(menu_bar)
 
+        # Delete marked menu (hidden by default, shown when images are marked)
+        self._create_delete_marked_menu(menu_bar)
+
     def _create_actions(self):
         """Create menu actions."""
         self.reload_directory_action = QAction('Reload Directory', parent=self.main_window)
@@ -56,6 +59,9 @@ class MenuManager:
         self.toggle_all_tags_editor_action = QAction('All Tags', parent=self.main_window)
         self.toggle_auto_captioner_action = QAction('Auto-Captioner', parent=self.main_window)
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
+        self.delete_marked_menu = None
+        self.delete_marked_button = None
+        self.delete_marked_widget_action = None
 
     def _create_file_menu(self, menu_bar):
         """Create File menu."""
@@ -240,3 +246,105 @@ class MenuManager:
         """Clear the recent folders list."""
         settings.setValue('recent_directories', [])
         self._update_recent_folders_menu()
+
+    def _create_delete_marked_menu(self, menu_bar):
+        """Create Delete Marked menu (shown only when images are marked)."""
+        # Create a custom button
+        self.delete_marked_button = QPushButton('🗑️ Delete Marked', menu_bar)
+        self.delete_marked_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #e53e3e, stop:1 #c53030);
+                color: white;
+                border: 1px solid rgba(0, 0, 0, 0.2);
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: 500;
+                margin: 2px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #fc8181, stop:1 #e53e3e);
+                border: 1px solid rgba(0, 0, 0, 0.3);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #c53030, stop:1 #9b2c2c);
+                border: 1px solid rgba(0, 0, 0, 0.4);
+            }
+            QPushButton::menu-indicator {
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: 12px;
+                right: 8px;
+            }
+        """)
+
+        # Create the dropdown menu
+        from PySide6.QtWidgets import QMenu
+        self.delete_marked_menu = QMenu(self.main_window)
+
+        delete_all_action = QAction('Delete All Marked Images', parent=self.main_window)
+        delete_all_action.triggered.connect(self._delete_all_marked)
+        self.delete_marked_menu.addAction(delete_all_action)
+
+        unmark_all_action = QAction('Unmark All Images', parent=self.main_window)
+        unmark_all_action.triggered.connect(self._unmark_all_images)
+        self.delete_marked_menu.addAction(unmark_all_action)
+
+        # Attach menu to button
+        self.delete_marked_button.setMenu(self.delete_marked_menu)
+
+        # Position button manually after Help menu
+        # Get the Help menu position
+        help_action = None
+        for action in menu_bar.actions():
+            if 'Help' in action.text():
+                help_action = action
+                break
+
+        if help_action:
+            # Get Help menu's geometry
+            help_rect = menu_bar.actionGeometry(help_action)
+            # Position button right after Help menu
+            self.delete_marked_button.setGeometry(
+                help_rect.right() + 5,
+                help_rect.top(),
+                self.delete_marked_button.sizeHint().width(),
+                help_rect.height()
+            )
+
+        # Show/hide based on marked count
+        self.delete_marked_button.setVisible(False)
+
+    def _delete_all_marked(self):
+        """Delete all marked images."""
+        if hasattr(self.main_window, 'image_list'):
+            self.main_window.image_list.delete_marked_images()
+
+    def _unmark_all_images(self):
+        """Unmark all images marked for deletion."""
+        if hasattr(self.main_window, 'image_list'):
+            self.main_window.image_list.unmark_all_images()
+
+    def update_delete_marked_menu(self, count):
+        """Update delete marked menu visibility and text."""
+        if self.delete_marked_button:
+            self.delete_marked_button.setVisible(count > 0)
+            if count > 0:
+                self.delete_marked_button.setText(f'🗑️ Delete Marked ({count})')
+                # Re-position in case window was resized
+                menu_bar = self.main_window.menuBar()
+                help_action = None
+                for action in menu_bar.actions():
+                    if 'Help' in action.text():
+                        help_action = action
+                        break
+                if help_action:
+                    help_rect = menu_bar.actionGeometry(help_action)
+                    self.delete_marked_button.setGeometry(
+                        help_rect.right() + 5,
+                        help_rect.top(),
+                        self.delete_marked_button.sizeHint().width(),
+                        help_rect.height()
+                    )

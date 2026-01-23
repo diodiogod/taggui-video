@@ -131,12 +131,11 @@ class MainWindow(QMainWindow):
         # Connect all signals
         self.signal_manager.connect_all_signals()
 
-        # Create status bar and connect cache warming updates
-        status_bar = self.statusBar()
-        status_bar.setSizeGripEnabled(False)  # Disable resize grip for cleaner look
-        self.image_list_model.cache_warm_progress.connect(self._update_cache_status)
-        # Trigger initial update to show cache status
-        QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
+        # TEMP: Disable status bar to test if it fixes gray space
+        # status_bar = self.statusBar()
+        # status_bar.setSizeGripEnabled(False)
+        # self.image_list_model.cache_warm_progress.connect(self._update_cache_status)
+        # QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
 
         # Connect video playback signals to freeze list view during playback
         self.image_viewer.video_player.playback_started.connect(self._freeze_list_view)

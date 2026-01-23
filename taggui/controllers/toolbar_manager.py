@@ -1,7 +1,7 @@
 """Manager for main window toolbar setup."""
 
 from PySide6.QtWidgets import (QToolBar, QPushButton, QWidget, QHBoxLayout,
-                               QLabel, QSpinBox, QSizePolicy)
+                               QLabel, QSpinBox, QSizePolicy, QMenu)
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PySide6.QtCore import Qt
 
@@ -48,6 +48,8 @@ class ToolbarManager:
         self.change_fps_btn = None
         self.star_labels = []
         self.rating = 0
+        self.delete_marked_btn = None
+        self.delete_marked_menu = None
 
     def create_toolbar(self):
         """Create and setup the main toolbar."""
@@ -348,3 +350,52 @@ class ToolbarManager:
             star_layout.addWidget(star_label)
 
         self.toolbar.addWidget(star_widget)
+
+    def _create_delete_marked_button(self):
+        """Create delete marked images dropdown button."""
+        self.delete_marked_btn = QPushButton('🗑️ Delete Marked ▼')
+        self.delete_marked_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #c62828;
+                color: white;
+                border: 2px solid #b71c1c;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+                border-color: #c62828;
+            }
+            QPushButton:pressed {
+                background-color: #b71c1c;
+            }
+            QPushButton::menu-indicator {
+                width: 0px;
+            }
+        """)
+        self.delete_marked_btn.setVisible(False)
+
+        # Create dropdown menu
+        self.delete_marked_menu = QMenu(self.main_window)
+        delete_all_action = QAction('Delete All Marked Images', self.main_window)
+        delete_all_action.triggered.connect(self._delete_all_marked)
+        self.delete_marked_menu.addAction(delete_all_action)
+
+        unmark_all_action = QAction('Unmark All Images', self.main_window)
+        unmark_all_action.triggered.connect(self._unmark_all_images)
+        self.delete_marked_menu.addAction(unmark_all_action)
+
+        self.delete_marked_btn.setMenu(self.delete_marked_menu)
+        self.toolbar.addWidget(self.delete_marked_btn)
+
+    def _delete_all_marked(self):
+        """Delete all marked images."""
+        if hasattr(self.main_window, 'image_list'):
+            self.main_window.image_list.delete_marked_images()
+
+    def _unmark_all_images(self):
+        """Unmark all images marked for deletion."""
+        if hasattr(self.main_window, 'image_list'):
+            self.main_window.image_list.unmark_all_images()
