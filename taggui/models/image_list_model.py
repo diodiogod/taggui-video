@@ -253,6 +253,7 @@ class ImageListModel(QAbstractListModel):
     total_count_changed = Signal(int)  # Emitted when total image count changes
     indexing_progress = Signal(int, int)  # (current, total) during initial indexing
     cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
+    enrichment_complete = Signal()  # Emitted when background enrichment finishes
 
     # Threshold for enabling pagination mode (number of images)
     PAGINATION_THRESHOLD = 5000
@@ -637,25 +638,8 @@ class ImageListModel(QAbstractListModel):
                     timestamp = time.strftime("%H:%M:%S")
                     print(f"[ENRICH {timestamp}] Processed {processed} dimension updates in {batch_time:.1f}ms")
 
-            # Trigger masonry recalc periodically during enrichment (every 1000 images)
-            # Make this conservative to avoid crashes
-            if updated_indices and not self._suppress_enrichment_signals:
-                if not hasattr(self, '_enrichment_recalc_counter'):
-                    self._enrichment_recalc_counter = 0
-                    self._last_recalc_time = time.time()  # Initialize to NOW, not 0
-                self._enrichment_recalc_counter += len(updated_indices)
-
-                # Only trigger if:
-                # 1. At least 1000 images enriched since last recalc
-                # 2. At least 5 seconds passed since last recalc (don't spam)
-                current_time = time.time()
-                if (self._enrichment_recalc_counter >= 1000 and
-                    current_time - self._last_recalc_time >= 5.0):
-                    self._enrichment_recalc_counter = 0
-                    self._last_recalc_time = current_time
-                    timestamp = time.strftime("%H:%M:%S")
-                    print(f"[ENRICH {timestamp}] Triggering incremental masonry recalc")
-                    self.layoutChanged.emit()
+            # DISABLED: Incremental recalcs during enrichment cause crashes/freezes on large datasets
+            # Only recalc once at the end when enrichment completes
 
             # Continue processing if queue has more items
             if not self._enrichment_queue.empty():
@@ -667,11 +651,23 @@ class ImageListModel(QAbstractListModel):
                 if self._enrichment_completed_flag:
                     self._enrichment_completed_flag = False
                     timestamp = time.strftime("%H:%M:%S")
-                    print(f"[ENRICH {timestamp}] Final masonry recalc after enrichment completion")
-                    # Rebuild aspect ratio cache with final dimensions
-                    self._rebuild_aspect_ratio_cache()
-                    # Emit layoutChanged to trigger full masonry recalc
-                    self.layoutChanged.emit()
+                    print(f"[ENRICH {timestamp}] Enrichment complete - waiting 2 seconds before final masonry recalc")
+
+                    # Wait 2 seconds to let DB commits, cache writes, etc. finish
+                    def trigger_final_recalc():
+                        timestamp = time.strftime("%H:%M:%S")
+                        print(f"[ENRICH {timestamp}] Triggering final masonry recalc")
+                        # Rebuild aspect ratio cache with final dimensions
+                        self._rebuild_aspect_ratio_cache()
+                        # Emit layoutChanged to trigger full masonry recalc
+                        self.layoutChanged.emit()
+
+                        # Signal that enrichment is complete (for cache warming to start)
+                        print(f"[ENRICH {timestamp}] Enrichment complete - cache warming can now start")
+                        self.enrichment_complete.emit()
+
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(2000, trigger_final_recalc)
 
                 # Check again in 100ms
                 if self._enrichment_timer:
