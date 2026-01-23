@@ -289,8 +289,8 @@ class ImageListModel(QAbstractListModel):
         self._aspect_ratio_cache: list[float] = []
 
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
-        # Load executor: 2 workers to minimize GIL contention (PIL blocks other threads)
-        self._load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_load")
+        # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
+        self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
         # Save executor: 2 workers for background cache writing (low priority, can be slow)
         self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
         # Page loader executor for paginated mode
