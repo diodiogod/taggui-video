@@ -361,6 +361,9 @@ class ImageListView(QListView):
         if hasattr(source_model, 'cache_warm_progress'):
             source_model.cache_warm_progress.connect(self._update_cache_warm_label)
 
+        # Start background cache status check (count cached items)
+        QTimer.singleShot(2000, self._check_cache_status)
+
         self.setWordWrap(True)
         self.setDragEnabled(True)
 
@@ -403,10 +406,18 @@ class ImageListView(QListView):
         # Cache warming status label (bottom-left overlay)
         self._cache_warm_label = None
 
+        # Persistent cache status label (bottom-right, shows total cached count)
+        self._cache_status_label = None
+
         # Idle timer for background cache warming (3 seconds after scroll stops)
         self._cache_warm_idle_timer = QTimer(self)
         self._cache_warm_idle_timer.setSingleShot(True)
         self._cache_warm_idle_timer.timeout.connect(self._start_cache_warming)
+
+        # Idle timer for flushing cache saves (2 seconds after scroll stops)
+        self._cache_flush_timer = QTimer(self)
+        self._cache_flush_timer.setSingleShot(True)
+        self._cache_flush_timer.timeout.connect(self._flush_cache_saves)
 
         # Resize debounce timer for smooth resizing with large datasets
         self._resize_timer = QTimer(self)
@@ -1676,6 +1687,9 @@ class ImageListView(QListView):
         self._mouse_scrolling = False
         # print("[SCROLL] Mouse scroll stopped")
 
+        # DON'T flush cache saves immediately - still might be scrolling
+        # Just mark that scroll detection stopped (200ms is too short for flush)
+
         # DON'T clear queues - rebuilding is expensive and causes freeze
         # Just let the preload continue from where it left off
         # Queues will self-correct as items get loaded
@@ -1687,15 +1701,25 @@ class ImageListView(QListView):
         # FORCE REPAINT to show thumbnails now that scrolling stopped
         self.viewport().update()
 
-        # Start cache warming timer (3 seconds after scroll stops)
+        # Start cache flush timer (2 seconds = truly idle)
+        self._cache_flush_timer.stop()
+        self._cache_flush_timer.start(2000)  # 2 seconds idle before flush
+
+        # Start cache warming timer (5 seconds after scroll stops)
         self._cache_warm_idle_timer.stop()
-        self._cache_warm_idle_timer.start(3000)  # 3 seconds idle
+        self._cache_warm_idle_timer.start(5000)  # 5 seconds idle
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
         super().scrollContentsBy(dx, dy)
 
-        # Cancel cache warming when scrolling starts
+        # Notify model that scrolling started (defer cache writes)
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, 'set_scrolling_state'):
+            source_model.set_scrolling_state(True)
+
+        # Cancel cache flush and warming timers when scrolling starts
+        self._cache_flush_timer.stop()
         self._cache_warm_idle_timer.stop()
         self._stop_cache_warming()
 
@@ -2422,6 +2446,99 @@ class ImageListView(QListView):
         if source_model and hasattr(source_model, 'stop_cache_warming'):
             source_model.stop_cache_warming()
 
+    def _flush_cache_saves(self):
+        """Flush pending cache saves after truly idle (2+ seconds)."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, 'set_scrolling_state'):
+            # Tell model scrolling stopped and flush pending saves
+            source_model.set_scrolling_state(False)
+
+    def _check_cache_status(self):
+        """Background check of cache status (count how many images are cached)."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if not source_model or not hasattr(source_model, 'images'):
+            return
+
+        from utils.thumbnail_cache import get_thumbnail_cache
+        cache = get_thumbnail_cache()
+
+        if not cache.enabled:
+            return
+
+        # Count cached items in background
+        def count_cached():
+            cached = 0
+            for image in source_model.images[:1000]:  # Check first 1000 quickly
+                try:
+                    mtime = image.path.stat().st_mtime
+                    cache_key = cache._get_cache_key(image.path, mtime, source_model.thumbnail_generation_width)
+                    cache_path = cache._get_cache_path(cache_key)
+                    if cache_path.exists():
+                        cached += 1
+                except Exception:
+                    pass
+            return cached, len(source_model.images)
+
+        # Run in thread pool to avoid blocking
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cache_check")
+        future = executor.submit(count_cached)
+
+        def on_done(f):
+            try:
+                cached, total = f.result()
+                # Extrapolate for full dataset
+                if total > 1000:
+                    cached = int((cached / 1000) * total)
+                print(f"[CACHE STATUS] Checked {total} images, {cached} cached ({int(cached/total*100)}%)")
+                self._update_cache_status_label(cached, total)
+            except Exception as e:
+                print(f"[CACHE STATUS] Error checking cache: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Use add_done_callback instead of timer
+        future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: on_done(f)))
+
+    def _update_cache_status_label(self, cached_count=0, total_count=0):
+        """Update persistent cache status label showing total cached images."""
+        if total_count == 0:
+            if self._cache_status_label:
+                self._cache_status_label.hide()
+            return
+
+        # Create label if needed
+        if not self._cache_status_label:
+            from PySide6.QtWidgets import QLabel
+            from PySide6.QtCore import Qt
+            self._cache_status_label = QLabel(self.viewport())
+            # Subtle gray styling for persistent status
+            self._cache_status_label.setStyleSheet("""
+                QLabel {
+                    background: rgba(40, 40, 45, 180);
+                    color: #b0b0b5;
+                    padding: 6px 12px;
+                    border-radius: 5px;
+                    font-size: 12px;
+                    font-family: monospace;
+                }
+            """)
+            self._cache_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Update text with percentage
+        percent = int((cached_count / total_count) * 100) if total_count > 0 else 0
+        self._cache_status_label.setText(f"💾 Cache: {cached_count:,} / {total_count:,} ({percent}%)")
+        self._cache_status_label.adjustSize()
+
+        # Position at bottom-right corner
+        viewport_rect = self.viewport().rect()
+        label_x = viewport_rect.width() - self._cache_status_label.width() - 20
+        label_y = viewport_rect.height() - self._cache_status_label.height() - 20
+        self._cache_status_label.move(label_x, label_y)
+
+        # Always show
+        self._cache_status_label.show()
+
     def _update_cache_warm_label(self, cached_count: int, total_count: int):
         """Update cache warming status label (bottom-left overlay)."""
         # Only show in pagination mode
@@ -2436,27 +2553,31 @@ class ImageListView(QListView):
             from PySide6.QtWidgets import QLabel
             from PySide6.QtCore import Qt
             self._cache_warm_label = QLabel(self.viewport())
-            # Reddish/orange tones to differentiate from page indicator
+            # Nice reddish gradient with warm tones
             self._cache_warm_label.setStyleSheet("""
                 QLabel {
-                    background-color: rgba(120, 40, 20, 180);
-                    color: #ffccaa;
-                    padding: 8px 16px;
-                    border-radius: 6px;
-                    font-size: 13px;
-                    font-weight: normal;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(180, 50, 30, 200),
+                        stop:1 rgba(200, 80, 50, 200));
+                    color: #ffe6d5;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    border: 2px solid rgba(255, 120, 80, 100);
+                    font-size: 14px;
+                    font-weight: 600;
+                    letter-spacing: 0.5px;
                 }
             """)
             self._cache_warm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Hide if cache warming is complete
-        if cached_count >= total_count:
+        # Hide if cache warming is complete or no work
+        if total_count == 0 or cached_count >= total_count:
             self._cache_warm_label.hide()
             return
 
-        # Update text and position
+        # Update text and position with nice formatting
         percent = int((cached_count / total_count) * 100) if total_count > 0 else 0
-        self._cache_warm_label.setText(f"Building cache: {cached_count}/{total_count} ({percent}%)")
+        self._cache_warm_label.setText(f"🔥 Building Cache: {cached_count:,} / {total_count:,} ({percent}%)")
         self._cache_warm_label.adjustSize()
 
         # Position at bottom-left corner
