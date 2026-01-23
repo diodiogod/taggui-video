@@ -315,12 +315,18 @@ class ImageListModel(QAbstractListModel):
         self._cache_saves_lock = threading.Lock()
         self._last_reported_saves = 0
 
+        # Track REAL cache status per image (scan once, update incrementally)
+        self._cache_status = {}  # Maps image index -> True if cached on disk
+        self._cache_status_lock = threading.Lock()
+        self._initial_cache_scan_done = False
+
         # Track background cache warming (proactive cache building when idle)
         self._cache_warm_cancelled = threading.Event()
         self._cache_warm_futures = []  # List of futures for cache warming tasks
         self._cache_warm_lock = threading.Lock()
         self._cache_warm_progress = 0  # How many images have been cache-warmed
         self._cache_warm_total = 0  # Total images to warm
+        self._cache_warm_running = False  # Is warming currently active?
 
         # Defer cache writes during scrolling to avoid I/O blocking
         self._is_scrolling = False  # Set by view during active scrolling
@@ -792,6 +798,12 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode:
             return
 
+        # Don't restart if already running
+        with self._cache_warm_lock:
+            if self._cache_warm_running:
+                return
+            self._cache_warm_running = True
+
         # Clear cancellation flag
         self._cache_warm_cancelled.clear()
 
@@ -801,28 +813,31 @@ class ImageListModel(QAbstractListModel):
                 future.cancel()
             self._cache_warm_futures.clear()
 
-        # Determine range to warm
-        # Start with nearby images (500 ahead), then continue to entire folder
+        # Determine range to warm - ENTIRE folder with nearby prioritized first
         total_images = len(self.images)
 
         if direction == 'down':
-            # Prioritize next 500, then rest of folder
+            # Prioritize next 500, then rest after, then before start
             priority_end = min(start_idx + 500, total_images)
             indices_to_warm = list(range(start_idx, priority_end))
-            # Then add rest of folder (lower priority)
+            # Then rest of folder after priority zone
             if priority_end < total_images:
                 indices_to_warm.extend(range(priority_end, total_images))
+            # Finally images before start_idx
+            if start_idx > 0:
+                indices_to_warm.extend(range(start_idx - 1, -1, -1))
         else:  # up
-            # Prioritize previous 500, then beginning of folder
+            # Prioritize previous 500, then rest before, then after start
             priority_start = max(start_idx - 500, 0)
             indices_to_warm = list(range(start_idx, priority_start, -1))
-            # Then add beginning of folder
+            # Then beginning of folder
             if priority_start > 0:
                 indices_to_warm.extend(range(priority_start - 1, -1, -1))
+            # Finally images after start_idx
+            if start_idx < total_images - 1:
+                indices_to_warm.extend(range(start_idx + 1, total_images))
 
-        # Filter out already-cached images
-        from utils.thumbnail_cache import get_thumbnail_cache
-        cache = get_thumbnail_cache()
+        # Filter out already-cached images using DB (FAST - no disk scans!)
         uncached_indices = []
 
         for idx in indices_to_warm:
@@ -835,28 +850,25 @@ class ImageListModel(QAbstractListModel):
             if image.thumbnail or image.thumbnail_qimage:
                 continue
 
-            # Check if in disk cache
-            if cache.enabled:
+            # Query DB directly for current cached status (don't rely on stale _db_cached_info)
+            if self._db and self._directory_path:
                 try:
-                    mtime = image.path.stat().st_mtime
-                    cache_key = cache._get_cache_key(image.path, mtime, self.thumbnail_generation_width)
-                    cache_path = cache._get_cache_path(cache_key)
-                    if cache_path.exists():
-                        continue  # Already cached
-                except Exception:
-                    pass
+                    relative_path = str(image.path.relative_to(self._directory_path))
+                    cached_info = self._db.get_cached_info(relative_path, image.path.stat().st_mtime)
+                    if cached_info and cached_info.get('thumbnail_cached', 0) == 1:
+                        continue  # DB says it's cached, skip
+                except (ValueError, OSError):
+                    pass  # Path error or file doesn't exist, assume uncached
 
+            # Not cached, add to warm list
             uncached_indices.append(idx)
 
         if not uncached_indices:
-            print(f"[CACHE WARM] All images cached! ({len(self.images)} total)")
             return
 
         # Store total for progress tracking
         self._cache_warm_total = len(uncached_indices)
         self._cache_warm_progress = 0
-
-        print(f"[CACHE WARM] Starting background cache warming: {len(uncached_indices)} images")
 
         # Emit initial progress to show label immediately
         self.cache_warm_progress.emit(0, len(uncached_indices))
@@ -875,14 +887,53 @@ class ImageListModel(QAbstractListModel):
             success = False
 
             try:
-                # Generate thumbnail (this is the expensive part)
-                result = self._load_thumbnail_worker(idx, image.path, image.crop,
-                                                      self.thumbnail_generation_width, image.is_video)
+                # Load thumbnail (generates if needed)
+                qimage, was_cached = load_thumbnail_data(image.path, image.crop,
+                                                         self.thumbnail_generation_width, image.is_video)
 
-                # Handle failed thumbnail generation (returns None)
-                if result is not None:
-                    qimage, was_cached = result
+                if qimage and not qimage.isNull():
+                    # Store in memory
+                    image.thumbnail_qimage = qimage
+                    image._last_thumbnail_was_cached = was_cached
                     success = True
+
+                    # If not from cache, save to disk cache
+                    if not was_cached:
+                        from PySide6.QtGui import QIcon, QPixmap
+                        pixmap = QPixmap.fromImage(qimage)
+                        icon = QIcon(pixmap)
+
+                        # Save to disk cache
+                        from utils.thumbnail_cache import get_thumbnail_cache
+                        get_thumbnail_cache().save_thumbnail(image.path, image.path.stat().st_mtime,
+                                                            self.thumbnail_generation_width, icon)
+
+                    # Mark in DB as cached (whether it was already cached or just generated)
+                    # Debug: log first check
+                    if not hasattr(self, '_db_check_logged'):
+                        print(f'[DB CHECK] _db={self._db is not None}, _directory_path={self._directory_path is not None}')
+                        if self._db:
+                            print(f'[DB CHECK] DB enabled={self._db.enabled}')
+                        self._db_check_logged = True
+
+                    if self._db and self._directory_path:
+                        try:
+                            relative_path = str(image.path.relative_to(self._directory_path))
+                            # Debug: log first 3 DB updates
+                            if not hasattr(self, '_db_update_log_count'):
+                                self._db_update_log_count = 0
+                            if self._db_update_log_count < 3:
+                                print(f'[DB UPDATE] Marking cached: {relative_path}')
+                                self._db_update_log_count += 1
+                            self._db.mark_thumbnail_cached(relative_path, cached=True)
+
+                            # Update in-memory flag so next warming cycle knows it's cached
+                            if not hasattr(image, '_db_cached_info') or image._db_cached_info is None:
+                                image._db_cached_info = {}
+                            image._db_cached_info['thumbnail_cached'] = 1
+                        except ValueError as e:
+                            print(f'[DB UPDATE ERROR] ValueError: {e} for path {image.path}')
+                            pass
 
                 # Check if cancelled after generation
                 if self._cache_warm_cancelled.is_set():
@@ -905,6 +956,29 @@ class ImageListModel(QAbstractListModel):
                 future = self._cache_warm_executor.submit(cache_warm_worker, idx)
                 self._cache_warm_futures.append(future)
 
+        # Add callback to mark warming complete when all futures finish
+        def on_warming_complete():
+            progress = self._cache_warm_progress
+            total = self._cache_warm_total
+            with self._cache_warm_lock:
+                self._cache_warm_running = False
+            print(f"[CACHE WARM] Completed - {progress}/{total} cached")
+            # Emit 0, 0 to signal completion and show real cache status
+            self.cache_warm_progress.emit(0, 0)
+
+        # Wait for all futures in background thread
+        def wait_for_completion():
+            for future in self._cache_warm_futures:
+                try:
+                    future.result()  # Wait for completion
+                except Exception:
+                    pass
+            on_warming_complete()
+
+        # Submit waiter to separate thread
+        import threading
+        threading.Thread(target=wait_for_completion, daemon=True).start()
+
     def stop_cache_warming(self):
         """Stop background cache warming immediately (called when user interacts)."""
         # Set cancellation flag
@@ -915,6 +989,7 @@ class ImageListModel(QAbstractListModel):
             for future in self._cache_warm_futures:
                 future.cancel()
             self._cache_warm_futures.clear()
+            self._cache_warm_running = False  # Allow restart
 
         # Reset progress
         self._cache_warm_progress = 0
@@ -922,6 +997,22 @@ class ImageListModel(QAbstractListModel):
 
         # Emit signal to hide label
         self.cache_warm_progress.emit(0, 0)
+
+    def get_cache_stats(self) -> tuple[int, int]:
+        """
+        Get real cache statistics from DB.
+        Returns: (cached_count, total_count)
+        """
+        if not self._db or not self._paginated_mode:
+            return (0, 0)
+
+        try:
+            cached = self._db.count_cached_thumbnails()
+            total = len(self.images)
+            return (cached, total)
+        except Exception as e:
+            print(f"[CACHE] Error getting cache stats: {e}")
+            return (0, 0)
 
     def set_scrolling_state(self, is_scrolling: bool):
         """
@@ -991,8 +1082,22 @@ class ImageListModel(QAbstractListModel):
         try:
             from utils.thumbnail_cache import get_thumbnail_cache
             get_thumbnail_cache().save_thumbnail(path, mtime, width, thumbnail)
+
+            # Mark as cached in DB (use relative path, not just filename)
+            if self._db and self._directory_path:
+                try:
+                    relative_path = str(path.relative_to(self._directory_path))
+                    self._db.mark_thumbnail_cached(relative_path, cached=True)
+                except ValueError:
+                    # Path not relative to directory, skip
+                    pass
+
             with self._cache_saves_lock:
                 self._cache_saves_count += 1
+
+                # Emit cache status update every 10 saves (not too spammy)
+                if self._cache_saves_count % 10 == 0:
+                    self.cache_warm_progress.emit(0, 0)  # Signal to refresh cache status
         except Exception as e:
             print(f"[CACHE] ERROR saving in background: {e}")
             import traceback
@@ -1167,13 +1272,6 @@ class ImageListModel(QAbstractListModel):
                 flag_value = getattr(image, '_last_thumbnail_was_cached', None) if has_flag else None
                 should_save = has_flag and not flag_value
 
-                # Debug: log first few saves to understand pattern
-                if should_save and not hasattr(self, '_cache_debug_count'):
-                    self._cache_debug_count = 0
-                if should_save and self._cache_debug_count < 5:
-                    print(f"[CACHE DEBUG] Saving {image.path.name}: has_flag={has_flag}, flag_value={flag_value}, should_save={should_save}")
-                    self._cache_debug_count += 1
-
                 if should_save:
                     # Defer cache writes during scrolling to avoid I/O blocking
                     if self._is_scrolling:
@@ -1186,8 +1284,6 @@ class ImageListModel(QAbstractListModel):
                             if queue_size >= 300:
                                 print(f"[CACHE] Queue full ({queue_size} items), force flushing...")
                                 self._flush_pending_cache_saves(force=True)
-                            elif queue_size % 50 == 0:
-                                print(f"[CACHE] Deferred {queue_size} cache writes during scroll")
                     else:
                         # Submit to save executor (low priority, won't compete with loads)
                         self._save_executor.submit(
@@ -1218,12 +1314,6 @@ class ImageListModel(QAbstractListModel):
                         # Save to disk cache in background thread if not from cache
                         if not was_cached:
                             # Debug: why are we saving this?
-                            if not hasattr(self, '_cache_debug_count2'):
-                                self._cache_debug_count2 = 0
-                            if self._cache_debug_count2 < 5:
-                                print(f"[CACHE DEBUG PATH2] Saving {image.path.name}: was_cached={was_cached}")
-                                self._cache_debug_count2 += 1
-
                             mtime = image.path.stat().st_mtime
                             # Defer during scroll to avoid I/O blocking
                             if self._is_scrolling:
@@ -1533,6 +1623,8 @@ class ImageListModel(QAbstractListModel):
                     tags = [tag for tag in tags if tag]
             image = Image(image_path, dimensions, tags, is_video=is_video,
                          video_metadata=video_metadata)
+            # Store DB cached info (including thumbnail_cached flag) for fast cache checks
+            image._db_cached_info = cached if cached else {}
             json_file_path = image_path.with_suffix('.json')
             if (str(json_file_path) in json_file_path_strings and
                 json_file_path.stat().st_size > 0):

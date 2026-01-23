@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 3  # Increment to force cache invalidation (v3: add tags table and indexes for pagination)
+DB_VERSION = 5  # Increment to force cache invalidation (v5: fix thumbnail_cached column creation)
 
 
 class ImageIndexDB:
@@ -22,6 +22,10 @@ class ImageIndexDB:
 
         self.db_path = directory_path / '.taggui_index.db'
         self.conn = None
+
+        # Lock for thread-safe DB access (multiple worker threads)
+        import threading
+        self._db_lock = threading.Lock()
 
         if self.enabled:
             self._init_db()
@@ -74,7 +78,8 @@ class ImageIndexDB:
                     video_frame_count INTEGER,
                     mtime REAL NOT NULL,
                     rating REAL DEFAULT 0.0,
-                    indexed_at REAL
+                    indexed_at REAL,
+                    thumbnail_cached INTEGER DEFAULT 0
                 )
             ''')
 
@@ -94,6 +99,7 @@ class ImageIndexDB:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
 
@@ -107,11 +113,50 @@ class ImageIndexDB:
                              ('version', str(DB_VERSION)))
                 self.conn.commit()
             elif int(row['value']) != DB_VERSION:
-                # Version mismatch, clear database
-                cursor.execute('DELETE FROM images')
+                # Version mismatch, drop and recreate tables (schema changed)
+                print(f'Database version mismatch (v{row["value"]} -> v{DB_VERSION}), recreating tables...')
+                cursor.execute('DROP TABLE IF EXISTS images')
+                cursor.execute('DROP TABLE IF EXISTS image_tags')
                 cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
                              (str(DB_VERSION), 'version'))
                 self.conn.commit()
+                # Recreate tables with new schema
+                cursor.execute('''
+                    CREATE TABLE images (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file_name TEXT UNIQUE NOT NULL,
+                        width INTEGER NOT NULL,
+                        height INTEGER NOT NULL,
+                        aspect_ratio REAL NOT NULL,
+                        is_video INTEGER NOT NULL,
+                        video_fps REAL,
+                        video_duration REAL,
+                        video_frame_count INTEGER,
+                        mtime REAL NOT NULL,
+                        rating REAL DEFAULT 0.0,
+                        indexed_at REAL,
+                        thumbnail_cached INTEGER DEFAULT 0
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE TABLE image_tags (
+                        image_id INTEGER NOT NULL,
+                        tag TEXT NOT NULL,
+                        PRIMARY KEY (image_id, tag),
+                        FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                    )
+                ''')
+                # Recreate indexes
+                cursor.execute('CREATE INDEX idx_images_mtime ON images(mtime)')
+                cursor.execute('CREATE INDEX idx_images_filename ON images(file_name)')
+                cursor.execute('CREATE INDEX idx_images_aspect_ratio ON images(aspect_ratio)')
+                cursor.execute('CREATE INDEX idx_images_is_video ON images(is_video)')
+                cursor.execute('CREATE INDEX idx_images_rating ON images(rating)')
+                cursor.execute('CREATE INDEX idx_images_thumbnail_cached ON images(thumbnail_cached)')
+                cursor.execute('CREATE INDEX idx_tags_tag ON image_tags(tag)')
+                cursor.execute('CREATE INDEX idx_tags_image_id ON image_tags(image_id)')
+                self.conn.commit()
+                print(f'Database recreated with v{DB_VERSION} schema')
 
         except sqlite3.Error as e:
             print(f'Failed to initialize database: {e}')
@@ -142,7 +187,7 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT width, height, is_video, video_fps, video_duration,
-                       video_frame_count, mtime
+                       video_frame_count, mtime, thumbnail_cached
                 FROM images
                 WHERE file_name = ?
             ''', (file_name,))
@@ -157,7 +202,8 @@ class ImageIndexDB:
 
             result = {
                 'dimensions': (row['width'], row['height']),
-                'is_video': bool(row['is_video'])
+                'is_video': bool(row['is_video']),
+                'thumbnail_cached': bool(row['thumbnail_cached'])
             }
 
             if row['is_video']:
@@ -209,11 +255,24 @@ class ImageIndexDB:
         for attempt in range(max_retries):
             try:
                 cursor = self.conn.cursor()
+                # Use INSERT ... ON CONFLICT to preserve thumbnail_cached flag
                 cursor.execute('''
-                    INSERT OR REPLACE INTO images
+                    INSERT INTO images
                     (file_name, width, height, aspect_ratio, is_video, video_fps,
                      video_duration, video_frame_count, mtime, rating, indexed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_name) DO UPDATE SET
+                        width = excluded.width,
+                        height = excluded.height,
+                        aspect_ratio = excluded.aspect_ratio,
+                        is_video = excluded.is_video,
+                        video_fps = excluded.video_fps,
+                        video_duration = excluded.video_duration,
+                        video_frame_count = excluded.video_frame_count,
+                        mtime = excluded.mtime,
+                        rating = excluded.rating,
+                        indexed_at = excluded.indexed_at
+                        -- thumbnail_cached intentionally NOT updated (preserve existing value)
                 ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
                       video_duration, video_frame_count, mtime, rating, indexed_at))
                 return  # Success
@@ -285,6 +344,10 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database count error: {e}')
             return 0
+
+    def count_cached_thumbnails(self) -> int:
+        """Get count of images with cached thumbnails."""
+        return self.count(filter_sql='thumbnail_cached = 1')
 
     def get_page(self, page: int, page_size: int = 1000,
                  sort_field: str = 'mtime', sort_dir: str = 'DESC',
@@ -506,6 +569,32 @@ class ImageIndexDB:
             cursor.execute('UPDATE images SET rating = ? WHERE id = ?', (rating, image_id))
         except sqlite3.Error as e:
             print(f'Database rating write error: {e}')
+
+    def mark_thumbnail_cached(self, file_name: str, cached: bool = True):
+        """Mark thumbnail as cached/uncached for an image (thread-safe)."""
+        if not self.enabled or not self.conn:
+            return
+
+        # Use lock to prevent concurrent access from multiple threads
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('UPDATE images SET thumbnail_cached = ? WHERE file_name = ?',
+                             (1 if cached else 0, file_name))
+                affected = cursor.rowcount
+                self.conn.commit()
+
+                # Debug: warn if UPDATE matched no rows (first 5 misses only)
+                if affected == 0 and not hasattr(self, '_warned_miss_count'):
+                    self._warned_miss_count = 0
+                if affected == 0 and self._warned_miss_count < 5:
+                    print(f'[DB] UPDATE matched 0 rows for: {file_name}')
+                    self._warned_miss_count += 1
+                    if self._warned_miss_count == 5:
+                        print('[DB] (suppressing further warnings...)')
+
+            except sqlite3.Error as e:
+                print(f'Database thumbnail cache flag write error: {e}')
 
     # ========== Image ID Lookup ==========
 
