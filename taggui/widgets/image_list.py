@@ -1076,14 +1076,15 @@ class ImageListView(QListView):
         # Determine batch sizes based on scroll state
         if self._scrollbar_dragging or self._mouse_scrolling:
             # During active scrolling: ONLY load urgent (visible) items
-            urgent_batch = 10   # Load visible items immediately
+            # Keep batch small to avoid lock contention on main thread
+            urgent_batch = 5    # Load visible items (small batches = less blocking)
             high_batch = 0      # Pause near buffer
             low_batch = 0       # Pause far buffer
         else:
-            # Idle state: Aggressive loading to build buffer quickly
-            urgent_batch = 15   # Very fast loading of visible
-            high_batch = 10     # Fast loading of near buffer
-            low_batch = 5       # Moderate loading of far buffer
+            # Idle state: Larger batches (6 workers can process these quickly)
+            urgent_batch = 20   # Moderate loading of visible
+            high_batch = 15     # Fast loading of near buffer
+            low_batch = 10      # Moderate loading of far buffer
 
         # Process queues in priority order
         def process_queue(queue, batch_size):
@@ -1112,13 +1113,15 @@ class ImageListView(QListView):
 
         # Continue preloading if any queue has items
         if self._urgent_queue or self._high_queue or self._low_queue:
-            # Adaptive cadence: faster for urgent items, slower for low priority
-            if self._urgent_queue:
-                cadence = 50   # 50ms for urgent items (very fast)
+            # Adaptive cadence: slower during scroll to reduce main thread overhead
+            if self._scrollbar_dragging or self._mouse_scrolling:
+                cadence = 100  # 100ms during scroll (reduce overhead)
+            elif self._urgent_queue:
+                cadence = 30   # 30ms for urgent when idle (fast)
             elif self._high_queue:
-                cadence = 100  # 100ms for high priority (normal)
+                cadence = 50   # 50ms for high priority when idle
             else:
-                cadence = 200  # 200ms for low priority (gentle)
+                cadence = 100  # 100ms for low priority
             self._idle_preload_timer.start(cadence)
 
         # Evict thumbnails far from current view (keep VRAM under control)
@@ -1669,6 +1672,9 @@ class ImageListView(QListView):
         self._idle_preload_timer.stop()
         self._idle_preload_timer.start(0)  # Immediate start - no delay
 
+        # FORCE REPAINT to show thumbnails now that scrolling stopped
+        self.viewport().update()
+
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
         super().scrollContentsBy(dx, dy)
@@ -1728,6 +1734,24 @@ class ImageListView(QListView):
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
+        # THROTTLE painting during active scrolling to prevent UI blocking
+        # Skip paint if we painted too recently (< 16ms ago = faster than 60fps)
+        if self.use_masonry:
+            import time
+            current_time = time.time()
+            if not hasattr(self, '_last_paint_time'):
+                self._last_paint_time = 0
+
+            # During scrolling, throttle to max 30fps (33ms between paints)
+            # This prevents overwhelming the GPU with too many repaints
+            if self._scrollbar_dragging or self._mouse_scrolling:
+                time_since_paint = (current_time - self._last_paint_time) * 1000
+                if time_since_paint < 33:  # 33ms = 30fps
+                    event.accept()
+                    return  # Skip this paint, too soon
+
+            self._last_paint_time = current_time
+
         if self.use_masonry and self._masonry_items and self.model():
             try:
                 import time
@@ -1794,22 +1818,32 @@ class ImageListView(QListView):
                     if is_current:
                         option.state |= QStyle.StateFlag.State_HasFocus
 
-                    # Paint using delegate
-                    self.itemDelegate().paint(painter, option, index)
+                    # SMART FAST SCROLL: Always show loaded thumbnails
+                    # Only skip delegate for items that aren't loaded yet
+                    source_model = self.model().sourceModel()
+                    has_thumbnail = False
+                    if source_model and item['index'] < len(source_model.images):
+                        image = source_model.images[item['index']]
+                        has_thumbnail = bool(image.thumbnail or image.thumbnail_qimage)
 
-                    # Draw selection border on top in masonry mode (delegate doesn't show it clearly in IconMode)
-                    if is_selected or is_current:
-                        painter.save()
-                        if is_current:
-                            # Current item: thicker blue border
-                            pen = QPen(QColor(0, 120, 215), 4)  # Windows blue
-                        else:
-                            # Just selected: thinner blue border
-                            pen = QPen(QColor(0, 120, 215), 2)
-                        painter.setPen(pen)
-                        painter.setBrush(Qt.BrushStyle.NoBrush)
-                        painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
-                        painter.restore()
+                    # If thumbnail is loaded OR not scrolling, use full delegate
+                    if has_thumbnail or not (self._mouse_scrolling or self._scrollbar_dragging):
+                        # Paint using delegate (shows thumbnail or placeholder)
+                        self.itemDelegate().paint(painter, option, index)
+
+                        # Draw selection border on top
+                        if is_selected or is_current:
+                            painter.save()
+                            pen = QPen(QColor(0, 120, 215), 4 if is_current else 2)
+                            painter.setPen(pen)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
+                            painter.restore()
+                    else:
+                        # Fast scroll + no thumbnail: draw nothing (skip delegate entirely)
+                        # This prevents expensive delegate calls for unloaded items during scroll
+                        # Just draw background to clear the area
+                        painter.fillRect(visual_rect, self.palette().base())
                         # Debug: show rect for selected items
                         # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
 
