@@ -250,10 +250,24 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(thumbnail_cache_location_button, 3, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        # Cache management section (continue grid layout)
-        grid_layout.addWidget(QLabel(''), 4, 0)  # Spacer row
+        # Thumbnail eviction pages (VRAM management)
+        grid_layout.addWidget(QLabel('Thumbnail eviction pages (VRAM)'), 4, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        eviction_pages_spin_box = SettingsSpinBox(
+            key='thumbnail_eviction_pages',
+            minimum=1, maximum=5)
+        eviction_pages_spin_box.setToolTip(
+            'How many pages to keep loaded on each side of visible area.\n'
+            '1 = ~2000 thumbnails (low VRAM)\n'
+            '3 = ~6000 thumbnails (default)\n'
+            '5 = ~10000 thumbnails (high VRAM, smoother scrolling)')
+        grid_layout.addWidget(eviction_pages_spin_box, 4, 1,
+                              Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Cache Management'), 5, 0,
+        # Cache management section (continue grid layout)
+        grid_layout.addWidget(QLabel(''), 5, 0)  # Spacer row
+
+        grid_layout.addWidget(QLabel('Cache Management'), 6, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         cache_buttons_layout = QVBoxLayout()
@@ -328,7 +342,7 @@ class SettingsDialog(QDialog):
         cache_buttons_layout.addSpacing(10)
         cache_buttons_layout.addLayout(all_db_row_layout)
 
-        grid_layout.addLayout(cache_buttons_layout, 5, 1,
+        grid_layout.addLayout(cache_buttons_layout, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         layout.addLayout(grid_layout)
