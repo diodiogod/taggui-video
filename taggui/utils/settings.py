@@ -5,7 +5,7 @@ DEFAULT_SETTINGS = {
     'font_size': 16,
     # Common image formats that are supported in PySide6, as well as JPEG XL and video formats.
     'image_list_file_formats': 'bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp, mp4, avi, mov, mkv, webm',
-    'image_list_image_width': 200,
+    'image_list_image_width': 120,  # Default to masonry view (threshold is 150)
     'tag_separator': ',',
     'insert_space_after_tag_separator': True,
     'autocomplete_tags': True,
@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
     'enable_dimension_cache': True,
     'enable_thumbnail_cache': True,
     'thumbnail_cache_location': '',  # Empty = default (~/.taggui_cache/thumbnails)
+    'thumbnail_eviction_pages': 3,  # How many pages to keep loaded on each side (1-5, higher = more VRAM but smoother)
 }
 
 
