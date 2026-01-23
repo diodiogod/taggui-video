@@ -131,6 +131,13 @@ class MainWindow(QMainWindow):
         # Connect all signals
         self.signal_manager.connect_all_signals()
 
+        # Create status bar and connect cache warming updates
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(False)  # Disable resize grip for cleaner look
+        self.image_list_model.cache_warm_progress.connect(self._update_cache_status)
+        # Trigger initial update to show cache status
+        QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
+
         # Connect video playback signals to freeze list view during playback
         self.image_viewer.video_player.playback_started.connect(self._freeze_list_view)
         self.image_viewer.video_player.playback_paused.connect(self._unfreeze_list_view)
@@ -657,3 +664,24 @@ class MainWindow(QMainWindow):
         # Save and update menu
         settings.setValue('recent_directories', recent_dirs)
         self.menu_manager._update_recent_folders_menu()
+
+    def _update_cache_status(self, progress: int, total: int):
+        """Update status bar with cache warming progress."""
+        # Create persistent label if needed (right-aligned in status bar)
+        if not hasattr(self, '_cache_status_label'):
+            from PySide6.QtWidgets import QLabel
+            self._cache_status_label = QLabel()
+            self.statusBar().addPermanentWidget(self._cache_status_label)
+
+        if total == 0:
+            # No warming active, show real cache stats
+            cached, total_images = self.image_list_model.get_cache_stats()
+            if total_images > 0:
+                percent = int((cached / total_images) * 100)
+                self._cache_status_label.setText(f"💾 Cache: {cached:,} / {total_images:,} ({percent}%)")
+            else:
+                self._cache_status_label.setText("")
+        else:
+            # Warming active, show progress
+            percent = int((progress / total) * 100) if total > 0 else 0
+            self._cache_status_label.setText(f"🔥 Building cache: {progress:,} / {total:,} ({percent}%)")
