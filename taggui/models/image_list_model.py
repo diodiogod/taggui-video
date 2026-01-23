@@ -332,6 +332,8 @@ class ImageListModel(QAbstractListModel):
         self._is_scrolling = False  # Set by view during active scrolling
         self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail) to save when idle
         self._pending_cache_saves_lock = threading.Lock()
+        self._pending_db_cache_flags = []  # Batch DB updates for thumbnail_cached flag (file_name strings)
+        self._pending_db_cache_flags_lock = threading.Lock()
 
         # Track background enrichment
         self._enrichment_cancelled = threading.Event()
@@ -1042,14 +1044,40 @@ class ImageListModel(QAbstractListModel):
             sample_names = [p.name for p, _, _, _ in self._pending_cache_saves[:3]]
             print(f"[CACHE] Flushing {count} pending cache saves (batch write) - e.g., {sample_names}")
 
-            # Submit all pending saves to background executor (2 workers, won't block main thread)
-            for path, mtime, width, thumbnail in self._pending_cache_saves:
+            # Move list instead of copying to avoid QIcon copy overhead
+            saves_to_submit = self._pending_cache_saves
+            self._pending_cache_saves = []
+
+        # Submit in background to avoid blocking (don't hold lock during submission loop)
+        from PySide6.QtCore import QTimer
+
+        # Track chunk index in closure
+        chunk_state = {'index': 0}
+        CHUNK_SIZE = 25  # Smaller chunks for smoother UI
+
+        def submit_next_chunk():
+            """Submit one chunk at a time, yielding between chunks."""
+            i = chunk_state['index']
+            if i >= len(saves_to_submit):
+                return  # Done
+
+            # Submit one chunk
+            chunk_end = min(i + CHUNK_SIZE, len(saves_to_submit))
+            for path, mtime, width, thumbnail in saves_to_submit[i:chunk_end]:
                 self._save_executor.submit(
                     self._save_thumbnail_worker,
                     path, mtime, width, thumbnail
                 )
 
-            self._pending_cache_saves.clear()
+            # Move to next chunk
+            chunk_state['index'] = chunk_end
+
+            # Schedule next chunk (yields to event loop)
+            if chunk_state['index'] < len(saves_to_submit):
+                QTimer.singleShot(0, submit_next_chunk)
+
+        # Start submission in next event loop iteration
+        QTimer.singleShot(0, submit_next_chunk)
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
@@ -1085,11 +1113,15 @@ class ImageListModel(QAbstractListModel):
             from utils.thumbnail_cache import get_thumbnail_cache
             get_thumbnail_cache().save_thumbnail(path, mtime, width, thumbnail)
 
-            # Mark as cached in DB (use relative path, not just filename)
+            # Queue DB update instead of doing it immediately (batch for performance)
             if self._db and self._directory_path:
                 try:
                     relative_path = str(path.relative_to(self._directory_path))
-                    self._db.mark_thumbnail_cached(relative_path, cached=True)
+                    with self._pending_db_cache_flags_lock:
+                        self._pending_db_cache_flags.append(relative_path)
+                        # Flush DB updates every 100 items to avoid huge batches
+                        if len(self._pending_db_cache_flags) >= 100:
+                            self._flush_db_cache_flags()
                 except ValueError:
                     # Path not relative to directory, skip
                     pass
@@ -1104,6 +1136,28 @@ class ImageListModel(QAbstractListModel):
             print(f"[CACHE] ERROR saving in background: {e}")
             import traceback
             traceback.print_exc()
+
+    def _flush_db_cache_flags(self):
+        """Batch update DB thumbnail_cached flags (called from worker thread)."""
+        with self._pending_db_cache_flags_lock:
+            if not self._pending_db_cache_flags:
+                return
+
+            batch = list(self._pending_db_cache_flags)
+            self._pending_db_cache_flags.clear()
+
+        # Batch DB update (single transaction for all flags)
+        if self._db:
+            try:
+                with self._db._db_lock:
+                    cursor = self._db.conn.cursor()
+                    cursor.executemany(
+                        'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ?',
+                        [(file_name,) for file_name in batch]
+                    )
+                    self._db.conn.commit()
+            except Exception as e:
+                print(f"[DB] ERROR batch updating thumbnail_cached flags: {e}")
 
     def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
         """Load thumbnail in background thread, then notify UI."""
