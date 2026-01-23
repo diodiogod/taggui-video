@@ -70,7 +70,8 @@ if __name__ == '__main__':
     try:
         run_gui()
     except Exception as exception:
-        settings.clear()
+        # DON'T clear settings on every crash - only show error
+        # settings.clear()  # REMOVED: This destroys user's recent files/settings on any crash
         error_message_box = QMessageBox()
         error_message_box.setWindowTitle('Error')
         error_message_box.setIcon(QMessageBox.Icon.Critical)

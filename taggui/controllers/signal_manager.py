@@ -132,7 +132,12 @@ class SignalManager:
             lambda: tag_counter_model.count_tags_filtered(
                 proxy_image_list_model.get_list() if
                 len(proxy_image_list_model.filter or [])>0 else None))
+        # Connect deletion marking signals
+        image_list.deletion_marking_changed.connect(self._update_delete_button_visibility)
+
         image_list.list_view.directory_reload_requested.connect(
+            self.main_window.reload_directory)
+        image_list.directory_reload_requested.connect(
             self.main_window.reload_directory)
         image_list.list_view.tags_paste_requested.connect(
             image_list_model.add_tags)
@@ -336,3 +341,9 @@ class SignalManager:
         video_controls = self.main_window.image_viewer.video_controls
         setattr(video_controls, 'fixed_marker_size', value)
         settings.setValue('fixed_marker_size', value)
+
+    def _update_delete_button_visibility(self):
+        """Show/hide delete marked menu based on whether any images are marked."""
+        if hasattr(self.main_window, 'image_list') and hasattr(self.main_window, 'menu_manager'):
+            count = self.main_window.image_list.get_marked_for_deletion_count()
+            self.main_window.menu_manager.update_delete_marked_menu(count)

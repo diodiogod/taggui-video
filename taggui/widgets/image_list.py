@@ -209,6 +209,19 @@ class ImageDelegate(QStyledItemDelegate):
         # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)
 
+        # Draw red border for images marked for deletion (thick, appears below blue border)
+        try:
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image and hasattr(image, 'marked_for_deletion') and image.marked_for_deletion:
+                painter.save()
+                pen = QPen(QColor(255, 0, 0), 8)  # Thick border (8px)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(option.rect.adjusted(2, 2, -2, -2))
+                painter.restore()
+        except (RuntimeError, AttributeError):
+            pass
+
     def update_label(self, index: QModelIndex, label: str):
         p_index = QPersistentModelIndex(index)
         self.labels[p_index] = label
@@ -1430,13 +1443,13 @@ class ImageListView(QListView):
         drag.exec(supportedActions)
 
     def resizeEvent(self, event):
-        """Recalculate masonry layout on resize (debounced for large datasets)."""
+        """Recalculate masonry layout on resize (debounced)."""
         super().resizeEvent(event)
         if self.use_masonry:
-            # Debounce: Only recalculate after user stops resizing for 300ms
-            # This prevents janky resize with 32K items
+            # Debounce: recalculate 50ms after last resize event
+            # Fast enough to feel live, but prevents recalc on every pixel
             self._resize_timer.stop()
-            self._resize_timer.start(300)  # Wait 300ms after last resize
+            self._resize_timer.start(50)
 
     def _on_resize_finished(self):
         """Called after resize stops (debounced)."""
@@ -1591,14 +1604,13 @@ class ImageListView(QListView):
 
     def mouseDoubleClickEvent(self, event):
         """Handle double-click events."""
-        # Alt+double-click opens image in default app
-        if event.modifiers() & Qt.AltModifier:
-            index = self.indexAt(event.pos())
-            if index.isValid():
-                # Get the image at this index
-                image = index.data(Qt.ItemDataRole.UserRole)
-                if image:
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path)))
+        # Double-click opens image in default app
+        index = self.indexAt(event.pos())
+        if index.isValid():
+            # Get the image at this index
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path)))
                 event.accept()
                 return
 
@@ -1617,6 +1629,26 @@ class ImageListView(QListView):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        """Handle keyboard events in the image list."""
+        if event.key() == Qt.Key.Key_Delete:
+            # Toggle deletion marking for selected images
+            selected_indices = self.selectedIndexes()
+            if selected_indices:
+                # Walk up the parent chain to find ImageList
+                parent = self.parent()
+                if parent:
+                    parent = parent.parent()
+                try:
+                    parent.toggle_deletion_marking()
+                    event.accept()
+                    return
+                except Exception as e:
+                    print(f"[ERROR] Failed to toggle deletion marking: {e}")
+
+        # Default behavior for other keys
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
@@ -2449,6 +2481,9 @@ class ImageListView(QListView):
 
 
 class ImageList(QDockWidget):
+    deletion_marking_changed = Signal()
+    directory_reload_requested = Signal()
+
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
         super().__init__()
@@ -2480,14 +2515,25 @@ class ImageList(QDockWidget):
 
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)
+
+        # Status bar with image index (left) and cache status (right) on same line
         self.image_index_label = QLabel()
+        self.cache_status_label = QLabel()
+        status_layout = QHBoxLayout()
+        status_layout.setContentsMargins(5, 2, 5, 2)
+        status_layout.addWidget(self.image_index_label)
+        status_layout.addStretch()  # Push cache label to the right
+        status_layout.addWidget(self.cache_status_label)
+
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        layout.setSpacing(0)  # Remove spacing between widgets
         layout.addWidget(self.filter_line_edit)
         layout.addLayout(selection_sort_layout)
         layout.addWidget(self.list_view)
-        layout.addWidget(self.image_index_label)
+        layout.addLayout(status_layout)
         self.setWidget(container)
 
         self.selection_mode_combo_box.currentTextChanged.connect(
@@ -2496,6 +2542,13 @@ class ImageList(QDockWidget):
 
         # Connect sort signal
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_changed)
+
+        # Connect cache warming signal to update cache status label
+        source_model = proxy_image_list_model.sourceModel()
+        if hasattr(source_model, 'cache_warm_progress'):
+            source_model.cache_warm_progress.connect(self._update_cache_status)
+            # Trigger initial update
+            QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
 
     def set_selection_mode(self, selection_mode: str):
         if selection_mode == SelectionMode.DEFAULT:
@@ -2514,6 +2567,25 @@ class ImageList(QDockWidget):
         if image_count != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)
+
+    def _update_cache_status(self, progress: int, total: int):
+        """Update cache status label (right side of status bar)."""
+        source_model = self.proxy_image_list_model.sourceModel()
+        if total == 0:
+            # No warming active, show real cache stats
+            if hasattr(source_model, 'get_cache_stats'):
+                cached, total_images = source_model.get_cache_stats()
+                if total_images > 0:
+                    percent = int((cached / total_images) * 100)
+                    self.cache_status_label.setText(f"💾 Cache: {cached:,} / {total_images:,} ({percent}%)")
+                else:
+                    self.cache_status_label.setText("")
+            else:
+                self.cache_status_label.setText("")
+        else:
+            # Warming active, show progress
+            percent = int((progress / total) * 100) if total > 0 else 0
+            self.cache_status_label.setText(f"🔥 Building cache: {progress:,} / {total:,} ({percent}%)")
 
     @Slot()
     def go_to_previous_image(self):
@@ -2615,4 +2687,144 @@ class ImageList(QDockWidget):
             traceback.print_exc()
             # Ensure layoutChanged is emitted even on error
             source_model.layoutChanged.emit()
+
+    @Slot()
+    def toggle_deletion_marking(self):
+        """Toggle the deletion marking for selected images."""
+        selected_indices = self.list_view.selectedIndexes()
+        print(f"[DEBUG] toggle_deletion_marking called, selected_indices: {len(selected_indices)}")
+        if not selected_indices:
+            return
+
+        # Get the images and toggle their marking
+        for proxy_index in selected_indices:
+            source_index = self.proxy_image_list_model.mapToSource(proxy_index)
+            image = self.proxy_image_list_model.sourceModel().data(
+                source_index, Qt.ItemDataRole.UserRole)
+            if image:
+                old_value = image.marked_for_deletion
+                image.marked_for_deletion = not image.marked_for_deletion
+                print(f"[DEBUG] Toggled image {image.path.name}: {old_value} -> {image.marked_for_deletion}")
+
+        # Trigger repaint
+        self.list_view.viewport().update()
+
+        # Emit signal to update delete button visibility
+        print(f"[DEBUG] Emitting deletion_marking_changed signal")
+        self.deletion_marking_changed.emit()
+
+    def get_marked_for_deletion_count(self):
+        """Get count of images marked for deletion."""
+        source_model = self.proxy_image_list_model.sourceModel()
+        count = 0
+        for row in range(source_model.rowCount()):
+            index = source_model.index(row, 0)
+            image = source_model.data(index, Qt.ItemDataRole.UserRole)
+            if image and hasattr(image, 'marked_for_deletion') and image.marked_for_deletion:
+                count += 1
+        return count
+
+    @Slot()
+    def unmark_all_images(self):
+        """Remove deletion marking from all images."""
+        source_model = self.proxy_image_list_model.sourceModel()
+        for row in range(source_model.rowCount()):
+            index = source_model.index(row, 0)
+            image = source_model.data(index, Qt.ItemDataRole.UserRole)
+            if image and hasattr(image, 'marked_for_deletion'):
+                image.marked_for_deletion = False
+
+        # Trigger repaint
+        self.list_view.viewport().update()
+
+        # Emit signal to update delete button visibility
+        self.deletion_marking_changed.emit()
+
+    @Slot()
+    def delete_marked_images(self):
+        """Delete all images marked for deletion."""
+        source_model = self.proxy_image_list_model.sourceModel()
+        marked_images = []
+
+        # Collect all marked images
+        for row in range(source_model.rowCount()):
+            index = source_model.index(row, 0)
+            image = source_model.data(index, Qt.ItemDataRole.UserRole)
+            if image and hasattr(image, 'marked_for_deletion') and image.marked_for_deletion:
+                marked_images.append(image)
+
+        if not marked_images:
+            return
+
+        marked_count = len(marked_images)
+        title = f'Delete {pluralize("Image", marked_count)}'
+        question = (f'Delete {marked_count} marked '
+                    f'{pluralize("image", marked_count)} and '
+                    f'{"its" if marked_count == 1 else "their"} '
+                    f'{pluralize("caption", marked_count)}?')
+        reply = get_confirmation_dialog_reply(title, question)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Similar cleanup logic as delete_selected_images
+        main_window = self.parent()
+        video_was_cleaned = False
+        if hasattr(main_window, 'image_viewer') and hasattr(main_window.image_viewer, 'video_player'):
+            video_player = main_window.image_viewer.video_player
+            if video_player.video_path:
+                currently_loaded_path = Path(video_player.video_path)
+                for image in marked_images:
+                    if image.path == currently_loaded_path:
+                        video_player.cleanup()
+                        video_was_cleaned = True
+                        break
+
+        # Clear thumbnails
+        for image in marked_images:
+            if hasattr(image, 'is_video') and image.is_video and image.thumbnail:
+                image.thumbnail = None
+
+        if video_was_cleaned:
+            from PySide6.QtCore import QThread
+            QThread.msleep(100)
+            QApplication.processEvents()
+
+        # Delete files with retries
+        import gc
+        max_retries = 3
+        for image in marked_images:
+            success = False
+            for attempt in range(max_retries):
+                if attempt > 0:
+                    QThread.msleep(150)
+                    QApplication.processEvents()
+                    gc.collect()
+
+                image_file = QFile(str(image.path))
+                if image_file.moveToTrash():
+                    success = True
+                    break
+                elif attempt == max_retries - 1:
+                    reply = QMessageBox.question(
+                        self, 'Trash Failed',
+                        f'Could not move {image.path.name} to trash.\nDelete permanently?',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        if image_file.remove():
+                            success = True
+
+            if not success:
+                QMessageBox.critical(self, 'Error', f'Failed to delete {image.path}.')
+                continue
+
+            # Delete caption file
+            caption_file_path = image.path.with_suffix('.txt')
+            if caption_file_path.exists():
+                caption_file = QFile(caption_file_path)
+                if not caption_file.moveToTrash():
+                    caption_file.remove()
+
+        self.directory_reload_requested.emit()
 
