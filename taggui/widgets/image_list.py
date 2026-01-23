@@ -1047,95 +1047,30 @@ class ImageListView(QListView):
             self._low_queue = []       # Far buffer - load with low priority
             self._scroll_direction = None  # Track scroll direction for predictive loading
 
-        # Build multi-priority preload queues if empty (URGENT → HIGH → LOW)
-        if not self._urgent_queue and not self._high_queue and not self._low_queue:
-            # Get visible items
+        # Build multi-priority preload queues if empty OR if we scrolled far away
+        # Check if current visible area overlaps with what's already queued
+        needs_rebuild = not self._urgent_queue and not self._high_queue and not self._low_queue
+
+        if not needs_rebuild and hasattr(self, '_last_queue_center'):
+            # Check if we scrolled far from last queue build (> 2 screens)
             scroll_offset = self.verticalScrollBar().value()
             viewport_height = self.viewport().height()
-            viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
-            visible_items = self._get_masonry_visible_items(viewport_rect)
+            current_center = scroll_offset + viewport_height // 2
+            scroll_distance = abs(current_center - self._last_queue_center)
+            # Rebuild if scrolled more than 2 screen heights
+            needs_rebuild = scroll_distance > (viewport_height * 2)
 
-            if visible_items:
-                visible_indices = [item['index'] for item in visible_items]
-                min_visible = min(visible_indices)
-                max_visible = max(visible_indices)
-                mid_visible = (min_visible + max_visible) // 2
-                visible_count = len(visible_indices)
+        # ASYNC QUEUE BUILDING: Don't block main thread with expensive calculation
+        # Defer queue building to next event loop iteration using QTimer
+        if needs_rebuild and not hasattr(self, '_queue_building'):
+            self._queue_building = True
+            # Build queue asynchronously (0ms delay = next event loop)
+            QTimer.singleShot(0, self._build_queues_async)
+            # Continue with old queues (if any) while new ones build
+            # This prevents UI freeze - better to show placeholders than freeze
 
-                # DYNAMIC BUFFER SIZING: Scale buffer based on how many items are visible
-                # More columns = more visible items = need larger buffer for smooth scrolling
-                # Example: 54 visible items (9 columns) → 162 item buffer (3 screens ahead)
-                near_buffer_size = max(visible_count * 1, 50)   # 1x visible count, min 50
-                far_buffer_size = max(visible_count * 2, 100)   # 2x visible count, min 100
-
-                # PREDICTIVE LOADING: Bias buffer direction based on scroll
-                # If scrolling down, load more items below; if scrolling up, load more above
-                if self._scroll_direction == 'down':
-                    near_buffer_below = int(near_buffer_size * 1.5)
-                    near_buffer_above = int(near_buffer_size * 0.5)
-                    far_buffer_below = int(far_buffer_size * 1.5)
-                    far_buffer_above = int(far_buffer_size * 0.5)
-                elif self._scroll_direction == 'up':
-                    near_buffer_below = int(near_buffer_size * 0.5)
-                    near_buffer_above = int(near_buffer_size * 1.5)
-                    far_buffer_below = int(far_buffer_size * 0.5)
-                    far_buffer_above = int(far_buffer_size * 1.5)
-                else:
-                    # No scroll direction yet - balanced buffer
-                    near_buffer_below = near_buffer_above = near_buffer_size // 2
-                    far_buffer_below = far_buffer_above = far_buffer_size // 2
-
-                # Track visited indices to avoid duplicates
-                visited = set()
-
-                # === ZONE 1: URGENT QUEUE (Visible items) ===
-                # Expand from center outward like ripples: 150, 151, 149, 152, 148...
-                self._urgent_queue.append(mid_visible)
-                visited.add(mid_visible)
-
-                offset = 1
-                while len(visited) < visible_count:
-                    # Add item after center
-                    if mid_visible + offset <= max_visible and mid_visible + offset not in visited:
-                        self._urgent_queue.append(mid_visible + offset)
-                        visited.add(mid_visible + offset)
-                    # Add item before center
-                    if mid_visible - offset >= min_visible and mid_visible - offset not in visited:
-                        self._urgent_queue.append(mid_visible - offset)
-                        visited.add(mid_visible - offset)
-                    offset += 1
-                    if offset > visible_count + 10:  # Safety break
-                        break
-
-                # === ZONE 2: HIGH QUEUE (Near buffer - 1-2 screens ahead/behind) ===
-                # Load items closest to visible edge first
-                # Items below visible area
-                for i in range(max_visible + 1, min(max_visible + near_buffer_below + 1, source_model.rowCount())):
-                    if i not in visited:
-                        self._high_queue.append(i)
-                        visited.add(i)
-                # Items above visible area
-                for i in range(min_visible - 1, max(0, min_visible - near_buffer_above) - 1, -1):
-                    if i not in visited:
-                        self._high_queue.append(i)
-                        visited.add(i)
-
-                # === ZONE 3: LOW QUEUE (Far buffer - 3-4 screens ahead/behind) ===
-                # Items further below
-                far_start_below = max_visible + near_buffer_below + 1
-                for i in range(far_start_below, min(far_start_below + far_buffer_below, source_model.rowCount())):
-                    if i not in visited:
-                        self._low_queue.append(i)
-                        visited.add(i)
-                # Items further above
-                far_start_above = min_visible - near_buffer_above - 1
-                for i in range(far_start_above, max(0, far_start_above - far_buffer_above) - 1, -1):
-                    if i not in visited:
-                        self._low_queue.append(i)
-                        visited.add(i)
-
-                # Legacy queue for compatibility (combine all queues)
-                self._pagination_preload_queue = self._urgent_queue + self._high_queue + self._low_queue
+        # Queues are now built asynchronously in _build_queues_async()
+        # Just proceed with batch loading from existing queues
 
         # === PRIORITY-BASED BATCH LOADING ===
         # Determine batch sizes based on scroll state
@@ -1195,6 +1130,104 @@ class ImageListView(QListView):
         if self._eviction_counter >= 10:
             self._eviction_counter = 0
             self._evict_distant_thumbnails()
+
+    def _build_queues_async(self):
+        """Build priority queues asynchronously (runs on next event loop to avoid blocking UI)."""
+        source_model = self.model().sourceModel()
+        if not source_model or not hasattr(source_model, 'PAGE_SIZE'):
+            self._queue_building = False
+            return
+
+        # Get visible items
+        scroll_offset = self.verticalScrollBar().value()
+        viewport_height = self.viewport().height()
+        viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
+        visible_items = self._get_masonry_visible_items(viewport_rect)
+
+        if not visible_items:
+            self._queue_building = False
+            return
+
+        visible_indices = [item['index'] for item in visible_items]
+        min_visible = min(visible_indices)
+        max_visible = max(visible_indices)
+        mid_visible = (min_visible + max_visible) // 2
+        visible_count = len(visible_indices)
+
+        # Buffer sizes
+        near_buffer_size = max(visible_count * 2, 100)
+        far_buffer_size = max(visible_count * 3, 150)
+
+        # Predictive loading based on scroll direction
+        if self._scroll_direction == 'down':
+            near_buffer_below = int(near_buffer_size * 1.5)
+            near_buffer_above = int(near_buffer_size * 0.5)
+            far_buffer_below = int(far_buffer_size * 1.5)
+            far_buffer_above = int(far_buffer_size * 0.5)
+        elif self._scroll_direction == 'up':
+            near_buffer_below = int(near_buffer_size * 0.5)
+            near_buffer_above = int(near_buffer_size * 1.5)
+            far_buffer_below = int(far_buffer_size * 0.5)
+            far_buffer_above = int(far_buffer_size * 1.5)
+        else:
+            near_buffer_below = near_buffer_above = near_buffer_size // 2
+            far_buffer_below = far_buffer_above = far_buffer_size // 2
+
+        # Clear old queues and build new ones
+        self._urgent_queue = []
+        self._high_queue = []
+        self._low_queue = []
+        visited = set()
+
+        # ZONE 1: Urgent (visible items, center-outward)
+        self._urgent_queue.append(mid_visible)
+        visited.add(mid_visible)
+        offset = 1
+        while len(visited) < visible_count:
+            if mid_visible + offset <= max_visible and mid_visible + offset not in visited:
+                self._urgent_queue.append(mid_visible + offset)
+                visited.add(mid_visible + offset)
+            if mid_visible - offset >= min_visible and mid_visible - offset not in visited:
+                self._urgent_queue.append(mid_visible - offset)
+                visited.add(mid_visible - offset)
+            offset += 1
+            if offset > visible_count + 10:
+                break
+
+        # ZONE 2: High (near buffer)
+        for i in range(max_visible + 1, min(max_visible + near_buffer_below + 1, source_model.rowCount())):
+            if i not in visited:
+                self._high_queue.append(i)
+                visited.add(i)
+        for i in range(min_visible - 1, max(0, min_visible - near_buffer_above) - 1, -1):
+            if i not in visited:
+                self._high_queue.append(i)
+                visited.add(i)
+
+        # ZONE 3: Low (far buffer)
+        far_start_below = max_visible + near_buffer_below + 1
+        for i in range(far_start_below, min(far_start_below + far_buffer_below, source_model.rowCount())):
+            if i not in visited:
+                self._low_queue.append(i)
+                visited.add(i)
+        far_start_above = min_visible - near_buffer_above - 1
+        for i in range(far_start_above, max(0, far_start_above - far_buffer_above) - 1, -1):
+            if i not in visited:
+                self._low_queue.append(i)
+                visited.add(i)
+
+        # Update legacy queue
+        self._pagination_preload_queue = self._urgent_queue + self._high_queue + self._low_queue
+
+        # Track queue center
+        self._last_queue_center = scroll_offset + viewport_height // 2
+
+        # Mark building complete
+        self._queue_building = False
+
+        # Trigger immediate preload
+        self._idle_preload_timer.stop()
+        self._idle_preload_timer.start(0)
 
     def _evict_distant_thumbnails(self):
         """Evict thumbnails that are far from current viewport (VRAM management)."""
@@ -1628,17 +1661,13 @@ class ImageListView(QListView):
         self._mouse_scrolling = False
         # print("[SCROLL] Mouse scroll stopped")
 
-        # Clear preload queues to rebuild based on new position
-        if hasattr(self, '_pagination_preload_queue'):
-            self._pagination_preload_queue = []
-        if hasattr(self, '_urgent_queue'):
-            self._urgent_queue = []
-            self._high_queue = []
-            self._low_queue = []
+        # DON'T clear queues - rebuilding is expensive and causes freeze
+        # Just let the preload continue from where it left off
+        # Queues will self-correct as items get loaded
 
-        # Trigger preload
+        # Trigger preload immediately (no delay)
         self._idle_preload_timer.stop()
-        self._idle_preload_timer.start(50)  # Quick start after scroll
+        self._idle_preload_timer.start(0)  # Immediate start - no delay
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
