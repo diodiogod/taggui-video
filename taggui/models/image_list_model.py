@@ -1057,11 +1057,13 @@ class ImageListModel(QAbstractListModel):
             # Load QImage in background thread (thread-safe, I/O bound)
             qimage, was_cached = load_thumbnail_data(path, crop, width, is_video)
 
-            if qimage and not qimage.isNull() and idx < len(self.images):
-                # Store QImage directly (NO main thread blocking!)
-                # QIcon creation happens lazily when data() is called
-                self.images[idx].thumbnail_qimage = qimage
-                self.images[idx]._last_thumbnail_was_cached = was_cached
+            if qimage and not qimage.isNull():
+                # Find image by PATH, not by idx (array may have been sorted!)
+                for img in self.images:
+                    if img.path == path:
+                        img.thumbnail_qimage = qimage
+                        img._last_thumbnail_was_cached = was_cached
+                        break
 
                 # DON'T emit dataChanged - let Qt request thumbnails on-demand
                 # Emitting 1147 dataChanged signals floods the event queue
