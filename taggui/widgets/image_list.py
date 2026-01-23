@@ -357,6 +357,10 @@ class ImageListView(QListView):
         proxy_image_list_model.layoutChanged.connect(lambda: self._recalculate_masonry_if_needed("layoutChanged"))
         proxy_image_list_model.filter_changed.connect(lambda: self._recalculate_masonry_if_needed("filter_changed"))
 
+        # Connect cache warming progress signal
+        if hasattr(source_model, 'cache_warm_progress'):
+            source_model.cache_warm_progress.connect(self._update_cache_warm_label)
+
         self.setWordWrap(True)
         self.setDragEnabled(True)
 
@@ -395,6 +399,14 @@ class ImageListView(QListView):
         self._page_indicator_timer = QTimer(self)
         self._last_loaded_pages = set()  # Track which pages have thumbnails loaded
         self._scrollbar_dragging = False  # Track if user is dragging scrollbar
+
+        # Cache warming status label (bottom-left overlay)
+        self._cache_warm_label = None
+
+        # Idle timer for background cache warming (3 seconds after scroll stops)
+        self._cache_warm_idle_timer = QTimer(self)
+        self._cache_warm_idle_timer.setSingleShot(True)
+        self._cache_warm_idle_timer.timeout.connect(self._start_cache_warming)
 
         # Resize debounce timer for smooth resizing with large datasets
         self._resize_timer = QTimer(self)
@@ -1675,9 +1687,17 @@ class ImageListView(QListView):
         # FORCE REPAINT to show thumbnails now that scrolling stopped
         self.viewport().update()
 
+        # Start cache warming timer (3 seconds after scroll stops)
+        self._cache_warm_idle_timer.stop()
+        self._cache_warm_idle_timer.start(3000)  # 3 seconds idle
+
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
         super().scrollContentsBy(dx, dy)
+
+        # Cancel cache warming when scrolling starts
+        self._cache_warm_idle_timer.stop()
+        self._stop_cache_warming()
 
         # Track scroll direction for predictive preloading
         if dy != 0:
@@ -2366,6 +2386,87 @@ class ImageListView(QListView):
         self._page_fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._page_fade_animation.finished.connect(self._page_indicator_label.hide)
         self._page_fade_animation.start()
+
+    def _start_cache_warming(self):
+        """Start background cache warming after idle period."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            return
+
+        # Only warm cache if we have a scroll direction (user was scrolling)
+        if not hasattr(self, '_scroll_direction') or self._scroll_direction is None:
+            return
+
+        # Get visible items to determine where to start warming
+        viewport_rect = self.viewport().rect()
+        visible_items = self._get_masonry_visible_items(viewport_rect)
+        if not visible_items:
+            return
+
+        # Calculate start index based on scroll direction
+        if self._scroll_direction == 'down':
+            # Warm cache ahead (below visible area)
+            start_idx = max(item['index'] for item in visible_items) + 1
+        else:
+            # Warm cache above visible area
+            start_idx = min(item['index'] for item in visible_items) - 500
+            start_idx = max(0, start_idx)
+
+        # Start cache warming in the model
+        if hasattr(source_model, 'start_cache_warming'):
+            source_model.start_cache_warming(start_idx, self._scroll_direction)
+
+    def _stop_cache_warming(self):
+        """Stop background cache warming immediately."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, 'stop_cache_warming'):
+            source_model.stop_cache_warming()
+
+    def _update_cache_warm_label(self, cached_count: int, total_count: int):
+        """Update cache warming status label (bottom-left overlay)."""
+        # Only show in pagination mode
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            if self._cache_warm_label:
+                self._cache_warm_label.hide()
+            return
+
+        # Create label if needed
+        if not self._cache_warm_label:
+            from PySide6.QtWidgets import QLabel
+            from PySide6.QtCore import Qt
+            self._cache_warm_label = QLabel(self.viewport())
+            # Reddish/orange tones to differentiate from page indicator
+            self._cache_warm_label.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(120, 40, 20, 180);
+                    color: #ffccaa;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: normal;
+                }
+            """)
+            self._cache_warm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Hide if cache warming is complete
+        if cached_count >= total_count:
+            self._cache_warm_label.hide()
+            return
+
+        # Update text and position
+        percent = int((cached_count / total_count) * 100) if total_count > 0 else 0
+        self._cache_warm_label.setText(f"Building cache: {cached_count}/{total_count} ({percent}%)")
+        self._cache_warm_label.adjustSize()
+
+        # Position at bottom-left corner
+        viewport_rect = self.viewport().rect()
+        label_x = 20
+        label_y = viewport_rect.height() - self._cache_warm_label.height() - 20
+        self._cache_warm_label.move(label_x, label_y)
+
+        # Show
+        self._cache_warm_label.show()
 
 
 class ImageList(QDockWidget):
