@@ -169,3 +169,5 @@ CLAUDE.md
 
 # Setup script logs
 taggui_setup.log
+# Test data for 1M images
+test-1m-images/
