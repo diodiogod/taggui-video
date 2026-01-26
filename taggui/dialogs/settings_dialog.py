@@ -264,10 +264,34 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(eviction_pages_spin_box, 4, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        # Cache management section (continue grid layout)
-        grid_layout.addWidget(QLabel(''), 5, 0)  # Spacer row
+        # Pagination threshold
+        grid_layout.addWidget(QLabel('Pagination threshold'), 5, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        pagination_threshold_combo = SettingsComboBox(
+            key='pagination_threshold',
+            items=['Always paginate (0 images)', '500 images', '1,000 images', '5,000 images', '10,000 images'],
+            data=[0, 500, 1000, 5000, 10000])
+        pagination_threshold_combo.setToolTip(
+            'When to enable pagination mode (memory-efficient lazy loading).\n\n'
+            'Pagination mode loads thumbnails on-demand as you scroll, keeping only\n'
+            'visible + nearby thumbnails in memory. This enables smooth scrolling\n'
+            'with datasets of any size (even 1M+ images).\n\n'
+            'Options:\n'
+            '• Always paginate (0) - Recommended. Uses pagination for all folders,\n'
+            '  providing consistent smooth performance regardless of size.\n\n'
+            '• 500/1K/5K/10K - Only paginate when folder has more than this many images.\n'
+            '  Smaller folders will load all thumbnails at once (classic mode).\n\n'
+            'Why default to 0?\n'
+            'Pagination mode is now highly optimized with low-priority background saves,\n'
+            'rate limiting, and minimal overhead. It works smoothly even for small folders\n'
+            'while being essential for large datasets. Classic mode offers no real benefit.')
+        grid_layout.addWidget(pagination_threshold_combo, 5, 1,
+                              Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Cache Management'), 6, 0,
+        # Cache management section (continue grid layout)
+        grid_layout.addWidget(QLabel(''), 6, 0)  # Spacer row
+
+        grid_layout.addWidget(QLabel('Cache Management'), 7, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         cache_buttons_layout = QVBoxLayout()
@@ -363,7 +387,7 @@ class SettingsDialog(QDialog):
         cache_buttons_layout.addSpacing(10)
         cache_buttons_layout.addLayout(all_db_row_layout)
 
-        grid_layout.addLayout(cache_buttons_layout, 6, 1,
+        grid_layout.addLayout(cache_buttons_layout, 7, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         layout.addLayout(grid_layout)

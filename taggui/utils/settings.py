@@ -40,6 +40,7 @@ DEFAULT_SETTINGS = {
     'enable_thumbnail_cache': True,
     'thumbnail_cache_location': '',  # Empty = default (~/.taggui_cache/thumbnails)
     'thumbnail_eviction_pages': 3,  # How many pages to keep loaded on each side (1-5, higher = more VRAM but smoother)
+    'pagination_threshold': 0,  # Minimum images to enable pagination mode (0 = always paginate, higher = only for large datasets)
 }
 
 

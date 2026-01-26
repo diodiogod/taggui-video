@@ -256,8 +256,8 @@ class ImageListModel(QAbstractListModel):
     # cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
 
-    # Threshold for enabling pagination mode (number of images)
-    PAGINATION_THRESHOLD = 5000
+    # Default threshold for enabling pagination mode (overridden by settings)
+    PAGINATION_THRESHOLD = 0  # Will be loaded from settings
     PAGE_SIZE = 1000
     MAX_PAGES_IN_MEMORY = 20  # Increased from 5 to reduce evictions and crashes
 
@@ -1583,10 +1583,22 @@ class ImageListModel(QAbstractListModel):
                 print(f"  - {count:5d} files with extension '{ext}'")
             print(f"[FILTER] Accepted extensions: {', '.join(sorted(image_suffixes))}")
 
-        # Check for pagination mode (large folders)
+        # Check for pagination mode (based on user setting)
         total_images = len(image_paths)
-        if total_images >= self.PAGINATION_THRESHOLD:
-            print(f"[PAGINATION] Large folder detected ({total_images} images), switching to paginated mode")
+
+        # Load pagination threshold from settings
+        from utils.settings import settings, DEFAULT_SETTINGS
+        pagination_threshold = settings.value(
+            'pagination_threshold',
+            defaultValue=DEFAULT_SETTINGS['pagination_threshold'],
+            type=int
+        )
+
+        if total_images >= pagination_threshold:
+            if pagination_threshold == 0:
+                print(f"[PAGINATION] Using paginated mode (always paginate enabled)")
+            else:
+                print(f"[PAGINATION] Large folder detected ({total_images} images >= {pagination_threshold} threshold), switching to paginated mode")
             self._load_directory_paginated(directory_path, image_paths, file_paths)
             return
 
