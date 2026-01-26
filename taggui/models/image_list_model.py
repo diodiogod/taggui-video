@@ -1091,39 +1091,16 @@ class ImageListModel(QAbstractListModel):
         Update scrolling state to defer cache writes during scroll.
         Called by view when scrolling starts/stops.
         """
-        import time
-        t0 = time.perf_counter()
-
-        t_before_assign = time.perf_counter()
         self._is_scrolling = is_scrolling
-        t_after_assign = time.perf_counter()
 
         # When scrolling stops, flush all pending cache saves
         if not is_scrolling:
-            t1 = time.perf_counter()
             self._flush_pending_cache_saves()
-            t2 = time.perf_counter()
-            print(f"[PERF] _flush_pending_cache_saves took {(t2-t1)*1000:.2f}ms")
-
             # Start deferred DB flush timer (only flushes if still idle after 5 seconds)
             self._db_flush_timer.start()
-            t3 = time.perf_counter()
-            print(f"[PERF] _db_flush_timer.start took {(t3-t2)*1000:.2f}ms")
         else:
             # Cancel DB flush if user starts scrolling again
-            t1 = time.perf_counter()
             self._db_flush_timer.stop()
-            t2 = time.perf_counter()
-
-            timer_stop_ms = (t2 - t1) * 1000
-            if timer_stop_ms > 1:
-                print(f"[PERF] _db_flush_timer.stop took {timer_stop_ms:.2f}ms")
-
-        t4 = time.perf_counter()
-        total_ms = (t4-t0)*1000
-        assign_ms = (t_after_assign - t_before_assign) * 1000
-        if total_ms > 5:
-            print(f"[PERF] set_scrolling_state({is_scrolling}) TOTAL: {total_ms:.2f}ms (assign: {assign_ms:.2f}ms)")
 
     def set_visible_indices(self, visible_indices: set):
         """
@@ -1514,13 +1491,6 @@ class ImageListModel(QAbstractListModel):
 
                             # Save to cache if needed
                             if not was_cached:
-                                # Debug: why are we saving this?
-                                if not hasattr(self, '_cache_debug_count3'):
-                                    self._cache_debug_count3 = 0
-                                if self._cache_debug_count3 < 5:
-                                    print(f"[CACHE DEBUG PATH3] Saving {image.path.name}: was_cached={was_cached}")
-                                    self._cache_debug_count3 += 1
-
                                 mtime = image.path.stat().st_mtime
                                 # Defer during scroll to avoid I/O blocking
                                 if self._is_scrolling:
