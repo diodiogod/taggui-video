@@ -1431,10 +1431,12 @@ class ImageListModel(QAbstractListModel):
 
                 return thumbnail
 
-            # Async loading ONLY in pagination mode (keeps normal mode smooth with preloading)
-            # In normal mode, preloading needs synchronous loads to work
-            if not self._paginated_mode:
-                # Normal mode: Load synchronously (enables preloading to work)
+            # Async loading for:
+            # 1. Pagination mode (always async)
+            # 2. Videos in ANY mode (cv2.VideoCapture can block for seconds)
+            # In normal mode for images: preloading needs synchronous loads to work
+            if not self._paginated_mode and not image.is_video:
+                # Normal mode for images: Load synchronously (enables preloading to work)
                 try:
                     qimage, was_cached = load_thumbnail_data(
                         image.path, image.crop, self.thumbnail_generation_width, image.is_video
