@@ -1618,7 +1618,19 @@ class ImageListModel(QAbstractListModel):
         # Load all metadata first, THEN reset the model (keeps old images visible during loading)
         error_messages: list[str] = []
         new_images = []  # Build new image list without clearing old one
-        file_paths = get_file_paths(directory_path)
+
+        # Try to load file paths from DB cache first (much faster for large folders)
+        from utils.image_index_db import ImageIndexDB
+        db = ImageIndexDB(directory_path)
+        cached_paths = db.get_all_paths()
+
+        if cached_paths and len(cached_paths) > 1000:
+            # Use cached paths if we have a substantial cache (reboot scenario)
+            print(f"[CACHE] Using {len(cached_paths):,} cached file paths (skipping scan)")
+            file_paths = {Path(directory_path) / p for p in cached_paths}
+        else:
+            # Full scan needed (first time or small folder)
+            file_paths = get_file_paths(directory_path)
         image_suffixes_string = settings.value(
             'image_list_file_formats',
             defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
