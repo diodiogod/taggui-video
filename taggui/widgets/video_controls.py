@@ -305,6 +305,10 @@ class VideoControlsWidget(QWidget):
         # Enable mouse tracking for cursor updates
         self.setMouseTracking(True)
 
+        # Install event filter on parent to catch mouse release outside widget
+        if parent:
+            parent.installEventFilter(self)
+
         # For dragging the controls
         self._dragging = False
         self._drag_start_pos = None
@@ -315,6 +319,7 @@ class VideoControlsWidget(QWidget):
         self._resize_start_width = None
         self._resize_start_x = None
         self._resize_handle_width = 10  # Width of resize area on edges
+        self._resize_corner_size = 20  # Size of corner resize areas (also resize width only)
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -646,7 +651,6 @@ class VideoControlsWidget(QWidget):
         self.fixed_marker_size = 31
 
         # Auto-play state (persists across video changes and reboots)
-        from utils.settings import settings, DEFAULT_SETTINGS
         self.auto_play_enabled = settings.value('video_auto_play', defaultValue=False, type=bool)
 
         # Mute state (persists across video changes and reboots)
@@ -674,8 +678,6 @@ class VideoControlsWidget(QWidget):
 
     def _load_persistent_settings(self):
         """Load persistent settings from config."""
-        from utils.settings import settings
-
         # Load loop enabled state
         loop_enabled = settings.value('video_loop_enabled', False, type=bool)
         # Block signals temporarily to avoid emission during init
@@ -822,7 +824,16 @@ class VideoControlsWidget(QWidget):
             self.frame_spinbox.setValue(value)
 
     def eventFilter(self, obj, event):
-        """Event filter for speed slider mouse tracking."""
+        """Event filter for speed slider mouse tracking and global mouse release."""
+        # Handle global mouse release to catch releases outside widget during resize/drag
+        if obj == self.parent() and event.type() == event.Type.MouseButtonRelease:
+            if (self._resizing or self._dragging) and event.button() == Qt.MouseButton.LeftButton:
+                # Mouse released outside widget during resize/drag - clean up
+                self._resizing = False
+                self._dragging = False
+                self._restart_parent_hide_timer()
+                return False  # Let parent handle the event too
+
         if obj == self.speed_slider:
             from PySide6.QtCore import QEvent, QPoint
             from PySide6.QtGui import QCursor
@@ -1138,7 +1149,6 @@ class VideoControlsWidget(QWidget):
         """Toggle mute/unmute state."""
         self.is_muted = not self.is_muted
         # Save to settings for persistence across reboots
-        from utils.settings import settings
         settings.setValue('video_muted', self.is_muted)
         self.mute_toggled.emit(self.is_muted)
         self._update_mute_button()
@@ -1332,7 +1342,6 @@ class VideoControlsWidget(QWidget):
         if update_auto_play:
             self.auto_play_enabled = playing
             # Save to settings for persistence across reboots
-            from utils.settings import settings
             settings.setValue('video_auto_play', playing)
 
         if playing:
@@ -1487,7 +1496,6 @@ class VideoControlsWidget(QWidget):
         self.is_looping = enabled
         self.loop_toggled.emit(enabled)
         # Save loop state to settings
-        from utils.settings import settings
         settings.setValue('video_loop_enabled', enabled)
 
     @Slot(bool)
@@ -1586,39 +1594,108 @@ class VideoControlsWidget(QWidget):
             self.play_pause_requested.emit()  # Resume video
             self._was_playing_before_preview = False
 
+    def _stop_parent_hide_timer(self):
+        """Stop parent's auto-hide timer during drag/resize operations."""
+        parent = self.parent()
+        if parent and hasattr(parent, '_controls_hide_timer'):
+            parent._controls_hide_timer.stop()
+
+    def _restart_parent_hide_timer(self):
+        """Restart parent's auto-hide timer after drag/resize ends."""
+        parent = self.parent()
+        if parent and hasattr(parent, '_show_controls_temporarily'):
+            # Use parent's method to show controls and restart timer
+            parent._show_controls_temporarily()
+
     def mousePressEvent(self, event):
         """Start dragging or resizing the controls widget."""
         if event.button() == Qt.MouseButton.LeftButton:
-            # Check if near left or right edge for resize
-            if event.pos().x() <= self._resize_handle_width:
+            pos = event.pos()
+
+            # Check corners first (higher priority than edges)
+            # Bottom-left corner
+            if (pos.x() <= self._resize_corner_size and
+                pos.y() >= self.height() - self._resize_corner_size):
+                self._resizing = 'left'
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_width = self.width()
+                self._resize_start_x = self.x()
+                self._stop_parent_hide_timer()
+                event.accept()
+                return
+            # Bottom-right corner
+            elif (pos.x() >= self.width() - self._resize_corner_size and
+                  pos.y() >= self.height() - self._resize_corner_size):
+                self._resizing = 'right'
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_width = self.width()
+                self._stop_parent_hide_timer()
+                event.accept()
+                return
+            # Top-left corner
+            elif (pos.x() <= self._resize_corner_size and
+                  pos.y() <= self._resize_corner_size):
+                self._resizing = 'left'
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_width = self.width()
+                self._resize_start_x = self.x()
+                self._stop_parent_hide_timer()
+                event.accept()
+                return
+            # Top-right corner
+            elif (pos.x() >= self.width() - self._resize_corner_size and
+                  pos.y() <= self._resize_corner_size):
+                self._resizing = 'right'
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_width = self.width()
+                self._stop_parent_hide_timer()
+                event.accept()
+                return
+            # Check edges
+            elif pos.x() <= self._resize_handle_width:
                 # Left edge resize
                 self._resizing = 'left'
                 self._resize_start_pos = event.globalPosition().toPoint()
                 self._resize_start_width = self.width()
                 self._resize_start_x = self.x()
+                self._stop_parent_hide_timer()
                 event.accept()
                 return
-            elif event.pos().x() >= self.width() - self._resize_handle_width:
+            elif pos.x() >= self.width() - self._resize_handle_width:
                 # Right edge resize
                 self._resizing = 'right'
                 self._resize_start_pos = event.globalPosition().toPoint()
                 self._resize_start_width = self.width()
+                self._stop_parent_hide_timer()
                 event.accept()
                 return
 
             # Otherwise, start dragging
             self._dragging = True
             self._drag_start_pos = event.globalPosition().toPoint() - self.pos()
+            self._stop_parent_hide_timer()
             event.accept()
 
     def mouseMoveEvent(self, event):
         """Drag or resize the controls widget, and update cursor."""
-        # Update cursor based on position
-        if not self._dragging and not self._resizing:
-            if event.pos().x() <= self._resize_handle_width or event.pos().x() >= self.width() - self._resize_handle_width:
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
-            else:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
+        pos = event.pos()
+
+        # Update cursor based on position (also during resize to maintain visual feedback)
+        # Check corners first
+        if ((pos.x() <= self._resize_corner_size and pos.y() <= self._resize_corner_size) or
+            (pos.x() >= self.width() - self._resize_corner_size and pos.y() >= self.height() - self._resize_corner_size) or
+            (pos.x() <= self._resize_corner_size and pos.y() >= self.height() - self._resize_corner_size) or
+            (pos.x() >= self.width() - self._resize_corner_size and pos.y() <= self._resize_corner_size)):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        # Check edges
+        elif pos.x() <= self._resize_handle_width or pos.x() >= self.width() - self._resize_handle_width:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif not self._dragging and not self._resizing:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        # Keep parent hide timer stopped during active resize/drag
+        if self._resizing or self._dragging:
+            self._stop_parent_hide_timer()
 
         if self._resizing:
             delta = event.globalPosition().toPoint() - self._resize_start_pos
@@ -1656,9 +1733,16 @@ class VideoControlsWidget(QWidget):
         """Stop dragging or resizing the controls widget."""
         if event.button() == Qt.MouseButton.LeftButton:
             was_resizing = self._resizing
-            current_width = self.width()  # Save width before changing _resizing flag
+            was_dragging = self._dragging
+            current_width = self.width()  # Save width before changing flags
+
+            # Always clear states first
             self._dragging = False
             self._resizing = False
+
+            # Restart parent hide timer after drag/resize ends
+            if was_resizing or was_dragging:
+                self._restart_parent_hide_timer()
 
             # Trigger scaling update after resize is done
             if was_resizing:
@@ -1676,15 +1760,15 @@ class VideoControlsWidget(QWidget):
                 self.update()
 
             # Save position and width as percentage of parent dimensions
-            from utils.settings import settings
-            if self.parent():
-                parent_width = self.parent().width()
-                parent_height = self.parent().height()
-                if parent_width > 0 and parent_height > 0:
-                    x_percent = self.x() / parent_width
-                    y_percent = self.y() / parent_height
-                    width_percent = self.width() / parent_width
-                    settings.setValue('video_controls_x_percent', x_percent)
-                    settings.setValue('video_controls_y_percent', y_percent)
-                    settings.setValue('video_controls_width_percent', width_percent)
+            if was_resizing or was_dragging:
+                if self.parent():
+                    parent_width = self.parent().width()
+                    parent_height = self.parent().height()
+                    if parent_width > 0 and parent_height > 0:
+                        x_percent = self.x() / parent_width
+                        y_percent = self.y() / parent_height
+                        width_percent = self.width() / parent_width
+                        settings.setValue('video_controls_x_percent', x_percent)
+                        settings.setValue('video_controls_y_percent', y_percent)
+                        settings.setValue('video_controls_width_percent', width_percent)
             event.accept()

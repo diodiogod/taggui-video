@@ -180,8 +180,14 @@ class ImageViewer(QWidget):
         self._controls_hide_timer.start(800)
 
     def _hide_controls(self):
-        """Hide controls after timeout, but only if mouse is not over them."""
+        """Hide controls after timeout, but only if mouse is not over them and not resizing."""
         if self.video_controls_auto_hide and self._is_video_loaded:
+            # Don't hide if actively resizing or dragging
+            if hasattr(self.video_controls, '_resizing') and self.video_controls._resizing:
+                return
+            if hasattr(self.video_controls, '_dragging') and self.video_controls._dragging:
+                return
+
             # Check if mouse is still over controls
             mouse_pos = self.mapFromGlobal(self.cursor().pos())
             controls_rect = self.video_controls.geometry()
