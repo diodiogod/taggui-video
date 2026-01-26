@@ -1820,8 +1820,8 @@ class ImageListView(QListView):
         self._idle_preload_timer.stop()
         self._idle_preload_timer.start(0)  # Immediate start - no delay
 
-        # FORCE REPAINT to show thumbnails now that scrolling stopped
-        self.viewport().update()
+        # DON'T force repaint - let Qt do it naturally to avoid blocking during disk I/O
+        # self.viewport().update()
 
         # Start cache flush timer (2 seconds = truly idle)
         self._cache_flush_timer.stop()
@@ -1833,12 +1833,21 @@ class ImageListView(QListView):
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
+        import time
+        t0 = time.perf_counter()
+
         super().scrollContentsBy(dx, dy)
+        t1 = time.perf_counter()
 
         # Notify model that scrolling started (defer cache writes)
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if source_model and hasattr(source_model, 'set_scrolling_state'):
             source_model.set_scrolling_state(True)
+
+        t2 = time.perf_counter()
+        total_ms = (t2 - t0) * 1000
+        if total_ms > 5:  # Only log if takes more than 5ms
+            print(f"[PERF SCROLL] scrollContentsBy took {total_ms:.2f}ms (super: {(t1-t0)*1000:.2f}ms, set_scrolling: {(t2-t1)*1000:.2f}ms)")
 
         # Cancel cache flush and warming timers when scrolling starts
         self._cache_flush_timer.stop()

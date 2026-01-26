@@ -303,6 +303,11 @@ class MainWindow(QMainWindow):
         settings.setValue('window_state', self.saveState())
         # Save marker size setting
         settings.setValue('fixed_marker_size', self.toolbar_manager.fixed_marker_size_spinbox.value())
+
+        # Flush any pending DB updates before closing
+        if hasattr(self, 'image_list_model'):
+            self.image_list_model._flush_db_cache_flags()
+
         super().closeEvent(event)
 
     def set_font_size(self):
