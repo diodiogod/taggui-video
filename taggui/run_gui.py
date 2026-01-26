@@ -61,6 +61,67 @@ def run_gui():
     QImageReader.setAllocationLimit(0)
     main_window = MainWindow(app)
     main_window.show()
+
+    # Install signal handler for console close (Windows Ctrl+C, terminal close, etc.)
+    def signal_handler(signum, frame):
+        print("\n[SHUTDOWN] Console closing, saving settings...")
+        # Save settings directly (closeEvent might not fire during forced shutdown)
+        geom = main_window.saveGeometry()
+        state = main_window.saveState()
+        print(f"[SHUTDOWN] Saving geometry: {len(geom)} bytes")
+        print(f"[SHUTDOWN] Saving state: {len(state)} bytes")
+        settings.setValue('geometry', geom)
+        settings.setValue('window_state', state)
+        if hasattr(main_window, 'toolbar_manager'):
+            settings.setValue('fixed_marker_size', main_window.toolbar_manager.fixed_marker_size_spinbox.value())
+        if hasattr(main_window, 'image_list_model'):
+            main_window.image_list_model._flush_db_cache_flags()
+        settings.sync()  # Force write to disk
+        print("[SHUTDOWN] Settings saved and synced")
+        # Now close and exit
+        main_window.close()
+        sys.exit(0)
+
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+
+    # Windows-specific: handle console window close
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+        # Console control handler function type
+        HANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+        @HANDLER_ROUTINE
+        def windows_console_handler(event):
+            if event in (0, 2, 5, 6):  # CTRL_C, CTRL_CLOSE, CTRL_LOGOFF, CTRL_SHUTDOWN
+                print("\n[SHUTDOWN] Console closing, saving settings...")
+                # Save settings directly (closeEvent might not fire during forced shutdown)
+                geom = main_window.saveGeometry()
+                state = main_window.saveState()
+                print(f"[SHUTDOWN] Saving geometry: {len(geom)} bytes")
+                print(f"[SHUTDOWN] Saving state: {len(state)} bytes")
+                settings.setValue('geometry', geom)
+                settings.setValue('window_state', state)
+                if hasattr(main_window, 'toolbar_manager'):
+                    settings.setValue('fixed_marker_size', main_window.toolbar_manager.fixed_marker_size_spinbox.value())
+                if hasattr(main_window, 'image_list_model'):
+                    main_window.image_list_model._flush_db_cache_flags()
+                settings.sync()  # Force write to disk
+                print("[SHUTDOWN] Settings saved and synced")
+                main_window.close()
+                return True
+            return False
+
+        try:
+            kernel32.SetConsoleCtrlHandler(windows_console_handler, True)
+        except Exception as e:
+            print(f"[WARNING] Could not install Windows console handler: {e}")
+
     sys.exit(app.exec())
 
 
