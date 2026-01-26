@@ -255,6 +255,7 @@ class ImageListModel(QAbstractListModel):
     # DISABLED: Cache warming causes UI blocking
     # cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
+    dimensions_updated = Signal()  # Emitted when aspect ratios change (no layout invalidation)
 
     # Default threshold for enabling pagination mode (overridden by settings)
     PAGINATION_THRESHOLD = 0  # Will be loaded from settings
@@ -376,6 +377,7 @@ class ImageListModel(QAbstractListModel):
         self._enrichment_paused = threading.Event()  # Pause enrichment during masonry recalc
         self._suppress_enrichment_signals = False  # Suppress dataChanged during filtering
         self._enrichment_completed_flag = False  # Flag to trigger masonry recalc after enrichment
+        self._final_recalc_timer = None  # Timer for final masonry recalc (only one should be active)
 
         # Queue for thread-safe dimension updates from background enrichment
         from queue import Queue
@@ -713,23 +715,44 @@ class ImageListModel(QAbstractListModel):
                 if self._enrichment_completed_flag:
                     self._enrichment_completed_flag = False
                     timestamp = time.strftime("%H:%M:%S")
-                    print(f"[ENRICH {timestamp}] Enrichment complete - waiting 2 seconds before final masonry recalc")
+                    print(f"[ENRICH {timestamp}] Enrichment complete - scheduling final masonry recalc in 2 seconds")
 
-                    # Wait 2 seconds to let DB commits, cache writes, etc. finish
+                    # Cancel any existing final recalc timer to prevent overlapping recalcs
+                    if self._final_recalc_timer is not None:
+                        self._final_recalc_timer.stop()
+                        self._final_recalc_timer.deleteLater()
+                        print(f"[ENRICH {timestamp}] Cancelled previous final recalc timer")
+
+                    # Wait 2 seconds to let everything settle before final recalc
                     def trigger_final_recalc():
                         timestamp = time.strftime("%H:%M:%S")
-                        print(f"[ENRICH {timestamp}] Triggering final masonry recalc")
+
+                        # Check if enrichment was cancelled/restarted while we were waiting
+                        if self._enrichment_cancelled.is_set():
+                            print(f"[ENRICH {timestamp}] Skipping final recalc - enrichment was restarted")
+                            return
+
                         # Rebuild aspect ratio cache with final dimensions
                         self._rebuild_aspect_ratio_cache()
-                        # Emit layoutChanged to trigger full masonry recalc
-                        self.layoutChanged.emit()
+
+                        # Trigger final masonry recalc WITHOUT invalidating layout
+                        # Using dimensions_updated instead of layoutChanged to avoid Qt crash
+                        # (layoutChanged invalidates proxy indices mid-calculation with 32K items)
+                        print(f"[ENRICH {timestamp}] Triggering final masonry recalc (dimensions only)")
+                        self.dimensions_updated.emit()
 
                         # Signal that enrichment is complete (for cache warming to start)
-                        print(f"[ENRICH {timestamp}] Enrichment complete - cache warming can now start")
+                        print(f"[ENRICH {timestamp}] Enrichment complete")
                         self.enrichment_complete.emit()
 
+                        # Clear timer reference
+                        self._final_recalc_timer = None
+
                     from PySide6.QtCore import QTimer
-                    QTimer.singleShot(2000, trigger_final_recalc)
+                    self._final_recalc_timer = QTimer()
+                    self._final_recalc_timer.setSingleShot(True)
+                    self._final_recalc_timer.timeout.connect(trigger_final_recalc)
+                    self._final_recalc_timer.start(2000)  # 2 seconds delay
 
                 # Check again in 100ms
                 if self._enrichment_timer:
@@ -2166,6 +2189,15 @@ class ImageListModel(QAbstractListModel):
     def _restart_enrichment(self):
         """Restart background enrichment after sorting/filtering (with new indices)."""
         # Pagination mode now uses enrichment too for uncached files
+
+        # Cancel any pending final recalc timer from previous enrichment
+        if self._final_recalc_timer is not None:
+            self._final_recalc_timer.stop()
+            self._final_recalc_timer.deleteLater()
+            self._final_recalc_timer = None
+            import time
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[ENRICH {timestamp}] Cancelled pending final recalc timer (sort restarted enrichment)")
 
         # Clear cancellation flag and completion flag
         self._enrichment_cancelled.clear()

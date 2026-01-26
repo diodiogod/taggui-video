@@ -370,6 +370,9 @@ class ImageListView(QListView):
         proxy_image_list_model.layoutChanged.connect(lambda: self._on_layout_changed())
         proxy_image_list_model.filter_changed.connect(lambda: self._recalculate_masonry_if_needed("filter_changed"))
 
+        # Handle dimension updates from enrichment (no layout invalidation)
+        source_model.dimensions_updated.connect(lambda: self._recalculate_masonry_if_needed("dimensions_updated"))
+
         # Cache status now shown in main window status bar (not floating labels here)
 
         self.setWordWrap(True)
@@ -840,10 +843,15 @@ class ImageListView(QListView):
                         self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
                 # Resume enrichment AFTER UI update completes (prevent race condition)
-                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-                if source_model and hasattr(source_model, '_enrichment_paused'):
-                    source_model._enrichment_paused.clear()
-                    print("[MASONRY] Resumed enrichment after UI update")
+                # Add delay to let Qt fully settle before enrichment resumes
+                # This prevents crashes when user interacts during final masonry recalc
+                def resume_enrichment_delayed():
+                    source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                    if source_model and hasattr(source_model, '_enrichment_paused'):
+                        source_model._enrichment_paused.clear()
+                        print("[MASONRY] Resumed enrichment after UI update")
+
+                QTimer.singleShot(200, resume_enrichment_delayed)  # 200ms delay
             except Exception as e:
                 print(f"[MASONRY] CRITICAL: UI update crashed: {type(e).__name__}: {e}")
                 import traceback
@@ -2837,28 +2845,50 @@ class ImageList(QDockWidget):
             # Scroll to currently selected image after sort (if any)
             current_index = self.list_view.currentIndex()
             if current_index.isValid():
-                print(f"[SORT] Will scroll to selected image at row {current_index.row()}")
-                # Use layout_ready signal for masonry, or immediate scroll for grid
-                scroll_done = [False]
+                # Get the actual Image object before sort changes indices
+                selected_image = source_model.data(
+                    self.proxy_image_list_model.mapToSource(current_index),
+                    Qt.ItemDataRole.UserRole
+                )
 
-                def do_scroll():
-                    if scroll_done[0]:
-                        return
-                    scroll_done[0] = True
-                    print(f"[SORT] Scrolling to row {current_index.row()}")
-                    from PySide6.QtWidgets import QAbstractItemView
-                    self.list_view.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
-                    try:
-                        self.list_view.layout_ready.disconnect(do_scroll)
-                    except:
-                        pass
+                if selected_image:
+                    print(f"[SORT] Will scroll to selected image: {selected_image.path.name}")
+                    # Use layout_ready signal for masonry, or immediate scroll for grid
+                    scroll_done = [False]
 
-                # Connect to layout_ready signal (fires when masonry completes)
-                self.list_view.layout_ready.connect(do_scroll)
+                    def do_scroll():
+                        if scroll_done[0]:
+                            return
+                        scroll_done[0] = True
 
-                # Fallback timeout in case layout_ready doesn't fire
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(500, do_scroll)
+                        # Find the image's NEW row after sorting
+                        try:
+                            new_source_row = source_model.images.index(selected_image)
+                            new_proxy_index = self.proxy_image_list_model.mapFromSource(
+                                source_model.index(new_source_row, 0)
+                            )
+                            if new_proxy_index.isValid():
+                                print(f"[SORT] Scrolling to image at new row {new_proxy_index.row()}")
+                                from PySide6.QtWidgets import QAbstractItemView
+                                self.list_view.scrollTo(new_proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                            else:
+                                print(f"[SORT] Image filtered out after sort, can't scroll")
+                        except (ValueError, AttributeError) as e:
+                            print(f"[SORT] Failed to find image after sort: {e}")
+
+                        try:
+                            self.list_view.layout_ready.disconnect(do_scroll)
+                        except:
+                            pass
+
+                    # Connect to layout_ready signal (fires when masonry completes)
+                    self.list_view.layout_ready.connect(do_scroll)
+
+                    # Fallback timeout in case layout_ready doesn't fire
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(1000, do_scroll)  # Increased to 1s for masonry
+                else:
+                    print(f"[SORT] Could not get selected image object")
             else:
                 print(f"[SORT] No valid current index to scroll to")
 
