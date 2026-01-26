@@ -736,7 +736,16 @@ class ImageListView(QListView):
         num_columns = max(1, (viewport_width + spacing) // (column_width + spacing))
 
         # Get aspect ratios from cache (fast, no Qt model iteration)
-        items_data = self.model().get_filtered_aspect_ratios()
+        # Wrap in try/except to prevent crashes from concurrent cache rebuilds
+        try:
+            items_data = self.model().get_filtered_aspect_ratios()
+        except Exception as e:
+            print(f"[MASONRY] Failed to get aspect ratios: {e}")
+            self._masonry_calculating = False
+            # Resume enrichment
+            if source_model and hasattr(source_model, '_enrichment_paused'):
+                source_model._enrichment_paused.clear()
+            return
 
         # Generate cache key
         cache_key = self._get_masonry_cache_key()
@@ -818,22 +827,31 @@ class ImageListView(QListView):
         # This prevents blocking keyboard events that are already queued
         from PySide6.QtCore import QTimer
         def apply_and_signal():
-            self._apply_layout_to_ui(timestamp)
-            # Emit signal that layout is ready for scrolling
-            self.layout_ready.emit()
+            try:
+                self._apply_layout_to_ui(timestamp)
+                # Emit signal that layout is ready for scrolling
+                self.layout_ready.emit()
 
-            # Re-center selected item if requested (after resize/zoom)
-            if self._recenter_after_layout:
-                self._recenter_after_layout = False
-                current_index = self.currentIndex()
-                if current_index.isValid():
-                    self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                # Re-center selected item if requested (after resize/zoom)
+                if self._recenter_after_layout:
+                    self._recenter_after_layout = False
+                    current_index = self.currentIndex()
+                    if current_index.isValid():
+                        self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
-            # Resume enrichment AFTER UI update completes (prevent race condition)
-            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-            if source_model and hasattr(source_model, '_enrichment_paused'):
-                source_model._enrichment_paused.clear()
-                print("[MASONRY] Resumed enrichment after UI update")
+                # Resume enrichment AFTER UI update completes (prevent race condition)
+                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                if source_model and hasattr(source_model, '_enrichment_paused'):
+                    source_model._enrichment_paused.clear()
+                    print("[MASONRY] Resumed enrichment after UI update")
+            except Exception as e:
+                print(f"[MASONRY] CRITICAL: UI update crashed: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Resume enrichment even on crash
+                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                if source_model and hasattr(source_model, '_enrichment_paused'):
+                    source_model._enrichment_paused.clear()
 
         QTimer.singleShot(0, apply_and_signal)
 
@@ -912,12 +930,17 @@ class ImageListView(QListView):
         import time
         t1 = time.time()
 
-        # Trigger UI update (EXPENSIVE - can block for 900ms)
-        self.scheduleDelayedItemsLayout()
-        self.viewport().update()
+        try:
+            # Trigger UI update (EXPENSIVE - can block for 900ms)
+            self.scheduleDelayedItemsLayout()
+            self.viewport().update()
 
-        # elapsed = (time.time() - t1) * 1000
-        # print(f"[{timestamp}] ✓ UI UPDATE DONE in {elapsed:.0f}ms")
+            # elapsed = (time.time() - t1) * 1000
+            # print(f"[{timestamp}] ✓ UI UPDATE DONE in {elapsed:.0f}ms")
+        except Exception as e:
+            print(f"[MASONRY] scheduleDelayedItemsLayout crashed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
@@ -2814,6 +2837,7 @@ class ImageList(QDockWidget):
             # Scroll to currently selected image after sort (if any)
             current_index = self.list_view.currentIndex()
             if current_index.isValid():
+                print(f"[SORT] Will scroll to selected image at row {current_index.row()}")
                 # Use layout_ready signal for masonry, or immediate scroll for grid
                 scroll_done = [False]
 
@@ -2821,6 +2845,7 @@ class ImageList(QDockWidget):
                     if scroll_done[0]:
                         return
                     scroll_done[0] = True
+                    print(f"[SORT] Scrolling to row {current_index.row()}")
                     from PySide6.QtWidgets import QAbstractItemView
                     self.list_view.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
                     try:
@@ -2834,6 +2859,8 @@ class ImageList(QDockWidget):
                 # Fallback timeout in case layout_ready doesn't fire
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(500, do_scroll)
+            else:
+                print(f"[SORT] No valid current index to scroll to")
 
         except Exception as e:
             import traceback

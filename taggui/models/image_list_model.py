@@ -418,14 +418,42 @@ class ImageListModel(QAbstractListModel):
         """Rebuild aspect ratio cache when images change (thread-safe)."""
         # Both modes use self.images now
         try:
+            import time
+            start_time = time.time()
             images_snapshot = self.images[:]
-            new_cache = [img.aspect_ratio for img in images_snapshot]
+            # Build cache with validation to prevent crashes from corrupted data
+            new_cache = []
+            corrupted_count = 0
+            for img in images_snapshot:
+                try:
+                    ar = img.aspect_ratio
+                    # Validate aspect ratio
+                    if ar is None or ar != ar or ar <= 0:  # None or NaN or invalid
+                        corrupted_count += 1
+                        ar = 1.0
+                    if ar > 100:
+                        corrupted_count += 1
+                        ar = 100
+                    if ar < 0.01:
+                        corrupted_count += 1
+                        ar = 0.01
+                    new_cache.append(ar)
+                except Exception as e:
+                    # Corrupted image object - use fallback
+                    print(f"[CACHE] Corrupted aspect ratio for image, using 1.0: {e}")
+                    corrupted_count += 1
+                    new_cache.append(1.0)
 
             # Update cache atomically under lock
             with self._aspect_ratio_cache_lock:
                 self._aspect_ratio_cache = new_cache
+
+            elapsed = time.time() - start_time
+            print(f"[CACHE] Rebuilt aspect ratio cache: {len(new_cache)} items in {elapsed:.2f}s ({corrupted_count} corrupted)")
         except Exception as e:
             print(f"[CACHE] Error rebuilding aspect ratio cache: {e}")
+            import traceback
+            traceback.print_exc()
             # Keep old cache if rebuild fails
             pass
 
@@ -2097,6 +2125,44 @@ class ImageListModel(QAbstractListModel):
             print(f"[PAGINATION] Starting background enrichment for {cache_misses} uncached images...")
             self._restart_enrichment()
 
+    def _read_jpeg_header_dimensions(self, file_path):
+        """
+        Read JPEG dimensions directly from file header.
+        This works on some corrupted JPEG files where PIL fails.
+        Returns (width, height) or None if header is too corrupted.
+        """
+        try:
+            with open(file_path, 'rb') as f:
+                # Check JPEG signature
+                if f.read(2) != b'\xff\xd8':
+                    return None
+
+                # Scan for SOF (Start of Frame) marker
+                while True:
+                    marker = f.read(2)
+                    if not marker:
+                        return None
+                    if marker[0] != 0xff:
+                        return None
+
+                    # SOF markers: 0xC0-0xCF (except 0xC4, 0xC8, 0xCC)
+                    marker_type = marker[1]
+                    if 0xC0 <= marker_type <= 0xCF and marker_type not in (0xC4, 0xC8, 0xCC):
+                        # Found SOF - read dimensions
+                        length = int.from_bytes(f.read(2), 'big')
+                        f.read(1)  # precision
+                        height = int.from_bytes(f.read(2), 'big')
+                        width = int.from_bytes(f.read(2), 'big')
+                        return (width, height)
+
+                    # Skip to next marker
+                    length = int.from_bytes(f.read(2), 'big')
+                    if length < 2:
+                        return None
+                    f.seek(length - 2, 1)  # Relative seek
+        except Exception:
+            return None
+
     def _restart_enrichment(self):
         """Restart background enrichment after sorting/filtering (with new indices)."""
         # Pagination mode now uses enrichment too for uncached files
@@ -2150,7 +2216,11 @@ class ImageListModel(QAbstractListModel):
             layout_update_interval = 1000 if total_images > 20000 else 100
 
             # Build prioritized processing order: visible first, then rest
-            needs_enrichment_indices = [idx for idx, img in enumerate(self.images) if img.dimensions == (512, 512)]
+            # Skip images that previously failed enrichment
+            needs_enrichment_indices = [
+                idx for idx, img in enumerate(self.images)
+                if img.dimensions == (512, 512) and not getattr(img, '_enrichment_failed', False)
+            ]
 
             print(f"[ENRICH] Found {len(needs_enrichment_indices)}/{len(self.images)} images needing enrichment (with placeholder 512x512)")
 
@@ -2205,8 +2275,23 @@ class ImageListModel(QAbstractListModel):
                         import imagesize
                         dimensions = imagesize.get(str(image.path))
                         if dimensions == (-1, -1):
-                            from PIL import Image as pilimage
-                            dimensions = pilimage.open(image.path).size
+                            # Try PIL (slower but more robust)
+                            try:
+                                from PIL import Image as pilimage
+                                dimensions = pilimage.open(image.path).size
+                            except Exception as pil_error:
+                                # PIL failed - try manual JPEG header reading as last resort
+                                if image.path.suffix.lower() in ('.jpg', '.jpeg'):
+                                    try:
+                                        dimensions = self._read_jpeg_header_dimensions(image.path)
+                                    except:
+                                        pass
+
+                                if not dimensions or dimensions == (-1, -1):
+                                    # Mark as corrupted to avoid retrying
+                                    if not hasattr(image, '_enrichment_failed'):
+                                        image._enrichment_failed = True
+                                    raise pil_error  # Re-raise to trigger error handling
 
                     if not dimensions:
                         continue
@@ -2244,13 +2329,29 @@ class ImageListModel(QAbstractListModel):
                         print(f"[ENRICH {timestamp}] Progress: {enriched_count}/{total_images} images enriched")
 
                 except Exception as e:
-                    # Log enrichment failures
-                    if enriched_count < 10:  # Only log first 10 failures
+                    # Log enrichment failures (reduced spam)
+                    error_key = f"{type(e).__name__}"
+                    if not hasattr(self, '_enrichment_error_counts'):
+                        self._enrichment_error_counts = {}
+
+                    self._enrichment_error_counts[error_key] = self._enrichment_error_counts.get(error_key, 0) + 1
+
+                    # Only log first occurrence of each error type + summary at end
+                    if self._enrichment_error_counts[error_key] == 1:
                         print(f"[ENRICH] Failed to enrich {image.path.name}: {type(e).__name__}: {e}")
                     pass
 
             db_bg.commit()
             db_bg.close()
+
+            # Print error summary if there were failures
+            if hasattr(self, '_enrichment_error_counts') and self._enrichment_error_counts:
+                total_errors = sum(self._enrichment_error_counts.values())
+                print(f"[ENRICH] Skipped {total_errors} corrupted files:")
+                for error_type, count in sorted(self._enrichment_error_counts.items(), key=lambda x: -x[1]):
+                    print(f"  - {count} files: {error_type}")
+                # Clear for next run
+                self._enrichment_error_counts = {}
 
             print(f"[SORT] Background enrichment complete: {enriched_count} images updated")
 
