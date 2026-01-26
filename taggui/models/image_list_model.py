@@ -170,12 +170,20 @@ def natural_sort_key(path: Path):
 def get_file_paths(directory_path: Path) -> set[Path]:
     """
     Recursively get all file paths in a directory, including
-    subdirectories.
+    subdirectories. Includes symlinks.
     """
     file_paths = set()
+    print(f"[SCAN] Scanning directory: {directory_path}")
+    count = 0
     for path in directory_path.rglob("*"):  # Use rglob for recursive search
-        if path.is_file():
+        # Accept regular files or symlinks (for organized workflows and test datasets)
+        if path.is_file() or path.is_symlink():
             file_paths.add(path)
+            count += 1
+            # Progress feedback for large directories
+            if count % 100000 == 0:
+                print(f"[SCAN] Found {count:,} files...")
+    print(f"[SCAN] Scan complete: {len(file_paths):,} total files found")
     return file_paths
 
 
@@ -698,9 +706,10 @@ class ImageListModel(QAbstractListModel):
             # Log processing (don't emit signals during enrichment to avoid crashes)
             if updated_indices and not self._suppress_enrichment_signals:
                 batch_time = (time.time() - batch_start) * 1000
-                if processed >= 50:  # Only log significant batches
-                    timestamp = time.strftime("%H:%M:%S")
-                    print(f"[ENRICH {timestamp}] Processed {processed} dimension updates in {batch_time:.1f}ms")
+                # Disabled: Too spammy for large datasets (1M images)
+                # if processed >= 50:  # Only log significant batches
+                #     timestamp = time.strftime("%H:%M:%S")
+                #     print(f"[ENRICH {timestamp}] Processed {processed} dimension updates in {batch_time:.1f}ms")
 
             # DISABLED: Incremental recalcs during enrichment cause crashes/freezes on large datasets
             # Only recalc once at the end when enrichment completes
