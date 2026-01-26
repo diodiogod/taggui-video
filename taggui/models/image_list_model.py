@@ -1550,6 +1550,7 @@ class ImageListModel(QAbstractListModel):
     def load_directory(self, directory_path: Path):
         from PySide6.QtWidgets import QProgressDialog, QApplication, QMessageBox
         from PySide6.QtCore import Qt
+        from utils.settings import settings, DEFAULT_SETTINGS
 
         # DON'T call beginResetModel() here - it clears the view immediately
         # Load all metadata first, THEN reset the model (keeps old images visible during loading)
@@ -1586,8 +1587,7 @@ class ImageListModel(QAbstractListModel):
         # Check for pagination mode (based on user setting)
         total_images = len(image_paths)
 
-        # Load pagination threshold from settings
-        from utils.settings import settings, DEFAULT_SETTINGS
+        # Load pagination threshold from settings (already imported at top)
         pagination_threshold = settings.value(
             'pagination_threshold',
             defaultValue=DEFAULT_SETTINGS['pagination_threshold'],
