@@ -2810,6 +2810,21 @@ class ImageList(QDockWidget):
 
         # Sort the images list
         try:
+            # Get currently selected image BEFORE sorting (to scroll to it after)
+            current_index = self.list_view.currentIndex()
+            selected_image = None
+            if current_index.isValid():
+                selected_image = source_model.data(
+                    self.proxy_image_list_model.mapToSource(current_index),
+                    Qt.ItemDataRole.UserRole
+                )
+                if selected_image:
+                    print(f"[SORT] Will scroll to selected image: {selected_image.path.name}")
+                else:
+                    print(f"[SORT] Could not get selected image object")
+            else:
+                print(f"[SORT] No valid current index to scroll to")
+
             # Emit layoutAboutToBeChanged before sorting
             source_model.layoutAboutToBeChanged.emit()
 
@@ -2842,55 +2857,45 @@ class ImageList(QDockWidget):
             if hasattr(source_model, '_restart_enrichment'):
                 source_model._restart_enrichment()
 
-            # Scroll to currently selected image after sort (if any)
-            current_index = self.list_view.currentIndex()
-            if current_index.isValid():
-                # Get the actual Image object before sort changes indices
-                selected_image = source_model.data(
-                    self.proxy_image_list_model.mapToSource(current_index),
-                    Qt.ItemDataRole.UserRole
-                )
+            # Scroll to selected image's NEW position after sort
+            if selected_image:
+                # Use layout_ready signal for masonry, or immediate scroll for grid
+                scroll_done = [False]
 
-                if selected_image:
-                    print(f"[SORT] Will scroll to selected image: {selected_image.path.name}")
-                    # Use layout_ready signal for masonry, or immediate scroll for grid
-                    scroll_done = [False]
+                def do_scroll():
+                    if scroll_done[0]:
+                        return
+                    scroll_done[0] = True
 
-                    def do_scroll():
-                        if scroll_done[0]:
-                            return
-                        scroll_done[0] = True
+                    # Find the image's NEW row after sorting
+                    try:
+                        new_source_row = source_model.images.index(selected_image)
+                        new_proxy_index = self.proxy_image_list_model.mapFromSource(
+                            source_model.index(new_source_row, 0)
+                        )
+                        if new_proxy_index.isValid():
+                            print(f"[SORT] Scrolling to image at new row {new_proxy_index.row()}")
+                            from PySide6.QtWidgets import QAbstractItemView
+                            # Set selection to the new position
+                            self.list_view.setCurrentIndex(new_proxy_index)
+                            # Scroll to show it
+                            self.list_view.scrollTo(new_proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                        else:
+                            print(f"[SORT] Image filtered out after sort, can't scroll")
+                    except (ValueError, AttributeError) as e:
+                        print(f"[SORT] Failed to find image after sort: {e}")
 
-                        # Find the image's NEW row after sorting
-                        try:
-                            new_source_row = source_model.images.index(selected_image)
-                            new_proxy_index = self.proxy_image_list_model.mapFromSource(
-                                source_model.index(new_source_row, 0)
-                            )
-                            if new_proxy_index.isValid():
-                                print(f"[SORT] Scrolling to image at new row {new_proxy_index.row()}")
-                                from PySide6.QtWidgets import QAbstractItemView
-                                self.list_view.scrollTo(new_proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
-                            else:
-                                print(f"[SORT] Image filtered out after sort, can't scroll")
-                        except (ValueError, AttributeError) as e:
-                            print(f"[SORT] Failed to find image after sort: {e}")
+                    try:
+                        self.list_view.layout_ready.disconnect(do_scroll)
+                    except:
+                        pass
 
-                        try:
-                            self.list_view.layout_ready.disconnect(do_scroll)
-                        except:
-                            pass
+                # Connect to layout_ready signal (fires when masonry completes)
+                self.list_view.layout_ready.connect(do_scroll)
 
-                    # Connect to layout_ready signal (fires when masonry completes)
-                    self.list_view.layout_ready.connect(do_scroll)
-
-                    # Fallback timeout in case layout_ready doesn't fire
-                    from PySide6.QtCore import QTimer
-                    QTimer.singleShot(1000, do_scroll)  # Increased to 1s for masonry
-                else:
-                    print(f"[SORT] Could not get selected image object")
-            else:
-                print(f"[SORT] No valid current index to scroll to")
+                # Fallback timeout in case layout_ready doesn't fire
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(1000, do_scroll)  # Increased to 1s for masonry
 
         except Exception as e:
             import traceback
