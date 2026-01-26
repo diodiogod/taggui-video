@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
-                                    SettingsSpinBox)
+                                    SettingsSpinBox, SettingsComboBox)
 from utils.grammar_checker import GrammarCheckMode
 from utils.thumbnail_cache import get_thumbnail_cache
 
@@ -134,6 +134,29 @@ class SettingsDialog(QDialog):
         autocomplete_tags_check_box.stateChanged.connect(
             self.show_restart_warning)
         grid_layout.addWidget(autocomplete_tags_check_box, 5, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        # Pagination threshold
+        grid_layout.addWidget(QLabel('Paginate folders larger than (images)'), 6, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        pagination_spin_box = SettingsSpinBox(
+            key='pagination_threshold',
+            minimum=0, maximum=100000)
+        pagination_spin_box.setToolTip(
+            'Enable pagination mode for folders with more than this many images.\n\n'
+            'Pagination mode loads thumbnails on-demand as you scroll, keeping only\n'
+            'visible + nearby thumbnails in memory. This enables smooth scrolling\n'
+            'with datasets of any size (even 1M+ images).\n\n'
+            'Setting this to 0 (recommended):\n'
+            'Always use pagination mode for consistent performance regardless of folder size.\n'
+            'Pagination is now highly optimized with low-priority background saves and\n'
+            'minimal overhead - it works smoothly even for small folders.\n\n'
+            'Setting this higher (e.g., 500, 1000, 5000):\n'
+            'Only paginate when folders exceed this size. Smaller folders will load\n'
+            'all thumbnails at once (classic mode). This may cause UI freezes and\n'
+            'memory issues with large folders if threshold is set too high.')
+        pagination_spin_box.valueChanged.connect(self.show_restart_warning)
+        grid_layout.addWidget(pagination_spin_box, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         layout.addLayout(grid_layout)
@@ -264,34 +287,10 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(eviction_pages_spin_box, 4, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        # Pagination threshold
-        grid_layout.addWidget(QLabel('Pagination threshold'), 5, 0,
-                              Qt.AlignmentFlag.AlignRight)
-        pagination_threshold_combo = SettingsComboBox(
-            key='pagination_threshold',
-            items=['Always paginate (0 images)', '500 images', '1,000 images', '5,000 images', '10,000 images'],
-            data=[0, 500, 1000, 5000, 10000])
-        pagination_threshold_combo.setToolTip(
-            'When to enable pagination mode (memory-efficient lazy loading).\n\n'
-            'Pagination mode loads thumbnails on-demand as you scroll, keeping only\n'
-            'visible + nearby thumbnails in memory. This enables smooth scrolling\n'
-            'with datasets of any size (even 1M+ images).\n\n'
-            'Options:\n'
-            '• Always paginate (0) - Recommended. Uses pagination for all folders,\n'
-            '  providing consistent smooth performance regardless of size.\n\n'
-            '• 500/1K/5K/10K - Only paginate when folder has more than this many images.\n'
-            '  Smaller folders will load all thumbnails at once (classic mode).\n\n'
-            'Why default to 0?\n'
-            'Pagination mode is now highly optimized with low-priority background saves,\n'
-            'rate limiting, and minimal overhead. It works smoothly even for small folders\n'
-            'while being essential for large datasets. Classic mode offers no real benefit.')
-        grid_layout.addWidget(pagination_threshold_combo, 5, 1,
-                              Qt.AlignmentFlag.AlignLeft)
-
         # Cache management section (continue grid layout)
-        grid_layout.addWidget(QLabel(''), 6, 0)  # Spacer row
+        grid_layout.addWidget(QLabel(''), 5, 0)  # Spacer row
 
-        grid_layout.addWidget(QLabel('Cache Management'), 7, 0,
+        grid_layout.addWidget(QLabel('Cache Management'), 6, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         cache_buttons_layout = QVBoxLayout()
@@ -387,7 +386,7 @@ class SettingsDialog(QDialog):
         cache_buttons_layout.addSpacing(10)
         cache_buttons_layout.addLayout(all_db_row_layout)
 
-        grid_layout.addLayout(cache_buttons_layout, 7, 1,
+        grid_layout.addLayout(cache_buttons_layout, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         layout.addLayout(grid_layout)
