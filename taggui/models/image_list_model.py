@@ -426,10 +426,16 @@ class ImageListModel(QAbstractListModel):
 
     def _rebuild_aspect_ratio_cache(self):
         """Rebuild aspect ratio cache when images change (thread-safe)."""
-        # Both modes use self.images now
         try:
             import time
             start_time = time.time()
+
+            # Paginated mode: aspect ratios already loaded from DB, skip rebuild
+            # unless explicitly needed (sort change, etc.)
+            if self._paginated_mode and len(self._aspect_ratio_cache) == self._total_count:
+                return
+
+            # Normal mode: build from self.images
             images_snapshot = self.images[:]
             # Build cache with validation to prevent crashes from corrupted data
             new_cache = []
@@ -602,9 +608,6 @@ class ImageListModel(QAbstractListModel):
 
     def _evict_old_pages(self):
         """Evict old pages (called on main thread via QTimer)."""
-        # TEMPORARY: Disable eviction to test if that's causing crashes
-        return
-
         with self._page_load_lock:
             while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
                 oldest_page = self._page_load_order.pop(0)
@@ -1407,7 +1410,10 @@ class ImageListModel(QAbstractListModel):
         return mimeData
 
     def rowCount(self, parent=None) -> int:
-        # Both modes use self.images (pagination just lazy-loads thumbnails)
+        # Paginated mode: return total count from DB (virtual list)
+        # Normal mode: return actual list length
+        if self._paginated_mode:
+            return self._total_count
         return len(self.images)
 
     def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
@@ -1417,11 +1423,28 @@ class ImageListModel(QAbstractListModel):
             if not index.isValid():
                 return None
 
-            # Get image - same logic for both modes (all images in self.images now)
-            # No lock needed - Python GIL protects simple reads, and lock was blocking thumbnail loads
-            if row >= len(self.images) or row < 0:
-                return None
-            image = self.images[row]
+            # Get image - different logic for paginated vs normal mode
+            if self._paginated_mode:
+                # Virtual pagination: query _pages dict
+                page_num = row // self.PAGE_SIZE
+                page_offset = row % self.PAGE_SIZE
+
+                # Check if page is loaded
+                if page_num not in self._pages:
+                    # Page not loaded - trigger async load and return None
+                    self._request_page_load(page_num)
+                    return None
+
+                # Get image from page
+                page = self._pages[page_num]
+                if page_offset >= len(page):
+                    return None
+                image = page[page_offset]
+            else:
+                # Normal mode: use self.images list
+                if row >= len(self.images) or row < 0:
+                    return None
+                image = self.images[row]
 
             if role == Qt.ItemDataRole.UserRole:
                 return image
@@ -1622,14 +1645,32 @@ class ImageListModel(QAbstractListModel):
         # Try to load file paths from DB cache first (much faster for large folders)
         from utils.image_index_db import ImageIndexDB
         db = ImageIndexDB(directory_path)
-        cached_paths = db.get_all_paths()
+        db_count = db.count()
 
-        if cached_paths and len(cached_paths) > 1000:
-            # Use cached paths if we have a substantial cache (reboot scenario)
-            print(f"[CACHE] Using {len(cached_paths):,} cached file paths (skipping scan)")
-            file_paths = {Path(directory_path) / p for p in cached_paths}
-        else:
-            # Full scan needed (first time or small folder)
+        # For large folders, verify cache is still valid by checking a few random files exist
+        use_cache = False
+        if db_count > 1000:
+            cached_paths = db.get_all_paths()
+            if cached_paths:
+                # Quick sanity check: verify 10 random files still exist
+                import random
+                sample_size = min(10, len(cached_paths))
+                sample_paths = random.sample(cached_paths, sample_size)
+                valid_count = sum(1 for p in sample_paths if (directory_path / p).exists())
+
+                if valid_count == sample_size:
+                    # Cache is valid
+                    print(f"[CACHE] Found {db_count:,} cached entries, loading file paths from DB (skipping scan)")
+                    file_paths = {Path(directory_path) / p for p in cached_paths}
+                    print(f"[CACHE] Loaded {len(file_paths):,} cached file paths")
+                    use_cache = True
+                else:
+                    print(f"[CACHE] Cache invalid ({valid_count}/{sample_size} files exist), performing full scan")
+
+        if not use_cache:
+            # Full scan needed (first time, small folder, or cache invalid)
+            if db_count > 0:
+                print(f"[CACHE] DB has {db_count} entries, but performing full scan to detect changes")
             file_paths = get_file_paths(directory_path)
         image_suffixes_string = settings.value(
             'image_list_file_formats',
@@ -2017,157 +2058,60 @@ class ImageListModel(QAbstractListModel):
             self._load_executor.submit(enrich_dimensions)
 
     def _load_directory_paginated(self, directory_path: Path, image_paths: list[Path], file_paths: set[Path]):
-        """Load a large directory using pagination mode (10K+ images).
+        """Load a large directory using true virtual pagination (1M+ images).
 
-        Strategy: Load all Image objects upfront (cheap metadata ~16MB for 32K images),
-        but lazy-load thumbnails on-demand (expensive ~40MB VRAM for visible items only).
+        Strategy: Don't load any Image objects upfront. Load aspect ratios from DB for masonry,
+        then lazy-load pages (1000 images each) on-demand as user scrolls.
 
-        This prevents Qt crashes from rendering 32K items where data() returns None.
+        Memory: ~8MB for aspect ratios vs ~300MB for all Image objects.
         """
-        from PySide6.QtWidgets import QProgressDialog, QApplication
         from PySide6.QtCore import Qt
+        import time
 
         total_images = len(image_paths)
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
         # Initialize database
         self._directory_path = directory_path
         self._db = ImageIndexDB(directory_path)
         self._paginated_mode = True
 
-        # Check if we need indexing or can use fast load
-        db_count = self._db.count()
-        needs_full_index = abs(db_count - total_images) >= 100
-
-        if needs_full_index:
-            # Only index if significantly out of sync (new directory or many new files)
-            # For small differences, use fast load with background enrichment
-            print(f"[PAGINATION] Database has {db_count} entries, folder has {total_images} files")
-            print(f"[PAGINATION] Using fast load - will index missing files in background")
-
-        # No blocking indexing - just load with placeholders and enrich in background
-
-        # Load ALL Image objects with fast load (use placeholders for uncached)
-        print(f"[PAGINATION] Fast loading {total_images} images...")
-        progress = QProgressDialog(f"Loading {total_images} images...", None, 0, total_images)
-        progress.setWindowTitle("Loading Images")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(500)
-        progress.setAutoClose(True)
-        progress.setAutoReset(False)
+        print(f"[PAGINATION] Virtual mode: {total_images} images")
+        start_time = time.time()
 
         self.beginResetModel()
+
+        # Don't load Image objects - keep self.images empty in paginated mode
         self.images = []
+        self._total_count = total_images
+        self._pages = {}  # Will be populated on-demand
 
-        # Load cached info from DB into dict (fast bulk load)
-        cached_files = {}
-        try:
-            cursor = self._db.conn.cursor()
-            cursor.execute('SELECT file_name, width, height, is_video, mtime, video_fps, video_duration, video_frame_count, rating FROM images')
-            for row in cursor:
-                cached_files[row[0]] = {
-                    'dimensions': (row[1], row[2]),
-                    'is_video': bool(row[3]),
-                    'mtime': row[4],
-                    'video_metadata': {
-                        'fps': row[5],
-                        'duration': row[6],
-                        'frame_count': row[7]
-                    } if row[3] else None,
-                    'rating': row[8] if row[8] is not None else 0.0
-                }
-            print(f"[PAGINATION] Loaded {len(cached_files)} cached entries from DB")
-        except Exception as e:
-            print(f"[PAGINATION] Warning: Could not load cache: {e}")
+        # Load ALL aspect ratios from DB for masonry layout (fast!)
+        print(f"[PAGINATION] Loading aspect ratios from DB...")
+        ar_start = time.time()
+        aspect_ratios = self._db.get_all_aspect_ratios(
+            sort_field=self._sort_field,
+            sort_dir=self._sort_dir
+        )
+        ar_time = time.time() - ar_start
 
-        # Gather text file paths for tag loading
-        text_file_paths = set()
-        for path in directory_path.rglob("*.txt"):
-            text_file_paths.add(str(path))
+        # Build aspect ratio cache for masonry
+        with self._aspect_ratio_cache_lock:
+            self._aspect_ratio_cache = aspect_ratios
 
-        # Load all images (from cache or with placeholders)
-        update_interval = max(100, total_images // 100)
-        cache_hits = 0
-        cache_misses = 0
-
-        for i, image_path in enumerate(image_paths):
-            # Update progress
-            if i % update_interval == 0:
-                progress.setValue(i)
-                QApplication.processEvents()
-
-            try:
-                relative_path = str(image_path.relative_to(directory_path))
-                mtime = image_path.stat().st_mtime
-
-                # Check cache
-                cached = cached_files.get(relative_path)
-                if cached and cached['mtime'] == mtime:
-                    # Use cached dimensions
-                    dimensions = cached['dimensions']
-                    is_video = cached['is_video']
-                    video_metadata = cached['video_metadata']
-                    rating = cached['rating']
-                    cache_hits += 1
-                else:
-                    # Use placeholder - will enrich in background
-                    dimensions = (512, 512)
-                    is_video = image_path.suffix.lower() in video_extensions
-                    video_metadata = None
-                    rating = 0.0
-                    cache_misses += 1
-
-                # Load tags from text file
-                tags = []
-                text_file_path = image_path.with_suffix('.txt')
-                if str(text_file_path) in text_file_paths:
-                    try:
-                        caption = text_file_path.read_text(encoding='utf-8', errors='replace')
-                        if caption:
-                            tags = [tag.strip() for tag in caption.split(self.tag_separator) if tag.strip()]
-                    except Exception:
-                        pass
-
-                image = Image(
-                    path=image_path,
-                    dimensions=dimensions,
-                    tags=tags,
-                    is_video=is_video,
-                    rating=rating
-                )
-
-                if is_video and video_metadata:
-                    image.video_metadata = video_metadata
-
-                self.images.append(image)
-
-            except Exception as e:
-                print(f"[PAGINATION] Error loading {image_path.name}: {e}")
-
-        progress.close()
-        print(f"[PAGINATION] Loaded {len(self.images)} images ({cache_hits} cached, {cache_misses} need enrichment)")
-
-        self._total_count = len(self.images)
-        print(f"[PAGINATION] Loaded {self._total_count} Image objects (~{self._total_count * 300 / 1024 / 1024:.1f} MB)")
+        print(f"[PAGINATION] Loaded {len(aspect_ratios)} aspect ratios in {ar_time*1000:.0f}ms")
 
         self.endResetModel()
-
-        # Build aspect ratio cache
-        self._rebuild_aspect_ratio_cache()
 
         # Emit signal
         self.total_count_changed.emit(self._total_count)
 
+        elapsed = time.time() - start_time
         print(f"================================================================================")
-        print(f"PAGINATION MODE: {self._total_count} images loaded (thumbnails lazy-load)")
-        print(f"Memory: ~{self._total_count * 300 / 1024 / 1024:.1f} MB for Image objects")
-        print(f"VRAM: ~40 MB max (only visible thumbnails loaded)")
+        print(f"VIRTUAL PAGINATION MODE: {self._total_count} images ready")
+        print(f"Load time: {elapsed*1000:.0f}ms")
+        print(f"Memory: ~{len(aspect_ratios) * 8 / 1024 / 1024:.1f} MB for aspect ratios (vs ~{total_images * 300 / 1024 / 1024:.0f} MB for objects)")
+        print(f"Pages loaded on-demand: 0/{(total_images + self.PAGE_SIZE - 1) // self.PAGE_SIZE}")
         print(f"================================================================================")
-
-        # Start background enrichment if needed
-        if cache_misses > 0:
-            print(f"[PAGINATION] Starting background enrichment for {cache_misses} uncached images...")
-            self._restart_enrichment()
 
     def _read_jpeg_header_dimensions(self, file_path):
         """

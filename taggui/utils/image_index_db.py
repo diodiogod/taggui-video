@@ -349,6 +349,38 @@ class ImageIndexDB:
         """Get count of images with cached thumbnails."""
         return self.count(filter_sql='thumbnail_cached = 1')
 
+    def get_all_aspect_ratios(self, sort_field: str = 'mtime', sort_dir: str = 'DESC') -> List[float]:
+        """Get all aspect ratios in sorted order for masonry layout cache.
+
+        This is MUCH faster than loading all Image objects (1M rows in ~100ms).
+        Returns list of floats with fallback to 1.0 for any invalid values.
+        """
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            query = f'SELECT aspect_ratio FROM images ORDER BY {sort_field} {sort_dir}'
+            cursor.execute(query)
+
+            # Build list with validation
+            aspect_ratios = []
+            for row in cursor:
+                ar = row[0]
+                # Validate aspect ratio
+                if ar is None or ar != ar or ar <= 0:  # None or NaN or invalid
+                    ar = 1.0
+                elif ar > 100:
+                    ar = 100.0
+                elif ar < 0.01:
+                    ar = 0.01
+                aspect_ratios.append(ar)
+
+            return aspect_ratios
+        except sqlite3.Error as e:
+            print(f'Database get_all_aspect_ratios error: {e}')
+            return []
+
     def get_page(self, page: int, page_size: int = 1000,
                  sort_field: str = 'mtime', sort_dir: str = 'DESC',
                  filter_sql: str = '', bindings: tuple = ()) -> List[Dict[str, Any]]:
@@ -441,7 +473,7 @@ class ImageIndexDB:
 
         try:
             cursor = self.conn.cursor()
-            cursor.execute('SELECT path FROM images')
+            cursor.execute('SELECT file_name FROM images')
             return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error:
             return []
