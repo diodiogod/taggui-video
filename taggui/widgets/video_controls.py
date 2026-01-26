@@ -645,11 +645,12 @@ class VideoControlsWidget(QWidget):
         # Fixed marker size (set from main window)
         self.fixed_marker_size = 31
 
-        # Auto-play state (persists across video changes)
-        self.auto_play_enabled = False
+        # Auto-play state (persists across video changes and reboots)
+        from utils.settings import settings, DEFAULT_SETTINGS
+        self.auto_play_enabled = settings.value('video_auto_play', defaultValue=False, type=bool)
 
-        # Mute state (persists across video changes in session, not across reboots)
-        self.is_muted = True  # Default to muted
+        # Mute state (persists across video changes and reboots)
+        self.is_muted = settings.value('video_muted', defaultValue=True, type=bool)
 
         # Video metadata for speed preview calculations
         self._current_fps = 0
@@ -1136,6 +1137,9 @@ class VideoControlsWidget(QWidget):
     def _toggle_mute(self):
         """Toggle mute/unmute state."""
         self.is_muted = not self.is_muted
+        # Save to settings for persistence across reboots
+        from utils.settings import settings
+        settings.setValue('video_muted', self.is_muted)
         self.mute_toggled.emit(self.is_muted)
         self._update_mute_button()
 
@@ -1327,6 +1331,9 @@ class VideoControlsWidget(QWidget):
         # Only update auto-play state on manual user toggles
         if update_auto_play:
             self.auto_play_enabled = playing
+            # Save to settings for persistence across reboots
+            from utils.settings import settings
+            settings.setValue('video_auto_play', playing)
 
         if playing:
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-pause'))
