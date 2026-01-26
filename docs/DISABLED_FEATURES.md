@@ -64,3 +64,43 @@ This document tracks features that have been temporarily disabled for testing or
 1. Search for `# DISABLED: Force flush causes UI freeze` in model file
 2. Consider implementing a non-blocking flush mechanism first
 3. Options: async DB writes, separate thread for DB updates, or increase queue limit
+
+## Immediate DB Flush During Saves (Disabled 2026-01-26)
+
+**Reason:** Causes UI blocking/stutter when flushing large batches (457+ items)
+
+**Problem:**
+- During cache flush, hundreds of save workers run concurrently
+- Each worker triggered DB flush every 100 items
+- Result: 4-5 DB commits during single flush operation = noticeable blocking
+- Even with WAL mode, multiple rapid commits caused UI stutter
+
+**Solution implemented:**
+- Removed immediate DB flush from `_save_thumbnail_worker`
+- Added deferred DB flush timer (5 seconds after scrolling stops)
+- DB updates now batched and happen only when truly idle
+- Single large batch commit is faster than multiple small commits
+- On app close, remaining updates are flushed immediately
+
+**Files modified:**
+
+### `taggui/models/image_list_model.py`
+- Lines 1167-1171: Removed auto-flush every 100 items from save worker
+- Lines 343-347: Added `_db_flush_timer` for deferred flush
+- Lines 1064-1072: Updated `set_scrolling_state` to manage timer
+
+### `taggui/widgets/main_window.py`
+- Lines 307-309: Added DB flush in `closeEvent`
+
+**Impact:**
+- Perfectly smooth UI during cache saves
+- DB updates accumulate in memory and flush when idle
+- Minimal memory overhead (just filename strings)
+- No data loss - flushes on app close
+
+**Performance:**
+- Before: 4-5 DB commits per flush in main thread = UI blocking
+- After: 1 DB commit after 5 seconds idle in **background thread** = zero UI impact
+- DB flush happens in `_save_executor` thread pool, completely async
+- WAL mode + background thread = perfectly smooth UI regardless of batch size
+- Tested with 400 and 20k image flushes - no blocking

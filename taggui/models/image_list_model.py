@@ -261,6 +261,26 @@ class ImageListModel(QAbstractListModel):
     PAGE_SIZE = 1000
     MAX_PAGES_IN_MEMORY = 20  # Increased from 5 to reduce evictions and crashes
 
+    @staticmethod
+    def _set_low_priority_thread():
+        """Set low OS priority for worker threads to never interfere with UI."""
+        import sys
+        try:
+            if sys.platform == 'win32':
+                # Windows: Set thread priority to lowest
+                import ctypes
+                ctypes.windll.kernel32.SetThreadPriority(
+                    ctypes.windll.kernel32.GetCurrentThread(),
+                    -2  # THREAD_PRIORITY_LOWEST
+                )
+            else:
+                # Unix/Linux: Set nice value to lowest priority
+                import os
+                os.nice(19)  # Lowest priority
+        except Exception as e:
+            # Silently ignore if setting priority fails
+            pass
+
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
         # Always generate thumbnails at max size (512px) for best quality and performance
@@ -295,8 +315,12 @@ class ImageListModel(QAbstractListModel):
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
         # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
         self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
-        # Save executor: 2 workers for background cache writing (low priority, can be slow)
-        self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb_save")
+        # Save executor: 2 workers for background cache writing (LOW OS PRIORITY to never block UI)
+        self._save_executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="thumb_save",
+            initializer=self._set_low_priority_thread
+        )
         # Page loader executor for paginated mode
         self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
         # DISABLED: Cache warming causes UI blocking
@@ -340,6 +364,12 @@ class ImageListModel(QAbstractListModel):
         self._pending_cache_saves_lock = threading.Lock()
         self._pending_db_cache_flags = []  # Batch DB updates for thumbnail_cached flag (file_name strings)
         self._pending_db_cache_flags_lock = threading.Lock()
+
+        # Timer for deferred DB flush (only when truly idle)
+        self._db_flush_timer = QTimer(self)
+        self._db_flush_timer.setSingleShot(True)
+        self._db_flush_timer.timeout.connect(self._flush_db_cache_flags)
+        self._db_flush_timer.setInterval(5000)  # 5 seconds idle before DB flush
 
         # Track background enrichment
         self._enrichment_cancelled = threading.Event()
@@ -1061,11 +1091,39 @@ class ImageListModel(QAbstractListModel):
         Update scrolling state to defer cache writes during scroll.
         Called by view when scrolling starts/stops.
         """
+        import time
+        t0 = time.perf_counter()
+
+        t_before_assign = time.perf_counter()
         self._is_scrolling = is_scrolling
+        t_after_assign = time.perf_counter()
 
         # When scrolling stops, flush all pending cache saves
         if not is_scrolling:
+            t1 = time.perf_counter()
             self._flush_pending_cache_saves()
+            t2 = time.perf_counter()
+            print(f"[PERF] _flush_pending_cache_saves took {(t2-t1)*1000:.2f}ms")
+
+            # Start deferred DB flush timer (only flushes if still idle after 5 seconds)
+            self._db_flush_timer.start()
+            t3 = time.perf_counter()
+            print(f"[PERF] _db_flush_timer.start took {(t3-t2)*1000:.2f}ms")
+        else:
+            # Cancel DB flush if user starts scrolling again
+            t1 = time.perf_counter()
+            self._db_flush_timer.stop()
+            t2 = time.perf_counter()
+
+            timer_stop_ms = (t2 - t1) * 1000
+            if timer_stop_ms > 1:
+                print(f"[PERF] _db_flush_timer.stop took {timer_stop_ms:.2f}ms")
+
+        t4 = time.perf_counter()
+        total_ms = (t4-t0)*1000
+        assign_ms = (t_after_assign - t_before_assign) * 1000
+        if total_ms > 5:
+            print(f"[PERF] set_scrolling_state({is_scrolling}) TOTAL: {total_ms:.2f}ms (assign: {assign_ms:.2f}ms)")
 
     def set_visible_indices(self, visible_indices: set):
         """
@@ -1075,56 +1133,40 @@ class ImageListModel(QAbstractListModel):
         self._visible_indices_hint = visible_indices
 
     def _flush_pending_cache_saves(self, force=False):
-        """Submit pending cache saves to background executor (batched to avoid blocking)."""
-        with self._pending_cache_saves_lock:
-            if not self._pending_cache_saves:
-                return
+        """Submit pending cache saves to background executor (fully async, zero main thread work)."""
+        # Don't flush if actively scrolling (unless forced on app close)
+        if not force and self._is_scrolling:
+            return  # Wait until truly idle
 
-            count = len(self._pending_cache_saves)
+        # Do EVERYTHING including list access in background thread to avoid ANY main thread blocking
+        def background_flush():
+            # Access the list in background thread to avoid main thread lock contention
+            with self._pending_cache_saves_lock:
+                if not self._pending_cache_saves:
+                    return
 
-            # Only flush if we have a substantial batch (50+ items) to make it worthwhile
-            # Or force flush (e.g., on app close, or queue too large 300+)
-            if not force and count < 50:
-                return  # Accumulate more before flushing
+                count = len(self._pending_cache_saves)
 
-            # Show first few filenames for debugging
-            sample_names = [p.name for p, _, _, _ in self._pending_cache_saves[:3]]
-            print(f"[CACHE] Flushing {count} pending cache saves (batch write) - e.g., {sample_names}")
+                # Only flush if we have a substantial batch (50+ items) to make it worthwhile
+                # Or force flush (e.g., on app close, or queue too large 300+)
+                if not force and count < 50:
+                    return  # Accumulate more before flushing
 
-            # Move list instead of copying to avoid QIcon copy overhead
-            saves_to_submit = self._pending_cache_saves
-            self._pending_cache_saves = []
+                # Swap with a new empty list
+                saves_to_submit = self._pending_cache_saves
+                self._pending_cache_saves = []
 
-        # Submit in background to avoid blocking (don't hold lock during submission loop)
-        from PySide6.QtCore import QTimer
+            # Print and submit all saves
+            print(f"[CACHE] Flushing {len(saves_to_submit)} pending cache saves")
 
-        # Track chunk index in closure
-        chunk_state = {'index': 0}
-        CHUNK_SIZE = 25  # Smaller chunks for smoother UI
-
-        def submit_next_chunk():
-            """Submit one chunk at a time, yielding between chunks."""
-            i = chunk_state['index']
-            if i >= len(saves_to_submit):
-                return  # Done
-
-            # Submit one chunk
-            chunk_end = min(i + CHUNK_SIZE, len(saves_to_submit))
-            for path, mtime, width, thumbnail in saves_to_submit[i:chunk_end]:
+            for path, mtime, width, thumbnail in saves_to_submit:
                 self._save_executor.submit(
                     self._save_thumbnail_worker,
                     path, mtime, width, thumbnail
                 )
 
-            # Move to next chunk
-            chunk_state['index'] = chunk_end
-
-            # Schedule next chunk (yields to event loop)
-            if chunk_state['index'] < len(saves_to_submit):
-                QTimer.singleShot(0, submit_next_chunk)
-
-        # Start submission in next event loop iteration
-        QTimer.singleShot(0, submit_next_chunk)
+        # Run the ENTIRE flush (including lock acquisition) in executor
+        self._save_executor.submit(background_flush)
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
@@ -1155,20 +1197,25 @@ class ImageListModel(QAbstractListModel):
     def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, thumbnail: QIcon):
         """Worker function that saves thumbnail to disk cache in background thread."""
         import threading
+        import time
+
+        # Small delay to prevent disk I/O saturation (yield to other I/O operations)
+        # This combined with low thread priority ensures saves never block UI
+        time.sleep(0.05)  # 50ms delay between saves
+
         # Removed noisy log: print(f"[CACHE SAVE] Background thread {threading.current_thread().name} saving: {path.name}")
         try:
             from utils.thumbnail_cache import get_thumbnail_cache
             get_thumbnail_cache().save_thumbnail(path, mtime, width, thumbnail)
 
-            # Queue DB update instead of doing it immediately (batch for performance)
+            # Queue DB update for deferred batch write (when truly idle)
             if self._db and self._directory_path:
                 try:
                     relative_path = str(path.relative_to(self._directory_path))
                     with self._pending_db_cache_flags_lock:
                         self._pending_db_cache_flags.append(relative_path)
-                        # Flush DB updates every 100 items to avoid huge batches
-                        if len(self._pending_db_cache_flags) >= 100:
-                            self._flush_db_cache_flags()
+                        # REMOVED: Immediate flush every 100 items (caused blocking)
+                        # DB updates now deferred to idle time (5+ seconds after scrolling stops)
                 except ValueError:
                     # Path not relative to directory, skip
                     pass
@@ -1186,7 +1233,7 @@ class ImageListModel(QAbstractListModel):
             traceback.print_exc()
 
     def _flush_db_cache_flags(self):
-        """Batch update DB thumbnail_cached flags (called from worker thread)."""
+        """Batch update DB thumbnail_cached flags (async, non-blocking)."""
         with self._pending_db_cache_flags_lock:
             if not self._pending_db_cache_flags:
                 return
@@ -1194,18 +1241,24 @@ class ImageListModel(QAbstractListModel):
             batch = list(self._pending_db_cache_flags)
             self._pending_db_cache_flags.clear()
 
-        # Batch DB update (single transaction for all flags)
-        if self._db:
-            try:
-                with self._db._db_lock:
-                    cursor = self._db.conn.cursor()
-                    cursor.executemany(
-                        'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ?',
-                        [(file_name,) for file_name in batch]
-                    )
-                    self._db.conn.commit()
-            except Exception as e:
-                print(f"[DB] ERROR batch updating thumbnail_cached flags: {e}")
+        # Submit DB flush to background thread (never blocks main thread)
+        def db_flush_worker():
+            """Worker function that performs DB commit in background."""
+            if self._db:
+                try:
+                    with self._db._db_lock:
+                        cursor = self._db.conn.cursor()
+                        cursor.executemany(
+                            'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ?',
+                            [(file_name,) for file_name in batch]
+                        )
+                        self._db.conn.commit()
+                        print(f"[DB] Flushed {len(batch)} thumbnail_cached flags in background")
+                except Exception as e:
+                    print(f"[DB] ERROR batch updating thumbnail_cached flags: {e}")
+
+        # Submit to save executor (dedicated thread pool for I/O operations)
+        self._save_executor.submit(db_flush_worker)
 
     def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
         """Load thumbnail in background thread, then notify UI."""
