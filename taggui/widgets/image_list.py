@@ -413,10 +413,10 @@ class ImageListView(QListView):
 
         # Cache status is now shown in main window status bar (removed floating labels)
 
-        # Idle timer for background cache warming (3 seconds after scroll stops)
-        self._cache_warm_idle_timer = QTimer(self)
-        self._cache_warm_idle_timer.setSingleShot(True)
-        self._cache_warm_idle_timer.timeout.connect(self._start_cache_warming)
+        # DISABLED: Cache warming causes UI blocking
+        # self._cache_warm_idle_timer = QTimer(self)
+        # self._cache_warm_idle_timer.setSingleShot(True)
+        # self._cache_warm_idle_timer.timeout.connect(self._start_cache_warming)
 
         # Idle timer for flushing cache saves (2 seconds after scroll stops)
         self._cache_flush_timer = QTimer(self)
@@ -1827,9 +1827,9 @@ class ImageListView(QListView):
         self._cache_flush_timer.stop()
         self._cache_flush_timer.start(2000)  # 2 seconds idle before flush
 
-        # Start cache warming timer (5 seconds after scroll stops)
-        self._cache_warm_idle_timer.stop()
-        self._cache_warm_idle_timer.start(5000)  # 5 seconds idle
+        # DISABLED: Cache warming causes UI blocking
+        # self._cache_warm_idle_timer.stop()
+        # self._cache_warm_idle_timer.start(5000)  # 5 seconds idle
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
@@ -1842,8 +1842,9 @@ class ImageListView(QListView):
 
         # Cancel cache flush and warming timers when scrolling starts
         self._cache_flush_timer.stop()
-        self._cache_warm_idle_timer.stop()
-        self._stop_cache_warming()
+        # DISABLED: Cache warming causes UI blocking
+        # self._cache_warm_idle_timer.stop()
+        # self._stop_cache_warming()
 
         # Track scroll direction for predictive preloading
         if dy != 0:
@@ -2548,51 +2549,53 @@ class ImageListView(QListView):
         self._page_fade_animation.finished.connect(self._page_indicator_label.hide)
         self._page_fade_animation.start()
 
-    def _start_cache_warming(self):
-        """Start background cache warming after idle period."""
-        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
-        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
-            return
+    # DISABLED: Cache warming causes UI blocking
+    # def _start_cache_warming(self):
+    #     """Start background cache warming after idle period."""
+    #     source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+    #     if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+    #         return
+    #
+    #     # Don't start cache warming while enrichment is running (causes UI blocking)
+    #     # Check if any images still need enrichment (have placeholder dimensions)
+    #     if hasattr(source_model, 'images') and source_model.images:
+    #         needs_enrichment = any(img.dimensions == (512, 512) for img in source_model.images[:100])  # Sample first 100
+    #         if needs_enrichment:
+    #             print("[CACHE WARM] Skipping - enrichment still in progress")
+    #             # Retry in 5 seconds
+    #             self._cache_warm_idle_timer.start(5000)
+    #             return
+    #
+    #     # Default to 'down' if never scrolled
+    #     if not hasattr(self, '_scroll_direction') or self._scroll_direction is None:
+    #         self._scroll_direction = 'down'
+    #         print(f"[CACHE WARM] Starting without prior scroll, defaulting to 'down'")
+    #
+    #     # Get visible items to determine where to start warming
+    #     viewport_rect = self.viewport().rect()
+    #     visible_items = self._get_masonry_visible_items(viewport_rect)
+    #     if not visible_items:
+    #         return
+    #
+    #     # Calculate start index based on scroll direction
+    #     if self._scroll_direction == 'down':
+    #         # Warm cache ahead (below visible area)
+    #         start_idx = max(item['index'] for item in visible_items) + 1
+    #     else:
+    #         # Warm cache above visible area
+    #         start_idx = min(item['index'] for item in visible_items) - 500
+    #         start_idx = max(0, start_idx)
+    #
+    #     # Start cache warming in the model
+    #     if hasattr(source_model, 'start_cache_warming'):
+    #         source_model.start_cache_warming(start_idx, self._scroll_direction)
 
-        # Don't start cache warming while enrichment is running (causes UI blocking)
-        # Check if any images still need enrichment (have placeholder dimensions)
-        if hasattr(source_model, 'images') and source_model.images:
-            needs_enrichment = any(img.dimensions == (512, 512) for img in source_model.images[:100])  # Sample first 100
-            if needs_enrichment:
-                print("[CACHE WARM] Skipping - enrichment still in progress")
-                # Retry in 5 seconds
-                self._cache_warm_idle_timer.start(5000)
-                return
-
-        # Default to 'down' if never scrolled
-        if not hasattr(self, '_scroll_direction') or self._scroll_direction is None:
-            self._scroll_direction = 'down'
-            print(f"[CACHE WARM] Starting without prior scroll, defaulting to 'down'")
-
-        # Get visible items to determine where to start warming
-        viewport_rect = self.viewport().rect()
-        visible_items = self._get_masonry_visible_items(viewport_rect)
-        if not visible_items:
-            return
-
-        # Calculate start index based on scroll direction
-        if self._scroll_direction == 'down':
-            # Warm cache ahead (below visible area)
-            start_idx = max(item['index'] for item in visible_items) + 1
-        else:
-            # Warm cache above visible area
-            start_idx = min(item['index'] for item in visible_items) - 500
-            start_idx = max(0, start_idx)
-
-        # Start cache warming in the model
-        if hasattr(source_model, 'start_cache_warming'):
-            source_model.start_cache_warming(start_idx, self._scroll_direction)
-
-    def _stop_cache_warming(self):
-        """Stop background cache warming immediately."""
-        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
-        if source_model and hasattr(source_model, 'stop_cache_warming'):
-            source_model.stop_cache_warming()
+    # DISABLED: Cache warming causes UI blocking
+    # def _stop_cache_warming(self):
+    #     """Stop background cache warming immediately."""
+    #     source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+    #     if source_model and hasattr(source_model, 'stop_cache_warming'):
+    #         source_model.stop_cache_warming()
 
     def _flush_cache_saves(self):
         """Flush pending cache saves after truly idle (2+ seconds)."""
@@ -2667,12 +2670,13 @@ class ImageList(QDockWidget):
         # Connect sort signal
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_changed)
 
+        # DISABLED: Cache warming causes UI blocking
         # Connect cache warming signal to update cache status label
-        source_model = proxy_image_list_model.sourceModel()
-        if hasattr(source_model, 'cache_warm_progress'):
-            source_model.cache_warm_progress.connect(self._update_cache_status)
-            # Trigger initial update
-            QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
+        # source_model = proxy_image_list_model.sourceModel()
+        # if hasattr(source_model, 'cache_warm_progress'):
+        #     source_model.cache_warm_progress.connect(self._update_cache_status)
+        #     # Trigger initial update
+        #     QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
 
     def set_selection_mode(self, selection_mode: str):
         if selection_mode == SelectionMode.DEFAULT:
@@ -2692,24 +2696,25 @@ class ImageList(QDockWidget):
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)
 
-    def _update_cache_status(self, progress: int, total: int):
-        """Update cache status label (right side of status bar)."""
-        source_model = self.proxy_image_list_model.sourceModel()
-        if total == 0:
-            # No warming active, show real cache stats
-            if hasattr(source_model, 'get_cache_stats'):
-                cached, total_images = source_model.get_cache_stats()
-                if total_images > 0:
-                    percent = int((cached / total_images) * 100)
-                    self.cache_status_label.setText(f"💾 Cache: {cached:,} / {total_images:,} ({percent}%)")
-                else:
-                    self.cache_status_label.setText("")
-            else:
-                self.cache_status_label.setText("")
-        else:
-            # Warming active, show progress
-            percent = int((progress / total) * 100) if total > 0 else 0
-            self.cache_status_label.setText(f"🔥 Building cache: {progress:,} / {total:,} ({percent}%)")
+    # DISABLED: Cache warming causes UI blocking
+    # def _update_cache_status(self, progress: int, total: int):
+    #     """Update cache status label (right side of status bar)."""
+    #     source_model = self.proxy_image_list_model.sourceModel()
+    #     if total == 0:
+    #         # No warming active, show real cache stats
+    #         if hasattr(source_model, 'get_cache_stats'):
+    #             cached, total_images = source_model.get_cache_stats()
+    #             if total_images > 0:
+    #                 percent = int((cached / total_images) * 100)
+    #                 self.cache_status_label.setText(f"💾 Cache: {cached:,} / {total_images:,} ({percent}%)")
+    #             else:
+    #                 self.cache_status_label.setText("")
+    #         else:
+    #             self.cache_status_label.setText("")
+    #     else:
+    #         # Warming active, show progress
+    #         percent = int((progress / total) * 100) if total > 0 else 0
+    #         self.cache_status_label.setText(f"🔥 Building cache: {progress:,} / {total:,} ({percent}%)")
 
     @Slot()
     def go_to_previous_image(self):
