@@ -2810,6 +2810,31 @@ class ImageList(QDockWidget):
             # Restart background enrichment with new sorted order
             if hasattr(source_model, '_restart_enrichment'):
                 source_model._restart_enrichment()
+
+            # Scroll to currently selected image after sort (if any)
+            current_index = self.list_view.currentIndex()
+            if current_index.isValid():
+                # Use layout_ready signal for masonry, or immediate scroll for grid
+                scroll_done = [False]
+
+                def do_scroll():
+                    if scroll_done[0]:
+                        return
+                    scroll_done[0] = True
+                    from PySide6.QtWidgets import QAbstractItemView
+                    self.list_view.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    try:
+                        self.list_view.layout_ready.disconnect(do_scroll)
+                    except:
+                        pass
+
+                # Connect to layout_ready signal (fires when masonry completes)
+                self.list_view.layout_ready.connect(do_scroll)
+
+                # Fallback timeout in case layout_ready doesn't fire
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, do_scroll)
+
         except Exception as e:
             import traceback
             print(f"Sort error: {e}")

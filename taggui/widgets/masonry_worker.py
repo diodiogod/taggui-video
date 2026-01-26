@@ -3,9 +3,10 @@
 This runs in a separate process to avoid Python GIL blocking the UI thread.
 """
 
-import json
+import pickle
 from pathlib import Path
 from dataclasses import dataclass
+import threading
 
 
 @dataclass
@@ -33,6 +34,22 @@ def calculate_masonry_layout(items_data, column_width, spacing, num_columns, cac
     Returns:
         dict with 'items' (list of positioned items) and 'total_height'
     """
+    # Top-level safety wrapper to catch ANY crash before process dies
+    try:
+        return _calculate_masonry_layout_impl(items_data, column_width, spacing, num_columns, cache_key)
+    except Exception as e:
+        print(f"[MASONRY] FATAL: Top-level catch prevented process crash: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return minimal valid result to prevent app crash
+        return {
+            'items': [],
+            'total_height': 0
+        }
+
+
+def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_columns, cache_key=None):
+    """Internal implementation of masonry layout calculation."""
     try:
         # Try to load from cache first
         if cache_key:
@@ -129,15 +146,24 @@ def _get_cache_path(cache_key):
     cache_dir.mkdir(parents=True, exist_ok=True)
     import hashlib
     key_hash = hashlib.md5(cache_key.encode()).hexdigest()
-    return cache_dir / f'{key_hash}.json'
+    return cache_dir / f'{key_hash}.pkl'  # Changed from .json to .pkl
+
+
+def _save_to_cache_worker(cache_path, cache_data):
+    """Background worker to save cache without blocking."""
+    try:
+        with open(cache_path, 'wb') as f:
+            pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"[MASONRY] Background cache save failed: {e}")
 
 
 def _save_to_cache(cache_key, result, items_data, column_width, spacing, num_columns):
-    """Save result to cache."""
+    """Save result to cache asynchronously in background thread."""
     try:
         cache_path = _get_cache_path(cache_key)
         cache_data = {
-            'cache_version': 2,
+            'cache_version': 3,  # Bumped version for pickle format
             'column_width': column_width,
             'spacing': spacing,
             'num_columns': num_columns,
@@ -145,10 +171,17 @@ def _save_to_cache(cache_key, result, items_data, column_width, spacing, num_col
             'items': result['items'],
             'total_height': result['total_height']
         }
-        with open(cache_path, 'w') as f:
-            json.dump(cache_data, f)
+
+        # Save in background thread so it never blocks
+        thread = threading.Thread(
+            target=_save_to_cache_worker,
+            args=(cache_path, cache_data),
+            daemon=True  # Don't prevent app exit
+        )
+        thread.start()
+
     except Exception as e:
-        print(f"Failed to save masonry cache: {e}")
+        print(f"[MASONRY] Failed to start cache save thread: {e}")
 
 
 def _load_from_cache(cache_key, items_data, column_width, spacing, num_columns):
@@ -156,22 +189,30 @@ def _load_from_cache(cache_key, items_data, column_width, spacing, num_columns):
     try:
         cache_path = _get_cache_path(cache_key)
         if not cache_path.exists():
+            # Try old .json cache for migration
+            old_cache_path = cache_path.with_suffix('.json')
+            if old_cache_path.exists():
+                print(f"[MASONRY] Deleting old JSON cache, will regenerate with pickle")
+                old_cache_path.unlink()
             return None
 
-        with open(cache_path, 'r') as f:
-            cache_data = json.load(f)
+        with open(cache_path, 'rb') as f:
+            cache_data = pickle.load(f)
 
         # Validate cache
-        if (cache_data.get('cache_version') != 2 or
+        if (cache_data.get('cache_version') != 3 or
             cache_data['column_width'] != column_width or
             cache_data['spacing'] != spacing or
             cache_data['num_columns'] != num_columns or
             cache_data['items_count'] != len(items_data)):
             return None
 
-        # Validate aspect ratios match
+        # Validate aspect ratios match (sample check for performance)
         cached_items = cache_data['items']
-        for i, (index, aspect_ratio) in enumerate(items_data):
+        # Only validate first 100 items for speed (full validation too slow for 32K items)
+        sample_size = min(100, len(items_data))
+        for i in range(sample_size):
+            index, aspect_ratio = items_data[i]
             if i >= len(cached_items):
                 return None
             cached_aspect = cached_items[i]['aspect_ratio']
@@ -182,5 +223,6 @@ def _load_from_cache(cache_key, items_data, column_width, spacing, num_columns):
             'items': cache_data['items'],
             'total_height': cache_data['total_height']
         }
-    except Exception:
+    except Exception as e:
+        print(f"[MASONRY] Cache load failed: {e}")
         return None
