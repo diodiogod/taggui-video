@@ -434,6 +434,18 @@ class ImageIndexDB:
             print(f'Database query error: {e}')
             return []
 
+    def get_all_paths(self) -> List[str]:
+        """Get all cached file paths (for fast reboot without rescanning)."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT path FROM images')
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
     # ========== Tag Management ==========
 
     def get_tags_for_image(self, image_id: int) -> List[str]:
