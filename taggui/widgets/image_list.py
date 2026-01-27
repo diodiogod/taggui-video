@@ -687,12 +687,12 @@ class ImageListView(QListView):
             # print(f"[{timestamp}] ✓ User stopped typing for 3+ seconds, clearing rapid input flag")
             self._rapid_input_detected = False
 
-        # Pagination mode now loads all Image objects, so masonry should work
-        # (it will be slower for 32K items, but shouldn't crash)
+        # Pagination mode with buffered masonry - only calculates for loaded pages
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-            # Large dataset - masonry calculation will be slower
-            print(f"[{timestamp}] Pagination mode: calculating masonry for {source_model.rowCount()} items (may be slow)...")
+            # Buffered mode - will only calculate for loaded pages
+            loaded_pages = len(source_model._pages) if hasattr(source_model, '_pages') else 0
+            print(f"[{timestamp}] Buffered pagination: calculating masonry for {loaded_pages} pages...")
 
         # print(f"[{timestamp}] ⚡ EXECUTE: Timer expired, starting masonry calculation")
         if self.use_masonry:
@@ -709,6 +709,13 @@ class ImageListView(QListView):
         # Skip if model is empty
         if self.model().rowCount() == 0:
             return
+
+        # In buffered pagination mode, skip if no pages loaded yet
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            if not source_model._pages:
+                print("[MASONRY] Skipping - no pages loaded yet in buffered mode")
+                return
 
         # If already calculating, skip this recalc (can't interrupt multiprocessing)
         if self._masonry_calculating:
@@ -742,8 +749,28 @@ class ImageListView(QListView):
         # Wrap in try/except to prevent crashes from concurrent cache rebuilds
         try:
             items_data = self.model().get_filtered_aspect_ratios()
+
+            # Safety check: skip if no items
+            if not items_data:
+                print(f"[MASONRY] Skipping - no items loaded yet")
+                self._masonry_calculating = False
+                if source_model and hasattr(source_model, '_enrichment_paused'):
+                    source_model._enrichment_paused.clear()
+                return
+
+            # Debug: show item count
+            if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                print(f"[MASONRY] Buffered mode: calculating layout for {len(items_data)} items (loaded pages only)")
+            else:
+                print(f"[MASONRY] Normal mode: calculating layout for {len(items_data)} items")
         except Exception as e:
             print(f"[MASONRY] Failed to get aspect ratios: {e}")
+            import traceback
+            traceback.print_exc()
+            self._masonry_calculating = False
+            if source_model and hasattr(source_model, '_enrichment_paused'):
+                source_model._enrichment_paused.clear()
+            return
             self._masonry_calculating = False
             # Resume enrichment
             if source_model and hasattr(source_model, '_enrichment_paused'):
@@ -821,8 +848,20 @@ class ImageListView(QListView):
         # Update scroll area to accommodate total height
         total_height = result_dict['total_height']
         viewport_height = self.viewport().height()
-        max_scroll = max(0, total_height - viewport_height)
 
+        # Buffered pagination: estimate full dataset height for scrollbar
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            # Estimate total height based on loaded pages
+            loaded_items = len(self._masonry_items)
+            total_items = source_model._total_count if hasattr(source_model, '_total_count') else loaded_items
+            if loaded_items > 0:
+                avg_height_per_item = total_height / loaded_items
+                estimated_total_height = int(avg_height_per_item * total_items)
+                total_height = estimated_total_height
+                print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
+
+        max_scroll = max(0, total_height - viewport_height)
         self.verticalScrollBar().setRange(0, max_scroll)
         self.verticalScrollBar().setPageStep(viewport_height)
 
@@ -1904,31 +1943,42 @@ class ImageListView(QListView):
                 self._idle_preload_timer.start(500)  # 500ms after scrolling stops
 
     def _check_and_load_pages(self):
-        """Update current page tracking (always), trigger preloading (only when not scrolling)."""
+        """Update current page tracking and trigger page loading based on scroll position."""
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
 
         # Only for pagination mode
         if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
             return
 
-        if not self._masonry_items or source_model.rowCount() == 0:
+        if not hasattr(source_model, '_total_count') or source_model._total_count == 0:
             return
 
-        # Get current visible items
+        # Estimate which items are visible based on scroll position
         scroll_offset = self.verticalScrollBar().value()
-        viewport_height = self.viewport().height()
-        viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_height)
-        visible_items = self._get_masonry_visible_items(viewport_rect)
+        scroll_max = self.verticalScrollBar().maximum()
 
-        if not visible_items:
+        if scroll_max <= 0:
+            # Can't determine position yet
             return
 
-        # Determine current page from middle visible item
-        mid_idx = visible_items[len(visible_items) // 2]['index']
-        current_page = mid_idx // source_model.PAGE_SIZE
+        # Estimate position in dataset
+        scroll_fraction = scroll_offset / scroll_max if scroll_max > 0 else 0
+        estimated_item_idx = int(scroll_fraction * source_model._total_count)
 
-        # ALWAYS update current page (needed for page indicator during drag)
+        # Calculate which page this corresponds to
+        current_page = estimated_item_idx // source_model.PAGE_SIZE
         self._current_page = current_page
+
+        # Load current page + buffer (3 pages before, 3 after)
+        buffer_pages = 3
+        start_page = max(0, current_page - buffer_pages)
+        end_page = min((source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE - 1,
+                       current_page + buffer_pages)
+
+        # Trigger page loads for this range
+        for page_num in range(start_page, end_page + 1):
+            if page_num not in source_model._pages and page_num not in source_model._loading_pages:
+                source_model._request_page_load(page_num)
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
@@ -1955,6 +2005,11 @@ class ImageListView(QListView):
                 import time
                 paint_start = time.time()
 
+                # Safety check: ensure model is valid
+                if not self.model() or self.model().rowCount() == 0:
+                    super().paintEvent(event)
+                    return
+
                 # Paint background
                 painter = QPainter(self.viewport())
                 painter.fillRect(self.viewport().rect(), self.palette().base())
@@ -1970,6 +2025,18 @@ class ImageListView(QListView):
 
                 # Use masonry layout to get only visible items (OPTIMIZATION!)
                 visible_items = self._get_masonry_visible_items(expanded_viewport)
+
+                # Trigger page loads for visible items (buffered pagination)
+                source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+                if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                    if visible_items:
+                        # Get index range of visible items
+                        indices = [item['index'] for item in visible_items]
+                        if indices:
+                            min_idx = min(indices)
+                            max_idx = max(indices)
+                            # Trigger page loads for this range
+                            source_model.ensure_pages_for_range(min_idx, max_idx)
 
                 # Auto-correct scroll bounds if needed
                 max_allowed = self._get_masonry_total_height() - viewport_height

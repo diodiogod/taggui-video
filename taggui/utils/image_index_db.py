@@ -441,7 +441,7 @@ class ImageIndexDB:
 
         try:
             cursor = self.conn.cursor()
-            cursor.execute('SELECT path FROM images')
+            cursor.execute('SELECT file_name FROM images')
             return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error:
             return []

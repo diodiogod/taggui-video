@@ -38,25 +38,47 @@ class ProxyImageListModel(QSortFilterProxyModel):
 
         Returns list of (proxy_row, aspect_ratio) tuples. This is MUCH faster than
         calling .index() and .data() in a loop on the UI thread.
+
+        In paginated mode with buffered masonry, returns only loaded pages.
         """
         source_model = self.sourceModel()
         if not source_model:
             return []
 
-        # Get all aspect ratios from source model (fast, no Qt calls)
-        all_aspect_ratios = source_model.get_aspect_ratios()
+        # Check if using buffered masonry (paginated mode)
+        if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            # Buffered masonry: get only loaded pages
+            items_data, first_idx, last_idx = source_model.get_buffered_aspect_ratios()
 
-        # Build filtered list by mapping proxy rows to source rows
-        result = []
-        for proxy_row in range(self.rowCount()):
-            proxy_index = self.index(proxy_row, 0)
-            source_index = self.mapToSource(proxy_index)
-            if source_index.isValid():
-                source_row = source_index.row()
-                if source_row < len(all_aspect_ratios):
-                    result.append((proxy_row, all_aspect_ratios[source_row]))
+            # Build dict for fast lookup
+            source_aspect_ratios = {idx: ar for idx, ar in items_data}
 
-        return result
+            # Map to proxy rows, only including loaded items
+            result = []
+            for proxy_row in range(self.rowCount()):
+                proxy_index = self.index(proxy_row, 0)
+                source_index = self.mapToSource(proxy_index)
+                if source_index.isValid():
+                    source_row = source_index.row()
+                    if source_row in source_aspect_ratios:
+                        result.append((proxy_row, source_aspect_ratios[source_row]))
+
+            return result
+        else:
+            # Normal mode: get all aspect ratios
+            all_aspect_ratios = source_model.get_aspect_ratios()
+
+            # Build filtered list by mapping proxy rows to source rows
+            result = []
+            for proxy_row in range(self.rowCount()):
+                proxy_index = self.index(proxy_row, 0)
+                source_index = self.mapToSource(proxy_index)
+                if source_index.isValid():
+                    source_row = source_index.row()
+                    if source_row < len(all_aspect_ratios):
+                        result.append((proxy_row, all_aspect_ratios[source_row]))
+
+            return result
 
     def set_filter(self, new_filter: list | None):
         self.filter = new_filter
