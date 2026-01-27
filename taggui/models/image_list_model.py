@@ -438,7 +438,12 @@ class ImageListModel(QAbstractListModel):
             return ([(i, ar) for i, ar in enumerate(self.get_aspect_ratios())], 0, len(self.images) - 1)
 
         # Get sorted page numbers (with lock to avoid race conditions)
+        # CRITICAL: Hold lock while building data to prevent concurrent modifications
         with self._page_load_lock:
+            if not self._pages:
+                return ([], 0, 0)
+
+            # Snapshot page numbers to avoid changes during iteration
             loaded_pages = sorted(self._pages.keys())
             if not loaded_pages:
                 return ([], 0, 0)
@@ -449,15 +454,24 @@ class ImageListModel(QAbstractListModel):
             last_index = min(last_index, self._total_count - 1)
 
             # Build aspect ratio list from loaded pages
+            # Create a deep snapshot to avoid concurrent modification
             for page_num in loaded_pages:
                 if page_num not in self._pages:
                     continue  # Page was evicted during iteration
+
                 page = self._pages[page_num]
                 page_start_idx = page_num * self.PAGE_SIZE
 
-                for offset, image in enumerate(page):
-                    global_idx = page_start_idx + offset
-                    items_data.append((global_idx, image.aspect_ratio))
+                # Snapshot the page to avoid modifications during iteration
+                try:
+                    for offset, image in enumerate(list(page)):
+                        if image and hasattr(image, 'aspect_ratio'):
+                            global_idx = page_start_idx + offset
+                            items_data.append((global_idx, image.aspect_ratio))
+                except Exception as e:
+                    # Page was modified during iteration, skip it
+                    print(f"[MASONRY] Page {page_num} modified during snapshot: {e}")
+                    continue
 
         return (items_data, first_index, last_index)
 
@@ -538,6 +552,12 @@ class ImageListModel(QAbstractListModel):
 
     def _request_page_load(self, page_num: int):
         """Request a page to be loaded in background."""
+        # DEBUG: Track what's triggering page loads
+        import traceback
+        stack = ''.join(traceback.format_stack()[-4:-1])
+        if 'data' in stack or 'get_filtered' in stack:
+            print(f"[PAGE LOAD] Page {page_num} requested from:\n{stack}")
+
         with self._page_load_lock:
             if page_num in self._pages or page_num in self._loading_pages:
                 return  # Already loaded or loading
@@ -699,12 +719,43 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode:
             return
 
-        # In buffered mode, just emit layoutChanged
-        # This is simpler than trying to track insert positions with non-contiguous pages
-        # layoutChanged will cause Qt to re-query rowCount() and data()
-        self.layoutChanged.emit()
-
         print(f"[PAGE] Page {page_num} loaded, total pages in memory: {len(self._pages)}")
+
+        # Track if we're still in initial bootstrap (first 3 pages: 0, 1, 2)
+        if not hasattr(self, '_bootstrap_complete'):
+            self._bootstrap_complete = False
+
+        # Mark bootstrap complete once we have pages 0, 1, 2 loaded
+        if not self._bootstrap_complete and 0 in self._pages and 1 in self._pages and 2 in self._pages:
+            self._bootstrap_complete = True
+            print("[PAGE] Initial bootstrap complete, future page loads will be silent")
+
+        # CRITICAL: Only trigger masonry recalc during initial bootstrap
+        # After that, pages load in background without triggering UI updates
+        if not self._bootstrap_complete:
+            # Bootstrap phase: trigger layout updates so user sees images appear
+            if not hasattr(self, '_page_load_debounce_timer'):
+                from PySide6.QtCore import QTimer
+                self._page_load_debounce_timer = QTimer()
+                self._page_load_debounce_timer.setSingleShot(True)
+                self._page_load_debounce_timer.timeout.connect(lambda: self.layoutChanged.emit())
+
+            # Trigger layout change after 200ms of no new page loads
+            self._page_load_debounce_timer.stop()
+            self._page_load_debounce_timer.start(200)
+        else:
+            # After bootstrap: trigger masonry recalc for newly loaded pages
+            # Use debounce to batch multiple page loads together
+            if not hasattr(self, '_post_bootstrap_debounce_timer'):
+                from PySide6.QtCore import QTimer
+                self._post_bootstrap_debounce_timer = QTimer()
+                self._post_bootstrap_debounce_timer.setSingleShot(True)
+                self._post_bootstrap_debounce_timer.timeout.connect(lambda: self.layoutChanged.emit())
+
+            # Trigger layout change after 300ms of no new page loads
+            # This batches rapid page loads during scrolling
+            self._post_bootstrap_debounce_timer.stop()
+            self._post_bootstrap_debounce_timer.start(300)
 
     def _process_enrichment_queue(self):
         """Process dimension updates from background thread (runs on main thread via timer)."""

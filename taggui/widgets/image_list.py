@@ -391,6 +391,7 @@ class ImageListView(QListView):
         self._masonry_items = []  # Positioned items from multiprocessing
         self._masonry_total_height = 0  # Total layout height
         self._recenter_after_layout = False  # Flag to re-center selected item after layout
+        self._painting = False  # Flag to prevent layout changes during paint (prevents re-entrancy)
 
         # Debounce timer for masonry recalculation (separate from filter debounce)
         self._masonry_recalc_timer = QTimer(self)
@@ -602,10 +603,24 @@ class ImageListView(QListView):
 
     def _on_layout_changed(self):
         """Handle layoutChanged signal - clear stale masonry data before recalculating."""
+        # CRITICAL: Skip layout changes during painting to prevent re-entrancy crash
+        # Page loading can trigger layoutChanged while we're in paintEvent
+        if hasattr(self, '_painting') and self._painting:
+            # Defer this layout change until after paint completes
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self._on_layout_changed())
+            return
+
         # Clear masonry items immediately to prevent race conditions
         # (sorting/filtering invalidates old layout, don't let paintEvent use stale data)
         self._masonry_items = []
-        self._masonry_total_height = 0
+
+        # Don't clear _masonry_total_height in buffered mode - keep estimated value for scrollbar
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
+        if not is_buffered:
+            self._masonry_total_height = 0
+
         # Now trigger recalculation
         self._recalculate_masonry_if_needed("layoutChanged")
 
@@ -821,90 +836,112 @@ class ImageListView(QListView):
 
     def _on_masonry_calculation_complete(self, result_dict):
         """Called when multiprocessing calculation completes."""
-        import time
-        timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
+        try:
+            import time
+            timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
 
-        self._masonry_calculating = False
+            self._masonry_calculating = False
 
-        if result_dict is None:
-            # Resume enrichment even if result is None
-            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-            if source_model and hasattr(source_model, '_enrichment_paused'):
-                source_model._enrichment_paused.clear()
-                print("[MASONRY] Resumed enrichment after recalculation (null result)")
-            return
-
-        # Check if another calculation is pending (user is still typing)
-        if self._masonry_recalc_timer.isActive():
-            # print(f"[{timestamp}] ⏭️  SKIP UI UPDATE: Another calculation pending")
-            return
-
-        # print(f"[{timestamp}] 🎨 APPLYING LAYOUT to UI...")
-
-        # Store results for paintEvent to use
-        self._masonry_items = result_dict['items']
-        self._masonry_total_height = result_dict['total_height']
-
-        # Update scroll area to accommodate total height
-        total_height = result_dict['total_height']
-        viewport_height = self.viewport().height()
-
-        # Buffered pagination: estimate full dataset height for scrollbar
-        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
-        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-            # Estimate total height based on loaded pages
-            loaded_items = len(self._masonry_items)
-            total_items = source_model._total_count if hasattr(source_model, '_total_count') else loaded_items
-            if loaded_items > 0:
-                avg_height_per_item = total_height / loaded_items
-                estimated_total_height = int(avg_height_per_item * total_items)
-                total_height = estimated_total_height
-                print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
-
-        max_scroll = max(0, total_height - viewport_height)
-        self.verticalScrollBar().setRange(0, max_scroll)
-        self.verticalScrollBar().setPageStep(viewport_height)
-
-        # Defer expensive UI update to next event loop iteration
-        # This prevents blocking keyboard events that are already queued
-        from PySide6.QtCore import QTimer
-        def apply_and_signal():
-            try:
-                self._apply_layout_to_ui(timestamp)
-                # Emit signal that layout is ready for scrolling
-                self.layout_ready.emit()
-
-                # Re-center selected item if requested (after resize/zoom)
-                if self._recenter_after_layout:
-                    self._recenter_after_layout = False
-                    current_index = self.currentIndex()
-                    if current_index.isValid():
-                        self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
-
-                # Resume enrichment AFTER UI update completes (prevent race condition)
-                # Add delay to let Qt fully settle before enrichment resumes
-                # This prevents crashes when user interacts during final masonry recalc
-                def resume_enrichment_delayed():
-                    source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-                    if source_model and hasattr(source_model, '_enrichment_paused'):
-                        source_model._enrichment_paused.clear()
-                        print("[MASONRY] Resumed enrichment after UI update")
-
-                QTimer.singleShot(200, resume_enrichment_delayed)  # 200ms delay
-            except Exception as e:
-                print(f"[MASONRY] CRITICAL: UI update crashed: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-                # Resume enrichment even on crash
+            if result_dict is None:
+                # Resume enrichment even if result is None
                 source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
                 if source_model and hasattr(source_model, '_enrichment_paused'):
                     source_model._enrichment_paused.clear()
+                    print("[MASONRY] Resumed enrichment after recalculation (null result)")
+                return
 
-        QTimer.singleShot(0, apply_and_signal)
+            # Check if another calculation is pending (user is still typing)
+            if self._masonry_recalc_timer.isActive():
+                # print(f"[{timestamp}] ⏭️  SKIP UI UPDATE: Another calculation pending")
+                return
 
-        # Start thumbnail preloading after layout is ready
-        if not self._preload_complete:
-            self._idle_preload_timer.start(100)  # Start preloading after 100ms
+            # print(f"[{timestamp}] 🎨 APPLYING LAYOUT to UI...")
+
+            # Store results for paintEvent to use
+            self._masonry_items = result_dict['items']
+            self._masonry_total_height = result_dict['total_height']
+
+            # Update scroll area to accommodate total height
+            total_height = result_dict['total_height']
+            viewport_height = self.viewport().height()
+
+            # Buffered pagination: estimate full dataset height for scrollbar
+            source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+            if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                # Estimate total height based on loaded pages
+                loaded_items = len(self._masonry_items)
+                total_items = source_model._total_count if hasattr(source_model, '_total_count') else loaded_items
+                if loaded_items > 0:
+                    avg_height_per_item = total_height / loaded_items
+                    estimated_total_height = int(avg_height_per_item * total_items)
+                    total_height = estimated_total_height
+                    # CRITICAL: Update _masonry_total_height with estimated value so updateGeometries() preserves it
+                    self._masonry_total_height = estimated_total_height
+                    print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
+
+            # Store for viewportSizeHint() and updateGeometries() to use
+            # Don't set scrollbar directly - let Qt calculate from size hint
+            print(f"[SCROLLBAR] Total height: {total_height:,} px (viewport={viewport_height})")
+
+            # Defer expensive UI update to next event loop iteration
+            # This prevents blocking keyboard events that are already queued
+            from PySide6.QtCore import QTimer
+            def apply_and_signal():
+                try:
+                    print(f"[MASONRY] About to call _apply_layout_to_ui")
+                    self._apply_layout_to_ui(timestamp)
+                    print(f"[MASONRY] _apply_layout_to_ui completed")
+
+                    # Emit signal that layout is ready for scrolling
+                    try:
+                        self.layout_ready.emit()
+                        print(f"[MASONRY] layout_ready signal emitted")
+                    except Exception as e:
+                        print(f"[MASONRY] layout_ready signal crashed: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                    # Re-center selected item if requested (after resize/zoom)
+                    if self._recenter_after_layout:
+                        self._recenter_after_layout = False
+                        current_index = self.currentIndex()
+                        if current_index.isValid():
+                            self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+                    # Resume enrichment AFTER UI update completes (prevent race condition)
+                    # Add delay to let Qt fully settle before enrichment resumes
+                    # This prevents crashes when user interacts during final masonry recalc
+                    def resume_enrichment_delayed():
+                        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                        if source_model and hasattr(source_model, '_enrichment_paused'):
+                            source_model._enrichment_paused.clear()
+                            print("[MASONRY] Resumed enrichment after UI update")
+
+                    QTimer.singleShot(200, resume_enrichment_delayed)  # 200ms delay
+                except Exception as e:
+                    print(f"[MASONRY] CRITICAL: UI update crashed: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Resume enrichment even on crash
+                    source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                    if source_model and hasattr(source_model, '_enrichment_paused'):
+                        source_model._enrichment_paused.clear()
+
+            QTimer.singleShot(0, apply_and_signal)
+
+            # Start thumbnail preloading after layout is ready
+            if not self._preload_complete:
+                self._idle_preload_timer.start(100)  # Start preloading after 100ms
+
+        except Exception as e:
+            print(f"[MASONRY] CRASH in _on_masonry_calculation_complete: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            self._masonry_calculating = False
+            # Resume enrichment even on crash
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+            if source_model and hasattr(source_model, '_enrichment_paused'):
+                source_model._enrichment_paused.clear()
 
     def _get_masonry_item_rect(self, index):
         """Get QRect for item at given index from masonry results."""
@@ -978,9 +1015,22 @@ class ImageListView(QListView):
         t1 = time.time()
 
         try:
+            # Verify model is still valid before updating UI
+            if not self.model() or not self._masonry_items:
+                print(f"[MASONRY] Skipping UI update - model or items invalid")
+                return
+
+            # Check if buffered pagination mode
+            source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+            is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
+
             # Trigger UI update (EXPENSIVE - can block for 900ms)
-            self.scheduleDelayedItemsLayout()
-            self.viewport().update()
+            # In buffered mode, skip scheduleDelayedItemsLayout as it resets scrollbar to rowCount() range
+            if not is_buffered:
+                self.scheduleDelayedItemsLayout()
+                self.viewport().update()
+            # In buffered mode, viewport().update() during page loading can crash
+            # Qt will paint when ready via its own event loop
 
             # elapsed = (time.time() - t1) * 1000
             # print(f"[{timestamp}] ✓ UI UPDATE DONE in {elapsed:.0f}ms")
@@ -1574,8 +1624,38 @@ class ImageListView(QListView):
         """Return the size hint for masonry layout."""
         if self.use_masonry and self._masonry_items:
             size = self._get_masonry_total_size()
+            # Debug: check if Qt is using this to calculate scrollbar
+            # print(f"[VIEWPORT HINT] Returning size: {size.width()}x{size.height()}")
             return size
         return super().viewportSizeHint()
+
+    def updateGeometries(self):
+        """Override to prevent Qt from resetting scrollbar in buffered pagination mode."""
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
+
+        if is_buffered and self.use_masonry:
+            # Buffered mode: preserve our manually-set scrollbar range
+            # Qt would reset it based on rowCount(), which is wrong for virtual pagination
+            old_max = self.verticalScrollBar().maximum()
+
+            # Store the correct range before Qt messes with it
+            if hasattr(self, '_masonry_total_height') and self._masonry_total_height > 0:
+                viewport_height = self.viewport().height()
+                correct_max = max(0, self._masonry_total_height - viewport_height)
+            else:
+                correct_max = old_max
+
+            super().updateGeometries()
+            new_max = self.verticalScrollBar().maximum()
+
+            # Always restore in buffered mode, even if Qt didn't change it
+            if correct_max > 0 and new_max != correct_max:
+                self.verticalScrollBar().setRange(0, correct_max)
+                print(f"[UPDATEGEOM] Qt set scrollbar to {new_max}, restored to {correct_max:,}")
+        else:
+            # Normal mode: let Qt manage scrollbar
+            super().updateGeometries()
 
     def visualRect(self, index):
         """Return the visual rectangle for an index, using masonry positions."""
@@ -1953,9 +2033,31 @@ class ImageListView(QListView):
         if not hasattr(source_model, '_total_count') or source_model._total_count == 0:
             return
 
-        # Estimate which items are visible based on scroll position
+        # Throttle: Don't spam page loads on every pixel of scroll
+        import time
+        current_time = time.time()
+        if not hasattr(self, '_last_page_check_time'):
+            self._last_page_check_time = 0
+        if current_time - self._last_page_check_time < 0.1:  # 100ms throttle
+            return
+        self._last_page_check_time = current_time
+
         scroll_offset = self.verticalScrollBar().value()
         scroll_max = self.verticalScrollBar().maximum()
+
+        # CRITICAL: During bootstrap phase (first 5 pages), don't load based on scroll estimation
+        # Height estimates are unstable, causing false page requests
+        # Only allow loading if user has scrolled significantly (> 5% of range)
+        if len(source_model._pages) < 5:
+            if scroll_max > 0 and scroll_offset < (scroll_max * 0.05):
+                # Bootstrap phase + near top = don't load yet
+                self._current_page = 0
+                return
+            # Bootstrap phase but user scrolled significantly = allow loading
+            print(f"[SCROLL] Bootstrap mode, but user scrolled to {scroll_offset}/{scroll_max}")
+
+        # After bootstrap, always load pages based on scroll position
+        # (No restrictions)
 
         if scroll_max <= 0:
             # Can't determine position yet
@@ -1968,6 +2070,8 @@ class ImageListView(QListView):
         # Calculate which page this corresponds to
         current_page = estimated_item_idx // source_model.PAGE_SIZE
         self._current_page = current_page
+
+        print(f"[SCROLL] offset={scroll_offset}, max={scroll_max}, fraction={scroll_fraction:.3f}, estimated_page={current_page}")
 
         # Load current page + buffer (3 pages before, 3 after)
         buffer_pages = 3
@@ -2001,6 +2105,8 @@ class ImageListView(QListView):
             self._last_paint_time = current_time
 
         if self.use_masonry and self._masonry_items and self.model():
+            # Set flag to prevent layout changes during paint (prevents re-entrancy crash)
+            self._painting = True
             try:
                 import time
                 paint_start = time.time()
@@ -2026,17 +2132,18 @@ class ImageListView(QListView):
                 # Use masonry layout to get only visible items (OPTIMIZATION!)
                 visible_items = self._get_masonry_visible_items(expanded_viewport)
 
-                # Trigger page loads for visible items (buffered pagination)
-                source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
-                if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-                    if visible_items:
-                        # Get index range of visible items
-                        indices = [item['index'] for item in visible_items]
-                        if indices:
-                            min_idx = min(indices)
-                            max_idx = max(indices)
-                            # Trigger page loads for this range
-                            source_model.ensure_pages_for_range(min_idx, max_idx)
+                # DISABLED: Don't trigger page loads during paint - causes endless recalc loop
+                # Page loading is handled by scroll events via _check_and_load_pages()
+                # source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+                # if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                #     if visible_items:
+                #         # Get index range of visible items
+                #         indices = [item['index'] for item in visible_items]
+                #         if indices:
+                #             min_idx = min(indices)
+                #             max_idx = max(indices)
+                #             # Trigger page loads for this range
+                #             source_model.ensure_pages_for_range(min_idx, max_idx)
 
                 # Auto-correct scroll bounds if needed
                 max_allowed = self._get_masonry_total_height() - viewport_height
@@ -2122,6 +2229,9 @@ class ImageListView(QListView):
                 traceback.print_exc()
                 # Fall back to default painting
                 super().paintEvent(event)
+            finally:
+                # Clear painting flag to allow layout changes again
+                self._painting = False
         else:
             # Use default painting
             super().paintEvent(event)
@@ -2596,7 +2706,9 @@ class ImageListView(QListView):
             else:
                 current_page = 0
 
-        total_pages = (source_model.rowCount() + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
+        # Use _total_count for buffered mode (rowCount only returns loaded items)
+        total_items = source_model._total_count if hasattr(source_model, '_total_count') else source_model.rowCount()
+        total_pages = (total_items + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
 
         # Create label if needed
         if not self._page_indicator_label:
@@ -2787,8 +2899,14 @@ class ImageList(QDockWidget):
     @Slot()
     def update_image_index_label(self, proxy_image_index: QModelIndex):
         image_count = self.proxy_image_list_model.rowCount()
-        unfiltered_image_count = (self.proxy_image_list_model.sourceModel()
-                                  .rowCount())
+        source_model = self.proxy_image_list_model.sourceModel()
+
+        # In buffered pagination mode, use _total_count instead of rowCount
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            unfiltered_image_count = source_model._total_count if hasattr(source_model, '_total_count') else source_model.rowCount()
+        else:
+            unfiltered_image_count = source_model.rowCount()
+
         label_text = f'Image {proxy_image_index.row() + 1} / {image_count}'
         if image_count != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
@@ -2895,6 +3013,39 @@ class ImageList(QDockWidget):
             # Emit layoutAboutToBeChanged before sorting
             source_model.layoutAboutToBeChanged.emit()
 
+            # BUFFERED PAGINATION MODE: Update DB sort params and reload pages
+            if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                # Map UI sort option to DB field
+                sort_map = {
+                    'Default': ('file_name', 'ASC'),
+                    'Name': ('file_name', 'ASC'),
+                    'Modified': ('mtime', 'DESC'),
+                    'Created': ('mtime', 'DESC'),  # DB doesn't have ctime, use mtime
+                    'Size': ('file_name', 'ASC'),  # DB doesn't have size, fallback to name
+                    'Type': ('file_name', 'ASC'),  # Group by extension would need SQL SUBSTR
+                    'Random': ('file_name', 'ASC')  # Random not supported in DB yet
+                }
+
+                db_sort_field, db_sort_dir = sort_map.get(sort_by, ('file_name', 'ASC'))
+                source_model._sort_field = db_sort_field
+                source_model._sort_dir = db_sort_dir
+                print(f"[SORT] Buffered mode: changed DB sort to {db_sort_field} {db_sort_dir}")
+
+                # Clear all pages and reload from DB with new sort
+                with source_model._page_load_lock:
+                    source_model._pages.clear()
+                    source_model._loading_pages.clear()
+                    source_model._page_load_order.clear()
+
+                # Reload first 3 pages with new sort order
+                for page_num in range(3):
+                    source_model._load_page_sync(page_num)
+
+                # Trigger layout update
+                source_model.layoutChanged.emit()
+                return  # Skip in-memory sorting below
+
+            # NORMAL MODE: Sort in-memory list
             if sort_by == 'Default':
                 # Use natural sort from image_list_model (same as initial load)
                 source_model.images.sort(key=lambda img: natural_sort_key(img.path))
