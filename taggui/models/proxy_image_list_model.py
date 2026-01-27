@@ -50,20 +50,29 @@ class ProxyImageListModel(QSortFilterProxyModel):
             # Buffered masonry: get only loaded pages
             items_data, first_idx, last_idx = source_model.get_buffered_aspect_ratios()
 
-            # Build dict for fast lookup
-            source_aspect_ratios = {idx: ar for idx, ar in items_data}
+            # items_data is [(global_idx, aspect_ratio), ...]
+            # But we need [(row, aspect_ratio), ...] where row is the index in the loaded items list
+            # Since source rowCount() returns only loaded items, row 0 = first loaded item
 
-            # Map to proxy rows, only including loaded items
-            result = []
-            for proxy_row in range(self.rowCount()):
-                proxy_index = self.index(proxy_row, 0)
-                source_index = self.mapToSource(proxy_index)
-                if source_index.isValid():
-                    source_row = source_index.row()
-                    if source_row in source_aspect_ratios:
-                        result.append((proxy_row, source_aspect_ratios[source_row]))
+            if self.filter is None:
+                # No filtering - just renumber to sequential rows
+                result = [(row, ar) for row, (global_idx, ar) in enumerate(items_data)]
+                return result
+            else:
+                # With filtering - need to check each item
+                result = []
+                for row, (global_idx, aspect_ratio) in enumerate(items_data):
+                    # Get the actual image to check filter
+                    source_index = source_model.index(row, 0)
+                    image = source_model.data(source_index, Qt.ItemDataRole.UserRole)
 
-            return result
+                    if image and self.does_image_match_filter(image, self.filter):
+                        # Map to proxy row
+                        proxy_index = self.mapFromSource(source_index)
+                        if proxy_index.isValid():
+                            result.append((proxy_index.row(), aspect_ratio))
+
+                return result
         else:
             # Normal mode: get all aspect ratios
             all_aspect_ratios = source_model.get_aspect_ratios()
