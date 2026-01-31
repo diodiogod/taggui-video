@@ -264,6 +264,8 @@ class ImageListModel(QAbstractListModel):
     # cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
     dimensions_updated = Signal()  # Emitted when aspect ratios change (no layout invalidation)
+    # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
+    pages_updated = Signal(list)  # Emits list of currently loaded page numbers
 
     # Default threshold for enabling pagination mode (overridden by settings)
     PAGINATION_THRESHOLD = 0  # Will be loaded from settings
@@ -518,6 +520,43 @@ class ImageListModel(QAbstractListModel):
             # Keep old cache if rebuild fails
             pass
 
+    def get_masonry_data_for_range(self, start_idx: int, end_idx: int) -> list[tuple[int, float]]:
+        """Get aspect ratios for a global index range in buffered mode.
+        
+        For loaded pages, returns actual aspect ratios. For unloaded pages, returns
+        estimated aspect ratios (1.0) to enable virtual masonry calculation.
+        
+        Args:
+            start_idx: Starting global index
+            end_idx: Ending global index (inclusive)
+            
+        Returns:
+            List of (global_index, aspect_ratio) tuples
+        """
+        if not self._paginated_mode:
+            # Normal mode: just return from cache
+            with self._aspect_ratio_cache_lock:
+                return [(i, self._aspect_ratio_cache[i]) 
+                        for i in range(start_idx, min(end_idx + 1, len(self._aspect_ratio_cache)))]
+        
+        items_data = []
+        with self._page_load_lock:
+            for idx in range(start_idx, min(end_idx + 1, self._total_count)):
+                page_num = idx // self.PAGE_SIZE
+                if page_num in self._pages:
+                    page = self._pages[page_num]
+                    offset = idx % self.PAGE_SIZE
+                    if offset < len(page) and page[offset]:
+                        items_data.append((idx, page[offset].aspect_ratio))
+                    else:
+                        items_data.append((idx, 1.0))  # Fallback for invalid offset
+                else:
+                    # Page not loaded - use estimated aspect ratio
+                    items_data.append((idx, 1.0))
+        
+        return items_data
+
+
     # ========== Pagination Methods ==========
 
     def _get_page_for_index(self, index: int) -> int:
@@ -539,6 +578,35 @@ class ImageListModel(QAbstractListModel):
                 self._touch_page(page_num)
                 return page_images[index_in_page]
             return None
+        
+        # Determine strict loading during scrolling
+        return None
+
+    def get_loaded_row_for_global_index(self, global_index: int) -> int:
+        """Get the row number (0..loaded_count-1) for a global index. Returns -1 if not loaded.
+        
+        This is crucial for mapping virtual masonry global indices to valid Qt model indices
+        for painting.
+        """
+        if not self._paginated_mode:
+            return global_index if global_index < len(self.images) else -1
+        
+        target_page = global_index // self.PAGE_SIZE
+        target_offset = global_index % self.PAGE_SIZE
+        
+        with self._page_load_lock:
+            if target_page not in self._pages:
+                return -1
+            
+            # Calculate row by summing lengths of all loaded pages before target
+            row_offset = 0
+            # Note: We must iterate in the same order as data() and rowCount()
+            for page_num in sorted(self._pages.keys()):
+                if page_num == target_page:
+                    return row_offset + target_offset
+                row_offset += len(self._pages[page_num])
+        
+        return -1
 
         # Page not loaded - trigger async load
         self._request_page_load(page_num)
@@ -670,9 +738,9 @@ class ImageListModel(QAbstractListModel):
                     print(f"[PAGE] Evicted page {oldest_page}, {len(self._pages)} pages remain")
                     evicted_any = True
 
-        # If pages were evicted, notify Qt that layout changed (rowCount decreased)
+        # If pages were evicted, notify masonry that pages changed (avoid layoutChanged crash!)
         if evicted_any:
-            self.layoutChanged.emit()
+            self._emit_pages_updated()
 
     def _cancel_page_thumbnails(self, page_num: int):
         """Cancel pending thumbnail loading futures for an evicted page."""
@@ -734,6 +802,7 @@ class ImageListModel(QAbstractListModel):
         # After that, pages load in background without triggering UI updates
         if not self._bootstrap_complete:
             # Bootstrap phase: trigger layout updates so user sees images appear
+            # Use layoutChanged here (not pages_updated) because Qt needs to know about new items
             if not hasattr(self, '_page_load_debounce_timer'):
                 from PySide6.QtCore import QTimer
                 self._page_load_debounce_timer = QTimer()
@@ -750,12 +819,20 @@ class ImageListModel(QAbstractListModel):
                 from PySide6.QtCore import QTimer
                 self._post_bootstrap_debounce_timer = QTimer()
                 self._post_bootstrap_debounce_timer.setSingleShot(True)
-                self._post_bootstrap_debounce_timer.timeout.connect(lambda: self.layoutChanged.emit())
+                self._post_bootstrap_debounce_timer.timeout.connect(self._emit_pages_updated)
 
             # Trigger layout change after 300ms of no new page loads
             # This batches rapid page loads during scrolling
             self._post_bootstrap_debounce_timer.stop()
             self._post_bootstrap_debounce_timer.start(300)
+
+    def _emit_pages_updated(self):
+        """Emit pages_updated signal with current loaded pages (safe alternative to layoutChanged)."""
+        with self._page_load_lock:
+            loaded_pages = list(self._pages.keys())
+        self.pages_updated.emit(loaded_pages)
+        print(f"[PAGE] Emitted pages_updated signal with {len(loaded_pages)} pages")
+
 
     def _process_enrichment_queue(self):
         """Process dimension updates from background thread (runs on main thread via timer)."""
