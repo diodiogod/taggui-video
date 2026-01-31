@@ -2177,9 +2177,12 @@ class ImageListView(QListView):
 
         # CRITICAL: During bootstrap phase (first 5 pages), don't load based on scroll estimation
         # Height estimates are unstable, causing false page requests
-        # Only allow loading if user has scrolled significantly (> 5% of range)
+        # Only allow loading if user has scrolled significantly past the initial content
+        # Using fixed pixel threshold (60,000 px ≈ 3 pages worth) instead of percentage
+        # because percentage doesn't scale well with 19M virtual height
+        bootstrap_scroll_threshold = 60000  # pixels (approx 3 pages of content)
         if len(source_model._pages) < 5:
-            if scroll_max > 0 and scroll_offset < (scroll_max * 0.05):
+            if scroll_max > 0 and scroll_offset < bootstrap_scroll_threshold:
                 # Bootstrap phase + near top = don't load yet
                 self._current_page = 0
                 return
