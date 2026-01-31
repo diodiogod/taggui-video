@@ -34,8 +34,15 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.filter: list | None = None
         self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
         
-        # Forward pages_updated signal from source model
-        image_list_model.pages_updated.connect(lambda pages: self.pages_updated.emit(pages))
+        # Forward pages_updated signal from source model AND invalidate filter to update mapping
+        image_list_model.pages_updated.connect(self._on_source_pages_updated)
+
+    def _on_source_pages_updated(self, pages):
+        """Handle page updates from source model in buffered mode."""
+        # Invalidate filter to force re-mapping of source rows
+        # This is necessary because source model updates rowCount() silently (without signals)
+        self.invalidate()
+        self.pages_updated.emit(pages)
 
     def get_filtered_aspect_ratios(self) -> list[tuple[int, float]]:
         """Get (row, aspect_ratio) pairs for filtered items without iterating Qt model.
