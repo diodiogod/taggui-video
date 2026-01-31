@@ -475,6 +475,12 @@ class ImageListModel(QAbstractListModel):
                     print(f"[MASONRY] Page {page_num} modified during snapshot: {e}")
                     continue
 
+        # DEBUG: Log index range
+        if items_data:
+            min_idx = min(item[0] for item in items_data)
+            max_idx = max(item[0] for item in items_data)
+            print(f"[ASPECT_RATIOS] Returning {len(items_data)} items, indices {min_idx}-{max_idx}")
+
         return (items_data, first_index, last_index)
 
     def _rebuild_aspect_ratio_cache(self):
@@ -639,20 +645,30 @@ class ImageListModel(QAbstractListModel):
         if not self._db:
             return
 
+    def _load_page_sync(self, page_num: int):
+        """Load a page synchronously (for initial load)."""
+        if not self._db:
+            return
+
         images = self._load_images_from_db(page_num)
         self._store_page(page_num, images)
 
     def _load_page_async(self, page_num: int):
         """Load a page in background thread."""
         try:
+            print(f"[ASYNC_LOAD] Starting load for Page {page_num} (Thread: {threading.current_thread().name})")
             if not self._db:
+                print(f"[ASYNC_LOAD] ABORT: No database connection for Page {page_num}")
                 return
 
             images = self._load_images_from_db(page_num)
+            print(f"[ASYNC_LOAD] Loaded {len(images)} images from DB for Page {page_num}")
             self._store_page(page_num, images)
+            print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
             self.page_loaded.emit(page_num)
+            print(f"[ASYNC_LOAD] Signal emitted for Page {page_num}")
 
         except Exception as e:
             print(f"[PAGE] Error loading page {page_num}: {e}")

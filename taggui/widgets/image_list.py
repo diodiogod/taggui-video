@@ -919,7 +919,13 @@ class ImageListView(QListView):
 
             # Store results for paintEvent to use
             self._masonry_items = result_dict['items']
+            self._masonry_index_map = None  # Invalidate lookup cache - will rebuild on first access
             self._masonry_total_height = result_dict['total_height']
+            
+            # CRITICAL: Force immediate repaint with new data
+            # Without this, paint runs with OLD masonry items during scroll
+            # DISABLED: Causing crash on startup? Testing stability.
+            # self.viewport().update()
 
             # Update scroll area to accommodate total height
             total_height = result_dict['total_height']
@@ -969,6 +975,14 @@ class ImageListView(QListView):
                         item['y'] += y_offset
                     
                     print(f"[MASONRY] Buffered: Shifted {loaded_items} items by Y={y_offset:,}px (Stable Avg Ht={avg_height_per_item:.2f})")
+                    
+                    # DEBUG: Show index range and Y range in masonry items
+                    indices = [item['index'] for item in self._masonry_items]
+                    y_values = [item['y'] for item in self._masonry_items]
+                    max_y_with_height = max(item['y'] + item['height'] for item in self._masonry_items)
+                    print(f"[MASONRY] Index range: {min(indices)} to {max(indices)} (count={len(indices)})")
+                    print(f"[MASONRY] Y range: {min(y_values)} to {max_y_with_height} (max_y={max(y_values)})")
+
                 
                 # print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
             else:
@@ -1041,51 +1055,58 @@ class ImageListView(QListView):
 
     def _get_masonry_item_rect(self, index):
         """Get QRect for item at given index from masonry results."""
-        if index < len(self._masonry_items):
-            item = self._masonry_items[index]
-            # Validate rect dimensions to prevent crashes with corrupted data
+        # Build lookup dict if not exists or stale
+        if not hasattr(self, '_masonry_index_map') or self._masonry_index_map is None:
+            self._rebuild_masonry_index_map()
+        
+        # Lookup by global index (not list position!)
+        item = self._masonry_index_map.get(index)
+        if item:
             width = item.get('width', 0)
             height = item.get('height', 0)
             if width > 0 and height > 0 and width < 100000 and height < 100000:
                 return QRect(item['x'], item['y'], width, height)
         return QRect()
+    
+    def _rebuild_masonry_index_map(self):
+        """Build a dict mapping global index -> item for O(1) lookup."""
+        self._masonry_index_map = {}
+        if self._masonry_items:
+            for item in self._masonry_items:
+                self._masonry_index_map[item['index']] = item
+
 
     def _get_masonry_visible_items(self, viewport_rect):
-        """Get masonry items that intersect with viewport_rect (optimized for large datasets)."""
+        """Get masonry items that intersect with viewport_rect."""
         if not self._masonry_items:
             return []
 
-        # Optimization: Use binary search to find start/end indices instead of checking all 32K items
-        # This reduces O(32000) to O(log 32000 + visible_items) per paint
         viewport_top = viewport_rect.top()
         viewport_bottom = viewport_rect.bottom()
 
-        # Binary search for first item that could be visible (y + height >= viewport_top)
-        left, right = 0, len(self._masonry_items) - 1
-        start_idx = 0
-        while left <= right:
-            mid = (left + right) // 2
-            item_bottom = self._masonry_items[mid]['y'] + self._masonry_items[mid]['height']
-            if item_bottom >= viewport_top:
-                start_idx = mid
-                right = mid - 1  # Keep searching left
-            else:
-                left = mid + 1
-
-        # Collect visible items starting from start_idx
+        # Linear search: masonry items are NOT sorted by Y (columns interleave Y values)
+        # Binary search was incorrectly assuming sorted order
         visible = []
-        for i in range(start_idx, len(self._masonry_items)):
-            item = self._masonry_items[i]
-            # Stop if item is below viewport
-            if item['y'] > viewport_bottom:
-                break
+        for item in self._masonry_items:
+            item_y = item['y']
+            item_bottom = item_y + item['height']
+            
+            # Check if item overlaps with viewport vertically
+            if item_bottom >= viewport_top and item_y <= viewport_bottom:
+                item_rect = QRect(item['x'], item_y, item['width'], item['height'])
+                if item_rect.intersects(viewport_rect):
+                    visible.append({
+                        'index': item['index'],
+                        'rect': item_rect
+                    })
 
-            item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
-            if item_rect.intersects(viewport_rect):
-                visible.append({
-                    'index': item['index'],
-                    'rect': item_rect
-                })
+        # DEBUG: Log when no visible items found at deep scroll
+        if not visible and viewport_top > 50000:
+            # Find Y range of all items
+            if self._masonry_items:
+                min_y = min(item['y'] for item in self._masonry_items)
+                max_y = max(item['y'] + item['height'] for item in self._masonry_items)
+                print(f"[VISIBLE_DEBUG] viewport={viewport_top}-{viewport_bottom}, items Y range={min_y}-{max_y}, count={len(self._masonry_items)}")
 
         return visible
 
@@ -2180,7 +2201,7 @@ class ImageListView(QListView):
         # Only allow loading if user has scrolled significantly past the initial content
         # Using fixed pixel threshold (60,000 px ≈ 3 pages worth) instead of percentage
         # because percentage doesn't scale well with 19M virtual height
-        bootstrap_scroll_threshold = 60000  # pixels (approx 3 pages of content)
+        bootstrap_scroll_threshold = 50000  # pixels (approx 2.5 pages of content)
         if len(source_model._pages) < 5:
             if scroll_max > 0 and scroll_offset < bootstrap_scroll_threshold:
                 # Bootstrap phase + near top = don't load yet
@@ -2288,6 +2309,11 @@ class ImageListView(QListView):
                 source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
                 is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
 
+                # DEBUG: Track items that fail mapping
+                skipped_count = 0
+                first_skipped = []
+                painted_count = 0
+
                 for item in visible_items:
                     # Construct valid index for painting
                     if is_buffered:
@@ -2301,6 +2327,9 @@ class ImageListView(QListView):
                             
                         if src_row == -1:
                             # Not loaded - can't paint using delegate
+                            skipped_count += 1
+                            if len(first_skipped) < 5:
+                                first_skipped.append(item['index'])
                             continue
                             
                         src_index = source_model.index(src_row, 0)
