@@ -23,6 +23,7 @@ comparison_operators = {
 
 class ProxyImageListModel(QSortFilterProxyModel):
     filter_changed = Signal()
+    pages_updated = Signal(list)  # Forward from source model for buffered mode
 
     def __init__(self, image_list_model: ImageListModel,
                  tokenizer: PreTrainedTokenizerBase, tag_separator: str):
@@ -32,6 +33,9 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.tag_separator = tag_separator
         self.filter: list | None = None
         self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
+        
+        # Forward pages_updated signal from source model
+        image_list_model.pages_updated.connect(lambda pages: self.pages_updated.emit(pages))
 
     def get_filtered_aspect_ratios(self) -> list[tuple[int, float]]:
         """Get (row, aspect_ratio) pairs for filtered items without iterating Qt model.
@@ -55,9 +59,10 @@ class ProxyImageListModel(QSortFilterProxyModel):
             # Since source rowCount() returns only loaded items, row 0 = first loaded item
 
             if self.filter is None:
-                # No filtering - just renumber to sequential rows
-                result = [(row, ar) for row, (global_idx, ar) in enumerate(items_data)]
-                return result
+                # No filtering - return global indices so Masonry can position correctly in virtual space
+                # Was: result = [(row, ar) for row, (global_idx, ar) in enumerate(items_data)]
+                # Returning row (0..) caused all pages to be treated as Page 0, failing window filter check.
+                return items_data
             else:
                 # With filtering - need to check each item
                 result = []
