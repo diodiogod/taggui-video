@@ -970,28 +970,28 @@ class ImageListView(QListView):
                     
                     print(f"[MASONRY] Buffered: Shifted {loaded_items} items by Y={y_offset:,}px (Stable Avg Ht={avg_height_per_item:.2f})")
                 
-                print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
+                # print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
             else:
                  # Normal mode
                  self._masonry_total_height = total_height
 
             # Store for viewportSizeHint() and updateGeometries() to use
             # Don't set scrollbar directly - let Qt calculate from size hint
-            print(f"[SCROLLBAR] Total height: {self._masonry_total_height:,} px (viewport={viewport_height})")
+            # print(f"[SCROLLBAR] Total height: {self._masonry_total_height:,} px (viewport={viewport_height})")
 
             # Defer expensive UI update to next event loop iteration
             # This prevents blocking keyboard events that are already queued
             from PySide6.QtCore import QTimer
             def apply_and_signal():
                 try:
-                    print(f"[MASONRY] About to call _apply_layout_to_ui")
+                    # print(f"[MASONRY] About to call _apply_layout_to_ui")
                     self._apply_layout_to_ui(timestamp)
-                    print(f"[MASONRY] _apply_layout_to_ui completed")
+                    # print(f"[MASONRY] _apply_layout_to_ui completed")
 
                     # Emit signal that layout is ready for scrolling
                     try:
                         self.layout_ready.emit()
-                        print(f"[MASONRY] layout_ready signal emitted")
+                        # print(f"[MASONRY] layout_ready signal emitted")
                     except Exception as e:
                         print(f"[MASONRY] layout_ready signal crashed: {e}")
                         import traceback
@@ -1011,7 +1011,7 @@ class ImageListView(QListView):
                         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
                         if source_model and hasattr(source_model, '_enrichment_paused'):
                             source_model._enrichment_paused.clear()
-                            print("[MASONRY] Resumed enrichment after UI update")
+                            # print("[MASONRY] Resumed enrichment after UI update")
 
                     QTimer.singleShot(200, resume_enrichment_delayed)  # 200ms delay
                 except Exception as e:
@@ -1753,7 +1753,7 @@ class ImageListView(QListView):
             # Always restore in buffered mode, even if Qt didn't change it
             if correct_max > 0 and new_max != correct_max:
                 self.verticalScrollBar().setRange(0, correct_max)
-                print(f"[UPDATEGEOM] Qt set scrollbar to {new_max}, restored to {correct_max:,}")
+                # print(f"[UPDATEGEOM] Qt set scrollbar to {new_max}, restored to {correct_max:,}")
                 
                 # Restore scroll position if Qt clamped it during range reduction
                 if self.verticalScrollBar().value() != old_value and old_value <= correct_max:
@@ -1810,8 +1810,30 @@ class ImageListView(QListView):
 
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
-        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        # DIAGNOSTIC LOG (Requested by user for deep page debugging)
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        pos = event.pos()
+        val = self.verticalScrollBar().value()
+        row_idx = -1
+        
+        # Identify what was clicked
+        index = self.indexAt(pos)
+        if index.isValid():
+            row_idx = index.row()
+            
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
+        page_num = row_idx // page_size if row_idx >= 0 else -1
+        
+        # Check if index is in current masonry layout
+        in_layout = any(item['index'] == row_idx for item in self._masonry_items) if hasattr(self, '_masonry_items') else False
+        layout_count = len(self._masonry_items) if hasattr(self, '_masonry_items') else 0
+        
+        print(f"[{timestamp}] [CLICK_DIAG] Pos:{pos.x()},{pos.y()} | ScrollY:{val:,} | Index:{row_idx} (Page {page_num}) | InLayout:{in_layout} | TotalLayoutItems:{layout_count}")
 
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        
         # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
             source_model._enrichment_timer.stop()
