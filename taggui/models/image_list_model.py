@@ -656,19 +656,19 @@ class ImageListModel(QAbstractListModel):
     def _load_page_async(self, page_num: int):
         """Load a page in background thread."""
         try:
-            print(f"[ASYNC_LOAD] Starting load for Page {page_num} (Thread: {threading.current_thread().name})")
+            # print(f"[ASYNC_LOAD] Starting load for Page {page_num} (Thread: {threading.current_thread().name})")
             if not self._db:
-                print(f"[ASYNC_LOAD] ABORT: No database connection for Page {page_num}")
+                # print(f"[ASYNC_LOAD] ABORT: No database connection for Page {page_num}")
                 return
 
             images = self._load_images_from_db(page_num)
-            print(f"[ASYNC_LOAD] Loaded {len(images)} images from DB for Page {page_num}")
+            # print(f"[ASYNC_LOAD] Loaded {len(images)} images from DB for Page {page_num}")
             self._store_page(page_num, images)
-            print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
+            # print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
             self.page_loaded.emit(page_num)
-            print(f"[ASYNC_LOAD] Signal emitted for Page {page_num}")
+            # print(f"[ASYNC_LOAD] Signal emitted for Page {page_num}")
 
         except Exception as e:
             print(f"[PAGE] Error loading page {page_num}: {e}")
@@ -751,7 +751,7 @@ class ImageListModel(QAbstractListModel):
                     # Cancel pending thumbnail loads for evicted page
                     self._cancel_page_thumbnails(oldest_page)
                     del self._pages[oldest_page]
-                    print(f"[PAGE] Evicted page {oldest_page}, {len(self._pages)} pages remain")
+                    # print(f"[PAGE] Evicted page {oldest_page}, {len(self._pages)} pages remain")
                     evicted_any = True
 
         # If pages were evicted, notify masonry that pages changed (avoid layoutChanged crash!)
@@ -1495,9 +1495,21 @@ class ImageListModel(QAbstractListModel):
         if not hasattr(self, '_placeholder_icon'):
             # Create a simple grey square as placeholder
             from PySide6.QtGui import QPixmap, QColor
-            size = self.image_list_image_width
+            # Ensure valid size even if image_list_image_width is uninitialized or 0
+            size = getattr(self, 'image_list_image_width', 200)
+            if size <= 0: 
+                size = 200
+                
             pixmap = QPixmap(size, size)
-            pixmap.fill(QColor(200, 200, 200))  # Light grey
+            pixmap.fill(QColor(40, 40, 40))  # Dark grey for placeholder (better for dark theme)
+            
+            # Draw a simple border or content to make it visible
+            from PySide6.QtGui import QPainter
+            painter = QPainter(pixmap)
+            painter.setPen(QColor(60, 60, 60))
+            painter.drawRect(0, 0, size-1, size-1)
+            painter.end()
+            
             self._placeholder_icon = QIcon(pixmap)
         return self._placeholder_icon
 
@@ -1648,6 +1660,10 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
+            # DEBUG: Trace why thumbnails are missing
+            # if row == 0 or row == 1:
+            #     print(f"[DATA DEBUG] DecorationRole for row {row}, image={image}, thumbnail={image.thumbnail}, qimage={image.thumbnail_qimage}")
+
             # During scrollbar drag ONLY: return placeholders to keep drag smooth
             # Mouse wheel scroll: allow loading (async is fast enough)
             if self._pause_thumbnail_loading:
@@ -1740,6 +1756,7 @@ class ImageListModel(QAbstractListModel):
                     import traceback
                     traceback.print_exc()
 
+                # print(f"[DATA DEBUG] Returning None for row {row}")
                 return None
 
             # Pagination mode: Async loading with placeholders for smooth scrolling
@@ -1794,6 +1811,7 @@ class ImageListModel(QAbstractListModel):
                 self._thumbnail_futures[row] = future
 
                 # Return placeholder immediately (smooth scrolling)
+                # print(f"[DATA DEBUG] Returning PLACEHOLDER for row {row}")
                 return self._get_placeholder_icon()
         if role == Qt.ItemDataRole.SizeHintRole:
             # Don't use thumbnail.availableSizes() - that returns the 512px generation size
