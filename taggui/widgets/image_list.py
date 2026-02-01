@@ -152,52 +152,39 @@ class ImageDelegate(QStyledItemDelegate):
         except (RuntimeError, AttributeError):
             return
 
-        # Check if we're in IconMode (compact view without text)
-        is_icon_mode = isinstance(self.parent(), QListView) and self.parent().viewMode() == QListView.ViewMode.IconMode
-
-        if is_icon_mode:
-            # In IconMode: paint only the icon, no text
-            try:
-                icon = index.data(Qt.ItemDataRole.DecorationRole)
-                if icon and not icon.isNull():
-                    # Paint background if selected
-                    if option.state & QStyle.StateFlag.State_Selected:
-                        painter.fillRect(option.rect, option.palette.highlight())
-
-                    # Paint just the icon, centered
-                    icon_size = self.parent().iconSize()
-                    x = option.rect.x() + (option.rect.width() - icon_size.width()) // 2
-                    y = option.rect.y() + (option.rect.height() - icon_size.height()) // 2
-                    icon.paint(painter, x, y, icon_size.width(), icon_size.height())
-            except RuntimeError:
-                return
+        # MASONRY/GRID PAINTING LOGIC
+        # Always paint the icon filling the entire rect provided by the layout.
+        # We ignore QListView.ViewMode because our masonry layout controls the rects.
+        
+        # 1. Paint selection/focus background
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
         else:
-            # In ListMode: manually paint instead of calling super() to avoid pixmap allocation issues
-            # Paint background if selected
-            if option.state & QStyle.StateFlag.State_Selected:
-                painter.fillRect(option.rect, option.palette.highlight())
-            else:
-                painter.fillRect(option.rect, option.palette.base())
+            painter.fillRect(option.rect, option.palette.base())
 
-            # Paint the icon/decoration
+        # 2. Paint the icon/thumbnail (DecorationRole)
+        try:
             icon = index.data(Qt.ItemDataRole.DecorationRole)
             if icon and not icon.isNull():
-                # Use the actual icon size instead of hardcoded 34px
-                icon_size = self.parent().iconSize()
-                icon_rect = option.rect.adjusted(2, 2, -option.rect.width() + icon_size.width() + 4, -2)
-                icon.paint(painter, icon_rect.x(), icon_rect.y(), icon_rect.width(), icon_rect.height())
+                # Paint icon filling the rect (maintaining aspect ratio is handled by QIcon.paint if modes used, 
+                # but here we just fill the target rect which masonry already calculated)
+                
+                # Draw centered and scaled to fit (QIcon.paint does this automatically usually)
+                # But to be safe and crisp:
+                # We can just pass the rect.
+                icon.paint(painter, option.rect, Qt.AlignmentFlag.AlignCenter)
+        except RuntimeError:
+            return
 
-            # Paint the text
-            text = index.data(Qt.ItemDataRole.DisplayRole)
-            if text:
-                # Position text after the icon (which now uses actual icon_size.width())
-                icon_size = self.parent().iconSize()
-                text_x = 2 + icon_size.width() + 6  # 2px margin + icon width + 6px gap
-                text_rect = option.rect.adjusted(text_x, 2, -2, -2)
-                painter.setPen(option.palette.text().color())
-                painter.drawText(text_rect, Qt.AlignVCenter, str(text))
-
-            # Paint custom labels if any
+        # 3. Paint text (if needed) - Overlay at bottom or tooltips?
+        # The original code painted text "after" the icon in ListMode, or "none" in IconMode.
+        # In masonry, we usually want just the image. The text is in the tooltip.
+        # If text overlay is desired, uncomment below:
+        # text = index.data(Qt.ItemDataRole.DisplayRole)
+        # if text:
+        #     ... text painting logic ...
+        
+        # Paint custom labels if any
             if painter.isActive():
                 p_index = QPersistentModelIndex(index)
                 if p_index.isValid() and p_index in self.labels:
@@ -955,10 +942,20 @@ class ImageListView(QListView):
                         self._stable_avg_item_height = (self._stable_avg_item_height * 0.95) + (current_avg_height * 0.05)
                         
                     avg_height_per_item = self._stable_avg_item_height
+                else:
+                    # No items loaded yet (loading gap) - use historical average to prevent scrollbar collapse
+                    if not hasattr(self, '_stable_avg_item_height'):
+                        self._stable_avg_item_height = 100.0 # Default fallback
+                    avg_height_per_item = self._stable_avg_item_height
 
                 # ALWAYS calculate estimated total height (even if 0 items loaded)
                 # This ensures scrollbar doesn't collapse to 0 during loading gaps
                 estimated_total_height = int(avg_height_per_item * total_items)
+                
+                # CRITICAL: Never shrink total height below known items count to prevent scroll jump
+                min_height = total_items * 10 # Absolute minimum 10px per item
+                estimated_total_height = max(estimated_total_height, min_height)
+                
                 self._masonry_total_height = estimated_total_height
                 
                 if loaded_items > 0:
@@ -980,8 +977,8 @@ class ImageListView(QListView):
                     indices = [item['index'] for item in self._masonry_items]
                     y_values = [item['y'] for item in self._masonry_items]
                     max_y_with_height = max(item['y'] + item['height'] for item in self._masonry_items)
-                    print(f"[MASONRY] Index range: {min(indices)} to {max(indices)} (count={len(indices)})")
-                    print(f"[MASONRY] Y range: {min(y_values)} to {max_y_with_height} (max_y={max(y_values)})")
+                    # print(f"[MASONRY] Index range: {min(indices)} to {max(indices)} (count={len(indices)})")
+                    # print(f"[MASONRY] Y range: {min(y_values)} to {max_y_with_height} (max_y={max(y_values)})")
 
                 
                 # print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
@@ -1106,7 +1103,7 @@ class ImageListView(QListView):
             if self._masonry_items:
                 min_y = min(item['y'] for item in self._masonry_items)
                 max_y = max(item['y'] + item['height'] for item in self._masonry_items)
-                print(f"[VISIBLE_DEBUG] viewport={viewport_top}-{viewport_bottom}, items Y range={min_y}-{max_y}, count={len(self._masonry_items)}")
+                # print(f"[VISIBLE_DEBUG] viewport={viewport_top}-{viewport_bottom}, items Y range={min_y}-{max_y}, count={len(self._masonry_items)}")
 
         return visible
 
@@ -1133,8 +1130,14 @@ class ImageListView(QListView):
 
         try:
             # Verify model is still valid before updating UI
-            if not self.model() or not self._masonry_items:
-                print(f"[MASONRY] Skipping UI update - model or items invalid")
+            if not self.model():
+                print(f"[MASONRY] Skipping UI update - model invalid")
+                return
+                
+            # Allow empty items for buffered mode (to set scrollbar range)
+            if not self._masonry_items and not (hasattr(self.model(), 'sourceModel') and 
+                                              getattr(self.model().sourceModel(), '_paginated_mode', False)):
+                print(f"[MASONRY] Skipping UI update - items empty (normal mode)")
                 return
 
             # Check if buffered pagination mode
@@ -2233,7 +2236,7 @@ class ImageListView(QListView):
         # Trigger page loads for this range
         for page_num in range(start_page, end_page + 1):
             if page_num not in source_model._pages and page_num not in source_model._loading_pages:
-                print(f"[LOADER] Requesting load for Page {page_num}")
+                # print(f"[LOADER] Requesting load for Page {page_num}")
                 source_model._request_page_load(page_num)
 
     def paintEvent(self, event):
@@ -2377,6 +2380,11 @@ class ImageListView(QListView):
                     is_selected = self.selectionModel() and self.selectionModel().isSelected(index)
                     is_current = self.currentIndex() == index
 
+                    # DEBUG: Report skipped items (only at deep scroll to avoid spam)
+                    # if skipped_count > 0 and scroll_offset > 50000:
+                    #    pass
+                    # print(f"[PAINT_DEBUG] scroll={scroll_offset}, visible={len(visible_items)}, painted={items_painted}, skipped={skipped_count}, first_skipped={first_skipped}")
+
                     # Debug: log selection state for visible items
                     # if is_selected or is_current:
                     #     print(f"[DEBUG] Painting row={item.index}, is_selected={is_selected}, is_current={is_current}")
@@ -2388,24 +2396,20 @@ class ImageListView(QListView):
 
 
 
-                    # If thumbnail is loaded OR not scrolling, use full delegate
-                    if has_thumbnail or not (self._mouse_scrolling or self._scrollbar_dragging):
-                        # Paint using delegate (shows thumbnail or placeholder)
-                        self.itemDelegate().paint(painter, option, index)
+                    # ALWAYS paint using delegate (it handles placeholders now)
+                    # Fast scroll optimization removed because it prevented placeholders from showing
+                    self.itemDelegate().paint(painter, option, index)
 
-                        # Draw selection border on top
-                        if is_selected or is_current:
-                            painter.save()
-                            pen = QPen(QColor(0, 120, 215), 4 if is_current else 2)
-                            painter.setPen(pen)
-                            painter.setBrush(Qt.BrushStyle.NoBrush)
-                            painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
-                            painter.restore()
-                    else:
-                        # Fast scroll + no thumbnail: draw nothing (skip delegate entirely)
-                        # This prevents expensive delegate calls for unloaded items during scroll
-                        # Just draw background to clear the area
-                        painter.fillRect(visual_rect, self.palette().base())
+                    # Draw selection border on top
+                    if is_selected or is_current:
+                        painter.save()
+                        pen = QPen(QColor(0, 120, 215), 4 if is_current else 2)
+                        painter.setPen(pen)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawRect(visual_rect.adjusted(2, 2, -2, -2))
+                        painter.restore()
+                    
+                    # (Fast scroll optimization block removed)
                         # Debug: show rect for selected items
                         # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
 
