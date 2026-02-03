@@ -626,12 +626,6 @@ class ImageListModel(QAbstractListModel):
 
     def _request_page_load(self, page_num: int):
         """Request a page to be loaded in background."""
-        # DEBUG: Track what's triggering page loads
-        import traceback
-        stack = ''.join(traceback.format_stack()[-4:-1])
-        if 'data' in stack or 'get_filtered' in stack:
-            print(f"[PAGE LOAD] Page {page_num} requested from:\n{stack}")
-
         with self._page_load_lock:
             if page_num in self._pages or page_num in self._loading_pages:
                 return  # Already loaded or loading
@@ -653,9 +647,26 @@ class ImageListModel(QAbstractListModel):
         images = self._load_images_from_db(page_num)
         self._store_page(page_num, images)
 
+    def cancel_pending_loads_except(self, keep_pages: set[int]):
+        """Cancel pending page loads that are not in the keep set."""
+        with self._page_load_lock:
+            # We can't stop running threads, but we can remove pages from the loading set.
+            # The worker thread will check this set and abort if its page is missing.
+            current_loading = list(self._loading_pages)
+            for page_num in current_loading:
+                if page_num not in keep_pages:
+                    self._loading_pages.discard(page_num)
+                    # print(f"[PAGE LOAD] Cancelled load for Page {page_num} (superseded)")
+
     def _load_page_async(self, page_num: int):
         """Load a page in background thread."""
         try:
+            # Check for cancellation
+            with self._page_load_lock:
+                if page_num not in self._loading_pages:
+                    # print(f"[ASYNC_LOAD] ABORT: Page {page_num} cancelled")
+                    return
+
             # print(f"[ASYNC_LOAD] Starting load for Page {page_num} (Thread: {threading.current_thread().name})")
             if not self._db:
                 # print(f"[ASYNC_LOAD] ABORT: No database connection for Page {page_num}")
@@ -1835,6 +1846,85 @@ class ImageListModel(QAbstractListModel):
             target = f'{image.target_dimension.width()}:{image.target_dimension.height()}'
             return f'{path}\n{dimensions} 🠮 {target}'
 
+    def _start_paginated_enrichment(self):
+        """Start background enrichment for paginated mode (using DB placeholders)."""
+        if hasattr(self, '_enrichment_cancelled') and self._enrichment_cancelled.is_set():
+             self._enrichment_cancelled.clear()
+
+        def enrich_worker():
+             from utils.image_index_db import ImageIndexDB
+             from utils.image import Image
+             import time
+             from pathlib import Path
+             import imagesize
+             
+             if not self._directory_path:
+                 return
+                 
+             db_bg = ImageIndexDB(self._directory_path)
+             
+             # Get files needing enrichment (width=512 AND height=512)
+             placeholders = db_bg.get_placeholder_files()
+             
+             if not placeholders:
+                 return
+                 
+             print(f"[ENRICH] Found {len(placeholders)} images needing enrichment in DB")
+             
+             enriched_count = 0
+             commit_interval = 100
+             video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+             
+             for rel_path in placeholders:
+                 if hasattr(self, '_enrichment_cancelled') and self._enrichment_cancelled.is_set():
+                     db_bg.commit()
+                     print("[ENRICH] Cancelled")
+                     return
+                     
+                 full_path = self._directory_path / rel_path
+                 
+                 try:
+                      is_video = Path(rel_path).suffix.lower() in video_extensions
+                      dimensions = None
+                      video_metadata = None
+                      
+                      if is_video:
+                         dimensions, video_metadata, _ = extract_video_info(full_path)
+                      elif full_path.suffix.lower() == '.jxl':
+                         from utils.jxlutil import get_jxl_size
+                         dimensions = get_jxl_size(full_path)
+                      else:
+                         dimensions = imagesize.get(str(full_path))
+                         if dimensions == (-1, -1):
+                              try:
+                                  from PIL import Image as pilimage
+                                  if full_path.suffix.lower() in ('.jpg', '.jpeg'):
+                                      dimensions = self._read_jpeg_header_dimensions(full_path) or (-1, -1)
+                                  if dimensions == (-1, -1):
+                                      dimensions = pilimage.open(full_path).size
+                              except:
+                                  pass
+                      
+                      if dimensions and dimensions != (-1, -1):
+                           mtime = full_path.stat().st_mtime
+                           db_bg.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime, video_metadata)
+                           enriched_count += 1
+                           
+                           if enriched_count % commit_interval == 0:
+                                db_bg.commit()
+                                print(f"[ENRICH] Progress: {enriched_count}/{len(placeholders)} enriched")
+
+                 except Exception as e:
+                      pass
+                      
+             db_bg.commit()
+             print(f"[ENRICH] Completed paginated enrichment: {enriched_count} images")
+             
+             # Signal completion from background thread
+             self.enrichment_complete.emit()
+             
+        self._load_executor.submit(enrich_worker)
+
     def load_directory(self, directory_path: Path):
         from PySide6.QtWidgets import QProgressDialog, QApplication, QMessageBox
         from PySide6.QtCore import Qt
@@ -2259,6 +2349,11 @@ class ImageListModel(QAbstractListModel):
         self._db = ImageIndexDB(directory_path)
         self._paginated_mode = True
 
+        # CRITICAL: Ensure DB is populated with files for paginated access
+        # This is fast (checks existing) and necessary for get_page() to work
+        print(f"[PAGINATION] Ensuring DB is populated for {len(image_paths)} files...")
+        self._db.bulk_insert_files(image_paths, directory_path)
+
         print(f"[PAGINATION] Buffered virtual mode: {total_images} images")
         start_time = time.time()
 
@@ -2281,6 +2376,9 @@ class ImageListModel(QAbstractListModel):
         print(f"[PAGINATION] Loaded {len(self._pages)} pages initially")
 
         # Trigger masonry calculation now that we have initial pages
+        # CRITICAL: Emit pages_updated BEFORE layoutChanged so proxy invalidates first
+        # Otherwise proxy.rowCount() returns 0 during masonry calculation
+        self._emit_pages_updated()
         self.layoutChanged.emit()
 
         elapsed = time.time() - start_time
@@ -2370,178 +2468,8 @@ class ImageListModel(QAbstractListModel):
         if not self._enrichment_timer.isActive():
             self._enrichment_timer.start(100)
 
-        # Reuse the same enrichment logic
-        def enrich_dimensions():
-            from utils.image_index_db import ImageIndexDB
-            from utils.settings import settings
-            import sys
-
-            # Use the root directory path, not first image's parent (images may be in subdirs)
-            directory_path = self._directory_path if self._directory_path else (self.images[0].path.parent if self.images else None)
-            if not directory_path:
-                return
-
-            db_bg = ImageIndexDB(directory_path)
-            enriched_count = 0
-            enriched_indices = []
-            video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-
-            # Adaptive batching based on total image count
-            total_images = len(self.images)
-            commit_interval = 500 if total_images > 20000 else 100
-            layout_update_interval = 1000 if total_images > 20000 else 100
-
-            # Build prioritized processing order: visible first, then rest
-            # Skip images that previously failed enrichment
-            needs_enrichment_indices = [
-                idx for idx, img in enumerate(self.images)
-                if img.dimensions == (512, 512) and not getattr(img, '_enrichment_failed', False)
-            ]
-
-            print(f"[ENRICH] Found {len(needs_enrichment_indices)}/{len(self.images)} images needing enrichment (with placeholder 512x512)")
-
-            # Get visible indices from view (if available)
-            visible_indices = getattr(self, '_visible_indices_hint', set())
-
-            # Split into visible and non-visible
-            visible_to_enrich = [idx for idx in needs_enrichment_indices if idx in visible_indices]
-            non_visible_to_enrich = [idx for idx in needs_enrichment_indices if idx not in visible_indices]
-
-            # Process visible first, then rest
-            processing_order = visible_to_enrich + non_visible_to_enrich
-
-            if visible_to_enrich:
-                print(f"[ENRICH] Prioritizing {len(visible_to_enrich)} visible images first")
-
-            for idx in processing_order:
-                # Check if cancelled
-                if self._enrichment_cancelled.is_set():
-                    print(f"[SORT] Background enrichment cancelled after {enriched_count} images")
-                    db_bg.commit()
-                    db_bg.close()
-                    return
-
-                # Wait if paused (during masonry recalc)
-                while self._enrichment_paused.is_set():
-                    if self._enrichment_cancelled.is_set():
-                        db_bg.commit()
-                        db_bg.close()
-                        return
-                    import time
-                    time.sleep(0.1)
-
-                image = self.images[idx]
-
-                try:
-                    is_video = image.path.suffix.lower() in video_extensions
-                    relative_path = str(image.path.relative_to(directory_path))
-                    mtime = image.path.stat().st_mtime
-
-                    # Read actual dimensions
-                    if is_video:
-                        from models.image_list_model import extract_video_info
-                        dimensions, video_metadata, _ = extract_video_info(image.path)
-                        if dimensions is None:
-                            continue
-                        image.video_metadata = video_metadata
-                    elif str(image.path).endswith('jxl'):
-                        from utils.jxlutil import get_jxl_size
-                        dimensions = get_jxl_size(image.path)
-                    else:
-                        import imagesize
-                        dimensions = imagesize.get(str(image.path))
-                        if dimensions == (-1, -1):
-                            # Try PIL (slower but more robust)
-                            try:
-                                from PIL import Image as pilimage
-                                dimensions = pilimage.open(image.path).size
-                            except Exception as pil_error:
-                                # PIL failed - try manual JPEG header reading as last resort
-                                if image.path.suffix.lower() in ('.jpg', '.jpeg'):
-                                    try:
-                                        dimensions = self._read_jpeg_header_dimensions(image.path)
-                                    except:
-                                        pass
-
-                                if not dimensions or dimensions == (-1, -1):
-                                    # Mark as corrupted to avoid retrying
-                                    if not hasattr(image, '_enrichment_failed'):
-                                        image._enrichment_failed = True
-                                    raise pil_error  # Re-raise to trigger error handling
-
-                    if not dimensions:
-                        continue
-
-                    # Check EXIF orientation
-                    if not is_video:
-                        try:
-                            import exifread
-                            with open(image.path, 'rb') as image_file:
-                                exif_tags = exifread.process_file(
-                                    image_file, details=False, extract_thumbnail=False,
-                                    stop_tag='Image Orientation')
-                                if 'Image Orientation' in exif_tags:
-                                    orientations = exif_tags['Image Orientation'].values
-                                    if any(value in orientations for value in (5, 6, 7, 8)):
-                                        dimensions = (dimensions[1], dimensions[0])
-                        except Exception:
-                            pass
-
-                    # Send update to queue (THREAD-SAFE)
-                    self._enrichment_queue.put((idx, dimensions, video_metadata if is_video else None))
-                    enriched_indices.append(idx)
-
-                    # Save to cache
-                    db_bg.save_info(relative_path, dimensions[0], dimensions[1],
-                                  is_video, mtime, video_metadata if is_video else None)
-
-                    enriched_count += 1
-
-                    # Commit to database and log at intervals
-                    if enriched_count % commit_interval == 0:
-                        db_bg.commit()
-                        import time
-                        timestamp = time.strftime("%H:%M:%S")
-                        print(f"[ENRICH {timestamp}] Progress: {enriched_count}/{total_images} images enriched")
-
-                except Exception as e:
-                    # Log enrichment failures (reduced spam)
-                    error_key = f"{type(e).__name__}"
-                    if not hasattr(self, '_enrichment_error_counts'):
-                        self._enrichment_error_counts = {}
-
-                    self._enrichment_error_counts[error_key] = self._enrichment_error_counts.get(error_key, 0) + 1
-
-                    # Only log first occurrence of each error type + summary at end
-                    if self._enrichment_error_counts[error_key] == 1:
-                        print(f"[ENRICH] Failed to enrich {image.path.name}: {type(e).__name__}: {e}")
-                    pass
-
-            db_bg.commit()
-            db_bg.close()
-
-            # Print error summary if there were failures
-            if hasattr(self, '_enrichment_error_counts') and self._enrichment_error_counts:
-                total_errors = sum(self._enrichment_error_counts.values())
-                print(f"[ENRICH] Skipped {total_errors} corrupted files:")
-                for error_type, count in sorted(self._enrichment_error_counts.items(), key=lambda x: -x[1]):
-                    print(f"  - {count} files: {error_type}")
-                # Clear for next run
-                self._enrichment_error_counts = {}
-
-            print(f"[SORT] Background enrichment complete: {enriched_count} images updated")
-
-            import time
-            timestamp = time.strftime("%H:%M:%S")
-            print(f"[ENRICH {timestamp}] Sort enrichment complete: {enriched_count} images updated")
-            print(f"[ENRICH {timestamp}] Queue has {self._enrichment_queue.qsize()} pending updates")
-
-            # Signal enrichment completion for masonry recalc trigger
-            if enriched_count > 0:
-                self._enrichment_completed_flag = True
-
-        # Submit enrichment task
-        self._load_executor.submit(enrich_dimensions)
+        # Submit background enrichment task using paginated-aware worker
+        self._start_paginated_enrichment()
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):

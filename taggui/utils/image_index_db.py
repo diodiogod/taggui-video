@@ -288,7 +288,85 @@ class ImageIndexDB:
             except sqlite3.Error as e:
                 print(f'Database write error: {e}')
                 return
+            except sqlite3.Error as e:
+                print(f'Database write error: {e}')
+                return
 
+    def bulk_insert_files(self, file_paths: List[Path], directory_path: Path):
+        """
+        Bulk insert initial file records into the database.
+        Used when initializing large folders to ensure DB has records for pagination.
+        Skips files that already exist in DB.
+        """
+        if not self.enabled or not self.conn or not file_paths:
+            return
+
+        # Prepare data chunks for insertion
+        files_data = []
+        now = time.time()
+        
+        # Get set of existing filenames to avoid duplicates (faster than INSERT OR IGNORE for 1M files)
+        try:
+             existing_files = set(self.get_all_paths())
+        except:
+             existing_files = set()
+
+        new_files_count = 0
+        for path in file_paths:
+             # Store just the filename relative to directory_path, but simplified to just name 
+             # because DB schema says 'file_name TEXT UNIQUE'.
+             # In cache logic: 'relative_path = str(image_path.relative_to(directory_path))'
+             # Wait, db.save_info uses file_name. 
+             # schema says file_name UNIQUE.
+             
+             # Let's match what save_info does.
+             # In fast load: get_cached_info(relative_path...)
+             # So we should store relative path.
+             try:
+                 rel_path = str(path.relative_to(directory_path))
+             except ValueError:
+                 rel_path = path.name # Fallback
+             
+             if rel_path in existing_files:
+                 continue
+                 
+             # Fallback values for new files
+             mtime = path.stat().st_mtime
+             is_video = path.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
+             
+             files_data.append((
+                 rel_path, 
+                 512, 512, 1.0,  # Placeholder dims
+                 int(is_video), 
+                 None, None, None, # Video metadata
+                 mtime, 0.0, now
+             ))
+             new_files_count += 1
+             
+             if len(files_data) >= 1000:
+                 self._bulk_insert_chunk(files_data)
+                 files_data = []
+                 
+        if files_data:
+             self._bulk_insert_chunk(files_data)
+             
+        if new_files_count > 0:
+             print(f"[DB] Bulk inserted {new_files_count} new files")
+
+
+    def _bulk_insert_chunk(self, data_chunk):
+        """Helper to insert a chunk of data."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.executemany('''
+                INSERT OR IGNORE INTO images
+                (file_name, width, height, aspect_ratio, is_video, video_fps,
+                 video_duration, video_frame_count, mtime, rating, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', data_chunk)
+            self.conn.commit()
+        except sqlite3.Error as e:
+            print(f'Database bulk insert error: {e}')
     def commit(self):
         """Commit pending transactions."""
         if not self.conn:
@@ -736,3 +814,15 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
             return []
+
+    def get_placeholder_files(self) -> List[str]:
+        """Get list of filenames that have placeholder dimensions (512x512)."""
+        if not self.enabled or not self.conn:
+             return []
+        try:
+             cursor = self.conn.cursor()
+             # Only get files that are strictly 512x512 (default placeholder)
+             cursor.execute('SELECT file_name FROM images WHERE width=512 AND height=512')
+             return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error:
+             return []
