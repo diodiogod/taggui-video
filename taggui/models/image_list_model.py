@@ -2471,6 +2471,17 @@ class ImageListModel(QAbstractListModel):
         # Submit background enrichment task using paginated-aware worker
         self._start_paginated_enrichment()
 
+    @property
+    def is_paginated(self) -> bool:
+        """Check if model is in paginated mode."""
+        return getattr(self, '_paginated_mode', False)
+
+    def get_all_tags_stats(self) -> list[dict]:
+        """Get all tags with counts from DB (paginated mode)."""
+        if self._db:
+             return self._db.get_all_tags()
+        return []
+
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):
         """Add the current state of the image tags to the undo stack."""

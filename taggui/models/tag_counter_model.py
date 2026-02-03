@@ -90,3 +90,17 @@ class TagCounterModel(QAbstractListModel):
             for image in images:
                 self.most_common_tags_filtered.update(image.tags)
         self.endResetModel()
+
+    @Slot()
+    def set_tags_from_db(self, tags_data: list[dict]):
+        """Populate tags from DB query result [{'tag': t, 'count': c}, ...]."""
+        self.beginResetModel()
+        self.tag_counter.clear()
+        self.most_common_tags_filtered = None
+        
+        # Populate counter directly
+        for item in tags_data:
+            self.tag_counter[item['tag']] = item['count']
+            
+        self.most_common_tags = self.tag_counter.most_common()
+        self.endResetModel()
