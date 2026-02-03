@@ -2430,16 +2430,18 @@ class ImageListView(QListView):
                 skipped_count = 0
                 first_skipped = []
                 painted_count = 0
+                
+                # Check if filtering is active
+                is_filtered = hasattr(self.model(), 'filter') and self.model().filter is not None
 
                 for item in visible_items:
                     # Construct valid index for painting
-                    if is_buffered:
+                    if is_buffered and not is_filtered:
+                        # Unfiltered buffered mode: item['index'] is global virtual index
                         # Map global index to loaded row
                         if hasattr(source_model, 'get_loaded_row_for_global_index'):
-                            # Use new efficient mapping method
                             src_row = source_model.get_loaded_row_for_global_index(item['index'])
                         else:
-                            # Fallback (should not happen if model updated)
                             src_row = -1
                             
                         if src_row == -1:
@@ -2453,7 +2455,8 @@ class ImageListView(QListView):
                         # Map to proxy
                         index = self.model().mapFromSource(src_index)
                     else:
-                        # Normal mode - index matches row
+                        # Normal mode OR filtered buffered mode:
+                        # item['index'] is already the proxy row
                         index = self.model().index(item['index'], 0)
 
                     if not index.isValid():
@@ -2474,14 +2477,16 @@ class ImageListView(QListView):
                     # SMART FAST SCROLL: Always show loaded thumbnails
                     # Only skip delegate for items that aren't loaded yet
                     has_thumbnail = False
-                    if is_buffered:
-                         # Use helper method to get image regardless of loading state
+                    if is_buffered and not is_filtered:
+                         # Unfiltered buffered mode: use global index
                          image = source_model._get_image_at_index(item['index'])
                          if image:
                              has_thumbnail = bool(image.thumbnail or image.thumbnail_qimage)
-                    elif source_model and item['index'] < len(source_model.images):
-                         image = source_model.images[item['index']]
-                         has_thumbnail = bool(image.thumbnail or image.thumbnail_qimage)
+                    else:
+                         # Normal mode or filtered mode: get via proxy index
+                         image = self.model().data(index, Qt.ItemDataRole.UserRole)
+                         if image:
+                             has_thumbnail = bool(getattr(image, 'thumbnail', None) or getattr(image, 'thumbnail_qimage', None))
 
                     # Create option for delegate using QStyleOptionViewItem
                     option = QStyleOptionViewItem()

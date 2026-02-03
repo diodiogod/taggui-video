@@ -570,11 +570,12 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
             # Delete existing tags
             cursor.execute('DELETE FROM image_tags WHERE image_id = ?', (image_id,))
-            # Insert new tags
+            # Insert new tags (deduplicated to prevent UNIQUE constraint errors)
             if tags:
+                unique_tags = list(dict.fromkeys(tags))  # Preserve order, remove duplicates
                 cursor.executemany(
                     'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
-                    [(image_id, tag) for tag in tags]
+                    [(image_id, tag) for tag in unique_tags]
                 )
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
@@ -617,12 +618,37 @@ class ImageIndexDB:
             cursor.execute('''
                 SELECT tag, COUNT(*) as count
                 FROM image_tags
+                WHERE tag != '__no_tags__'
                 GROUP BY tag
                 ORDER BY count DESC
             ''')
             return [{'tag': row[0], 'count': row[1]} for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f'Database tag query error: {e}')
+            return []
+
+    # ... (get_images_with_tag skipped) ...
+
+    def get_placeholder_files(self, limit: int = 1000) -> List[str]:
+        """
+        Get list of files that have placeholder dimensions (need enrichment)
+        OR have no tags indexed (need tag extraction).
+        """
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            # Find files with placeholder dims OR no presence in image_tags table
+            cursor.execute('''
+                SELECT file_name FROM images 
+                WHERE (width IS NULL OR (width = 512 AND height = 512))
+                   OR id NOT IN (SELECT DISTINCT image_id FROM image_tags)
+                LIMIT ?
+            ''', (limit,))
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
             return []
 
     def get_images_with_tag(self, tag: str, page: int = 0, page_size: int = 1000) -> List[Dict[str, Any]]:
@@ -815,14 +841,4 @@ class ImageIndexDB:
             print(f'Database query error: {e}')
             return []
 
-    def get_placeholder_files(self) -> List[str]:
-        """Get list of filenames that have placeholder dimensions (512x512)."""
-        if not self.enabled or not self.conn:
-             return []
-        try:
-             cursor = self.conn.cursor()
-             # Only get files that are strictly 512x512 (default placeholder)
-             cursor.execute('SELECT file_name FROM images WHERE width=512 AND height=512')
-             return [row[0] for row in cursor.fetchall()]
-        except sqlite3.Error:
-             return []
+
