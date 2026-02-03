@@ -113,10 +113,8 @@ class SignalManager:
         image_list_selection_model.currentChanged.connect(safe_load_image)
         image_list_selection_model.currentChanged.connect(
             image_tags_editor.load_image_tags)
-        image_list_model.modelReset.connect(
-            lambda: tag_counter_model.count_tags(image_list_model.get_all_loaded_images()))
-        image_list_model.dataChanged.connect(
-            lambda: tag_counter_model.count_tags(image_list_model.get_all_loaded_images()))
+        image_list_model.modelReset.connect(self._update_tag_counts)
+        image_list_model.dataChanged.connect(lambda: self._update_tag_counts())
         image_list_model.dataChanged.connect(
             image_tags_editor.reload_image_tags_if_changed)
         image_list_model.dataChanged.connect(
@@ -347,3 +345,16 @@ class SignalManager:
         if hasattr(self.main_window, 'image_list') and hasattr(self.main_window, 'menu_manager'):
             count = self.main_window.image_list.get_marked_for_deletion_count()
             self.main_window.menu_manager.update_delete_marked_menu(count)
+
+    def _update_tag_counts(self):
+        """Update tag counts based on current model mode (paginated (DB) vs normal)."""
+        image_list_model = self.main_window.image_list_model
+        tag_counter_model = self.main_window.tag_counter_model
+        
+        if image_list_model.is_paginated:
+             # Use DB stats for efficiency and full coverage
+             stats = image_list_model.get_all_tags_stats()
+             tag_counter_model.set_tags_from_db(stats)
+        else:
+             # Regular in-memory counting
+             tag_counter_model.count_tags(image_list_model.get_all_loaded_images())
