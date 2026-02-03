@@ -636,6 +636,35 @@ class ImageIndexDB:
 
     # ... (get_images_with_tag skipped) ...
 
+    def get_files_with_tag(self, tag: str) -> List[str]:
+        """Get list of filenames that have a specific tag."""
+        if not self.enabled or not self.conn:
+             return []
+        try:
+             cursor = self.conn.cursor()
+             cursor.execute('''
+                 SELECT i.file_name 
+                 FROM images i
+                 JOIN image_tags it ON i.id = it.image_id
+                 WHERE it.tag = ?
+             ''', (tag,))
+             return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+             print(f'Database query error: {e}')
+             return []
+
+    def get_image_count(self) -> int:
+        """Get total number of images in DB."""
+        if not self.enabled or not self.conn:
+             return 0
+        try:
+             cursor = self.conn.cursor()
+             cursor.execute('SELECT COUNT(*) FROM images')
+             return cursor.fetchone()[0]
+        except sqlite3.Error as e:
+             print(f'Database query error: {e}')
+             return 0
+
     def get_placeholder_files(self, limit: int = 1000) -> List[str]:
         """
         Get list of files that have placeholder dimensions (need enrichment)
