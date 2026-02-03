@@ -31,6 +31,13 @@ class TagCounterModel(QAbstractListModel):
                 return f'{tag} ({self.most_common_tags_filtered[tag]}/{count})'
         if role == Qt.ItemDataRole.EditRole:
             return tag
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if self.most_common_tags_filtered is None:
+                return f"Total images with tag '{tag}': {count}"
+            else:
+                filtered_count = self.most_common_tags_filtered[tag]
+                return (f"In current view: {filtered_count} images have this tag\n"
+                        f"Total in folder: {count} images have this tag")
 
     def flags(self, index) -> Qt.ItemFlag:
         """Make the tags editable."""
@@ -88,7 +95,7 @@ class TagCounterModel(QAbstractListModel):
         else:
             self.most_common_tags_filtered = Counter()
             for image in images:
-                self.most_common_tags_filtered.update(image.tags)
+                self.most_common_tags_filtered.update(set(image.tags))
         self.endResetModel()
 
     @Slot()

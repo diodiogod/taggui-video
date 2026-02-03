@@ -1887,7 +1887,19 @@ class ImageListModel(QAbstractListModel):
                       is_video = Path(rel_path).suffix.lower() in video_extensions
                       dimensions = None
                       video_metadata = None
+                      tags = []
                       
+                      # Extract tags
+                      txt_path = full_path.with_suffix('.txt')
+                      if txt_path.exists():
+                          try:
+                              caption = txt_path.read_text(encoding='utf-8', errors='replace')
+                              if caption:
+                                  tags = [t.strip() for t in caption.split(self.tag_separator) if t.strip()]
+                          except Exception:
+                              pass
+                      
+                      # Extract dimensions
                       if is_video:
                          dimensions, video_metadata, _ = extract_video_info(full_path)
                       elif full_path.suffix.lower() == '.jxl':
@@ -1907,12 +1919,23 @@ class ImageListModel(QAbstractListModel):
                       
                       if dimensions and dimensions != (-1, -1):
                            mtime = full_path.stat().st_mtime
+                           # Save dimensions
                            db_bg.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime, video_metadata)
+                           
+                           # Save tags (requires image_id from newly inserted/updated record)
+                           image_id = db_bg.get_image_id(rel_path)
+                           if image_id:
+                               if tags:
+                                   db_bg.set_tags_for_image(image_id, tags)
+                               else:
+                                   # Mark as scanned with special tag to prevent reprocessing
+                                   db_bg.add_tag_to_image(image_id, '__no_tags__')
+                                   
                            enriched_count += 1
                            
                            if enriched_count % commit_interval == 0:
                                 db_bg.commit()
-                                print(f"[ENRICH] Progress: {enriched_count}/{len(placeholders)} enriched")
+                                print(f"[ENRICH] Progress: {enriched_count}/{len(placeholders)} enriched (dims+tags)")
 
                  except Exception as e:
                       pass
@@ -2361,7 +2384,8 @@ class ImageListModel(QAbstractListModel):
 
         # Don't load Image objects - keep self.images empty for paginated mode
         self.images = []
-        self._total_count = total_images
+        # Sync total count with DB (handling skipped files)
+        self._total_count = self._db.get_image_count()
         self._pages = {}  # Will be populated on-demand
 
         self.endResetModel()
@@ -2518,10 +2542,39 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode or not self._db:
             return
 
-        # Get image ID from filename
-        image_id = self._db.get_image_id(image.path.name)
+        # Get image ID using relative path (DB stores relative paths)
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+
+        image_id = self._db.get_image_id(rel_path)
+        if not image_id:
+             # Attempt to self-heal by inserting/updating image info
+             try:
+                 print(f"[DB FIX] Inserting missing image to DB: {rel_path}")
+                 stat = image.path.stat()
+                 is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
+                 self._db.save_info(
+                     file_name=rel_path,
+                     width=image.width or 512,
+                     height=image.height or 512,
+                     is_video=is_video,
+                     mtime=stat.st_mtime,
+                     rating=image.rating
+                 )
+                 # Retry get ID
+                 image_id = self._db.get_image_id(rel_path)
+             except Exception as e:
+                 print(f"[DB ERROR] Failed to self-heal image {rel_path}: {e}")
+
         if image_id:
-            self._db.set_tags_for_image(image_id, image.tags)
+            if image.tags:
+                 self._db.set_tags_for_image(image_id, image.tags)
+            else:
+                 # Ensure we don't trigger re-enrichment by having at least one tag
+                 self._db.set_tags_for_image(image_id, [])
+                 self._db.add_tag_to_image(image_id, '__no_tags__')
 
     def write_meta_to_disk(self, image: Image):
         does_exist = image.path.with_suffix('.json').exists()
@@ -2899,8 +2952,8 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
-        self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
+        self.dataChanged.emit(image_index, image_index)
 
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
@@ -2912,11 +2965,124 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(action_name, should_ask_for_confirmation)
         for image_index in image_indices:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
-            image.tags.extend(tags)
-            self.write_image_tags_to_disk(image)
+            # Add tags ensuring no duplicates in the image object
+            new_tags_added = False
+            for tag in tags:
+                if tag not in image.tags:
+                    image.tags.append(tag)
+                    new_tags_added = True
+            
+            if new_tags_added:
+                self.write_image_tags_to_disk(image)
         min_image_index = min(image_indices, key=lambda index: index.row())
         max_image_index = max(image_indices, key=lambda index: index.row())
         self.dataChanged.emit(min_image_index, max_image_index)
+
+    def _rename_tags_paginated(self, old_tags: list[str], new_tag: str, scope, use_regex: bool):
+        files_to_process = set()
+        if use_regex:
+             all_tags = [item['tag'] for item in self._db.get_all_tags()]
+             pattern = old_tags[0]
+             matched_tags = [t for t in all_tags if re.fullmatch(pattern, t)]
+             for t in matched_tags:
+                 files_to_process.update(self._db.get_files_with_tag(t))
+        else:
+             for tag in old_tags:
+                 files_to_process.update(self._db.get_files_with_tag(tag))
+        
+        for rel_path in files_to_process:
+             path = self._directory_path / rel_path
+             if not path.exists(): continue
+             
+             txt_path = path.with_suffix('.txt')
+             current_tags = []
+             if txt_path.exists():
+                 try:
+                     content = txt_path.read_text(encoding='utf-8', errors='replace')
+                     current_tags = [t.strip() for t in content.split(self.tag_separator) if t.strip()]
+                 except: pass
+            
+             updated = False
+             new_tags_list = []
+             
+             if use_regex:
+                 pattern = old_tags[0]
+                 for tag in current_tags:
+                     if re.fullmatch(pattern, tag):
+                         new_tags_list.append(new_tag)
+                         updated = True
+                     else:
+                         new_tags_list.append(tag)
+             else:
+                 for tag in current_tags:
+                     if tag in old_tags:
+                         new_tags_list.append(new_tag)
+                         updated = True
+                     else:
+                         new_tags_list.append(tag)
+            
+             if updated:
+                 try:
+                     txt_path.write_text(self.tag_separator.join(new_tags_list), encoding='utf-8')
+                     image_id = self._db.get_image_id(rel_path)
+                     if image_id:
+                         self._db.set_tags_for_image(image_id, new_tags_list)
+                 except Exception as e:
+                     print(f"Error updating tags for {rel_path}: {e}")
+
+    def _delete_tags_paginated(self, tags: list[str], scope, use_regex: bool):
+        files_to_process = set()
+        if use_regex:
+             all_tags = [item['tag'] for item in self._db.get_all_tags()]
+             pattern = tags[0]
+             matched_tags = [t for t in all_tags if re.fullmatch(pattern, t)]
+             for t in matched_tags:
+                 files_to_process.update(self._db.get_files_with_tag(t))
+        else:
+             for tag in tags:
+                 files_to_process.update(self._db.get_files_with_tag(tag))
+
+        for rel_path in files_to_process:
+             path = self._directory_path / rel_path
+             if not path.exists(): continue
+             
+             txt_path = path.with_suffix('.txt')
+             current_tags = []
+             if txt_path.exists():
+                 try:
+                     content = txt_path.read_text(encoding='utf-8', errors='replace')
+                     current_tags = [t.strip() for t in content.split(self.tag_separator) if t.strip()]
+                 except: pass
+             
+             updated = False
+             new_tags_list = []
+             
+             if use_regex:
+                 pattern = tags[0]
+                 for tag in current_tags:
+                     if not re.fullmatch(pattern, tag):
+                         new_tags_list.append(tag)
+                     else:
+                         updated = True
+             else:
+                 for tag in current_tags:
+                     if tag not in tags:
+                         new_tags_list.append(tag)
+                     else:
+                         updated = True
+
+             if updated:
+                 try:
+                     txt_path.write_text(self.tag_separator.join(new_tags_list), encoding='utf-8')
+                     image_id = self._db.get_image_id(rel_path)
+                     if image_id:
+                         if new_tags_list:
+                             self._db.set_tags_for_image(image_id, new_tags_list)
+                         else:
+                             self._db.set_tags_for_image(image_id, [])
+                             self._db.add_tag_to_image(image_id, '__no_tags__')
+                 except Exception as e:
+                     print(f"Error deleting tags for {rel_path}: {e}")
 
     @Slot(list, str)
     def rename_tags(self, old_tags: list[str], new_tag: str,
@@ -2925,6 +3091,17 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(
             action_name=f'Rename {pluralize("Tag", len(old_tags))}',
             should_ask_for_confirmation=True)
+            
+        if self._paginated_mode and scope == Scope.ALL_IMAGES:
+            self._rename_tags_paginated(old_tags, new_tag, scope, use_regex)
+            # Reload currently loaded pages to reflect changes
+            current_pages = list(self._pages.keys())
+            self._pages.clear()
+            for page in current_pages:
+                self._load_page_sync(page)
+            self.modelReset.emit()
+            return
+            
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if not self.is_image_in_scope(scope, image_index, image):
@@ -2955,6 +3132,17 @@ class ImageListModel(QAbstractListModel):
         self.add_to_undo_stack(
             action_name=f'Delete {pluralize("Tag", len(tags))}',
             should_ask_for_confirmation=True)
+            
+        if self._paginated_mode and scope == Scope.ALL_IMAGES:
+            self._delete_tags_paginated(tags, scope, use_regex)
+            # Reload currently loaded pages to reflect changes
+            current_pages = list(self._pages.keys())
+            self._pages.clear()
+            for page in current_pages:
+                self._load_page_sync(page)
+            self.modelReset.emit()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if not self.is_image_in_scope(scope, image_index, image):
