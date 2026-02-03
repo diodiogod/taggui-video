@@ -581,6 +581,7 @@ class ImageIndexDB:
                     'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
                     [(image_id, tag) for tag in unique_tags]
                 )
+            self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
 
@@ -595,6 +596,7 @@ class ImageIndexDB:
                 'INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
                 (image_id, tag)
             )
+            self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
 
@@ -609,6 +611,7 @@ class ImageIndexDB:
                 'DELETE FROM image_tags WHERE image_id = ? AND tag = ?',
                 (image_id, tag)
             )
+            self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
 
