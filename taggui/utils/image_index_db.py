@@ -331,7 +331,11 @@ class ImageIndexDB:
                  continue
                  
              # Fallback values for new files
-             mtime = path.stat().st_mtime
+             try:
+                 mtime = path.stat().st_mtime
+             except (OSError, FileNotFoundError):
+                 continue
+
              is_video = path.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
              
              files_data.append((
