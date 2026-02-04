@@ -65,26 +65,10 @@ class ProxyImageListModel(QSortFilterProxyModel):
             # But we need [(row, aspect_ratio), ...] where row is the index in the loaded items list
             # Since source rowCount() returns only loaded items, row 0 = first loaded item
 
-            if self.filter is None:
-                # No filtering - return global indices so Masonry can position correctly in virtual space
-                # Was: result = [(row, ar) for row, (global_idx, ar) in enumerate(items_data)]
-                # Returning row (0..) caused all pages to be treated as Page 0, failing window filter check.
-                return items_data
-            else:
-                # With filtering - need to check each item
-                result = []
-                for row, (global_idx, aspect_ratio) in enumerate(items_data):
-                    # Get the actual image to check filter
-                    source_index = source_model.index(row, 0)
-                    image = source_model.data(source_index, Qt.ItemDataRole.UserRole)
-
-                    if image and self.does_image_match_filter(image, self.filter):
-                        # Map to proxy row
-                        proxy_index = self.mapFromSource(source_index)
-                        if proxy_index.isValid():
-                            result.append((proxy_index.row(), aspect_ratio))
-
-                return result
+            # Since source model now handles filtering via SQL in paginated mode,
+            # items_data already reflects the filtered dataset.
+            # We must NOT re-filter here (avoids mismatches).
+            return items_data
         else:
             # Normal mode: get all aspect ratios
             all_aspect_ratios = source_model.get_aspect_ratios()
@@ -103,9 +87,18 @@ class ProxyImageListModel(QSortFilterProxyModel):
 
     def set_filter(self, new_filter: list | None):
         self.filter = new_filter
+        
+        # Check source model capabilities
+        source_model = self.sourceModel()
+        
+        # Delegate SQL filtering to source model in paginated mode
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            if hasattr(source_model, 'apply_filter'):
+                source_model.apply_filter(new_filter)
+                self.filter_changed.emit()
+                return
 
         # Suppress enrichment signals while filtering to prevent layout issues
-        source_model = self.sourceModel()
         if source_model and hasattr(source_model, '_suppress_enrichment_signals'):
             # Enable suppression if filter is active, disable if cleared
             source_model._suppress_enrichment_signals = (new_filter is not None)
@@ -216,6 +209,12 @@ class ProxyImageListModel(QSortFilterProxyModel):
         # Show all images when there is no filter.
         if self.filter is None:
             return True
+            
+        # In Paginated Mode, source already filters via SQL.
+        source_model = self.sourceModel()
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+             return True
+
         image_index = self.sourceModel().index(source_row, 0)
         image: Image = self.sourceModel().data(image_index,
                                                Qt.ItemDataRole.UserRole)

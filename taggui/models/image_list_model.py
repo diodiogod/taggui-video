@@ -317,6 +317,9 @@ class ImageListModel(QAbstractListModel):
         self._directory_path: Path = None
         self._sort_field = 'mtime'
         self._sort_dir = 'DESC'
+        self._filter_sql = ""
+        self._filter_bindings = ()
+        self._random_seed = 0
         self._pause_thumbnail_loading = False  # Pause during scrollbar drag for smooth dragging
 
         # Aspect ratio cache for masonry layout (avoids Qt model iteration on UI thread)
@@ -435,9 +438,14 @@ class ImageListModel(QAbstractListModel):
             - first_index: global index of first loaded item
             - last_index: global index of last loaded item
         """
-        if not self._paginated_mode or not self._pages:
-            # Normal mode or no pages loaded - return all
+        if not self._paginated_mode:
+            # Normal mode - return all
             return ([(i, ar) for i, ar in enumerate(self.get_aspect_ratios())], 0, len(self.images) - 1)
+        
+        if not self._pages:
+            # Paginated mode but no pages loaded yet - return empty
+            # DONT fallback to get_aspect_ratios() as it's expensive and breaks buffered logic
+            return ([], 0, 0)
 
         # Get sorted page numbers (with lock to avoid race conditions)
         # CRITICAL: Hold lock while building data to prevent concurrent modifications
@@ -639,11 +647,6 @@ class ImageListModel(QAbstractListModel):
         if not self._db:
             return
 
-    def _load_page_sync(self, page_num: int):
-        """Load a page synchronously (for initial load)."""
-        if not self._db:
-            return
-
         images = self._load_images_from_db(page_num)
         self._store_page(page_num, images)
 
@@ -698,28 +701,22 @@ class ImageListModel(QAbstractListModel):
             page=page_num,
             page_size=self.PAGE_SIZE,
             sort_field=self._sort_field,
-            sort_dir=self._sort_dir
+            sort_dir=self._sort_dir,
+            filter_sql=self._filter_sql,
+            bindings=self._filter_bindings,
+            random_seed=self._random_seed
         )
 
         images = []
-        text_file_paths = set()
-        # Gather text file paths for tag loading
-        for path in self._directory_path.rglob("*.txt"):
-            text_file_paths.add(str(path))
+        image_ids = [row['id'] for row in rows]
+        tags_map = self._db.get_tags_for_images(image_ids)
 
         for row in rows:
             file_path = self._directory_path / row['file_name']
-
-            # Load tags from text file
-            tags = []
-            text_file_path = file_path.with_suffix('.txt')
-            if str(text_file_path) in text_file_paths:
-                try:
-                    caption = text_file_path.read_text(encoding='utf-8', errors='replace')
-                    if caption:
-                        tags = [tag.strip() for tag in caption.split(self.tag_separator) if tag.strip()]
-                except Exception:
-                    pass
+            img_id = row['id']
+            
+            # Get tags from DB map (much faster than file I/O)
+            tags = tags_map.get(img_id, [])
 
             image = Image(
                 path=file_path,
@@ -728,6 +725,12 @@ class ImageListModel(QAbstractListModel):
                 is_video=bool(row['is_video']),
                 rating=row.get('rating', 0.0)
             )
+            
+            # Populate metadata
+            image.file_size = row.get('file_size')
+            image.file_type = row.get('file_type')
+            image.ctime = row.get('ctime')
+            image.mtime = row.get('mtime')
 
             if row['is_video']:
                 image.video_metadata = {
@@ -740,11 +743,99 @@ class ImageListModel(QAbstractListModel):
 
         return images
 
+    def apply_filter(self, filter_struct: list | str | None):
+        """Apply a filter to the paginated database view."""
+        if not self._paginated_mode or not self._db:
+            return
+
+        try:
+            sql, bindings = self._build_filter_sql(filter_struct)
+        except Exception as e:
+            print(f"Filter build error: {e}")
+            sql, bindings = "", ()
+        
+        # Only update if changed
+        if sql == self._filter_sql and bindings == self._filter_bindings:
+            return
+
+        self._filter_sql = sql
+        self._filter_bindings = bindings
+
+        # Update total count based on filter
+        self._total_count = self._db.count(filter_sql=sql, bindings=bindings)
+
+        # Clear cache and reset
+        # Clear cache
+        self._pages.clear()
+
+        # Bootstrap load first pages
+        print(f"[FILTER] Applied SQL filter (Count: {self._total_count})")
+        for page_num in range(min(3, (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
+            self._load_page_sync(page_num)
+
+        # Emit reset AFTER pages are loaded so rowCount() returns valid data
+        self.modelReset.emit()
+        self.total_count_changed.emit(self._total_count)
+
+    def _build_filter_sql(self, filter_node) -> tuple[str, tuple]:
+        """Convert filter structure to SQL WHERE clause and bindings."""
+        if filter_node is None:
+            return "", ()
+        
+        if isinstance(filter_node, str):
+            # Simple string search: tag OR filename
+            pattern = f"%{filter_node}%"
+            return (
+                "(file_name LIKE ? OR EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?))",
+                (pattern, pattern)
+            )
+            
+        if isinstance(filter_node, list):
+            if len(filter_node) == 0:
+                return "", ()
+                
+            # Handle infix notation [A, 'AND', B] or prefix ['tag', 'val']
+            # Determine type by inspection
+            if len(filter_node) == 2:
+                # Binary operator like ['tag', 'val']
+                op = filter_node[0]
+                val = filter_node[1]
+                
+                if op == 'tag':
+                    if '*' in val or '?' in val:
+                        val = val.replace('*', '%').replace('?', '_')
+                        return "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?)", (val,)
+                    else:
+                        return "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag = ?)", (val,)
+                
+                if op == 'name':
+                     # Contains match by default
+                     return "file_name LIKE ?", (f"%{val}%",)
+                
+                # Default case for other prefixes? like 'path'
+                
+            # Handle Infix AND/OR/NOT if length >= 3 and middle is OP
+            if len(filter_node) >= 3:
+                # Check for [A, 'AND', B]
+                op = filter_node[1]
+                if op in ('AND', 'OR'):
+                     s1, p1 = self._build_filter_sql(filter_node[0])
+                     s2, p2 = self._build_filter_sql(filter_node[2:] if len(filter_node) > 3 else filter_node[2])
+                     
+                     clauses = []
+                     if s1: clauses.append(f"({s1})")
+                     if s2: clauses.append(f"({s2})")
+                     return f" {op} ".join(clauses), p1 + p2
+            
+            # Fallback recursion for simple list?
+            return "", ()
+
+        return "", ()
+
     def _store_page(self, page_num: int, images: list[Image]):
         """Store a loaded page and evict old pages if needed."""
         with self._page_load_lock:
             self._pages[page_num] = images
-            self._touch_page(page_num)
 
             # Check if we need to evict pages (but don't do it here - background thread unsafe)
             if len(self._pages) > self.MAX_PAGES_IN_MEMORY:
@@ -1613,6 +1704,20 @@ class ImageListModel(QAbstractListModel):
             return loaded_count
         return len(self.images)
 
+    def get_global_index_for_row(self, row: int) -> int:
+        """Get the absolute global index for a visible row. Returns -1 if not found."""
+        if not self._paginated_mode:
+            return row if row < len(self.images) else -1
+            
+        with self._page_load_lock:
+            cumulative = 0
+            for page_num in sorted(self._pages.keys()):
+                page_size = len(self._pages[page_num])
+                if row < cumulative + page_size:
+                    return (page_num * self.PAGE_SIZE) + (row - cumulative)
+                cumulative += page_size
+        return -1
+
     def data(self, index: QModelIndex, role=None) -> Image | str | QIcon | QSize:
         # Validate index bounds to prevent errors during model reset
         try:
@@ -2263,6 +2368,9 @@ class ImageListModel(QAbstractListModel):
             self._enrichment_timer = QTimer()
             self._enrichment_timer.timeout.connect(self._process_enrichment_queue)
             self._enrichment_timer.start(100)  # Check queue every 100ms
+
+            # Trigger background metadata backfill safely handled later
+            self._trigger_metadata_backfill_later(directory_path)
 
             # Enrich dimensions in background thread
             def enrich_dimensions():
@@ -3287,3 +3395,21 @@ class ImageListModel(QAbstractListModel):
         self.beginInsertRows(QModelIndex(), insert_pos, insert_pos)
         self.images.insert(insert_pos, image)
         self.endInsertRows()
+
+    def _trigger_metadata_backfill_later(self, directory_path):
+        """Run metadata backfill in a background thread to avoid blocking UI."""
+        import threading
+        def backfill_worker():
+            try:
+                from utils.image_index_db import ImageIndexDB
+                db = ImageIndexDB(directory_path)
+                if db.enabled:
+                    # Small delay to let initial load finish completely
+                    import time
+                    time.sleep(2.0)
+                    db.backfill_missing_metadata(directory_path)
+                    db.close()
+            except Exception as e:
+                print(f"[BACKFILL] Error: {e}")
+        
+        threading.Thread(target=backfill_worker, daemon=True).start()

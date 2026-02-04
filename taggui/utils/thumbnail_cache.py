@@ -2,6 +2,7 @@
 
 import hashlib
 import shutil
+import threading
 from pathlib import Path
 from PySide6.QtGui import QIcon, QPixmap
 from utils.settings import settings, DEFAULT_SETTINGS
@@ -264,11 +265,14 @@ class ThumbnailCache:
 
 # Global singleton instance
 _thumbnail_cache = None
+_cache_lock = threading.Lock()
 
 
 def get_thumbnail_cache() -> ThumbnailCache:
-    """Get global thumbnail cache instance."""
+    """Get global thumbnail cache instance (thread-safe)."""
     global _thumbnail_cache
     if _thumbnail_cache is None:
-        _thumbnail_cache = ThumbnailCache()
+        with _cache_lock:
+            if _thumbnail_cache is None:
+                _thumbnail_cache = ThumbnailCache()
     return _thumbnail_cache

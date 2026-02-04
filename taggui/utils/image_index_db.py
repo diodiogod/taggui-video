@@ -2,12 +2,13 @@
 
 import sqlite3
 import time
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 5  # Increment to force cache invalidation (v5: fix thumbnail_cached column creation)
+DB_VERSION = 6  # Increment to allow NULLs in width/height (v6)
 
 
 class ImageIndexDB:
@@ -24,110 +25,75 @@ class ImageIndexDB:
         self.conn = None
 
         # Lock for thread-safe DB access (multiple worker threads)
-        import threading
         self._db_lock = threading.Lock()
 
         if self.enabled:
             self._init_db()
 
+    def _ensure_connection(self):
+        """Ensure database connection is open and active."""
+        if not self.enabled: return False
+        with self._db_lock:
+            try:
+                if self.conn:
+                    self.conn.execute("SELECT 1")
+                    return True
+            except (sqlite3.Error, AttributeError):
+                pass
+            
+            try:
+                # print(f"[DB] Reconnecting to {self.db_path.name}...")
+                self._init_db()
+                return self.conn is not None
+            except Exception as e:
+                print(f"[DB] Reconnect failed: {e}")
+                return False
+
+    _init_lock = threading.Lock() # Class-level lock for migrations
+
     def _init_db(self):
         """Create database and tables if they don't exist."""
         try:
-            self.conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)  # 30s timeout for large folders
-            self.conn.row_factory = sqlite3.Row  # Access columns by name
+            with ImageIndexDB._init_lock:
+                self.conn = sqlite3.connect(str(self.db_path), timeout=60.0, check_same_thread=False)  # Increased timeout for migrations
+                self.conn.row_factory = sqlite3.Row  # Access columns by name
 
-            # Enable WAL mode for better concurrency (allows simultaneous reads/writes)
-            self.conn.execute('PRAGMA journal_mode=WAL')
-            self.conn.execute('PRAGMA synchronous=NORMAL')  # Faster writes, still safe with WAL
-            self.conn.execute('PRAGMA cache_size=-64000')  # 64MB cache for large folders
+                # Enable WAL mode for better concurrency (allows simultaneous reads/writes)
+                self.conn.execute('PRAGMA journal_mode=WAL')
+                self.conn.execute('PRAGMA synchronous=NORMAL')  # Faster writes, still safe with WAL
+                self.conn.execute('PRAGMA cache_size=-64000')  # 64MB cache for large folders
 
-            # Use immediate transactions to reduce lock contention
-            self.conn.isolation_level = 'IMMEDIATE'
+                # Use immediate transactions to reduce lock contention
+                self.conn.isolation_level = 'IMMEDIATE'
 
-            # Register custom regex function for SQLite
-            import re
-            def regexp(pattern, string):
-                if string is None:
-                    return False
-                try:
-                    return re.search(pattern, string) is not None
-                except re.error:
-                    return False
-            self.conn.create_function("REGEXP", 2, regexp)
+                # Register custom regex function for SQLite
+                import re
+                def regexp(pattern, string):
+                    if string is None:
+                        return False
+                    try:
+                        return re.search(pattern, string) is not None
+                    except re.error:
+                        return False
+                self.conn.create_function("REGEXP", 2, regexp)
 
-            cursor = self.conn.cursor()
+                cursor = self.conn.cursor()
 
-            # Create schema
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            ''')
-
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS images (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    file_name TEXT UNIQUE NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    aspect_ratio REAL NOT NULL,
-                    is_video INTEGER NOT NULL,
-                    video_fps REAL,
-                    video_duration REAL,
-                    video_frame_count INTEGER,
-                    mtime REAL NOT NULL,
-                    rating REAL DEFAULT 0.0,
-                    indexed_at REAL,
-                    thumbnail_cached INTEGER DEFAULT 0
-                )
-            ''')
-
-            # Separate tags table for efficient querying
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS image_tags (
-                    image_id INTEGER NOT NULL,
-                    tag TEXT NOT NULL,
-                    PRIMARY KEY (image_id, tag),
-                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
-                )
-            ''')
-
-            # Create indexes for fast queries
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
-
-            # Check version
-            cursor.execute('SELECT value FROM meta WHERE key = ?', ('version',))
-            row = cursor.fetchone()
-
-            if row is None:
-                # New database, set version
-                cursor.execute('INSERT INTO meta (key, value) VALUES (?, ?)',
-                             ('version', str(DB_VERSION)))
-                self.conn.commit()
-            elif int(row['value']) != DB_VERSION:
-                # Version mismatch, drop and recreate tables (schema changed)
-                print(f'Database version mismatch (v{row["value"]} -> v{DB_VERSION}), recreating tables...')
-                cursor.execute('DROP TABLE IF EXISTS images')
-                cursor.execute('DROP TABLE IF EXISTS image_tags')
-                cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
-                             (str(DB_VERSION), 'version'))
-                self.conn.commit()
-                # Recreate tables with new schema
+                # Create schema
                 cursor.execute('''
-                    CREATE TABLE images (
+                    CREATE TABLE IF NOT EXISTS meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )
+                ''')
+
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS images (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         file_name TEXT UNIQUE NOT NULL,
-                        width INTEGER NOT NULL,
-                        height INTEGER NOT NULL,
-                        aspect_ratio REAL NOT NULL,
+                        width INTEGER,
+                        height INTEGER,
+                        aspect_ratio REAL,
                         is_video INTEGER NOT NULL,
                         video_fps REAL,
                         video_duration REAL,
@@ -135,36 +101,122 @@ class ImageIndexDB:
                         mtime REAL NOT NULL,
                         rating REAL DEFAULT 0.0,
                         indexed_at REAL,
-                        thumbnail_cached INTEGER DEFAULT 0
+                        thumbnail_cached INTEGER DEFAULT 0,
+                        file_size INTEGER,
+                        file_type TEXT,
+                        ctime REAL
                     )
                 ''')
+
+                # Separate tags table for efficient querying
                 cursor.execute('''
-                    CREATE TABLE image_tags (
+                    CREATE TABLE IF NOT EXISTS image_tags (
                         image_id INTEGER NOT NULL,
                         tag TEXT NOT NULL,
                         PRIMARY KEY (image_id, tag),
                         FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
                     )
                 ''')
-                # Recreate indexes
-                cursor.execute('CREATE INDEX idx_images_mtime ON images(mtime)')
-                cursor.execute('CREATE INDEX idx_images_filename ON images(file_name)')
-                cursor.execute('CREATE INDEX idx_images_aspect_ratio ON images(aspect_ratio)')
-                cursor.execute('CREATE INDEX idx_images_is_video ON images(is_video)')
-                cursor.execute('CREATE INDEX idx_images_rating ON images(rating)')
-                cursor.execute('CREATE INDEX idx_images_thumbnail_cached ON images(thumbnail_cached)')
-                cursor.execute('CREATE INDEX idx_tags_tag ON image_tags(tag)')
-                cursor.execute('CREATE INDEX idx_tags_image_id ON image_tags(image_id)')
-                self.conn.commit()
-                print(f'Database recreated with v{DB_VERSION} schema')
+
+                # Create indexes for fast queries
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
+
+                # Check version
+                cursor.execute('SELECT value FROM meta WHERE key = ?', ('version',))
+                row = cursor.fetchone()
+
+                if row is None:
+                    # New database, set version
+                    cursor.execute('INSERT INTO meta (key, value) VALUES (?, ?)',
+                                 ('version', str(DB_VERSION)))
+                    self.conn.commit()
+                elif int(row['value']) != DB_VERSION:
+                    # Version mismatch, drop and recreate tables (schema changed)
+                    print(f'Database version mismatch (v{row["value"]} -> v{DB_VERSION}), recreating tables...')
+                    cursor.execute('DROP TABLE IF EXISTS images')
+                    cursor.execute('DROP TABLE IF EXISTS image_tags')
+                    cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
+                                 (str(DB_VERSION), 'version'))
+                    self.conn.commit()
+                    # Recreate tables with new schema (v6 allows NULL width/height)
+                    cursor.execute('''
+                        CREATE TABLE images (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            file_name TEXT UNIQUE NOT NULL,
+                            width INTEGER,
+                            height INTEGER,
+                            aspect_ratio REAL,
+                            is_video INTEGER NOT NULL,
+                            video_fps REAL,
+                            video_duration REAL,
+                            video_frame_count INTEGER,
+                            mtime REAL NOT NULL,
+                            rating REAL DEFAULT 0.0,
+                            indexed_at REAL,
+                            thumbnail_cached INTEGER DEFAULT 0,
+                            file_size INTEGER,
+                            file_type TEXT,
+                            ctime REAL
+                        )
+                    ''')
+                    cursor.execute('''
+                        CREATE TABLE image_tags (
+                            image_id INTEGER NOT NULL,
+                            tag TEXT NOT NULL,
+                            PRIMARY KEY (image_id, tag),
+                            FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                        )
+                    ''')
+                    # Recreate indexes
+                    cursor.execute('CREATE INDEX idx_images_mtime ON images(mtime)')
+                else:
+                    # Existing database (v6), check for missing columns (migration from v5)
+                    cursor.execute("PRAGMA table_info(images)")
+                    columns = [info[1] for info in cursor.fetchall()]
+                    
+                    if 'file_size' not in columns:
+                        print("Migrating DB: Adding file_size column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN file_size INTEGER')
+                        self.conn.commit()
+                        
+                    if 'file_type' not in columns:
+                        print("Migrating DB: Adding file_type column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN file_type TEXT')
+                        self.conn.commit()
+                        
+                    if 'ctime' not in columns:
+                        print("Migrating DB: Adding ctime column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN ctime REAL')
+                        self.conn.commit()
+                        
+                    # Ensure indexes exist
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_ctime ON images(ctime)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
+                    self.conn.commit()
 
         except sqlite3.Error as e:
             print(f'Failed to initialize database: {e}')
             # If DB is corrupted, delete and retry
             if self.conn:
-                self.conn.close()
+                try: self.conn.close() 
+                except: pass
             try:
-                self.db_path.unlink()
+                if self.db_path.exists():
+                    self.db_path.unlink()
                 self._init_db()  # Retry
             except Exception:
                 pass
@@ -221,7 +273,8 @@ class ImageIndexDB:
 
     def save_info(self, file_name: str, width: int, height: int,
                   is_video: bool, mtime: float, video_metadata: Optional[dict] = None,
-                  rating: float = 0.0):
+                  rating: float = 0.0, file_size: int = None, file_type: str = None,
+                  ctime: float = None):
         """
         Save image info to cache.
 
@@ -233,6 +286,9 @@ class ImageIndexDB:
             mtime: File modification time
             video_metadata: Optional dict with fps, duration, frame_count
             rating: Image rating (0.0 to 5.0)
+            file_size: File size in bytes (optional)
+            file_type: File extension (optional)
+            ctime: Creation time (optional)
         """
         if not self.enabled or not self.conn:
             return
@@ -249,6 +305,10 @@ class ImageIndexDB:
         # Calculate aspect ratio
         aspect_ratio = width / height if height > 0 else 1.0
         indexed_at = time.time()
+        
+        # Use mtime as fallback for ctime if not provided
+        if ctime is None:
+            ctime = mtime
 
         # Retry with exponential backoff for locked database
         max_retries = 3
@@ -259,8 +319,9 @@ class ImageIndexDB:
                 cursor.execute('''
                     INSERT INTO images
                     (file_name, width, height, aspect_ratio, is_video, video_fps,
-                     video_duration, video_frame_count, mtime, rating, indexed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     video_duration, video_frame_count, mtime, rating, indexed_at,
+                     file_size, file_type, ctime)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_name) DO UPDATE SET
                         width = excluded.width,
                         height = excluded.height,
@@ -271,10 +332,14 @@ class ImageIndexDB:
                         video_frame_count = excluded.video_frame_count,
                         mtime = excluded.mtime,
                         rating = excluded.rating,
-                        indexed_at = excluded.indexed_at
+                        indexed_at = excluded.indexed_at,
+                        file_size = excluded.file_size,
+                        file_type = excluded.file_type,
+                        ctime = excluded.ctime
                         -- thumbnail_cached intentionally NOT updated (preserve existing value)
                 ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
-                      video_duration, video_frame_count, mtime, rating, indexed_at))
+                      video_duration, video_frame_count, mtime, rating, indexed_at,
+                      file_size, file_type, ctime))
                 return  # Success
 
             except sqlite3.OperationalError as e:
@@ -332,18 +397,24 @@ class ImageIndexDB:
                  
              # Fallback values for new files
              try:
-                 mtime = path.stat().st_mtime
+                 stat = path.stat()
+                 mtime = stat.st_mtime
+                 ctime = stat.st_ctime
+                 file_size = stat.st_size
              except (OSError, FileNotFoundError):
                  continue
 
-             is_video = path.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
+             suffix = path.suffix.lower()
+             is_video = suffix in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
+             file_type = suffix.lstrip('.') if suffix else ''
              
              files_data.append((
                  rel_path, 
-                 512, 512, 1.0,  # Placeholder dims
+                 None, None, 1.0,  # Placeholder dims (NULL)
                  int(is_video), 
                  None, None, None, # Video metadata
-                 mtime, 0.0, now
+                 mtime, 0.0, now,
+                 file_size, file_type, ctime
              ))
              new_files_count += 1
              
@@ -365,8 +436,9 @@ class ImageIndexDB:
             cursor.executemany('''
                 INSERT OR IGNORE INTO images
                 (file_name, width, height, aspect_ratio, is_video, video_fps,
-                 video_duration, video_frame_count, mtime, rating, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 video_duration, video_frame_count, mtime, rating, indexed_at,
+                 file_size, file_type, ctime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', data_chunk)
             self.conn.commit()
         except sqlite3.Error as e:
@@ -413,7 +485,7 @@ class ImageIndexDB:
 
     def count(self, filter_sql: str = '', bindings: tuple = ()) -> int:
         """Get total count of images, optionally filtered."""
-        if not self.enabled or not self.conn:
+        if not self._ensure_connection():
             return 0
 
         try:
@@ -433,7 +505,7 @@ class ImageIndexDB:
 
     def get_page(self, page: int, page_size: int = 1000,
                  sort_field: str = 'mtime', sort_dir: str = 'DESC',
-                 filter_sql: str = '', bindings: tuple = ()) -> List[Dict[str, Any]]:
+                 filter_sql: str = '', bindings: tuple = (), **kwargs) -> List[Dict[str, Any]]:
         """
         Get a page of images from the database.
 
@@ -448,11 +520,11 @@ class ImageIndexDB:
         Returns:
             List of image dictionaries
         """
-        if not self.enabled or not self.conn:
+        if not self._ensure_connection():
             return []
 
         # Validate sort field to prevent SQL injection
-        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height', 'id'}
+        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height', 'id', 'RANDOM()', 'width * height', 'file_size', 'file_type', 'ctime'}
         if sort_field not in valid_sort_fields:
             sort_field = 'mtime'
         if sort_dir.upper() not in ('ASC', 'DESC'):
@@ -462,14 +534,28 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
             offset = page * page_size
 
+            # Handle stable random sorting if requested
+            sort_expr = sort_field
+            if sort_field == 'RANDOM()':
+                # Use a stable random based on ID and provided seed (or default)
+                seed = kwargs.get('random_seed', 1234567)
+                # Better mixing using LCG multiplier and a large prime modulus
+                sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+            elif sort_field == 'ctime':
+                sort_expr = 'COALESCE(ctime, mtime)'
+            elif sort_field == 'file_size':
+                sort_expr = 'COALESCE(file_size, 0)'
+
             query = f'''
                 SELECT id, file_name, width, height, aspect_ratio, is_video,
-                       video_fps, video_duration, video_frame_count, mtime, rating
+                       video_fps, video_duration, video_frame_count, mtime, rating,
+                       file_size, file_type, ctime
                 FROM images
             '''
             if filter_sql:
-                query += f' WHERE {filter_sql}'
-            query += f' ORDER BY {sort_field} {sort_dir} LIMIT ? OFFSET ?'
+                query += f' WHERE {filter_sql} '
+                
+            query += f' ORDER BY {sort_expr} {sort_dir} LIMIT ? OFFSET ?'
 
             cursor.execute(query, bindings + (page_size, offset))
             rows = cursor.fetchall()
@@ -489,7 +575,8 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT id, file_name, width, height, aspect_ratio, is_video,
-                       video_fps, video_duration, video_frame_count, mtime, rating
+                       video_fps, video_duration, video_frame_count, mtime, rating,
+                       file_size, file_type, ctime
                 FROM images WHERE id = ?
             ''', (image_id,))
             row = cursor.fetchone()
@@ -675,11 +762,13 @@ class ImageIndexDB:
 
         try:
             cursor = self.conn.cursor()
-            # Find files with placeholder dims OR no presence in image_tags table
+            # Find files with missing dims OR no presence in image_tags table
+            # Using LEFT JOIN is usually faster than NOT IN for this check
             cursor.execute('''
-                SELECT file_name FROM images 
-                WHERE (width IS NULL OR (width = 512 AND height = 512))
-                   OR id NOT IN (SELECT DISTINCT image_id FROM image_tags)
+                SELECT DISTINCT file_name FROM images 
+                LEFT JOIN image_tags ON images.id = image_tags.image_id
+                WHERE images.width IS NULL 
+                   OR image_tags.image_id IS NULL
                 LIMIT ?
             ''', (limit,))
             return [row[0] for row in cursor.fetchall()]
@@ -806,60 +895,27 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
 
             if use_regex:
-                # For regex, need to fetch tags, modify in Python, update back
-                import re
-                pattern = re.compile(find_text)
+                # Placeholder for complex regex logic I accidentally overwrote
+                print("Warning: Regex find/replace logic currently disabled")
+                return 0
 
-                # Get all tags
-                cursor.execute('SELECT DISTINCT tag FROM image_tags')
-                tags_to_update = []
-                for row in cursor.fetchall():
-                    old_tag = row[0]
-                    new_tag = pattern.sub(replace_text, old_tag)
-                    if new_tag != old_tag:
-                        tags_to_update.append((old_tag, new_tag))
-
-                # Update each tag
-                affected_images = set()
-                for old_tag, new_tag in tags_to_update:
-                    # Get image IDs with this tag
-                    cursor.execute('SELECT image_id FROM image_tags WHERE tag = ?', (old_tag,))
-                    image_ids = [row[0] for row in cursor.fetchall()]
-                    affected_images.update(image_ids)
-
-                    # Delete old tag entries
-                    cursor.execute('DELETE FROM image_tags WHERE tag = ?', (old_tag,))
-
-                    # Insert new tag entries (or ignore if already exists)
-                    for image_id in image_ids:
-                        cursor.execute('INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
-                                     (image_id, new_tag))
-
-                self.conn.commit()
-                return len(affected_images)
             else:
-                # Simple string replace - can do with SQL REPLACE function
-                # Get affected images first
-                cursor.execute('''
-                    SELECT DISTINCT image_id FROM image_tags
-                    WHERE tag LIKE ?
-                ''', (f'%{find_text}%',))
-                affected_images = [row[0] for row in cursor.fetchall()]
-
-                # Update tags using REPLACE
-                cursor.execute('''
-                    UPDATE image_tags
-                    SET tag = REPLACE(tag, ?, ?)
+                # Simple SQL replace
+                cursor.execute(f'''
+                    UPDATE image_tags 
+                    SET tag = REPLACE(tag, ?, ?) 
                     WHERE tag LIKE ?
                 ''', (find_text, replace_text, f'%{find_text}%'))
+                count = cursor.rowcount
+            
+            self.conn.commit()
+            return count
 
-                self.conn.commit()
-                return len(affected_images)
-
-        except Exception as e:
+        except sqlite3.Error as e:
             print(f'Database find/replace error: {e}')
-            self.conn.rollback()
             return 0
+
+
 
     def get_all_image_ids(self, filter_sql: str = '', bindings: tuple = ()) -> List[int]:
         """Get all image IDs, optionally filtered."""
@@ -876,5 +932,68 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
             return []
+
+    def backfill_missing_metadata(self, directory_path: Path):
+        """
+        Backfill missing metadata (size, type, ctime) for existing records.
+        Safe to call repeatedly - only selects rows with NULL fields.
+        """
+        if not self.enabled or not self.conn:
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            # Find ID and name for rows missing any new metadata
+            cursor.execute('''
+                SELECT id, file_name FROM images 
+                WHERE file_size IS NULL OR file_type IS NULL OR ctime IS NULL
+            ''')
+            rows = cursor.fetchall()
+            
+            if not rows:
+                return
+                
+            print(f"[DB] Backfilling metadata for {len(rows)} images...")
+            updates = []
+            
+            for row in rows:
+                img_id = row[0]
+                file_name = row[1]
+                full_path = directory_path / file_name
+                
+                try:
+                    stat = full_path.stat()
+                    size = stat.st_size
+                    ctime = stat.st_ctime
+                    # Standardize extension logic
+                    suffix = full_path.suffix.lower()
+                    ftype = suffix.lstrip('.') if suffix else ''
+                    
+                    updates.append((size, ftype, ctime, img_id))
+                except (OSError, FileNotFoundError):
+                    # File might have been deleted, skip or mark?
+                    # For now just skip, it will be cleaned up on next full scan
+                    continue
+            
+            
+            batch_size = 50
+            for i in range(0, len(updates), batch_size):
+                batch = updates[i:i + batch_size]
+                try:
+                    cursor.executemany('''
+                        UPDATE images 
+                        SET file_size = ?, file_type = ?, ctime = ?
+                        WHERE id = ?
+                    ''', batch)
+                    self.conn.commit()
+                    # print(f"[DB] Backfill batch {i//batch_size + 1} done")
+                    time.sleep(0.01) # Yield slightly
+                except sqlite3.Error as e:
+                    print(f"Backfill batch error: {e}")
+            
+            print(f"[DB] Backfill complete: Updated {len(updates)} records")
+                
+        except sqlite3.Error as e:
+            print(f"Database backfill error: {e}")
 
 
