@@ -798,17 +798,13 @@ class ImageListView(QListView):
                 print("[MASONRY] Skipping - no pages loaded yet in buffered mode")
                 return
 
-        # If already calculating, try to cancel it and start fresh
+        # If already calculating, mark as pending and return
         if self._masonry_calculating:
-            if self._masonry_calc_future and not self._masonry_calc_future.done():
-                # Try to cancel the running calculation
-                if self._masonry_calc_future.cancel():
-                    print("[MASONRY] Cancelled previous calculation to start new one")
-                else:
-                    print("[MASONRY] Skipping - can't cancel running calculation")
-                    return
-            # Previous calc is done or cancelled, allow new one
-            self._masonry_calculating = False
+            self._masonry_recalc_pending = True
+            # print("[MASONRY] Calculation in progress, marking new one as pending")
+            return
+        
+        self._masonry_recalc_pending = False
         
         # CRITICAL FIX: Always check grace period after masonry completion
         # Check timestamp independently of future reference (which might be None)
@@ -1027,6 +1023,13 @@ class ImageListView(QListView):
             total_height = result_dict['total_height']
             viewport_height = self.viewport().height()
 
+            # Check if another calculation was requested while this one was running
+            if getattr(self, '_masonry_recalc_pending', False):
+                self._masonry_recalc_pending = False
+                # Re-trigger calculation to ensure we have the most up-to-date layout
+                # print("[MASONRY] Triggering pending recalculation")
+                QTimer.singleShot(0, self._calculate_masonry_layout)
+            
             # Buffered pagination: estimate full dataset height for scrollbar
             # Buffered pagination: estimate full dataset height for scrollbar
             # Use stored proxy reference for stability (self.model() can be transient)
@@ -1989,25 +1992,26 @@ class ImageListView(QListView):
             scroll_offset = self.verticalScrollBar().value()
             adjusted_point = QPoint(point.x(), point.y() + scroll_offset)
 
-            # Debug: find ALL rects that contain this point
-            matching_rows = []
-            for row in range(self.model().rowCount() if self.model() else 0):
-                rect = self._get_masonry_item_rect(row)
-                if rect.contains(adjusted_point):
-                    matching_rows.append((row, rect))
-
-            if matching_rows:
-                # Show matching info (limit rect output for readability)
-                # match_info = [(r, f"({rect.x()},{rect.y()} {rect.width()}x{rect.height()})") for r, rect in matching_rows]
-                # print(f"[DEBUG] indexAt: click at ({adjusted_point.x()},{adjusted_point.y()}) matches {len(matching_rows)} items: {match_info}")
-                # Return the last one (topmost painted item)
-                last_row, last_rect = matching_rows[-1]
-                found_index = self.model().index(last_row, 0)
-                # print(f"[DEBUG] indexAt returning row={last_row}")
-                return found_index
-            else:
-                # print(f"[DEBUG] indexAt found no match at {adjusted_point}")
-                return QModelIndex()
+            source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+            
+            # Use the optimized map for fast lookup
+            if not hasattr(self, '_masonry_index_map') or self._masonry_index_map is None:
+                self._rebuild_masonry_index_map()
+            
+            # Linear search in the map rects (could be optimized with spatial index if 32k+)
+            for global_idx, item in self._masonry_index_map.items():
+                item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
+                if item_rect.contains(adjusted_point):
+                    # Map global index to row
+                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                         row = source_model.get_loaded_row_for_global_index(global_idx)
+                    else:
+                         row = global_idx
+                         
+                    if row != -1:
+                        return self.model().index(row, 0)
+            
+            return QModelIndex()
         else:
             return super().indexAt(point)
 
@@ -2516,28 +2520,19 @@ class ImageListView(QListView):
 
                 for item in visible_items:
                     # Construct valid index for painting
-                    if is_buffered and not is_filtered:
-                        # Unfiltered buffered mode: item['index'] is global virtual index
-                        # Map global index to loaded row
-                        if hasattr(source_model, 'get_loaded_row_for_global_index'):
-                            src_row = source_model.get_loaded_row_for_global_index(item['index'])
-                        else:
-                            src_row = -1
-                            
-                        if src_row == -1:
-                            # Not loaded - can't paint using delegate
-                            skipped_count += 1
-                            if len(first_skipped) < 5:
-                                first_skipped.append(item['index'])
-                            continue
-                            
-                        src_index = source_model.index(src_row, 0)
-                        # Map to proxy
-                        index = self.model().mapFromSource(src_index)
+                    # ALWAYS map global index to loaded row in masonry mode
+                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                        src_row = source_model.get_loaded_row_for_global_index(item['index'])
                     else:
-                        # Normal mode OR filtered buffered mode:
-                        # item['index'] is already the proxy row
-                        index = self.model().index(item['index'], 0)
+                        src_row = item['index']
+                        
+                    if src_row == -1:
+                        # Not loaded or belongs to a different view state
+                        skipped_count += 1
+                        continue
+                        
+                    src_index = source_model.index(src_row, 0)
+                    index = self.model().mapFromSource(src_index)
 
                     if not index.isValid():
                         continue
