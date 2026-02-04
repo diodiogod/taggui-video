@@ -659,16 +659,17 @@ class ImageListView(QListView):
     def _on_paginated_enrichment_complete(self):
         """Handle completion of background enrichment in paginated mode."""
         print("[ENRICH] Paginated enrichment complete, reloading pages...")
-        source_model = self.proxy_image_list_model.sourceModel()
         
-        # Reload currently loaded pages to pick up new dimensions from DB
-        # This updates in-memory Image objects
-        if hasattr(source_model, '_pages'):
-             for page_num in list(source_model._pages.keys()):
-                 source_model._load_page_sync(page_num)
-                 
-        # Trigger layout update - emit pages_updated FIRST
-        source_model._emit_pages_updated()
+        # CRITICAL FIX: Defer to avoid race with masonry cleanup
+        def reload_pages():
+            source_model = self.proxy_image_list_model.sourceModel()
+            if hasattr(source_model, '_pages'):
+                 for page_num in list(source_model._pages.keys()):
+                     source_model._load_page_sync(page_num)
+            source_model._emit_pages_updated()
+        
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(250, reload_pages)
         # source_model.layoutChanged.emit() # Optional, already covered by pages_updated logic if connected
 
     def _on_pages_updated(self, loaded_pages: list):
@@ -797,13 +798,51 @@ class ImageListView(QListView):
                 print("[MASONRY] Skipping - no pages loaded yet in buffered mode")
                 return
 
-        # If already calculating, skip this recalc (can't interrupt multiprocessing)
+        # If already calculating, try to cancel it and start fresh
         if self._masonry_calculating:
             if self._masonry_calc_future and not self._masonry_calc_future.done():
-                print("[MASONRY] Skipping recalc - previous calculation still running")
-                return
-            # Previous calc is done, allow new one
+                # Try to cancel the running calculation
+                if self._masonry_calc_future.cancel():
+                    print("[MASONRY] Cancelled previous calculation to start new one")
+                else:
+                    print("[MASONRY] Skipping - can't cancel running calculation")
+                    return
+            # Previous calc is done or cancelled, allow new one
             self._masonry_calculating = False
+        
+        # CRITICAL FIX: Always check grace period after masonry completion
+        # Check timestamp independently of future reference (which might be None)
+        import time
+        current_time = time.time()
+        
+        if hasattr(self, '_last_masonry_done_time') and self._last_masonry_done_time > 0:
+            time_since_done = (current_time - self._last_masonry_done_time) * 1000
+            
+            if time_since_done < 500:  # 500ms grace period for thread cleanup
+                remaining = int(500 - time_since_done)
+                print(f"[MASONRY] Enforcing grace period - {remaining}ms remaining")
+                # Schedule retry after grace period
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(remaining, self._calculate_masonry_layout)
+                return
+        
+        # CRITICAL FIX: Recreate executor periodically to prevent thread pool exhaustion
+        # After many rapid operations, thread state can accumulate and cause crashes
+        if not hasattr(self, '_masonry_calc_count'):
+            self._masonry_calc_count = 0
+        
+        self._masonry_calc_count += 1
+        if self._masonry_calc_count % 20 == 0:  # Reset every 20 calculations
+            print(f"[MASONRY] Recreating executor after {self._masonry_calc_count} calculations")
+            try:
+                old_executor = self._masonry_executor
+                from concurrent.futures import ThreadPoolExecutor
+                self._masonry_executor = ThreadPoolExecutor(max_workers=1)
+                # Shut down old executor in background
+                import threading
+                threading.Thread(target=lambda: old_executor.shutdown(wait=True), daemon=True).start()
+            except Exception as e:
+                print(f"[MASONRY] Failed to recreate executor: {e}")
 
         self._masonry_calculating = True
 
@@ -886,18 +925,36 @@ class ImageListView(QListView):
                 source_model._enrichment_paused.clear()
             return
 
-        # Generate cache key
-        cache_key = self._get_masonry_cache_key()
+        try:
+            # Generate cache key
+            cache_key = self._get_masonry_cache_key()
+            
+            # CRITICAL: Make a defensive copy of items_data to prevent race conditions
+            # If the main thread modifies items_data while the worker is iterating,
+            # it can cause crashes. This was causing the second masonry call to fail.
+            items_data_copy = list(items_data)
+            
+            # Validate data before sending to worker
+            if not all(isinstance(item, (tuple, list)) and len(item) >= 2 for item in items_data_copy[:10]):
+                print(f"[MASONRY] WARNING: items_data contains invalid entries, skipping calculation")
+                self._masonry_calculating = False
+                return
 
-        # Submit to worker process (NO GIL BLOCKING!)
-        self._masonry_calc_future = self._masonry_executor.submit(
-            calculate_masonry_layout,
-            items_data,
-            column_width,
-            spacing,
-            num_columns,
-            cache_key
-        )
+            # Submit to worker process (NO GIL BLOCKING!)
+            self._masonry_calc_future = self._masonry_executor.submit(
+                calculate_masonry_layout,
+                items_data_copy,  # Pass the copy, not the original!
+                column_width,
+                spacing,
+                num_columns,
+                cache_key
+            )
+        except Exception as e:
+            print(f"[MASONRY] CRITICAL ERROR starting calculation: {e}")
+            import traceback
+            traceback.print_exc()
+            self._masonry_calculating = False
+            return
 
         # Poll for completion using QTimer
         self._check_masonry_completion()
@@ -935,6 +992,7 @@ class ImageListView(QListView):
             timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
 
             self._masonry_calculating = False
+            self._last_masonry_done_time = time.time()  # For cleanup grace period
 
             if result_dict is None:
                 # Resume enrichment even if result is None
@@ -1027,6 +1085,11 @@ class ImageListView(QListView):
 
                 # ALWAYS calculate estimated total height (even if 0 items loaded)
                 # This ensures scrollbar doesn't collapse to 0 during loading gaps
+                # Check for NaN to prevent crashes
+                import math
+                if math.isnan(avg_height_per_item):
+                    avg_height_per_item = 100.0
+                    
                 estimated_total_height = int(avg_height_per_item * total_items)
                 
                 # CRITICAL: Never shrink total height below known items count to prevent scroll jump
@@ -1036,26 +1099,19 @@ class ImageListView(QListView):
                 self._masonry_total_height = estimated_total_height
                 
                 if loaded_items > 0:
-                    # For shift calculation, use the STABLE average to Match the scrollbar
-                    # This ensures Y-offset aligns with scrollbar position
-                    first_index = self._masonry_items[0]['index']
-                    y_offset = int(first_index * avg_height_per_item)
-                    
-                    # Shift all items
-                    # We MUST update 'y' in the dict because:
-                    # 1. 'rect' key does not exist yet (KeyError fix)
-                    # 2. _get_masonry_visible_items uses 'y' to find items
-                    for item in self._masonry_items:
-                        item['y'] += y_offset
-                    
-                    print(f"[MASONRY] Buffered: Shifted {loaded_items} items by Y={y_offset:,}px (Stable Avg Ht={avg_height_per_item:.2f})")
-                    
-                    # DEBUG: Show index range and Y range in masonry items
-                    indices = [item['index'] for item in self._masonry_items]
-                    y_values = [item['y'] for item in self._masonry_items]
-                    max_y_with_height = max(item['y'] + item['height'] for item in self._masonry_items)
-                    # print(f"[MASONRY] Index range: {min(indices)} to {max(indices)} (count={len(indices)})")
-                    # print(f"[MASONRY] Y range: {min(y_values)} to {max_y_with_height} (max_y={max(y_values)})")
+                    try:
+                        # For shift calculation, use the STABLE average to Match the scrollbar
+                        # This ensures Y-offset aligns with scrollbar position
+                        first_index = self._masonry_items[0]['index']
+                        y_offset = int(first_index * avg_height_per_item)
+                        
+                        # Shift all items
+                        for item in self._masonry_items:
+                            item['y'] += y_offset
+                    except Exception as e:
+                        print(f"[MASONRY] Error shifting items: {e}")
+                
+                    # print(f"[MASONRY] Buffered: Shifted {loaded_items} items by Y={y_offset:,}px (Stable Avg Ht={avg_height_per_item:.2f})")
 
                 
                 # print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
@@ -1126,6 +1182,20 @@ class ImageListView(QListView):
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
             if source_model and hasattr(source_model, '_enrichment_paused'):
                 source_model._enrichment_paused.clear()
+
+    def _map_row_to_global_index_safely(self, row: int) -> int:
+        """Fallback mapping if model lacks the direct method."""
+        try:
+            model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+            if not model: return row
+            
+            if hasattr(model, 'get_global_index_for_row'):
+                return model.get_global_index_for_row(row)
+            
+            # Manual fallback logic if model is busy/reset
+            return row # In normal mode row == global index
+        except Exception:
+            return row
 
     def _get_masonry_item_rect(self, index):
         """Get QRect for item at given index from masonry results."""
@@ -1891,8 +1961,18 @@ class ImageListView(QListView):
     def visualRect(self, index):
         """Return the visual rectangle for an index, using masonry positions."""
         if self.use_masonry and self._masonry_items and index.isValid():
+            # In masonry mode, we map rows to global indices
+            global_idx = index.row()
+            if hasattr(self.model(), 'sourceModel'):
+                source_model = self.model().sourceModel()
+                if hasattr(source_model, 'get_global_index_for_row'):
+                    global_idx = source_model.get_global_index_for_row(index.row())
+                elif getattr(source_model, '_paginated_mode', False):
+                    # Fallback mapping for paginated mode
+                    global_idx = self._map_row_to_global_index_safely(index.row())
+
             # Get masonry position (absolute coordinates)
-            rect = self._get_masonry_item_rect(index.row())
+            rect = self._get_masonry_item_rect(global_idx)
             if rect.isValid():
                 # Create new rect adjusted for scroll position (viewport coordinates)
                 scroll_offset = self.verticalScrollBar().value()
@@ -3339,106 +3419,96 @@ class ImageList(QDockWidget):
                     'Default': ('file_name', 'ASC'),
                     'Name': ('file_name', 'ASC'),
                     'Modified': ('mtime', 'DESC'),
-                    'Created': ('mtime', 'DESC'),  # DB doesn't have ctime, use mtime
-                    'Size': ('file_name', 'ASC'),  # DB doesn't have size, fallback to name
-                    'Type': ('file_name', 'ASC'),  # Group by extension would need SQL SUBSTR
-                    'Random': ('file_name', 'ASC')  # Random not supported in DB yet
+                    'Created': ('ctime', 'DESC'),
+                    'Size': ('file_size', 'DESC'),
+                    'Type': ('file_type', 'ASC'),
+                    'Random': ('RANDOM()', 'ASC')  # Now supported in DB
                 }
 
                 db_sort_field, db_sort_dir = sort_map.get(sort_by, ('file_name', 'ASC'))
                 source_model._sort_field = db_sort_field
                 source_model._sort_dir = db_sort_dir
-                print(f"[SORT] Buffered mode: changed DB sort to {db_sort_field} {db_sort_dir}")
+                
+                # STABLE RANDOM: Generate a new seed if sorting by Random, to shuffle view
+                if sort_by == 'Random':
+                    import time
+                    source_model._random_seed = int(time.time() * 1000) % 1000000
+                
+                print(f"[SORT] Buffered mode: changed DB sort to {db_sort_field} {db_sort_dir} (Seed: {getattr(source_model, '_random_seed', 0)})")
 
-                # Clear all pages and reload from DB with new sort
-                with source_model._page_load_lock:
-                    source_model._pages.clear()
-                    source_model._loading_pages.clear()
-                    source_model._page_load_order.clear()
+                # CRITICAL: Inform Qt that the entire model is being reset
+                source_model.beginResetModel()
+                
+                try:
+                    # Clear all pages and reload from DB with new sort
+                    with source_model._page_load_lock:
+                        source_model._pages.clear()
+                        source_model._loading_pages.clear()
+                        source_model._page_load_order.clear()
 
-                # Reload first 3 pages with new sort order
-                for page_num in range(3):
-                    source_model._load_page_sync(page_num)
+                    # Reload first 3 pages with new sort order
+                    for page_num in range(3):
+                        source_model._load_page_sync(page_num)
+                finally:
+                    source_model.endResetModel()
 
                 # Trigger layout update - emit pages_updated FIRST so proxy invalidates
                 source_model._emit_pages_updated()
-                source_model.layoutChanged.emit()
+                # source_model.layoutChanged.emit() # Redundant with endResetModel()
                 
                 # Restart background enrichment (essential for updating placeholders)
                 if hasattr(source_model, '_start_paginated_enrichment'):
                     source_model._start_paginated_enrichment()
 
-                return  # Skip in-memory sorting below
+            else:
+                # NORMAL MODE: Sort in-memory list
+                source_model.beginResetModel()
+                try:
+                    if sort_by == 'Default':
+                        # Use natural sort from image_list_model (same as initial load)
+                        source_model.images.sort(key=lambda img: natural_sort_key(img.path))
+                    elif sort_by == 'Name':
+                        # Natural sort by filename only (not full path)
+                        source_model.images.sort(key=lambda img: natural_sort_key(Path(img.path.name)))
+                    elif sort_by == 'Modified':
+                        source_model.images.sort(key=lambda img: safe_stat(img, 'st_mtime'), reverse=True)
+                    elif sort_by == 'Created':
+                        source_model.images.sort(key=lambda img: safe_stat(img, 'st_ctime'), reverse=True)
+                    elif sort_by == 'Size':
+                        source_model.images.sort(key=lambda img: safe_stat(img, 'st_size'), reverse=True)
+                    elif sort_by == 'Type':
+                        source_model.images.sort(key=lambda img: (img.path.suffix.lower(), natural_sort_key(img.path.name)))
+                    elif sort_by == 'Random':
+                        import random
+                        random.shuffle(source_model.images)
 
-            # NORMAL MODE: Sort in-memory list
-            if sort_by == 'Default':
-                # Use natural sort from image_list_model (same as initial load)
-                source_model.images.sort(key=lambda img: natural_sort_key(img.path))
-            elif sort_by == 'Name':
-                # Natural sort by filename only (not full path)
-                source_model.images.sort(key=lambda img: natural_sort_key(Path(img.path.name)))
-            elif sort_by == 'Modified':
-                source_model.images.sort(key=lambda img: safe_stat(img, 'st_mtime'), reverse=True)
-            elif sort_by == 'Created':
-                source_model.images.sort(key=lambda img: safe_stat(img, 'st_ctime'), reverse=True)
-            elif sort_by == 'Size':
-                source_model.images.sort(key=lambda img: safe_stat(img, 'st_size'), reverse=True)
-            elif sort_by == 'Type':
-                source_model.images.sort(key=lambda img: (img.path.suffix.lower(), natural_sort_key(img.path.name)))
-            elif sort_by == 'Random':
-                import random
-                random.shuffle(source_model.images)
+                    # Rebuild aspect ratio cache after reordering
+                    if hasattr(source_model, '_rebuild_aspect_ratio_cache'):
+                        source_model._rebuild_aspect_ratio_cache()
+                finally:
+                    source_model.endResetModel()
 
-            # Rebuild aspect ratio cache after reordering
-            if hasattr(source_model, '_rebuild_aspect_ratio_cache'):
-                source_model._rebuild_aspect_ratio_cache()
+                # Restart background enrichment with new sorted order
+                if hasattr(source_model, '_restart_enrichment'):
+                    source_model._restart_enrichment()
 
-            # Emit layoutChanged after sorting
-            source_model.layoutChanged.emit()
-
-            # Restart background enrichment with new sorted order
-            if hasattr(source_model, '_restart_enrichment'):
-                source_model._restart_enrichment()
-
-            # Scroll to selected image's NEW position after sort
+            # --- SELECTION RESTORATION ---
+            # Use a class-level variable and a single shot timer to avoid multiple connections
             if selected_image:
-                # Use layout_ready signal for masonry, or immediate scroll for grid
-                scroll_done = [False]
-
-                def do_scroll():
-                    if scroll_done[0]:
-                        return
-                    scroll_done[0] = True
-
-                    # Find the image's NEW row after sorting
-                    try:
-                        new_source_row = source_model.images.index(selected_image)
-                        new_proxy_index = self.proxy_image_list_model.mapFromSource(
-                            source_model.index(new_source_row, 0)
-                        )
-                        if new_proxy_index.isValid():
-                            print(f"[SORT] Scrolling to image at new row {new_proxy_index.row()}")
-                            from PySide6.QtWidgets import QAbstractItemView
-                            # Set selection to the new position
-                            self.list_view.setCurrentIndex(new_proxy_index)
-                            # Scroll to show it
-                            self.list_view.scrollTo(new_proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
-                        else:
-                            print(f"[SORT] Image filtered out after sort, can't scroll")
-                    except (ValueError, AttributeError) as e:
-                        print(f"[SORT] Failed to find image after sort: {e}")
-
-                    try:
-                        self.list_view.layout_ready.disconnect(do_scroll)
-                    except:
-                        pass
-
-                # Connect to layout_ready signal (fires when masonry completes)
-                self.list_view.layout_ready.connect(do_scroll)
-
-                # Fallback timeout in case layout_ready doesn't fire
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(1000, do_scroll)  # Increased to 1s for masonry
+                self._image_to_scroll_to = selected_image
+                
+                try:
+                    # Disconnect previous if any
+                    self.list_view.layout_ready.disconnect(self._do_scroll_after_sort)
+                except Exception:
+                    pass
+                    
+                self.list_view.layout_ready.connect(self._do_scroll_after_sort)
+                
+                # Fallback timer (1s)
+                QTimer.singleShot(1000, self._do_scroll_after_sort)
+            else:
+                 self.list_view.verticalScrollBar().setValue(0)
 
         except Exception as e:
             import traceback
@@ -3446,6 +3516,53 @@ class ImageList(QDockWidget):
             traceback.print_exc()
             # Ensure layoutChanged is emitted even on error
             source_model.layoutChanged.emit()
+
+    @Slot()
+    def _do_scroll_after_sort(self):
+        """Scroll to the previously selected image after a sort operation completes."""
+        if not hasattr(self, '_image_to_scroll_to') or not self._image_to_scroll_to:
+            return
+            
+        selected_image = self._image_to_scroll_to
+        self._image_to_scroll_to = None  # Clear to prevent multiple triggers
+        
+        try:
+            # Disconnect to prevent re-triggering from future layouts
+            try:
+                self.list_view.layout_ready.disconnect(self._do_scroll_after_sort)
+            except Exception:
+                pass
+                
+            source_model = self.proxy_image_list_model.sourceModel()
+            new_proxy_index = QModelIndex()
+            
+            if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                # OPTIMIZATION: In paginated mode, don't iterate all data
+                # Just check the first few rows (usually where it ends up after Name sort if it was near top)
+                # For 1600 items, we can iterate, but let's be careful.
+                row_count = source_model.rowCount()
+                for row in range(min(row_count, 3000)): # Cap at 3k for safety
+                    image = source_model.data(source_model.index(row, 0), Qt.ItemDataRole.UserRole)
+                    if image and image.path == selected_image.path:
+                        new_proxy_index = self.proxy_image_list_model.mapFromSource(source_model.index(row, 0))
+                        break
+            else:
+                try:
+                    new_source_row = source_model.images.index(selected_image)
+                    new_proxy_index = self.proxy_image_list_model.mapFromSource(source_model.index(new_source_row, 0))
+                except (ValueError, AttributeError):
+                    pass
+
+            if new_proxy_index.isValid():
+                from PySide6.QtWidgets import QAbstractItemView
+                self.list_view.setCurrentIndex(new_proxy_index)
+                self.list_view.scrollTo(new_proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            else:
+                # Not loaded or filtered out
+                pass
+        except Exception as e:
+            print(f"[SORT] Scroll restoration failed: {e}")
+            pass
 
     @Slot()
     def toggle_deletion_marking(self):

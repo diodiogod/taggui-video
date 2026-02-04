@@ -38,6 +38,10 @@ class Image:
     loop_start_frame: int | None = None
     loop_end_frame: int | None = None
     marked_for_deletion: bool = False
+    file_size: int | None = None
+    file_type: str | None = None
+    ctime: float | None = None
+    mtime: float | None = None
 
     @property
     def aspect_ratio(self) -> float:
