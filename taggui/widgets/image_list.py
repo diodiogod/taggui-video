@@ -894,7 +894,7 @@ class ImageListView(QListView):
                     scroll_fraction = scroll_val / scroll_max
                     estimated_idx = int(scroll_fraction * total_items)
                     current_page = estimated_idx // page_size
-                    print(f"[MASONRY_CALC] Scroll={scroll_val}/{scroll_max} ({scroll_fraction:.2f}), EstIdx={estimated_idx}, Page={current_page}")
+                    # print(f"[MASONRY_CALC] Scroll={scroll_val}/{scroll_max} ({scroll_fraction:.2f}), EstIdx={estimated_idx}, Page={current_page}")
                 else:
                     current_page = self._current_page if hasattr(self, '_current_page') else 0
                 
@@ -903,9 +903,17 @@ class ImageListView(QListView):
                 
                 # Buffer: define window of interest (e.g. +/- 5 pages)
                 # Should match or exceed load buffer to ensure we see what we load
-                window_buffer = 5 
-                min_idx = max(0, (current_page - window_buffer) * page_size)
-                max_idx = (current_page + window_buffer + 1) * page_size
+                # DYNAMIC BUFFER: Adjust based on MAX_PAGES_IN_MEMORY to avoid thrashing
+                max_pages_mem = source_model.MAX_PAGES_IN_MEMORY if hasattr(source_model, 'MAX_PAGES_IN_MEMORY') else 20
+                # We need to fit (2 * buffer + 1) pages in memory.
+                # So buffer = (max - 1) / 2
+                window_buffer = max(1, (max_pages_mem - 1) // 2)
+                # print(f"[MASONRY] Window buffer set to {window_buffer} pages (Max Mem: {max_pages_mem})")
+                # CRITICAL FIX: Anchor layout to 0 to prevent y-offset drift/overlap
+                # We effectively layout from Start to Current+Buffer.
+                # Missing pages become spacers, which is fast.
+                min_idx = 0
+                max_idx = total_items # (current_page + window_buffer + 1) * page_size
                 
                 # CRITICAL FIX: Proactively load pages in the masonry window
                 # Without this, the layout runs before pages are loaded, resulting in empty display
@@ -926,7 +934,9 @@ class ImageListView(QListView):
                     # Sort by index just in case
                     filtered_items.sort(key=lambda x: x[0])
                     
-                    last_idx = filtered_items[0][0] - 1
+                    # Initialize last_idx to start of window (minus 1)
+                    # This ensures we insert a spacer if the first loaded item is NOT min_idx
+                    last_idx = min_idx - 1
                     
                     # Estimate row height for spacers
                     avg_h = getattr(self, '_stable_avg_item_height', 100.0)
@@ -1198,9 +1208,9 @@ class ImageListView(QListView):
             if is_buffered and self._masonry_items:
                 first_item_idx = self._masonry_items[0]['index']
                 
-                # DEFAULT OFFSET: Theoretical position
-                # We start with this, but might override it below for better alignment
-                y_offset = int(first_item_idx * avg_height)
+                # DEFAULT OFFSET: 0 (Cumulative Layout)
+                # Since min_idx=0 and we use spacers, the item['y'] is already absolute.
+                y_offset = 0
                 
                 # VISUAL ANCHORING (Blind Spot Fix):
                 # If we don't have a visual anchor (jumped into void), 
@@ -1249,8 +1259,15 @@ class ImageListView(QListView):
                      y_offset = 0
 
                 # Shift all items to absolute y
+                max_actual_y = 0
                 for item in self._masonry_items:
                     item['y'] += y_offset
+                    max_actual_y = max(max_actual_y, item['y'] + item['height'])
+
+                # CRITICAL FIX: Ensure scrollbar accommodates real item positions
+                # If items extend beyond our estimated height, expand the universe
+                if max_actual_y > self._masonry_total_height:
+                    self._masonry_total_height = max_actual_y
                 
                 # RE-ALIGN VIEW (ANCHOR OR RESCUE)
                 if anchor_index != -1:
@@ -2523,20 +2540,17 @@ class ImageListView(QListView):
 
         scroll_offset = self.verticalScrollBar().value()
         scroll_max = self.verticalScrollBar().maximum()
-        # print(f"[LOAD_CHECK] Offset={scroll_offset}, Max={scroll_max}, Page={self._current_page if hasattr(self, '_current_page') else \'?\'}")
+        # print(f"[LOAD_CHECK] Offset={scroll_offset}, Max={scroll_max}, Page={self._current_page if hasattr(self, '_current_page') else '?'}, Total={source_model._total_count if hasattr(source_model, '_total_count') else '?'}")
 
         # CRITICAL: During bootstrap phase (first 5 pages), don't load based on scroll estimation
         # Height estimates are unstable, causing false page requests
         # Only allow loading if user has scrolled significantly past the initial content
         # Using fixed pixel threshold (60,000 px ≈ 3 pages worth) instead of percentage
         # because percentage doesn't scale well with 19M virtual height
-        bootstrap_scroll_threshold = 50000  # pixels (approx 2.5 pages of content)
-        if len(source_model._pages) < 5:
-            if scroll_max > 0 and scroll_offset < bootstrap_scroll_threshold:
-                # Bootstrap phase + near top = don't load yet
-                self._current_page = 0
-                return
-            # Bootstrap phase but user scrolled significantly = allow loading
+        bootstrap_scroll_threshold = 50000
+        if len(source_model._pages) < 5 and scroll_offset < bootstrap_scroll_threshold:
+             # print(f"[LOAD_CHECK] Skipping Load: Bootstrap Phase (Pages={len(source_model._pages)})")
+             return
 
         # After bootstrap, always load pages based on scroll position
         # (No restrictions)
@@ -2560,8 +2574,9 @@ class ImageListView(QListView):
         current_page = estimated_item_idx // source_model.PAGE_SIZE
         self._current_page = current_page
 
-        # Load current page + buffer (3 pages before, 3 after)
-        buffer_pages = 3
+        # Load current page + buffer (10 pages before, 10 after)
+        # Increased buffer to avoid seeing the fringe
+        buffer_pages = 10
         start_page = max(0, current_page - buffer_pages)
         end_page = min((source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE - 1,
                        current_page + buffer_pages)
@@ -2708,6 +2723,35 @@ class ImageListView(QListView):
                 is_filtered = hasattr(self.model(), 'filter') and self.model().filter is not None
 
                 for item in visible_items:
+                    # Draw spacers (negative index)
+                    if item['index'] < 0:
+                         # Adjust rect to viewport coordinates
+                        visual_rect = QRect(
+                            item['rect'].x(),
+                            item['rect'].y() - scroll_offset,
+                            item['rect'].width(),
+                            item['rect'].height()
+                        )
+                        painter.fillRect(visual_rect, Qt.GlobalColor.darkGray)
+                        
+                        # Draw text to reassure user
+                        painter.setPen(Qt.GlobalColor.white)
+                        painter.drawText(visual_rect, Qt.AlignmentFlag.AlignCenter, "Loading more images...")
+                        
+                        # TRIGGER LOAD: If user sees spacer, force load next page
+                        # This bypasses the scroll-fraction logic which might be miscalibrated (The "Void" Trap)
+                        if is_buffered and hasattr(source_model, '_pages') and source_model._pages:
+                             # Find last loaded page
+                             max_page = max(source_model._pages.keys())
+                             next_page = max_page + 1
+                             # Only request if within bounds and not already loading
+                             if next_page * source_model.PAGE_SIZE < source_model._total_count:
+                                 if next_page not in source_model._pages and next_page not in source_model._loading_pages:
+                                     print(f"[PAINT] Spacer visible at {scroll_offset}, forcing load of Page {next_page}")
+                                     source_model._request_page_load(next_page)
+
+                        continue
+
                     # Construct valid index for painting
                     # ALWAYS map global index to loaded row in masonry mode
                     if hasattr(source_model, 'get_loaded_row_for_global_index'):
@@ -2719,6 +2763,7 @@ class ImageListView(QListView):
                         # Not loaded or belongs to a different view state
                         skipped_count += 1
                         continue
+                        
                         
                     src_index = source_model.index(src_row, 0)
                     index = self.model().mapFromSource(src_index)

@@ -74,11 +74,23 @@ def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_column
                 # Push ALL columns down to the max height + spacer
                 # This ensures the gap is preserved across the whole layout width
                 max_h = max(column_heights)
+                
+                # Create a VISUAL item for the spacer so we can paint it (Loading Text) and use it as a trigger
+                full_width = (column_width + spacing) * num_columns - spacing
+                spacer_item = MasonryItem(
+                    index=-2,       # Special index for spacer
+                    x=0,
+                    y=max_h,
+                    width=int(full_width),
+                    height=int(spacer_height),
+                    aspect_ratio=1.0
+                )
+                positioned_items.append(spacer_item)
+
                 new_h = max_h + spacer_height
                 for i in range(num_columns):
                     column_heights[i] = new_h
                 
-                # We don't create a visual item for the spacer
                 continue
 
             # Calculate item dimensions

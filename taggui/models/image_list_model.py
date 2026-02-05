@@ -1,6 +1,7 @@
 import random
 import re
 import sys
+from typing import List, Dict, Any, Optional
 from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
@@ -496,6 +497,22 @@ class ImageListModel(QAbstractListModel):
 
         return (items_data, first_index, last_index)
 
+    def get_all_aspect_ratios(self) -> List[float]:
+        """
+        Get ALL aspect ratios from DB in current sort order.
+        Used for Global Masonry Layout (stable alignment).
+        """
+        if self._db and self._paginated_mode:
+            return self._db.get_ordered_aspect_ratios(
+                sort_field=self._sort_field,
+                sort_dir=self._sort_dir,
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+                random_seed=self._random_seed
+            )
+        # Fallback for non-paginated mode (just use loaded images)
+        return [img.aspect_ratio for img in self.images]
+
     def _rebuild_aspect_ratio_cache(self):
         """Rebuild aspect ratio cache when images change (thread-safe)."""
         # Both modes use self.images now
@@ -645,6 +662,7 @@ class ImageListModel(QAbstractListModel):
             self._loading_pages.add(page_num)
 
         # Submit background load
+        print(f"[PAGE request] Requesting Page {page_num}")
         self._page_executor.submit(self._load_page_async, page_num)
 
     def _load_page_sync(self, page_num: int):
@@ -841,6 +859,8 @@ class ImageListModel(QAbstractListModel):
         """Store a loaded page and evict old pages if needed."""
         with self._page_load_lock:
             self._pages[page_num] = images
+            if page_num not in self._page_load_order:
+                self._page_load_order.append(page_num)
 
             # Check if we need to evict pages (but don't do it here - background thread unsafe)
             if len(self._pages) > self.MAX_PAGES_IN_MEMORY:
@@ -2536,6 +2556,12 @@ class ImageListModel(QAbstractListModel):
 
         # Initialize database
         self._directory_path = directory_path
+        
+        # Load max pages from settings
+        max_pages = settings.value('max_pages_in_memory', 20, type=int)
+        self.MAX_PAGES_IN_MEMORY = max_pages
+        print(f"[PAGINATION] Max pages in memory: {self.MAX_PAGES_IN_MEMORY}")
+
         self._db = ImageIndexDB(directory_path)
         self._paginated_mode = True
 

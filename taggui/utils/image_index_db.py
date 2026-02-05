@@ -566,6 +566,49 @@ class ImageIndexDB:
             print(f'Database query error: {e}')
             return []
 
+    def get_ordered_aspect_ratios(self, sort_field: str = 'mtime', sort_dir: str = 'DESC',
+                                 filter_sql: str = '', bindings: tuple = (), **kwargs) -> List[float]:
+        """
+        Get ALL aspect ratios sorted and filtered.
+        Used for global masonry layout calculation.
+        """
+        if not self._ensure_connection():
+            return []
+
+        # Validate sort (reuse logic from get_page)
+        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height', 'id', 'RANDOM()', 'width * height', 'file_size', 'file_type', 'ctime'}
+        if sort_field not in valid_sort_fields:
+            sort_field = 'mtime'
+        if sort_dir.upper() not in ('ASC', 'DESC'):
+            sort_dir = 'DESC'
+
+        try:
+            cursor = self.conn.cursor()
+
+            # Handle stable random sorting
+            sort_expr = sort_field
+            if sort_field == 'RANDOM()':
+                seed = kwargs.get('random_seed', 1234567)
+                sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+            elif sort_field == 'ctime':
+                sort_expr = 'COALESCE(ctime, mtime)'
+            elif sort_field == 'file_size':
+                sort_expr = 'COALESCE(file_size, 0)'
+
+            query = f'SELECT aspect_ratio FROM images'
+            if filter_sql:
+                query += f' WHERE {filter_sql} '
+            
+            query += f' ORDER BY {sort_expr} {sort_dir}'
+
+            cursor.execute(query, bindings)
+            # Return list of floats (default to 1.0 if null)
+            return [row[0] if row[0] is not None else 1.0 for row in cursor.fetchall()]
+
+        except sqlite3.Error as e:
+            print(f'Database query error: {e}')
+            return []
+
     def get_image_by_id(self, image_id: int) -> Optional[Dict[str, Any]]:
         """Get a single image by ID."""
         if not self.enabled or not self.conn:
@@ -592,13 +635,21 @@ class ImageIndexDB:
 
         try:
             cursor = self.conn.cursor()
-            placeholders = ','.join('?' * len(image_ids))
-            cursor.execute(f'''
-                SELECT id, file_name, width, height, aspect_ratio, is_video,
-                       video_fps, video_duration, video_frame_count, mtime, rating
-                FROM images WHERE id IN ({placeholders})
-            ''', image_ids)
-            return [dict(row) for row in cursor.fetchall()]
+            result = []
+            
+            # Batch queries to avoid SQLite limit (usually 999)
+            batch_size = 50
+            for i in range(0, len(image_ids), batch_size):
+                batch = image_ids[i:i + batch_size]
+                placeholders = ','.join('?' * len(batch))
+                cursor.execute(f'''
+                    SELECT id, file_name, width, height, aspect_ratio, is_video,
+                           video_fps, video_duration, video_frame_count, mtime, rating
+                    FROM images WHERE id IN ({placeholders})
+                ''', batch)
+                result.extend([dict(row) for row in cursor.fetchall()])
+            
+            return result
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
             return []
@@ -640,7 +691,7 @@ class ImageIndexDB:
             result: Dict[int, List[str]] = {img_id: [] for img_id in image_ids}
             
             # Batch queries to avoid SQLite limit (usually 999)
-            batch_size = 900
+            batch_size = 50
             for i in range(0, len(image_ids), batch_size):
                 batch = image_ids[i:i + batch_size]
                 placeholders = ','.join('?' * len(batch))
@@ -651,6 +702,8 @@ class ImageIndexDB:
                 ''', batch)
 
                 for row in cursor.fetchall():
+                    if not row or len(row) < 2:
+                        continue
                     # Check if key exists (it should initialized above)
                     if row[0] in result:
                         result[row[0]].append(row[1])
