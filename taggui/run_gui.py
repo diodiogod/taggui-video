@@ -9,13 +9,18 @@ import io
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
 
-import transformers
-from PySide6.QtGui import QImageReader
-from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import qInstallMessageHandler
+try:
+    import transformers
+    from PySide6.QtGui import QImageReader
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtCore import qInstallMessageHandler
 
-from utils.settings import settings
-from widgets.main_window import MainWindow
+    from utils.settings import settings
+    from widgets.main_window import MainWindow
+except Exception as e:
+    with open('taggui_import_crash.log', 'w') as f:
+        f.write(str(e) + "\n" + traceback.format_exc())
+    sys.exit(1)
 
 
 # Install a message handler to suppress QPainter warnings at Qt level
@@ -131,6 +136,11 @@ if __name__ == '__main__':
     try:
         run_gui()
     except Exception as exception:
+        try:
+            with open('taggui_crash.log', 'w') as f:
+                f.write(str(exception) + "\n" + traceback.format_exc())
+        except:
+            print("Failed to write crash log")
         # DON'T clear settings on every crash - only show error
         # settings.clear()  # REMOVED: This destroys user's recent files/settings on any crash
         error_message_box = QMessageBox()

@@ -1,5 +1,6 @@
 import operator
 import re
+from typing import List, Dict, Any, Optional
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import (QModelIndex, QSortFilterProxyModel, Qt, QRect,
@@ -238,3 +239,10 @@ class ProxyImageListModel(QSortFilterProxyModel):
             if image is not None:
                 images.append(image)
         return images
+
+    def get_all_aspect_ratios(self) -> list[float]:
+        """Pass-through to source model."""
+        source = self.sourceModel()
+        if hasattr(source, 'get_all_aspect_ratios'):
+            return source.get_all_aspect_ratios()
+        return []
