@@ -92,16 +92,18 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
             if cache_path.exists():
                 # Load directly as QImage (thread-safe, no QIcon/QPixmap needed)
                 cached_qimage = QImage(str(cache_path))
-                if not cached_qimage.isNull():
-                    return (cached_qimage, True)  # Cache hit!
+        if not cached_qimage.isNull():
+                    return (cached_qimage, True, None)  # Cache hit! (No original dims from cache)
     except Exception:
         pass  # Cache check failed, fall through to generation
 
     # Generate new thumbnail using QImage (thread-safe for creation)
+    original_size = None
     try:
         if is_video:
             # For videos, extract first frame as thumbnail
-            _, _, first_frame_pixmap = extract_video_info(image_path)
+            dims, _, first_frame_pixmap = extract_video_info(image_path)
+            original_size = dims
             if first_frame_pixmap:
                 # Convert QPixmap to QImage (thread-safe)
                 qimage = first_frame_pixmap.toImage().scaledToWidth(
@@ -113,6 +115,7 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
                 qimage.fill(Qt.gray)
         elif image_path.suffix.lower() == ".jxl":
             pil_image = pilimage.open(image_path)  # Uses pillow-jxl
+            original_size = pil_image.size
             qimage = pil_to_qimage(pil_image)
             if not crop:
                 crop = QRect(QPoint(0, 0), qimage.size())
@@ -128,6 +131,7 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
             image_reader = QImageReader(str(image_path))
             # Rotate the image based on the orientation tag.
             image_reader.setAutoTransform(True)
+            original_size = tuple(image_reader.size().toTuple())
             if not crop:
                 crop = QRect(QPoint(0, 0), image_reader.size())
             if crop.height() > crop.width()*3:
@@ -144,13 +148,13 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
                 Qt.TransformationMode.SmoothTransformation)
 
         # Return QImage - caller will convert to QPixmap/QIcon on main thread
-        return qimage, False
+        return qimage, False, original_size
     except Exception as e:
         print(f"Error loading image/video {image_path}: {e}")
         # Return a placeholder QImage
         qimage = QImage(thumbnail_width, thumbnail_width, QImage.Format_RGB888)
         qimage.fill(Qt.gray)
-        return qimage, False
+        return qimage, False, None
 
 
 def natural_sort_key(path: Path):
@@ -465,6 +469,7 @@ class ImageListModel(QAbstractListModel):
 
             # Build aspect ratio list from loaded pages
             # Create a deep snapshot to avoid concurrent modification
+            print(f"[ASPECT_RATIOS] Iterating loaded pages: {loaded_pages}")
             for page_num in loaded_pages:
                 if page_num not in self._pages:
                     continue  # Page was evicted during iteration
@@ -885,10 +890,31 @@ class ImageListModel(QAbstractListModel):
 
         start_page = self._get_page_for_index(start_idx)
         end_page = self._get_page_for_index(end_idx)
+        
+        # print(f"[PAGINATION] Ensuring range {start_idx}-{end_idx} (Pages {start_page}-{end_page})")
 
+        requested_any = False
         for page_num in range(start_page, end_page + 1):
-            if page_num not in self._pages and page_num not in self._loading_pages:
-                self._request_page_load(page_num)
+             # Force retry if page stuck in loading for > 15s?
+             # For now, just rely on strict checking
+             should_load = False
+             
+             with self._page_load_lock:
+                 if page_num not in self._pages:
+                     if page_num not in self._loading_pages:
+                         should_load = True
+                     else:
+                         # Check if it's been loading for too long (stuck?)
+                         # This requires tracking load start time, which we don't do yet.
+                         # Instead, we rely on the robustness of _request_page_load
+                         pass
+             
+             if should_load:
+                 self._request_page_load(page_num)
+                 requested_any = True
+
+        if requested_any:
+            print(f"[PAGINATION] Triggered loads for needed pages in range {start_page}-{end_page}")
 
     def event(self, event):
         """Handle custom events for page loading."""
@@ -1573,18 +1599,57 @@ class ImageListModel(QAbstractListModel):
         # Submit to save executor (dedicated thread pool for I/O operations)
         self._save_executor.submit(db_flush_worker)
 
+    @Slot(int, int, int)
+    def _notify_thumbnail_ready(self, idx: int, width: int = -1, height: int = -1):
+        """Called on main thread when thumbnail QImage is ready (batched to reduce repaints).
+        
+        Args:
+            idx: Global index of image
+            width, height: Original dimensions found during load (optional, -1 if unknown)
+        """
+        # JUST-IN-TIME ENRICHMENT:
+        # If we found dimensions during loading and the model doesn't have them (or has None),
+        # update them now to fix masonry layout instantly!
+        if idx < len(self.images) and width > 0 and height > 0:
+            image = self.images[idx]
+            # paginated mode check: self.images is shared, but we need to check if we really need updating
+            if not image.dimensions or image.dimensions[0] is None or image.dimensions[1] is None:
+                # print(f"[JIT] Updating dimensions for {image.path.name}: {width}x{height}")
+                image.dimensions = (width, height)
+                
+                # Update DB in background 
+                if self._db and self._save_executor:
+                    self._save_executor.submit(lambda: self._db.update_image_dimensions(str(image.path), width, height))
+
+                # Trigger dimension update signal (debounced ideally, but direct emission works for now)
+                # We emit this so Masonry re-calculates the 1.0 -> Correct AR change
+                self.dimensions_updated.emit()
+
+        if idx < len(self.images):
+            self._pending_thumbnail_updates.add(idx)
+            # Restart timer to batch updates (coalesces rapid thumbnail loads)
+            self._thumbnail_batch_timer.start()
+
     def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
         """Load thumbnail in background thread, then notify UI."""
         try:
-            qimage, was_cached = load_thumbnail_data(
+            qimage, was_cached, original_size = load_thumbnail_data(
                 path, crop, self.thumbnail_generation_width, is_video
             )
+            
+            width = -1
+            height = -1
+            if original_size:
+                 width, height = original_size
+                 
             # Notify main thread that thumbnail is ready
             QMetaObject.invokeMethod(
                 self,
                 "_notify_thumbnail_ready",
                 Qt.ConnectionType.QueuedConnection,
-                Q_ARG(int, row)
+                Q_ARG(int, row),
+                Q_ARG(int, width),
+                Q_ARG(int, height)
             )
             return qimage, was_cached
         except Exception as e:
@@ -1615,13 +1680,7 @@ class ImageListModel(QAbstractListModel):
             self._placeholder_icon = QIcon(pixmap)
         return self._placeholder_icon
 
-    @Slot(int)
-    def _notify_thumbnail_ready(self, idx: int):
-        """Called on main thread when thumbnail QImage is ready (batched to reduce repaints)."""
-        if idx < len(self.images):
-            self._pending_thumbnail_updates.add(idx)
-            # Restart timer to batch updates (coalesces rapid thumbnail loads)
-            self._thumbnail_batch_timer.start()
+
 
     def _flush_thumbnail_updates(self):
         """Emit batched dataChanged for all pending thumbnail updates."""

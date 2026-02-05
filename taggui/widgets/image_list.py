@@ -841,6 +841,8 @@ class ImageListView(QListView):
                 print(f"[MASONRY] Failed to recreate executor: {e}")
 
         self._masonry_calculating = True
+        import time
+        self._masonry_start_time = time.time() # Start watchdog timer
 
         # Pause enrichment during masonry calculation to prevent race conditions
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
@@ -881,9 +883,23 @@ class ImageListView(QListView):
                 # This prevents Page 0 (if still loaded) from being included when we are at Page 1000,
                 # which would break the Y-offset shift logic (which depends on first_index).
                 page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
+                total_items = source_model._total_count if hasattr(source_model, '_total_count') else 0
                 
-                # Use current page from scroll tracking
-                current_page = self._current_page if hasattr(self, '_current_page') else 0
+                # CRITICAL FIX: Compute current page DIRECTLY from scroll position
+                # Don't rely on self._current_page which may be stale by the time this runs
+                scroll_val = self.verticalScrollBar().value()
+                scroll_max = self.verticalScrollBar().maximum()
+                
+                if scroll_max > 0 and total_items > 0:
+                    scroll_fraction = scroll_val / scroll_max
+                    estimated_idx = int(scroll_fraction * total_items)
+                    current_page = estimated_idx // page_size
+                    print(f"[MASONRY_CALC] Scroll={scroll_val}/{scroll_max} ({scroll_fraction:.2f}), EstIdx={estimated_idx}, Page={current_page}")
+                else:
+                    current_page = self._current_page if hasattr(self, '_current_page') else 0
+                
+                # Update cached value for other uses
+                self._current_page = current_page
                 
                 # Buffer: define window of interest (e.g. +/- 5 pages)
                 # Should match or exceed load buffer to ensure we see what we load
@@ -891,20 +907,127 @@ class ImageListView(QListView):
                 min_idx = max(0, (current_page - window_buffer) * page_size)
                 max_idx = (current_page + window_buffer + 1) * page_size
                 
+                # CRITICAL FIX: Proactively load pages in the masonry window
+                # Without this, the layout runs before pages are loaded, resulting in empty display
+                max_page = (total_items + page_size - 1) // page_size
+                for p in range(max(0, current_page - window_buffer), min(max_page, current_page + window_buffer + 1)):
+                    if p not in source_model._pages and p not in source_model._loading_pages:
+                        source_model._request_page_load(p)
+
+                
                 # Filter items_data to this window
                 original_count = len(items_data)
-                items_data = [item for item in items_data if min_idx <= item[0] < max_idx]
+                filtered_items = [item for item in items_data if min_idx <= item[0] < max_idx]
                 
-                if not items_data:
-                     # This can happen if we scrolled fast to a region not loaded yet
-                     # and the model returned 0 items for that region?
-                     # Or maybe items_data contained ONLY Page 0 but we are at Page 1000.
-                     print(f"[MASONRY] Buffered: No items in visible window (Page {current_page} +/- {window_buffer})")
-                     # We should probably let it process empty list to clear the view? 
-                     # Or return? If we return, we keep old layout (Page 0).
-                     pass 
+                # GAP FILLING: Detect missing index ranges and insert spacers
+                # This ensures consistent Y-coordinates even if pages are missing
+                items_data = []
+                if filtered_items:
+                    # Sort by index just in case
+                    filtered_items.sort(key=lambda x: x[0])
+                    
+                    last_idx = filtered_items[0][0] - 1
+                    
+                    # Estimate row height for spacers
+                    avg_h = getattr(self, '_stable_avg_item_height', 100.0)
+                    if avg_h < 1: avg_h = 100.0
+                    
+                    # Calculate num columns for spacer height calc
+                    scroll_bar_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
+                    avail_width = viewport_width - scroll_bar_width - 24 # margins
+                    num_cols_est = max(1, avail_width // (column_width + spacing))
 
-                print(f"[MASONRY] Buffered mode: calculating layout for {len(items_data)} items (Window: Pages {current_page-window_buffer}-{current_page+window_buffer})")
+                    for item in filtered_items:
+                        curr_idx = item[0]
+                        gap = curr_idx - last_idx - 1
+                        if gap > 0:
+                            # Found a gap (missing items)
+                            # Convert item count to approximate pixel height
+                            # Each row has 'num_cols_est' items.
+                            # height = (gap / cols) * row_height
+                            import math
+                            gap_rows = math.ceil(gap / num_cols_est)
+                            spacer_h = int(gap_rows * avg_h)
+                            
+                            # Insert spacer token
+                            # print(f"[MASONRY] Inserting spacer for gap {last_idx+1}-{curr_idx-1} ({gap} items, ~{spacer_h}px)")
+                            items_data.append((-1, ('SPACER', spacer_h))) 
+                            
+                        items_data.append(item)
+                        last_idx = curr_idx
+                    
+                    # TAIL GAP FILLER: Check if the window extends beyond the last loaded item
+                    # This ensures we reserve space for missing pages at the bottom of the window
+                    if total_items > 0: # Ensure we have a valid total count
+                         last_item_idx = filtered_items[-1][0]
+                         # Our window goes up to max_idx (exclusive).
+                         # But the dataset might end before max_idx.
+                         # We want to fill up to the smaller of (window_end, dataset_end).
+                         
+                         target_end_idx = min(max_idx, total_items)
+                         gap = target_end_idx - last_item_idx - 1
+                         
+                         if gap > 0:
+                            import math
+                            gap_rows = math.ceil(gap / num_cols_est)
+                            spacer_h = int(gap_rows * avg_h)
+                            
+                            # items_data.append((-1, ('SPACER', spacer_h))) 
+                            # We use a special index for the tail spacer so it doesn't conflict
+                            items_data.append((-2, ('SPACER', spacer_h))) 
+                            
+                else:
+                    # Window is outside currently loaded items (e.g. jumped to Page 50, only Page 0-5 loaded)
+                    # We need to insert a spacer for this entire window so the user sees "something" (blank space)
+                    # and the scrollbar maintains its size/position while we wait for loads.
+                    if total_items > 0:
+                         # Calculate how many items *should* be in this window
+                         # min_idx to max_idx, clamped to total_items
+                         start = min(min_idx, total_items)
+                         end = min(max_idx, total_items)
+                         count = end - start
+                         
+                         if count > 0:
+                            # Insert a single spacer for this block
+                             import math
+                             # Estimate how many rows this missing block would take
+                             num_cols_est = max(1, avail_width // (column_width + spacing))
+                             rows = math.ceil(count / num_cols_est)
+                             spacer_h = int(rows * avg_h)
+                             
+                             # We use a special index structure: (-1, ('SPACER', h))
+                             # But let's use a unique index based on the window start to avoid collisions if we merge
+                             items_data = [(min_idx, ('SPACER', spacer_h))]
+                             # print(f"[MASONRY] Buffered: Inserted full-window spacer for indices {start}-{end} ({spacer_h}px)")
+                    else:
+                        items_data = []
+
+                # FINAL SAFETY/BLIND SPOT HANDLER
+                # If we still have no items, but we are within the dataset range, we MUST insert a spacer.
+                # This handles cases where filtered_items was empty, or checks failed.
+                if not items_data and total_items > 0:
+                     start = min(min_idx, total_items)
+                     end = min(max_idx, total_items)
+                     count = end - start
+                     
+                     if count > 0:
+                         import math
+                         num_cols_est = max(1, avail_width // (column_width + spacing))
+                         rows = math.ceil(count / num_cols_est)
+                         
+                         # Robust avg height (fallback to 100 if invalid)
+                         safe_avg = avg_h if avg_h > 1 else 100.0
+                         spacer_h = int(rows * safe_avg)
+                         
+                         items_data = [(min_idx, ('SPACER', spacer_h))]
+                         # print(f"[MASONRY] Buffered: Inserted SAFETY spacer for indices {start}-{end} ({spacer_h}px) due to empty items")
+
+                if not items_data:
+                     # print(f"[MASONRY] Buffered: No items in visible window (Page {current_page} +/- {window_buffer})")
+                     pass 
+ 
+
+                print(f"[MASONRY] Buffered mode: calculating layout for {len(items_data)} tokens (Window: Pages {current_page-window_buffer}-{current_page+window_buffer})")
             else:
                 print(f"[MASONRY] Normal mode: calculating layout for {len(items_data)} items")
         except Exception as e:
@@ -973,215 +1096,234 @@ class ImageListView(QListView):
                     source_model._enrichment_paused.clear()
                     print("[MASONRY] Resumed enrichment after error")
         else:
+            # WATCHDOG: Check if we've been calculating for too long (e.g. > 5 seconds)
+            # This handles cases where the future silently hangs or the worker died uniquely
+            import time
+            current_time = time.time()
+            start_time = getattr(self, '_masonry_start_time', 0)
+            if self._masonry_calculating and (current_time - start_time > 5.0):
+                print(f"[MASONRY] ⚠️ Watchdog triggered: Calculation stuck for {current_time - start_time:.1f}s. Resetting state.")
+                self._masonry_calculating = False
+                self._masonry_calc_future = None # Abandon broken future
+                if hasattr(source_model, '_enrichment_paused'):
+                     source_model._enrichment_paused.clear()
+                return # Stop polling this dead task
+
             # Check again in 50ms
             QTimer.singleShot(50, self._check_masonry_completion)
+            
+            # Heartbeat logging (every 2 seconds approx)
+            if not hasattr(self, '_masonry_poll_counter'):
+                self._masonry_poll_counter = 0
+            self._masonry_poll_counter += 1
+            if self._masonry_poll_counter % 40 == 0:
+                 # print("[MASONRY] Waiting for worker...")
+                 pass
 
     def _on_masonry_calculation_progress(self, current, total):
         """Update progress bar during calculation."""
         if hasattr(self, '_masonry_progress_bar'):
             self._masonry_progress_bar.setValue(current)
 
-    def _on_masonry_calculation_complete(self, result_dict):
+    def _on_masonry_calculation_complete(self, result):
         """Called when multiprocessing calculation completes."""
         try:
             import time
             timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
 
             self._masonry_calculating = False
-            self._last_masonry_done_time = time.time()  # For cleanup grace period
+            self._last_masonry_done_time = time.time()
 
-            if result_dict is None:
-                # Resume enrichment even if result is None
+            if result is None:
                 source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
                 if source_model and hasattr(source_model, '_enrichment_paused'):
                     source_model._enrichment_paused.clear()
-                    print("[MASONRY] Resumed enrichment after recalculation (null result)")
+                    print("[MASONRY] Resumed enrichment (null result)")
                 return
 
-            # Check if another calculation is pending (user is still typing)
-            # IMPORTANT: Only skip if timer was started AFTER this calculation began.
-            # Don't skip just because layoutChanged fired again - we still need to show SOMETHING.
-            # The next calculation will replace this one when it completes.
-            # Actually, always apply the result - skipping causes blank views!
-            # if self._masonry_recalc_timer.isActive():
-            #     # print(f"[{timestamp}] ⏭️  SKIP UI UPDATE: Another calculation pending")
-            #     return
-
-            # print(f"[{timestamp}] 🎨 APPLYING LAYOUT to UI...")
-
-            # Store results for paintEvent to use
-            self._masonry_items = result_dict['items']
-            self._masonry_index_map = None  # Invalidate lookup cache - will rebuild on first access
-            self._masonry_total_height = result_dict['total_height'] # REMOVED: Unconditional assignment causes flicker to 0 in buffered mode gaps!
+            # result is the dict returned by worker
+            result_dict = result
             
-            # CRITICAL: Force immediate repaint with new data
-            # Without this, paint runs with OLD masonry items during scroll
-            # DISABLED: Causing crash on startup? Testing stability.
-            # self.viewport().update()
-
-            # Update scroll area to accommodate total height
-            total_height = result_dict['total_height']
+            # 1. ANCHORING: Capture current view position before updating data
+            anchor_index = -1
+            anchor_offset = 0
+            scroll_val = self.verticalScrollBar().value()
             viewport_height = self.viewport().height()
 
-            # Check if another calculation was requested while this one was running
-            if getattr(self, '_masonry_recalc_pending', False):
-                self._masonry_recalc_pending = False
-                # Re-trigger calculation to ensure we have the most up-to-date layout
-                # print("[MASONRY] Triggering pending recalculation")
-                QTimer.singleShot(0, self._calculate_masonry_layout)
-            
-            # Buffered pagination: estimate full dataset height for scrollbar
-            # Buffered pagination: estimate full dataset height for scrollbar
-            # Use stored proxy reference for stability (self.model() can be transient)
+            if self._masonry_items:
+                initial_viewport = self.viewport().rect().translated(0, scroll_val)
+                visible_before = self._get_masonry_visible_items(initial_viewport)
+                if visible_before:
+                    visible_before.sort(key=lambda x: x['rect'].y())
+                    anchor_index = visible_before[0]['index']
+                    anchor_offset = visible_before[0]['rect'].y() - scroll_val
+
+            # 2. Update model data
+            self._masonry_items = result_dict.get('items', [])
+            self._masonry_index_map = None
+            total_height_chunk = result_dict.get('total_height', 0)
+
+            # 3. Determine if buffered mode
             source_model = self.proxy_image_list_model.sourceModel()
             is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
+            total_items = source_model._total_count if is_buffered else (self.model().rowCount() if self.model() else 0)
+
+            # 4. CALIBRATION & ESTIMATION
+            avg_height = getattr(self, '_stable_avg_item_height', 100.0)
             
-            # COLLAPSE GUARD: checking against previous height
-            # If we think we are not in buffered mode, but we previously had a huge height,
-            # something is wrong (model fetch failed/transient state).
-            # Prevent collapsing scrollbar to 0/small which causes jump to Page 1000.
-            # COLLAPSE GUARD: checking against previous height
-            # If we think we are not in buffered mode, but we previously had a huge height,
-            # something is wrong (model fetch failed/transient state).
-            # Force buffered mode to maintain height and process update.
-            if not is_buffered and self._masonry_total_height > 50000:
-                # print(f"[MASONRY] ⚠️ CRITICAL: Forced is_buffered=True to prevent collapse (prev_height={self._masonry_total_height})")
-                is_buffered = True
+            if self._masonry_items:
+                # Real data refined average
+                chunk_items = len(self._masonry_items)
+                if chunk_items > 0 and total_height_chunk > 0:
+                    real_avg = total_height_chunk / chunk_items
+                    if 10.0 < real_avg < 5000.0:
+                        if not hasattr(self, '_stable_avg_item_height'):
+                            self._stable_avg_item_height = real_avg
+                        else:
+                            # Use a slower moving average to prevent oscillation loops
+                            self._stable_avg_item_height = (self._stable_avg_item_height * 0.9) + (real_avg * 0.1)
+                        
+            # Use the most up-to-date stable average
+            avg_height = getattr(self, '_stable_avg_item_height', 100.0)
+
+            # Final total height estimation
+            import math
+            if math.isnan(avg_height): avg_height = 100.0
             
-            if is_buffered:
-                # Estimate total height based on loaded pages
-                loaded_items = len(self._masonry_items)
+            self._masonry_total_height = int(avg_height * total_items)
+            self._masonry_total_height = max(self._masonry_total_height, total_items * 10)
+
+            # 5. BUFFER MODE SHIFTING & RESCUE
+            # Buffer mode logic
+            if is_buffered and self._masonry_items:
+                first_item_idx = self._masonry_items[0]['index']
                 
-                # Robust total count retrieval with caching
-                current_total = 0
-                if hasattr(source_model, '_total_count'):
-                    current_total = source_model._total_count
+                # DEFAULT OFFSET: Theoretical position
+                # We start with this, but might override it below for better alignment
+                y_offset = int(first_item_idx * avg_height)
                 
-                if current_total > 0:
-                    self._last_known_total_count = current_total
-                    total_items = current_total
-                elif getattr(self, '_last_known_total_count', 0) > 0:
-                    total_items = self._last_known_total_count
-                else:
-                    total_items = loaded_items
-                
-                # Retrieve existing stable average or default
-                avg_height_per_item = getattr(self, '_stable_avg_item_height', 100.0)
-                
-                if loaded_items > 0:
-                    # Calculate average height per item from the loaded batch
-                    current_avg_height = total_height / loaded_items
+                # VISUAL ANCHORING (Blind Spot Fix):
+                # If we don't have a visual anchor (jumped into void), 
+                # align the content to where the user is LOOKING, not where theory says it should be.
+                if anchor_index == -1 and first_item_idx > 0:
+                    # User is at 'scroll_val'.
+                    # Based on our PREVIOUS estimate (which led the user to drag here),
+                    # they expect to see 'target_idx'.
+                    # target_idx = scroll_val / old_avg (We don't have old_avg easily, but we know scroll_val)
                     
-                    # STABILIZATION: Use running average to prevent scrollbar jumping
-                    if not hasattr(self, '_stable_avg_item_height'):
-                        self._stable_avg_item_height = current_avg_height
-                    else:
-                        # Use weighted average (95% old, 5% new) to dampen fluctuations
-                        self._stable_avg_item_height = (self._stable_avg_item_height * 0.95) + (current_avg_height * 0.05)
-                        
-                    avg_height_per_item = self._stable_avg_item_height
-                else:
-                    # No items loaded yet (loading gap) - use historical average to prevent scrollbar collapse
-                    if not hasattr(self, '_stable_avg_item_height'):
-                        self._stable_avg_item_height = 100.0 # Default fallback
-                    avg_height_per_item = self._stable_avg_item_height
+                    # We can reverse it: Find the item in our new batch that SHOULD be at scroll_val
+                    # matching the 'percentage' of the scrollbar? 
+                    # Simpler: Just align the first visible loaded item to the top?
+                    # No, that might shift Page 20 to top even if we scrolled to Page 21.
 
-                # ALWAYS calculate estimated total height (even if 0 items loaded)
-                # This ensures scrollbar doesn't collapse to 0 during loading gaps
-                # Check for NaN to prevent crashes
-                import math
-                if math.isnan(avg_height_per_item):
-                    avg_height_per_item = 100.0
+                    # Better: Calculate offset delta to minimize jump.
+                    # The user is at `scroll_val`.
+                    # We want the items to cover `scroll_val`.
+                    # Currently they start at `result.y` (relative 0).
+                    # If we use `y_offset = scroll_val`, then `item[0]` starts at `scroll_val`.
+                    # This works if `item[0]` is roughly what corresponds to `scroll_val`.
                     
-                estimated_total_height = int(avg_height_per_item * total_items)
-                
-                # CRITICAL: Never shrink total height below known items count to prevent scroll jump
-                min_height = total_items * 10 # Absolute minimum 10px per item
-                estimated_total_height = max(estimated_total_height, min_height)
-                
-                self._masonry_total_height = estimated_total_height
-                
-                if loaded_items > 0:
-                    try:
-                        # For shift calculation, use the STABLE average to Match the scrollbar
-                        # This ensures Y-offset aligns with scrollbar position
-                        first_index = self._masonry_items[0]['index']
-                        y_offset = int(first_index * avg_height_per_item)
+                    # Let's try to match the 'expected index' to the scroll position
+                    # This matches the paintEvent logic that requested these pages
+                    expected_idx_at_top = int(scroll_val / avg_height) # Use CURRENT avg as best guess
+                    
+                    # Find item in masonry list closest to this index
+                    closest_item = min(self._masonry_items, key=lambda x: abs(x['index'] - expected_idx_at_top))
+                    
+                    if abs(closest_item['index'] - expected_idx_at_top) < 2000: # Safety: only if reasonably close
+                        # Align this item to the scroll top
+                        # current_absolute_y = closest_item.y + y_offset
+                        # target_absolute_y = scroll_val
+                        # So: closest_item.y + new_offset = scroll_val
+                        # new_offset = scroll_val - closest_item.y
                         
-                        # Shift all items
-                        for item in self._masonry_items:
-                            item['y'] += y_offset
-                    except Exception as e:
-                        print(f"[MASONRY] Error shifting items: {e}")
+                        proposed_offset = scroll_val - closest_item['y']
+                        
+                        # Only apply if it doesn't deviate INSANELY from theory (e.g. +/- 50%)
+                        # This prevents breaking the scrollbar physics completely
+                        if 0.5 * y_offset < proposed_offset < 1.5 * y_offset:
+                            y_offset = proposed_offset
+                            # print(f"[ANCHOR] Blind Jump: Aligned item {closest_item['index']} to scroll {scroll_val}")
+
+                if first_item_idx == 0:
+                     y_offset = 0
+
+                # Shift all items to absolute y
+                for item in self._masonry_items:
+                    item['y'] += y_offset
                 
-                    # print(f"[MASONRY] Buffered: Shifted {loaded_items} items by Y={y_offset:,}px (Stable Avg Ht={avg_height_per_item:.2f})")
-
+                # RE-ALIGN VIEW (ANCHOR OR RESCUE)
+                if anchor_index != -1:
+                    found_anchor = False
+                    for item in self._masonry_items:
+                        if item['index'] == anchor_index:
+                            new_scroll_y = item['y'] - anchor_offset
+                            new_scroll_y = max(0, min(new_scroll_y, self._masonry_total_height - viewport_height))
+                            
+                            self.verticalScrollBar().setRange(0, self._masonry_total_height - viewport_height)
+                            self.verticalScrollBar().setValue(new_scroll_y)
+                            found_anchor = True
+                            break
+                    
+                    # If anchor not found, might be a drag into void - Rescue will handle it if above
+                    if not found_anchor:
+                        pass
                 
-                # print(f"[MASONRY] Estimated total height: {estimated_total_height:,} px for {total_items:,} items")
-            else:
-                 # Normal mode
-                 self._masonry_total_height = total_height
+                # RESCUE ONE-WAY (Avoid violent snap-back when scrolling down)
+                min_y = self._masonry_items[0]['y']
+                if scroll_val + viewport_height < min_y:
+                    # Viewport is stuck ABOVE the current loaded block. Snap down to start.
+                    print(f"[RESCUE] Viewport {scroll_val} above block {min_y}. Snapping down.")
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(min_y))
+            
+            elif not is_buffered:
+                self._masonry_total_height = total_height_chunk
 
-            # Store for viewportSizeHint() and updateGeometries() to use
-            # Don't set scrollbar directly - let Qt calculate from size hint
-            # print(f"[SCROLLBAR] Total height: {self._masonry_total_height:,} px (viewport={viewport_height})")
-
-            # Defer expensive UI update to next event loop iteration
-            # This prevents blocking keyboard events that are already queued
+            # 6. ASYNC UI UPDATE
             from PySide6.QtCore import QTimer
             def apply_and_signal():
                 try:
-                    # print(f"[MASONRY] About to call _apply_layout_to_ui")
                     self._apply_layout_to_ui(timestamp)
-                    # print(f"[MASONRY] _apply_layout_to_ui completed")
-
-                    # Emit signal that layout is ready for scrolling
-                    try:
-                        self.layout_ready.emit()
-                        # print(f"[MASONRY] layout_ready signal emitted")
-                    except Exception as e:
-                        print(f"[MASONRY] layout_ready signal crashed: {e}")
-                        import traceback
-                        traceback.print_exc()
-
-                    # Re-center selected item if requested (after resize/zoom)
+                    self.layout_ready.emit()
+                    
                     if self._recenter_after_layout:
                         self._recenter_after_layout = False
-                        current_index = self.currentIndex()
-                        if current_index.isValid():
-                            self.scrollTo(current_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                        idx = self.currentIndex()
+                        if idx.isValid():
+                            self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
 
-                    # Resume enrichment AFTER UI update completes (prevent race condition)
-                    # Add delay to let Qt fully settle before enrichment resumes
-                    # This prevents crashes when user interacts during final masonry recalc
+                    # Resume enrichment
                     def resume_enrichment_delayed():
                         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
                         if source_model and hasattr(source_model, '_enrichment_paused'):
                             source_model._enrichment_paused.clear()
-                            # print("[MASONRY] Resumed enrichment after UI update")
+                    QTimer.singleShot(200, resume_enrichment_delayed)
 
-                    QTimer.singleShot(200, resume_enrichment_delayed)  # 200ms delay
                 except Exception as e:
-                    print(f"[MASONRY] CRITICAL: UI update crashed: {type(e).__name__}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Resume enrichment even on crash
+                    print(f"[MASONRY] UI update crashed: {e}")
                     source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
                     if source_model and hasattr(source_model, '_enrichment_paused'):
                         source_model._enrichment_paused.clear()
 
             QTimer.singleShot(0, apply_and_signal)
-
-            # Start thumbnail preloading after layout is ready
+            
             if not self._preload_complete:
-                self._idle_preload_timer.start(100)  # Start preloading after 100ms
+                self._idle_preload_timer.start(100)
+
+            # CRITICAL FIX: Check if a new calculation was requested while we were busy
+            # This handles the case where pages loaded WHILE we were calculating spacers
+            if getattr(self, '_masonry_recalc_pending', False):
+                self._masonry_recalc_pending = False
+                # print("[MASONRY] Triggering PENDING recalculation (pages loaded during calc)")
+                QTimer.singleShot(50, self._calculate_masonry_layout)
+
 
         except Exception as e:
-            print(f"[MASONRY] CRASH in _on_masonry_calculation_complete: {type(e).__name__}: {e}")
+            print(f"[MASONRY] CRASH in completion handler: {e}")
             import traceback
             traceback.print_exc()
             self._masonry_calculating = False
-            # Resume enrichment even on crash
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
             if source_model and hasattr(source_model, '_enrichment_paused'):
                 source_model._enrichment_paused.clear()
@@ -2485,18 +2627,65 @@ class ImageListView(QListView):
                 # Use masonry layout to get only visible items (OPTIMIZATION!)
                 visible_items = self._get_masonry_visible_items(expanded_viewport)
 
-                # DISABLED: Don't trigger page loads during paint - causes endless recalc loop
-                # Page loading is handled by scroll events via _check_and_load_pages()
-                # source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
-                # if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-                #     if visible_items:
-                #         # Get index range of visible items
-                #         indices = [item['index'] for item in visible_items]
-                #         if indices:
-                #             min_idx = min(indices)
-                #             max_idx = max(indices)
-                #             # Trigger page loads for this range
-                #             source_model.ensure_pages_for_range(min_idx, max_idx)
+                # CRITICAL RESURRECTION: We MUST trigger page loads for the visible range here.
+                # Why? Because if you drag the scrollbar fast, you bypass the `scrollContentsBy` events
+                # that usually trigger loading. The only way to know what the user is LOOKING at is right here.
+                source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+                if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                    
+                    total_items = source_model._total_count if hasattr(source_model, '_total_count') else 0
+                    page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
+                    
+                    # FIX: Use scrollbar FRACTION instead of pixel/height estimation
+                    # This is immune to avg_height errors because it uses the scrollbar's proportions
+                    scroll_max = self.verticalScrollBar().maximum()
+                    if scroll_max > 0 and total_items > 0:
+                        scroll_fraction = scroll_offset / scroll_max
+                        est_start_idx = int(scroll_fraction * total_items)
+                        est_end_idx = int(scroll_fraction * total_items) + (viewport_height // 50)  # Estimate ~50px per item visible
+                        est_end_idx = min(est_end_idx, total_items - 1)
+                    else:
+                        # Fallback to pixel-based estimation when scrollbar not yet calibrated
+                        avg_height = getattr(self, '_stable_avg_item_height', 100.0)
+                        if avg_height < 1: avg_height = 100.0
+                        est_start_idx = int(scroll_offset / avg_height)
+                        est_end_idx = int((scroll_offset + viewport_height) / avg_height)
+                    
+                    # SYNC CURRENT PAGE:
+                    # If we are scrolling via drag, scrollContentsBy might not have fired or calculated the page yet.
+                    # We must update it here so the masonry window (which uses self._current_page) moves with us.
+                    # Otherwise, Masonry calculates layout for Page 5 while we are looking at Page 50.
+                    new_page = est_start_idx // page_size
+                    old_page = getattr(self, '_current_page', -1)
+                    
+                    if new_page != old_page:
+                        self._current_page = new_page
+                        # If page jumped significantly (> 2 pages), trigger immediate masonry recalc
+                        if abs(new_page - old_page) > 2 and old_page >= 0:
+                            # print(f"[PAINT] Page jumped {old_page} -> {new_page}, triggering masonry recalc")
+                            from PySide6.QtCore import QTimer
+                            QTimer.singleShot(0, self._calculate_masonry_layout)
+
+                    # ALWAYS request the estimated range to bridge gaps
+                    # This covers the "Blind Spot" (no items) and "Fringe" (some items, but next page missing) cases
+                    if hasattr(source_model, 'ensure_pages_for_range'):
+                         source_model.ensure_pages_for_range(est_start_idx, est_end_idx)
+                    
+                    # FALLBACK: If visible_items is empty, we're in a blind spot - force load based on fraction
+                    if not visible_items and total_items > 0:
+                        # Force-request the page we should be on based on scroll fraction
+                        target_page = est_start_idx // page_size
+                        for p in range(max(0, target_page - 2), min((total_items // page_size) + 1, target_page + 3)):
+                            if p not in source_model._pages and p not in source_model._loading_pages:
+                                source_model._request_page_load(p)
+                                # print(f"[PAINT] Blind spot detected, force-loading Page {p}")
+
+                    # if visible_items:
+                    #     # Also validate actual visible items (just in case estimation is way off)
+                    #     min_idx = visible_items[0]['index']
+                    #     max_idx = visible_items[-1]['index']
+                    #     if hasattr(source_model, 'ensure_pages_for_range'):
+                    #          source_model.ensure_pages_for_range(min_idx, max_idx)
 
                 # Auto-correct scroll bounds if needed
                 max_allowed = self._get_masonry_total_height() - viewport_height
