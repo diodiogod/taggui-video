@@ -48,5 +48,7 @@ class Image:
         """Get aspect ratio (width/height), cached to avoid recalculation."""
         if self.dimensions:
             width, height = self.dimensions
-            return width / height if height > 0 else 1.0
+            # Handle potential None values unpacked from dimensions
+            if width is not None and height is not None and height > 0:
+                return width / height
         return 1.0  # Default square for images without dimensions

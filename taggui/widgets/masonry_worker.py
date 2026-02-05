@@ -66,10 +66,28 @@ def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_column
         positioned_items = []
 
         for index, aspect_ratio in items_data:
+            # CHECK FOR SPACER
+            # Spacer format: aspect_ratio is ('SPACER', height_pixels)
+            if isinstance(aspect_ratio, tuple) and len(aspect_ratio) == 2 and aspect_ratio[0] == 'SPACER':
+                spacer_height = int(aspect_ratio[1])
+                
+                # Push ALL columns down to the max height + spacer
+                # This ensures the gap is preserved across the whole layout width
+                max_h = max(column_heights)
+                new_h = max_h + spacer_height
+                for i in range(num_columns):
+                    column_heights[i] = new_h
+                
+                # We don't create a visual item for the spacer
+                continue
+
             # Calculate item dimensions
             item_width = column_width
 
             # Validate aspect ratio to prevent crashes
+            if not isinstance(aspect_ratio, (int, float)):
+                 aspect_ratio = 1.0 # Fallback for bad data
+
             if not aspect_ratio or aspect_ratio <= 0 or aspect_ratio != aspect_ratio:  # NaN check
                 aspect_ratio = 1.0  # Fallback to square
             if aspect_ratio > 100:  # Extremely wide

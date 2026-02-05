@@ -637,16 +637,24 @@ class ImageIndexDB:
 
         try:
             cursor = self.conn.cursor()
-            placeholders = ','.join('?' * len(image_ids))
-            cursor.execute(f'''
-                SELECT image_id, tag FROM image_tags
-                WHERE image_id IN ({placeholders})
-                ORDER BY image_id
-            ''', image_ids)
-
             result: Dict[int, List[str]] = {img_id: [] for img_id in image_ids}
-            for row in cursor.fetchall():
-                result[row[0]].append(row[1])
+            
+            # Batch queries to avoid SQLite limit (usually 999)
+            batch_size = 900
+            for i in range(0, len(image_ids), batch_size):
+                batch = image_ids[i:i + batch_size]
+                placeholders = ','.join('?' * len(batch))
+                cursor.execute(f'''
+                    SELECT image_id, tag FROM image_tags
+                    WHERE image_id IN ({placeholders})
+                    ORDER BY image_id
+                ''', batch)
+
+                for row in cursor.fetchall():
+                    # Check if key exists (it should initialized above)
+                    if row[0] in result:
+                        result[row[0]].append(row[1])
+            
             return result
         except sqlite3.Error as e:
             print(f'Database tag query error: {e}')
