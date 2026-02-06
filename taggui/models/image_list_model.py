@@ -2089,19 +2089,44 @@ class ImageListModel(QAbstractListModel):
                       elif full_path.suffix.lower() == '.jxl':
                          from utils.jxlutil import get_jxl_size
                          dimensions = get_jxl_size(full_path)
-                      else:
-                         dimensions = imagesize.get(str(full_path))
-                         if dimensions == (-1, -1):
-                              try:
-                                  from PIL import Image as pilimage
-                                  if full_path.suffix.lower() in ('.jpg', '.jpeg'):
-                                      dimensions = self._read_jpeg_header_dimensions(full_path) or (-1, -1)
-                                  if dimensions == (-1, -1):
-                                      dimensions = pilimage.open(full_path).size
-                              except:
-                                  pass
-                      
-                      if dimensions and dimensions != (-1, -1):
+                       else:
+                          # Try fast imagesize first
+                          dimensions = imagesize.get(str(full_path))
+                          
+                          # HEURISTIC CHECK:
+                          # If dimensions seem "Impossible" or "Suspicious" (Super Tall/Fat),
+                          # Double check with PIL. This catches corrupted headers where imagesize reads garbage.
+                          is_suspicious = False
+                          
+                          if dimensions == (-1, -1):
+                              is_suspicious = True
+                          elif dimensions[0] > 0 and dimensions[1] > 0:
+                              aspect_ratio = dimensions[0] / dimensions[1]
+                              # Thresholds: Taller than 1:5 (0.2) or Wider than 5:1 (5.0)
+                              # Normal panoramas might trigger this, but verifying them via PIL is safe/fast enough.
+                              if aspect_ratio < 0.2 or aspect_ratio > 5.0:
+                                  is_suspicious = True
+
+                          # For Suspicious items OR JPEGs (that risk EXIF rotation issues), verify with PIL
+                          # (We verify suspicious PNGs/WebP too)
+                          if is_suspicious and full_path.suffix.lower() in ('.jpg', '.jpeg', '.webp', '.tiff', '.png'):
+                               try:
+                                   with pilimage.open(full_path) as img:
+                                       # Trust PIL dimensions over imagesize (fixes corruption cases)
+                                       dimensions = img.size
+                                       
+                                       # Check Orientation (Only relevant for formats that support it)
+                                       exif = img.getexif()
+                                       if exif:
+                                           orientation = exif.get(274)
+                                           if orientation in (5, 6, 7, 8):
+                                               dimensions = (dimensions[1], dimensions[0])
+                               except:
+                                   # If PIL fails, fall back to whatever imagesize got (or try custom parser)
+                                   if dimensions == (-1, -1) and full_path.suffix.lower() in ('.jpg', '.jpeg'):
+                                        dimensions = self._read_jpeg_header_dimensions(full_path) or (-1, -1)
+                       
+                       if dimensions and dimensions != (-1, -1):
                            mtime = full_path.stat().st_mtime
                            # Save dimensions
                            db_bg.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime, video_metadata)
