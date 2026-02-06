@@ -447,6 +447,9 @@ class ImageListView(QListView):
         self._thumbnail_cache_hits = set()  # Track unique cache hits by index
         self._thumbnail_cache_misses = set()  # Track unique cache misses by index
         self._flow_log_last: dict[str, float] = {}
+        self._masonry_sticky_until = 0.0
+        self._masonry_sticky_page = 0
+        self._last_masonry_window_signature = None
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
@@ -675,6 +678,9 @@ class ImageListView(QListView):
     def _on_paginated_enrichment_complete(self):
         """Handle completion of background enrichment in paginated mode."""
         self._log_flow("ENRICH", "Paginated enrichment complete; reloading active pages", level="INFO")
+        self._masonry_sticky_page = getattr(self, '_current_page', 0)
+        self._masonry_sticky_until = time.time() + 0.5  # Prevent immediate window rebasing/jitter
+        self._last_masonry_window_signature = None  # Force recalc with enriched dimensions
         
         # CRITICAL FIX: Defer to avoid race with masonry cleanup
         def reload_pages():
@@ -682,6 +688,7 @@ class ImageListView(QListView):
             if hasattr(source_model, '_pages'):
                  for page_num in list(source_model._pages.keys()):
                      source_model._load_page_sync(page_num)
+            self._last_masonry_signal = "enrichment_complete"
             source_model._emit_pages_updated()
         
         from PySide6.QtCore import QTimer
@@ -698,6 +705,7 @@ class ImageListView(QListView):
         
         # Recalculate masonry for currently loaded pages
         # This is safe because it doesn't emit layoutChanged
+        self._last_masonry_window_signature = None
         self._recalculate_masonry_if_needed("pages_updated")
         
         # Request viewport repaint (safe, doesn't invalidate model)
@@ -908,17 +916,56 @@ class ImageListView(QListView):
                 total_items = source_model._total_count if hasattr(source_model, '_total_count') else 0
                 
                 # CRITICAL FIX: Compute current page DIRECTLY from scroll position
-                # Don't rely on self._current_page which may be stale by the time this runs
+                # Prefer visible masonry top index (stable), fallback to scroll fraction.
                 scroll_val = self.verticalScrollBar().value()
                 scroll_max = self.verticalScrollBar().maximum()
-                
-                if scroll_max > 0 and total_items > 0:
+                source_idx = None
+
+                if self._masonry_items:
+                    viewport_height = self.viewport().height()
+                    viewport_rect = QRect(0, scroll_val, self.viewport().width(), viewport_height)
+                    visible_now = self._get_masonry_visible_items(viewport_rect)
+                    if visible_now:
+                        # Ignore spacer tokens (negative indices) when estimating current page.
+                        real_visible = [it for it in visible_now if it.get('index', -1) >= 0]
+                        if real_visible:
+                            top_item = min(real_visible, key=lambda x: x['rect'].y())
+                            source_idx = top_item['index']
+
+                # If no real visible item is available (e.g. viewport currently on spacers),
+                # prefer the tracked current page from scroll logic to avoid oscillation.
+                if total_items > 0 and scroll_val <= 2:
+                    source_idx = 0
+                elif total_items > 0 and scroll_max > 0 and scroll_val >= scroll_max - 2:
+                    source_idx = total_items - 1
+
+                if source_idx is None and hasattr(self, '_current_page'):
+                    source_idx = max(0, int(self._current_page) * page_size)
+
+                if source_idx is None and scroll_max > 0 and total_items > 0:
                     scroll_fraction = scroll_val / scroll_max
-                    estimated_idx = int(scroll_fraction * total_items)
-                    current_page = estimated_idx // page_size
-                    # print(f"[MASONRY_CALC] Scroll={scroll_val}/{scroll_max} ({scroll_fraction:.2f}), EstIdx={estimated_idx}, Page={current_page}")
-                else:
-                    current_page = self._current_page if hasattr(self, '_current_page') else 0
+                    source_idx = int(scroll_fraction * total_items)
+
+                if source_idx is None:
+                    source_idx = 0
+
+                candidate_page = max(0, min((total_items - 1) // page_size if total_items > 0 else 0, source_idx // page_size))
+                prev_page = self._current_page if hasattr(self, '_current_page') else candidate_page
+
+                # Hysteresis: avoid page flapping near boundaries.
+                current_page = candidate_page
+                if total_items > 0 and candidate_page != prev_page:
+                    half_page = max(1, page_size // 2)
+                    if candidate_page > prev_page:
+                        if source_idx < ((prev_page + 1) * page_size + half_page):
+                            current_page = prev_page
+                    else:
+                        if source_idx > (prev_page * page_size - half_page):
+                            current_page = prev_page
+
+                # Sticky window right after enrichment/layout refresh.
+                if time.time() < getattr(self, '_masonry_sticky_until', 0.0):
+                    current_page = getattr(self, '_masonry_sticky_page', current_page)
                 
                 # Update cached value for other uses
                 self._current_page = current_page
@@ -931,6 +978,15 @@ class ImageListView(QListView):
                     window_buffer = 3
                 window_buffer = max(1, min(window_buffer, 6))
                 max_page = (total_items + page_size - 1) // page_size
+                full_layout_mode = False
+
+                # Accuracy mode: when most/all items are loaded, compute full masonry to preserve
+                # true column state. Windowed spacer mode cannot reproduce exact column heights.
+                loaded_count = len(items_data)
+                if total_items > 0:
+                    coverage = loaded_count / total_items
+                    if coverage >= 0.95 and total_items <= 50000:
+                        full_layout_mode = True
 
                 # Estimate row/column metrics for spacer heights once
                 avg_h = getattr(self, '_stable_avg_item_height', 100.0)
@@ -940,12 +996,37 @@ class ImageListView(QListView):
                 avail_width = viewport_width - scroll_bar_width - 24  # margins
                 num_cols_est = max(1, avail_width // (column_width + spacing))
 
-                # Window layout around current page (not full 0..N), with prefix/suffix spacers
-                # to preserve absolute Y positioning while keeping token count small.
-                window_start_page = max(0, current_page - window_buffer)
-                window_end_page = min(max_page - 1, current_page + window_buffer)
-                min_idx = window_start_page * page_size
-                max_idx = min(total_items, (window_end_page + 1) * page_size)
+                if full_layout_mode:
+                    window_start_page = 0
+                    window_end_page = max_page - 1
+                    min_idx = 0
+                    max_idx = total_items
+                else:
+                    # Window layout around current page (not full 0..N), with prefix/suffix spacers
+                    # to preserve absolute Y positioning while keeping token count small.
+                    window_start_page = max(0, current_page - window_buffer)
+                    window_end_page = min(max_page - 1, current_page + window_buffer)
+                    min_idx = window_start_page * page_size
+                    max_idx = min(total_items, (window_end_page + 1) * page_size)
+
+                loaded_pages_sig = tuple(sorted(source_model._pages.keys())) if hasattr(source_model, '_pages') else ()
+                window_signature = (
+                    window_start_page,
+                    window_end_page,
+                    loaded_pages_sig,
+                    num_columns,
+                    self.current_thumbnail_size,
+                    self.viewport().width(),
+                    full_layout_mode,
+                )
+                if window_signature == self._last_masonry_window_signature and self._last_masonry_signal not in {"resize", "enrichment_complete"}:
+                    self._log_flow("MASONRY", "Skipping calc: unchanged window signature",
+                                   throttle_key="masonry_same_window", every_s=0.8)
+                    self._masonry_calculating = False
+                    if source_model and hasattr(source_model, '_enrichment_paused'):
+                        source_model._enrichment_paused.clear()
+                    return
+                self._last_masonry_window_signature = window_signature
                 
                 # CRITICAL FIX: Proactively load pages in the masonry window
                 # Without this, the layout runs before pages are loaded, resulting in empty display
@@ -1078,11 +1159,18 @@ class ImageListView(QListView):
                      pass 
  
 
-                self._log_flow(
-                    "MASONRY",
-                    f"Calc start: tokens={len(items_data)} window_pages={window_start_page}-{window_end_page} "
-                    f"current_page={current_page}"
-                )
+                if full_layout_mode:
+                    self._log_flow(
+                        "MASONRY",
+                        f"Calc start: tokens={len(items_data)} window_pages={window_start_page}-{window_end_page} "
+                        f"current_page={current_page} mode=full"
+                    )
+                else:
+                    self._log_flow(
+                        "MASONRY",
+                        f"Calc start: tokens={len(items_data)} window_pages={window_start_page}-{window_end_page} "
+                        f"current_page={current_page}"
+                    )
             else:
                 self._log_flow("MASONRY", f"Calc start (normal mode): items={len(items_data)}")
         except Exception as e:
@@ -2128,6 +2216,8 @@ class ImageListView(QListView):
         if self.use_masonry:
             print("[RESIZE] Window resize finished, recalculating masonry...")
             self._recenter_after_layout = True
+            self._last_masonry_window_signature = None
+            self._last_masonry_signal = "resize"
             self._calculate_masonry_layout()
             self.viewport().update()
 
@@ -2645,11 +2735,17 @@ class ImageListView(QListView):
         if hasattr(self, '_masonry_total_height') and self._masonry_total_height > scroll_max:
              virtual_max = self._masonry_total_height
         
-        scroll_fraction = scroll_offset / virtual_max if virtual_max > 0 else 0
-        estimated_item_idx = int(scroll_fraction * source_model._total_count)
-
-        # Calculate which page this corresponds to
-        current_page = estimated_item_idx // source_model.PAGE_SIZE
+        total_pages = (source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
+        last_page = max(0, total_pages - 1)
+        if scroll_offset <= 2:
+            current_page = 0
+        elif scroll_max > 0 and scroll_offset >= scroll_max - 2:
+            current_page = last_page
+        else:
+            scroll_fraction = scroll_offset / virtual_max if virtual_max > 0 else 0
+            estimated_item_idx = int(scroll_fraction * source_model._total_count)
+            current_page = estimated_item_idx // source_model.PAGE_SIZE
+            current_page = max(0, min(last_page, current_page))
         self._current_page = current_page
 
         # Load current page + a small local buffer for responsive pagination.
@@ -3401,20 +3497,36 @@ class ImageListView(QListView):
         if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
             return
 
-        # Get current page (already tracked by _check_and_load_pages)
-        if hasattr(self, '_current_page'):
-            current_page = self._current_page
+        total_items = source_model._total_count if hasattr(source_model, '_total_count') else source_model.rowCount()
+        if total_items <= 0:
+            return
+
+        # Prefer selected/current index (most intuitive to user), map to global row in buffered mode.
+        current_page = getattr(self, '_current_page', 0)
+        current_idx = self.currentIndex()
+        if current_idx.isValid():
+            try:
+                global_idx = current_idx.row()
+                if hasattr(self.model(), 'mapToSource'):
+                    src_idx = self.model().mapToSource(current_idx)
+                    if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
+                        mapped = source_model.get_global_index_for_row(src_idx.row())
+                        if mapped >= 0:
+                            global_idx = mapped
+                current_page = max(0, min((total_items - 1) // source_model.PAGE_SIZE, global_idx // source_model.PAGE_SIZE))
+            except Exception:
+                pass
         else:
-            # Fallback: calculate from visible items
-            visible_items = self._get_masonry_visible_items(self.viewport().rect())
-            if visible_items and len(visible_items) > 0:
-                mid_idx = visible_items[len(visible_items) // 2]['index']
-                current_page = mid_idx // source_model.PAGE_SIZE
-            else:
-                current_page = 0
+            # Fallback to visible items in absolute (scrolled) coordinates.
+            scroll_offset = self.verticalScrollBar().value()
+            viewport_rect = self.viewport().rect().translated(0, scroll_offset)
+            visible_items = self._get_masonry_visible_items(viewport_rect)
+            real_items = [it for it in visible_items if it.get('index', -1) >= 0]
+            if real_items:
+                mid_idx = real_items[len(real_items) // 2]['index']
+                current_page = max(0, min((total_items - 1) // source_model.PAGE_SIZE, mid_idx // source_model.PAGE_SIZE))
 
         # Use _total_count for buffered mode (rowCount only returns loaded items)
-        total_items = source_model._total_count if hasattr(source_model, '_total_count') else source_model.rowCount()
         total_pages = (total_items + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
 
         # Create label if needed
@@ -3614,7 +3726,23 @@ class ImageList(QDockWidget):
         else:
             unfiltered_image_count = source_model.rowCount()
 
-        label_text = f'Image {proxy_image_index.row() + 1} / {image_count}'
+        current_pos = proxy_image_index.row() + 1
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            try:
+                src_index = self.proxy_image_list_model.mapToSource(proxy_image_index)
+                if src_index.isValid() and hasattr(source_model, 'get_global_index_for_row'):
+                    global_idx = source_model.get_global_index_for_row(src_index.row())
+                    if global_idx >= 0:
+                        current_pos = global_idx + 1
+            except Exception:
+                pass
+
+        # In buffered mode, denominator should reflect total filtered dataset size, not loaded rowCount.
+        denom = image_count
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            denom = unfiltered_image_count
+
+        label_text = f'Image {current_pos} / {denom}'
         if image_count != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)

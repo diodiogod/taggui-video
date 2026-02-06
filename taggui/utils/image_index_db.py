@@ -707,10 +707,21 @@ class ImageIndexDB:
                 
             query += f' ORDER BY {sort_expr} {sort_dir} LIMIT ? OFFSET ?'
 
-            cursor.execute(query, bindings + (page_size, offset))
+            cursor.execute(query, tuple(bindings) + (page_size, offset))
             rows = cursor.fetchall()
+            if not rows:
+                return []
 
-            return [dict(row) for row in rows]
+            # sqlite3.Row normally supports dict(row), but under some reconnect/concurrency
+            # conditions rows may be plain tuples. Handle both robustly.
+            first = rows[0]
+            if isinstance(first, sqlite3.Row):
+                return [dict(row) for row in rows]
+
+            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+            if col_names:
+                return [dict(zip(col_names, row)) for row in rows]
+            return []
 
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
@@ -820,7 +831,7 @@ class ImageIndexDB:
 
     def get_tags_for_image(self, image_id: int) -> List[str]:
         """Get all tags for a specific image."""
-        if not self.enabled or not self.conn:
+        if not self.enabled or not self._ensure_connection():
             return []
 
         try:
@@ -833,7 +844,7 @@ class ImageIndexDB:
 
     def get_tags_for_images(self, image_ids: List[int]) -> Dict[int, List[str]]:
         """Get tags for multiple images in a single query."""
-        if not self.enabled or not self.conn or not image_ids:
+        if not self.enabled or not self._ensure_connection() or not image_ids:
             return {}
 
         try:
@@ -849,7 +860,7 @@ class ImageIndexDB:
                     SELECT image_id, tag FROM image_tags
                     WHERE image_id IN ({placeholders})
                     ORDER BY image_id
-                ''', batch)
+                ''', tuple(batch))
 
                 for row in cursor.fetchall():
                     if not row or len(row) < 2:
@@ -1206,5 +1217,4 @@ class ImageIndexDB:
                 
         except sqlite3.Error as e:
             print(f"Database backfill error: {e}")
-
 
