@@ -1,4 +1,5 @@
 import shutil
+import time
 from enum import Enum
 from functools import reduce
 from operator import or_
@@ -445,6 +446,7 @@ class ImageListView(QListView):
         self._thumbnails_loaded = set()  # Track which thumbnails are loaded (by index)
         self._thumbnail_cache_hits = set()  # Track unique cache hits by index
         self._thumbnail_cache_misses = set()  # Track unique cache misses by index
+        self._flow_log_last: dict[str, float] = {}
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
@@ -538,6 +540,18 @@ class ImageListView(QListView):
         self.selectionModel().selectionChanged.connect(
             self.update_context_menu_actions)
 
+    def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
+                  throttle_key: str | None = None, every_s: float | None = None):
+        """Timestamped, optionally throttled flow logging for masonry/pagination diagnostics."""
+        now = time.time()
+        if throttle_key and every_s is not None:
+            last = self._flow_log_last.get(throttle_key, 0.0)
+            if (now - last) < every_s:
+                return
+            self._flow_log_last[throttle_key] = now
+        ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
+        print(f"[{ts}][{component}][{level}] {message}")
+
     def contextMenuEvent(self, event):
         self.context_menu.exec_(event.globalPos())
 
@@ -619,11 +633,13 @@ class ImageListView(QListView):
             if bootstrap_complete:
                 # Post-bootstrap: ignore layoutChanged from dynamic page loads
                 # Only respond to pages_updated signal
-                print("[LAYOUT] Skipping post-bootstrap layoutChanged in buffered mode (using pages_updated instead)")
+                self._log_flow("LAYOUT", "Skipping post-bootstrap layoutChanged; pages_updated drives masonry",
+                               throttle_key="layout_skip", every_s=0.5)
                 return
             else:
                 # Bootstrap phase: allow layoutChanged to display initial images
-                print("[LAYOUT] Allowing bootstrap layoutChanged in buffered mode")
+                self._log_flow("LAYOUT", "Allowing bootstrap layoutChanged",
+                               throttle_key="layout_bootstrap", every_s=0.5)
         
         # CRITICAL: Skip layout changes during painting to prevent re-entrancy crash
         # Page loading can trigger layoutChanged while we're in paintEvent
@@ -658,7 +674,7 @@ class ImageListView(QListView):
 
     def _on_paginated_enrichment_complete(self):
         """Handle completion of background enrichment in paginated mode."""
-        print("[ENRICH] Paginated enrichment complete, reloading pages...")
+        self._log_flow("ENRICH", "Paginated enrichment complete; reloading active pages", level="INFO")
         
         # CRITICAL FIX: Defer to avoid race with masonry cleanup
         def reload_pages():
@@ -677,7 +693,8 @@ class ImageListView(QListView):
         if not self.use_masonry:
             return
         
-        print(f"[PAGES] Pages updated: {len(loaded_pages)} pages loaded, triggering masonry recalc")
+        self._log_flow("PAGES", f"Pages updated ({len(loaded_pages)} loaded); scheduling masonry recalc",
+                       throttle_key="pages_updated", every_s=0.3)
         
         # Recalculate masonry for currently loaded pages
         # This is safe because it doesn't emit layoutChanged
@@ -773,7 +790,8 @@ class ImageListView(QListView):
         if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
             # Buffered mode - will only calculate for loaded pages
             loaded_pages = len(source_model._pages) if hasattr(source_model, '_pages') else 0
-            print(f"[{timestamp}] Buffered pagination: calculating masonry for {loaded_pages} pages...")
+            self._log_flow("MASONRY", f"Recalc requested; buffered pages loaded={loaded_pages}",
+                           throttle_key="masonry_recalc_req", every_s=0.5)
 
         # print(f"[{timestamp}] ⚡ EXECUTE: Timer expired, starting masonry calculation")
         if self.use_masonry:
@@ -795,7 +813,8 @@ class ImageListView(QListView):
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
         if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
             if not source_model._pages:
-                print("[MASONRY] Skipping - no pages loaded yet in buffered mode")
+                self._log_flow("MASONRY", "Skipping calc: no pages loaded yet",
+                               throttle_key="masonry_no_pages", every_s=1.0)
                 return
 
         # If already calculating, mark as pending and return
@@ -816,7 +835,8 @@ class ImageListView(QListView):
             
             if time_since_done < 500:  # 500ms grace period for thread cleanup
                 remaining = int(500 - time_since_done)
-                print(f"[MASONRY] Enforcing grace period - {remaining}ms remaining")
+                self._log_flow("MASONRY", f"Grace period active: {remaining}ms remaining",
+                               throttle_key="masonry_grace", every_s=0.5)
                 # Schedule retry after grace period
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(remaining, self._calculate_masonry_layout)
@@ -848,7 +868,8 @@ class ImageListView(QListView):
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
         if source_model and hasattr(source_model, '_enrichment_paused'):
             source_model._enrichment_paused.set()
-            print("[MASONRY] Paused enrichment for recalculation")
+            self._log_flow("MASONRY", "Paused enrichment for recalculation",
+                           throttle_key="masonry_pause", every_s=0.5)
 
         # Initialize parameters
         column_width = self.current_thumbnail_size
@@ -871,7 +892,8 @@ class ImageListView(QListView):
 
             # Safety check: skip if no items
             if not items_data:
-                print(f"[MASONRY] Skipping - no items loaded yet")
+                self._log_flow("MASONRY", "Skipping calc: no items loaded yet",
+                               throttle_key="masonry_no_items", every_s=1.0)
                 self._masonry_calculating = False
                 if source_model and hasattr(source_model, '_enrichment_paused'):
                     source_model._enrichment_paused.clear()
@@ -901,29 +923,38 @@ class ImageListView(QListView):
                 # Update cached value for other uses
                 self._current_page = current_page
                 
-                # Buffer: define window of interest (e.g. +/- 5 pages)
-                # Should match or exceed load buffer to ensure we see what we load
-                # DYNAMIC BUFFER: Adjust based on MAX_PAGES_IN_MEMORY to avoid thrashing
-                max_pages_mem = source_model.MAX_PAGES_IN_MEMORY if hasattr(source_model, 'MAX_PAGES_IN_MEMORY') else 20
-                # We need to fit (2 * buffer + 1) pages in memory.
-                # So buffer = (max - 1) / 2
-                window_buffer = max(1, (max_pages_mem - 1) // 2)
-                # print(f"[MASONRY] Window buffer set to {window_buffer} pages (Max Mem: {max_pages_mem})")
-                # CRITICAL FIX: Anchor layout to 0 to prevent y-offset drift/overlap
-                # We effectively layout from Start to Current+Buffer.
-                # Missing pages become spacers, which is fast.
-                min_idx = 0
-                max_idx = total_items # (current_page + window_buffer + 1) * page_size
+                # Keep masonry calculations local to the current region.
+                # This is intentionally small for responsive correction on large folders.
+                try:
+                    window_buffer = int(settings.value('thumbnail_eviction_pages', 3, type=int))
+                except Exception:
+                    window_buffer = 3
+                window_buffer = max(1, min(window_buffer, 6))
+                max_page = (total_items + page_size - 1) // page_size
+
+                # Estimate row/column metrics for spacer heights once
+                avg_h = getattr(self, '_stable_avg_item_height', 100.0)
+                if avg_h < 1:
+                    avg_h = 100.0
+                scroll_bar_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
+                avail_width = viewport_width - scroll_bar_width - 24  # margins
+                num_cols_est = max(1, avail_width // (column_width + spacing))
+
+                # Window layout around current page (not full 0..N), with prefix/suffix spacers
+                # to preserve absolute Y positioning while keeping token count small.
+                window_start_page = max(0, current_page - window_buffer)
+                window_end_page = min(max_page - 1, current_page + window_buffer)
+                min_idx = window_start_page * page_size
+                max_idx = min(total_items, (window_end_page + 1) * page_size)
                 
                 # CRITICAL FIX: Proactively load pages in the masonry window
                 # Without this, the layout runs before pages are loaded, resulting in empty display
-                max_page = (total_items + page_size - 1) // page_size
                 for p in range(max(0, current_page - window_buffer), min(max_page, current_page + window_buffer + 1)):
                     if p not in source_model._pages and p not in source_model._loading_pages:
                         source_model._request_page_load(p)
 
                 
-                # Filter items_data to this window
+                # Filter loaded items to the active window only
                 original_count = len(items_data)
                 filtered_items = [item for item in items_data if min_idx <= item[0] < max_idx]
                 
@@ -934,19 +965,17 @@ class ImageListView(QListView):
                     # Sort by index just in case
                     filtered_items.sort(key=lambda x: x[0])
                     
+                    # Insert prefix spacer for pages before the window so layout coordinates remain absolute.
+                    if min_idx > 0:
+                        import math
+                        prefix_rows = math.ceil(min_idx / num_cols_est)
+                        prefix_h = int(prefix_rows * avg_h)
+                        items_data.append((-3, ('SPACER', prefix_h)))
+
                     # Initialize last_idx to start of window (minus 1)
                     # This ensures we insert a spacer if the first loaded item is NOT min_idx
                     last_idx = min_idx - 1
                     
-                    # Estimate row height for spacers
-                    avg_h = getattr(self, '_stable_avg_item_height', 100.0)
-                    if avg_h < 1: avg_h = 100.0
-                    
-                    # Calculate num columns for spacer height calc
-                    scroll_bar_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
-                    avail_width = viewport_width - scroll_bar_width - 24 # margins
-                    num_cols_est = max(1, avail_width // (column_width + spacing))
-
                     for item in filtered_items:
                         curr_idx = item[0]
                         gap = curr_idx - last_idx - 1
@@ -1007,7 +1036,13 @@ class ImageListView(QListView):
                              
                              # We use a special index structure: (-1, ('SPACER', h))
                              # But let's use a unique index based on the window start to avoid collisions if we merge
-                             items_data = [(min_idx, ('SPACER', spacer_h))]
+                             if min_idx > 0:
+                                 import math
+                                 prefix_rows = math.ceil(min_idx / num_cols_est)
+                                 prefix_h = int(prefix_rows * avg_h)
+                                 items_data = [(-3, ('SPACER', prefix_h)), (min_idx, ('SPACER', spacer_h))]
+                             else:
+                                 items_data = [(min_idx, ('SPACER', spacer_h))]
                              # print(f"[MASONRY] Buffered: Inserted full-window spacer for indices {start}-{end} ({spacer_h}px)")
                     else:
                         items_data = []
@@ -1029,7 +1064,13 @@ class ImageListView(QListView):
                          safe_avg = avg_h if avg_h > 1 else 100.0
                          spacer_h = int(rows * safe_avg)
                          
-                         items_data = [(min_idx, ('SPACER', spacer_h))]
+                         if min_idx > 0:
+                             import math
+                             prefix_rows = math.ceil(min_idx / num_cols_est)
+                             prefix_h = int(prefix_rows * avg_h)
+                             items_data = [(-3, ('SPACER', prefix_h)), (min_idx, ('SPACER', spacer_h))]
+                         else:
+                             items_data = [(min_idx, ('SPACER', spacer_h))]
                          # print(f"[MASONRY] Buffered: Inserted SAFETY spacer for indices {start}-{end} ({spacer_h}px) due to empty items")
 
                 if not items_data:
@@ -1037,9 +1078,13 @@ class ImageListView(QListView):
                      pass 
  
 
-                print(f"[MASONRY] Buffered mode: calculating layout for {len(items_data)} tokens (Window: Pages {current_page-window_buffer}-{current_page+window_buffer})")
+                self._log_flow(
+                    "MASONRY",
+                    f"Calc start: tokens={len(items_data)} window_pages={window_start_page}-{window_end_page} "
+                    f"current_page={current_page}"
+                )
             else:
-                print(f"[MASONRY] Normal mode: calculating layout for {len(items_data)} items")
+                self._log_flow("MASONRY", f"Calc start (normal mode): items={len(items_data)}")
         except Exception as e:
             print(f"[MASONRY] Failed to get aspect ratios: {e}")
             import traceback
@@ -1345,16 +1390,16 @@ class ImageListView(QListView):
 
                     # Resume enrichment
                     def resume_enrichment_delayed():
-                        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-                        if source_model and hasattr(source_model, '_enrichment_paused'):
-                            source_model._enrichment_paused.clear()
+                        model_for_resume = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                        if model_for_resume and hasattr(model_for_resume, '_enrichment_paused'):
+                            model_for_resume._enrichment_paused.clear()
                     QTimer.singleShot(200, resume_enrichment_delayed)
 
                 except Exception as e:
                     print(f"[MASONRY] UI update crashed: {e}")
-                    source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-                    if source_model and hasattr(source_model, '_enrichment_paused'):
-                        source_model._enrichment_paused.clear()
+                    model_for_error = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+                    if model_for_error and hasattr(model_for_error, '_enrichment_paused'):
+                        model_for_error._enrichment_paused.clear()
 
             QTimer.singleShot(0, apply_and_signal)
             
@@ -2607,25 +2652,26 @@ class ImageListView(QListView):
         current_page = estimated_item_idx // source_model.PAGE_SIZE
         self._current_page = current_page
 
-        # Load current page + buffer (10 pages before, 10 after)
-        # Increased buffer to avoid seeing the fringe
-        buffer_pages = 10
+        # Load current page + a small local buffer for responsive pagination.
+        try:
+            buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
+        except Exception:
+            buffer_pages = 3
+        buffer_pages = max(1, min(buffer_pages, 6))
         start_page = max(0, current_page - buffer_pages)
         end_page = min((source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE - 1,
                        current_page + buffer_pages)
 
-        # Trigger page loads for this range
-        needed_pages_set = set(range(start_page, end_page + 1))
-        
-        # Prioritize: Cancel any pending loads that are OUTSIDE our needed range
-        # This ensures that if user jumps from Page 0 to Page 100, we don't waste time loading Pages 1-10
-        if hasattr(source_model, 'cancel_pending_loads_except'):
-            source_model.cancel_pending_loads_except(needed_pages_set)
-
-        for page_num in range(start_page, end_page + 1):
-            if page_num not in source_model._pages and page_num not in source_model._loading_pages:
-                # print(f"[LOADER] Requesting load for Page {page_num}")
-                source_model._request_page_load(page_num)
+        # Trigger page loads for this range using DEBOUNCER
+        if hasattr(source_model, 'ensure_pages_for_range'):
+            start_row = start_page * source_model.PAGE_SIZE
+            end_row = (end_page + 1) * source_model.PAGE_SIZE
+            source_model.ensure_pages_for_range(start_row, end_row)
+        else:
+            # Fallback for old model versions
+            for page_num in range(start_page, end_page + 1):
+                if page_num not in source_model._pages and page_num not in source_model._loading_pages:
+                    source_model._request_page_load(page_num)
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
@@ -3980,4 +4026,3 @@ class ImageList(QDockWidget):
                     caption_file.remove()
 
         self.directory_reload_requested.emit()
-
