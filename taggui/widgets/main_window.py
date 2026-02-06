@@ -596,13 +596,15 @@ class MainWindow(QMainWindow):
 
         # Save path for robust restoration (independent of filter/sort)
         if proxy_image_index.isValid():
-            source_index = self.proxy_image_list_model.mapToSource(proxy_image_index)
+            source_index = self.proxy_image_list_model.mapToSource(
+                proxy_image_index)
             if source_index.isValid():
                 try:
-                    # Access internal list for path (assuming Normal Mode structure)
-                    # For paginated, this might need adjustment, but sufficient for now.
-                    path = self.image_list_model._image_files[source_index.row()].path
-                    settings.setValue('last_selected_path', str(path))
+                    # Access helper method for path (works for Normal & Paginated)
+                    img = self.image_list_model.get_image_at_row(source_index.row())
+                    if img:
+                        settings.setValue('last_selected_path', str(img.path))
+                        print(f"[SAVE] Selected path: {img.path.name}")
                 except (IndexError, AttributeError):
                     pass
 
