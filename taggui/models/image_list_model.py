@@ -519,6 +519,7 @@ class ImageListModel(QAbstractListModel):
         self._dimensions_update_timer.setSingleShot(True)
         self._dimensions_update_timer.setInterval(300)
         self._dimensions_update_timer.timeout.connect(self._emit_dimensions_updated_debounced)
+        self._last_dimensions_emit_at = 0.0
 
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
@@ -534,11 +535,16 @@ class ImageListModel(QAbstractListModel):
 
     def _schedule_dimensions_updated(self):
         """Coalesce frequent dimension updates into one masonry refresh signal."""
+        now = time.time()
+        # In paginated mode, limit refresh pressure from continuous thumbnail/JIT updates.
+        if self._paginated_mode and (now - self._last_dimensions_emit_at) < 1.0:
+            return
         if self._dimensions_update_timer.isActive():
-            self._dimensions_update_timer.stop()
+            return
         self._dimensions_update_timer.start()
 
     def _emit_dimensions_updated_debounced(self):
+        self._last_dimensions_emit_at = time.time()
         self.dimensions_updated.emit()
 
     @property
@@ -601,8 +607,12 @@ class ImageListModel(QAbstractListModel):
 
             # Build aspect ratio list from loaded pages
             # Create a deep snapshot to avoid concurrent modification
-            self._log_flow("ASPECT_RATIOS", f"Iterating loaded pages: {loaded_pages}",
-                           throttle_key="aspect_iter", every_s=1.0)
+            if loaded_pages:
+                summary = f"{loaded_pages[0]}-{loaded_pages[-1]} ({len(loaded_pages)} pages)"
+            else:
+                summary = "none"
+            self._log_flow("ASPECT_RATIOS", f"Iterating loaded pages: {summary}",
+                           throttle_key="aspect_iter", every_s=2.0)
             for page_num in loaded_pages:
                 if page_num not in self._pages:
                     continue  # Page was evicted during iteration
@@ -626,7 +636,7 @@ class ImageListModel(QAbstractListModel):
             min_idx = min(item[0] for item in items_data)
             max_idx = max(item[0] for item in items_data)
             self._log_flow("ASPECT_RATIOS", f"Returning {len(items_data)} items, indices {min_idx}-{max_idx}",
-                           throttle_key="aspect_return", every_s=1.0)
+                           throttle_key="aspect_return", every_s=2.0)
 
         return (items_data, first_index, last_index)
 
@@ -1077,7 +1087,7 @@ class ImageListModel(QAbstractListModel):
 
         if requested_any:
             self._log_flow("PAGINATION", f"Triggered loads for page range {start_page}-{end_page}",
-                           throttle_key="page_range", every_s=0.3)
+                           throttle_key="page_range", every_s=1.0)
 
     def event(self, event):
         """Handle custom events for page loading."""
