@@ -275,15 +275,21 @@ class ImageListModel(QAbstractListModel):
                  try:
                      rel_path = str(path.relative_to(self._directory_path))
                  except ValueError:
+                     # Fallback if path is not in directory (e.g. symlink resolved differently)
                      rel_path = path.name
+                 
+                 print(f"[RESTORE] Checking rank for rel_path: {rel_path}")
                      
                  sort_field = getattr(self, '_sort_field', 'file_name')
                  sort_dir = getattr(self, '_sort_dir', 'ASC')
                  random_seed = getattr(self, '_random_seed', 1234567)
                  
-                 return self._db.get_rank_of_image(rel_path, sort_field, sort_dir, 
+                 rank = self._db.get_rank_of_image(rel_path, sort_field, sort_dir, 
                                                    random_seed=random_seed)
-        except Exception:
+                 print(f"[RESTORE] DB returned rank: {rank}")
+                 return rank
+        except Exception as e:
+            print(f"[RESTORE] get_index_for_path error: {e}")
             pass
         return -1
 

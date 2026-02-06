@@ -589,8 +589,18 @@ class ImageIndexDB:
             cursor.execute(f"SELECT {sort_expr} FROM images WHERE file_name = ?", (rel_path,))
             result = cursor.fetchone()
             if not result:
-                return -1
-            target_val = result[0]
+                print(f"[DB] get_rank: Target file not found in DB: {rel_path} (Query: SELECT {sort_expr} FROM images WHERE file_name = ?)")
+                # Attempt flexible lookup (replace / with \ or vice versa)
+                alt_path = rel_path.replace('\\', '/')
+                if alt_path == rel_path: alt_path = rel_path.replace('/', '\\')
+                
+                cursor.execute(f"SELECT {sort_expr} FROM images WHERE file_name = ?", (alt_path,))
+                result = cursor.fetchone()
+                if not result:
+                     return -1
+                target_val = result[0]
+            else:
+                target_val = result[0]
             
             # 3. Count how many items come BEFORE this one
             # Logic: WHERE (sort_val < target) OR (sort_val = target AND file_name < target)
