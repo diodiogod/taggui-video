@@ -1198,11 +1198,27 @@ class VideoControlsWidget(QWidget):
         self.current_image = image
         self.proxy_image_list_model = proxy_model
 
-        fps = metadata.get('fps', 0)
-        frame_count = metadata.get('frame_count', 0)
-        duration = metadata.get('duration', 0)
-        sar_num = metadata.get('sar_num', 1)
-        sar_den = metadata.get('sar_den', 1)
+        def _to_float(value, default):
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _to_int(value, default):
+            try:
+                if value is None:
+                    return default
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        fps = _to_float(metadata.get('fps', 0), 0.0)
+        frame_count = _to_int(metadata.get('frame_count', 0), 0)
+        duration = _to_float(metadata.get('duration', 0), 0.0)
+        sar_num = _to_int(metadata.get('sar_num', 1), 1)
+        sar_den = _to_int(metadata.get('sar_den', 1), 1)
 
         # Store for speed preview calculations
         self._current_fps = fps
