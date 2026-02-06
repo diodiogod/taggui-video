@@ -2241,6 +2241,8 @@ class ImageListModel(QAbstractListModel):
 
         # Initialize database cache
         db = ImageIndexDB(directory_path)
+        # Run maintenance to fix bad dimensions (Super Tall/Fat glitches) and backfill metadata
+        db.run_maintenance(directory_path)
 
         # Fast metadata-only loading for large folders
         if total_images > 5000:
