@@ -166,6 +166,9 @@ CLAUDE.md
 .claide/
 .claude/
 .taggui_undo/
+GEMINI.md
+.GEMINI.md
+AGENTS.md
 
 # Setup script logs
 taggui_setup.log
