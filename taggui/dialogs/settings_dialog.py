@@ -159,6 +159,26 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(pagination_spin_box, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        # Masonry strategy
+        grid_layout.addWidget(QLabel('Masonry strategy'), 7, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        masonry_strategy_combo = SettingsComboBox(
+            key='masonry_strategy',
+            default='full_compat')
+        masonry_strategy_combo.addItems(['full_compat', 'windowed_strict'])
+        masonry_strategy_combo.setToolTip(
+            'Select masonry engine behavior for paginated mode.\n\n'
+            'full_compat:\n'
+            '- Stable/default behavior.\n'
+            '- Allows full masonry fallback when coverage is high.\n\n'
+            'windowed_strict:\n'
+            '- Experimental true paginated behavior for very large datasets.\n'
+            '- Keeps masonry calculation window-local (no full fallback).\n\n'
+            'If the UI is already open, changing this takes effect on the next masonry recalculation.'
+        )
+        grid_layout.addWidget(masonry_strategy_combo, 7, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 

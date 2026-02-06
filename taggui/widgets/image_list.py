@@ -450,6 +450,7 @@ class ImageListView(QListView):
         self._thumbnail_cache_hits = set()  # Track unique cache hits by index
         self._thumbnail_cache_misses = set()  # Track unique cache misses by index
         self._flow_log_last: dict[str, float] = {}
+        self._masonry_strategy_logged = None
         self._masonry_sticky_until = 0.0
         self._masonry_sticky_page = 0
         self._last_masonry_window_signature = None
@@ -461,6 +462,10 @@ class ImageListView(QListView):
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
         self._drag_release_anchor_active = False
+        self._drag_scroll_max_baseline = 0
+        self._drag_target_page = None
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
@@ -567,10 +572,35 @@ class ImageListView(QListView):
         print(f"[{ts}][{component}][{level}] {message}")
 
     def _use_local_anchor_masonry(self, source_model=None) -> bool:
-        """Enable local-anchor masonry for large paginated datasets."""
-        # Safety fallback: disable local-anchor mode until drag-settle logic is stabilized.
-        # This trades peak jump performance for consistent, predictable scrolling behavior.
-        return False
+        """Enable local-anchor/windowed masonry when strict strategy is requested."""
+        return self._get_masonry_strategy(source_model) == "windowed_strict"
+
+    def _get_masonry_strategy(self, source_model=None) -> str:
+        """Return active masonry strategy for paginated mode control."""
+        strategy = "full_compat"
+        try:
+            raw = settings.value("masonry_strategy", "full_compat", type=str)
+            if raw:
+                strategy = str(raw).strip().lower()
+        except Exception:
+            strategy = "full_compat"
+
+        if strategy not in {"full_compat", "windowed_strict"}:
+            strategy = "full_compat"
+
+        is_paginated = bool(
+            source_model
+            and hasattr(source_model, "_paginated_mode")
+            and source_model._paginated_mode
+        )
+        if not is_paginated:
+            strategy = "full_compat"
+
+        if strategy != self._masonry_strategy_logged:
+            self._masonry_strategy_logged = strategy
+            self._log_flow("MASONRY", f"Strategy={strategy}", level="INFO")
+
+        return strategy
 
     def contextMenuEvent(self, event):
         self.context_menu.exec_(event.globalPos())
@@ -960,6 +990,7 @@ class ImageListView(QListView):
                 # which would break the Y-offset shift logic (which depends on first_index).
                 page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
                 total_items = source_model._total_count if hasattr(source_model, '_total_count') else 0
+                strategy = self._get_masonry_strategy(source_model)
                 local_anchor_mode = self._use_local_anchor_masonry(source_model)
                 
                 # CRITICAL FIX: Compute current page DIRECTLY from scroll position
@@ -1047,7 +1078,7 @@ class ImageListView(QListView):
                 # Accuracy mode: when most/all items are loaded, compute full masonry to preserve
                 # true column state. Windowed spacer mode cannot reproduce exact column heights.
                 loaded_count = len(items_data)
-                if total_items > 0 and not local_anchor_mode:
+                if total_items > 0 and strategy != "windowed_strict":
                     coverage = loaded_count / total_items
                     if coverage >= 0.95 and total_items <= 50000:
                         full_layout_mode = True
@@ -1233,7 +1264,7 @@ class ImageListView(QListView):
                     self._log_flow(
                         "MASONRY",
                         f"Calc start: tokens={len(items_data)} window_pages={window_start_page}-{window_end_page} "
-                        f"current_page={current_page}"
+                        f"current_page={current_page} mode={strategy}"
                     )
             else:
                 self._log_flow("MASONRY", f"Calc start (normal mode): items={len(items_data)}")
@@ -1898,6 +1929,11 @@ class ImageListView(QListView):
     def _on_scrollbar_pressed(self):
         """Called when user starts dragging scrollbar."""
         self._scrollbar_dragging = True
+        sb = self.verticalScrollBar()
+        self._drag_scroll_max_baseline = max(1, int(sb.maximum()))
+        self._drag_target_page = None
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
         self._drag_release_anchor_active = False
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
@@ -1936,7 +1972,8 @@ class ImageListView(QListView):
                 at_bottom_strict = max_v > 0 and sb.value() >= max_v - 2
                 at_top_strict = sb.value() <= 2
                 # Intent thresholds for drag preview: if user releases very low/high, snap to edge.
-                bottom_intent = at_bottom_strict or (self._drag_preview_mode and release_fraction >= 0.80)
+                # Keep this strict: broad thresholds caused accidental snaps near the lower region.
+                bottom_intent = at_bottom_strict or (self._drag_preview_mode and release_fraction >= 0.99)
                 top_intent = at_top_strict or (self._drag_preview_mode and release_fraction <= 0.02)
 
                 if bottom_intent:
@@ -1945,6 +1982,10 @@ class ImageListView(QListView):
                 elif top_intent:
                     self._drag_release_anchor_idx = 0
                     self._stick_to_edge = "top"
+                elif self._drag_target_page is not None and hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
+                    page_anchor = max(0, int(self._drag_target_page))
+                    self._drag_release_anchor_idx = max(0, min(total_items - 1, page_anchor * source_model.PAGE_SIZE))
+                    self._stick_to_edge = None
                 else:
                     self._drag_release_anchor_idx = max(0, min(total_items - 1, int(release_fraction * (total_items - 1))))
                     self._stick_to_edge = None
@@ -1952,10 +1993,19 @@ class ImageListView(QListView):
                 self._drag_release_anchor_until = time.time() + 8.0
                 if hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
                     self._current_page = self._drag_release_anchor_idx // source_model.PAGE_SIZE
+                    # Strict mode owner lock: keep release page as sole owner briefly
+                    # while pages/layout settle to prevent immediate window/page flip.
+                    strategy = self._get_masonry_strategy(source_model)
+                    if strategy == "windowed_strict":
+                        self._release_page_lock_page = int(self._current_page)
+                        self._release_page_lock_until = time.time() + 2.5
             else:
                 self._drag_release_anchor_active = False
                 self._drag_release_anchor_idx = None
                 self._drag_release_anchor_until = 0.0
+                self._release_page_lock_page = None
+                self._release_page_lock_until = 0.0
+            self._drag_scroll_max_baseline = 0
 
         if (max_v > 0 and sb.value() >= max_v - 2) or (self._stick_to_edge == "bottom"):
             self._pending_edge_snap = "bottom"
@@ -2917,6 +2967,7 @@ class ImageListView(QListView):
 
         total_pages = (source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
         last_page = max(0, total_pages - 1)
+        strategy = self._get_masonry_strategy(source_model)
         edge_snap_active = self._pending_edge_snap is not None and current_time < getattr(self, '_pending_edge_snap_until', 0.0)
         anchor_active = (
             getattr(self, '_drag_release_anchor_active', False)
@@ -2935,6 +2986,12 @@ class ImageListView(QListView):
         dragging_mode = self._scrollbar_dragging or self._drag_preview_mode
         local_anchor_mode = self._use_local_anchor_masonry(source_model)
         current_page = None
+        if dragging_mode:
+            baseline_max = max(1, int(getattr(self, '_drag_scroll_max_baseline', scroll_max if scroll_max > 0 else 1)))
+            slider_pos = int(self.verticalScrollBar().sliderPosition())
+            frac = max(0.0, min(1.0, slider_pos / baseline_max))
+            self._drag_target_page = max(0, min(last_page, int(round(frac * last_page))))
+            current_page = self._drag_target_page
         if stick_top:
             current_page = 0
             if scroll_offset > 0:
@@ -2957,6 +3014,14 @@ class ImageListView(QListView):
             if scroll_max > 0 and scroll_offset < scroll_max:
                 self.verticalScrollBar().setValue(scroll_max)
                 scroll_offset = scroll_max
+        # In strict mode, keep release target as page owner briefly after release.
+        release_lock_active = (
+            strategy == "windowed_strict"
+            and self._release_page_lock_page is not None
+            and current_time < getattr(self, '_release_page_lock_until', 0.0)
+        )
+        if current_page is None and release_lock_active:
+            current_page = max(0, min(last_page, int(self._release_page_lock_page)))
         # Local-anchor mode: page ownership comes from scrollbar fraction, not masonry visibility.
         if current_page is None and local_anchor_mode:
             if dragging_mode:
@@ -2990,6 +3055,9 @@ class ImageListView(QListView):
         if self._pending_edge_snap is not None and not edge_snap_active:
             self._pending_edge_snap = None
             self._pending_edge_snap_until = 0.0
+        if self._release_page_lock_page is not None and current_time >= getattr(self, '_release_page_lock_until', 0.0):
+            self._release_page_lock_page = None
+            self._release_page_lock_until = 0.0
 
         if current_page is None:
             # NAVIGATION FIX: Use internal height estimate if scrollbar is collapsed
@@ -3796,14 +3864,14 @@ class ImageListView(QListView):
         # During scrollbar drag, represent current target page from slider position.
         # Selection often remains on an old item and is misleading in this mode.
         if self._scrollbar_dragging or self._drag_preview_mode:
-            scroll_max = self.verticalScrollBar().maximum()
-            scroll_val = self.verticalScrollBar().value()
-            if scroll_max > 0:
-                fraction = max(0.0, min(1.0, scroll_val / scroll_max))
+            if self._drag_target_page is not None:
+                current_page = max(0, min(total_pages - 1, int(self._drag_target_page)))
             else:
-                fraction = 0.0
-            current_page = int(fraction * (total_pages - 1))
-            current_page = max(0, min(total_pages - 1, current_page))
+                scroll_max = max(1, int(getattr(self, '_drag_scroll_max_baseline', self.verticalScrollBar().maximum())))
+                slider_pos = int(self.verticalScrollBar().sliderPosition())
+                fraction = max(0.0, min(1.0, slider_pos / scroll_max))
+                current_page = int(round(fraction * (total_pages - 1)))
+                current_page = max(0, min(total_pages - 1, current_page))
 
         # Create label if needed
         if not self._page_indicator_label:
