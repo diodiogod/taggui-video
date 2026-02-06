@@ -1898,6 +1898,8 @@ class ImageListView(QListView):
     def _on_scrollbar_pressed(self):
         """Called when user starts dragging scrollbar."""
         self._scrollbar_dragging = True
+        # New drag gesture should not inherit prior edge lock.
+        self._stick_to_edge = None
         self._drag_release_anchor_active = False
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
@@ -1935,9 +1937,10 @@ class ImageListView(QListView):
             if total_items > 0:
                 at_bottom_strict = max_v > 0 and sb.value() >= max_v - 2
                 at_top_strict = sb.value() <= 2
-                # Intent thresholds for drag preview: if user releases very low/high, snap to edge.
-                bottom_intent = at_bottom_strict or (self._drag_preview_mode and release_fraction >= 0.80)
-                top_intent = at_top_strict or (self._drag_preview_mode and release_fraction <= 0.02)
+                # Intent thresholds for drag preview: snap only when user is very close to edges.
+                # Keep this strict so near-bottom targets (e.g. pages 17-20) remain reachable.
+                bottom_intent = at_bottom_strict or (self._drag_preview_mode and release_fraction >= 0.985)
+                top_intent = at_top_strict or (self._drag_preview_mode and release_fraction <= 0.015)
 
                 if bottom_intent:
                     self._drag_release_anchor_idx = total_items - 1
@@ -2746,6 +2749,16 @@ class ImageListView(QListView):
 
     def keyPressEvent(self, event):
         """Handle keyboard events in the image list."""
+        if event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End):
+            # If user explicitly navigates to edges via keyboard, drop any drag-anchor locks
+            # so default Home/End refocus + scroll behavior is not overridden by sticky state.
+            self._stick_to_edge = None
+            self._pending_edge_snap = None
+            self._pending_edge_snap_until = 0.0
+            self._drag_release_anchor_active = False
+            self._drag_release_anchor_idx = None
+            self._drag_release_anchor_until = 0.0
+
         if event.key() == Qt.Key.Key_Delete:
             # Toggle deletion marking for selected images
             selected_indices = self.selectedIndexes()
