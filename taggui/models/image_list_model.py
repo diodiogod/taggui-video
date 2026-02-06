@@ -515,6 +515,10 @@ class ImageListModel(QAbstractListModel):
         # Connect page_loaded signal to handler (for pagination mode)
         self.page_loaded.connect(self._on_page_loaded_signal)
         self._flow_log_last: dict[str, float] = {}
+        self._dimensions_update_timer = QTimer(self)
+        self._dimensions_update_timer.setSingleShot(True)
+        self._dimensions_update_timer.setInterval(300)
+        self._dimensions_update_timer.timeout.connect(self._emit_dimensions_updated_debounced)
 
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
@@ -527,6 +531,15 @@ class ImageListModel(QAbstractListModel):
             self._flow_log_last[throttle_key] = now
         ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
         print(f"[{ts}][{component}][{level}] {message}")
+
+    def _schedule_dimensions_updated(self):
+        """Coalesce frequent dimension updates into one masonry refresh signal."""
+        if self._dimensions_update_timer.isActive():
+            self._dimensions_update_timer.stop()
+        self._dimensions_update_timer.start()
+
+    def _emit_dimensions_updated_debounced(self):
+        self.dimensions_updated.emit()
 
     @property
     def is_paginated(self) -> bool:
@@ -1202,7 +1215,7 @@ class ImageListModel(QAbstractListModel):
                         # Using dimensions_updated instead of layoutChanged to avoid Qt crash
                         # (layoutChanged invalidates proxy indices mid-calculation with 32K items)
                         print(f"[ENRICH {timestamp}] Triggering final masonry recalc (dimensions only)")
-                        self.dimensions_updated.emit()
+                        self._schedule_dimensions_updated()
 
                         # Signal that enrichment is complete (for cache warming to start)
                         print(f"[ENRICH {timestamp}] Enrichment complete")
@@ -1776,9 +1789,8 @@ class ImageListModel(QAbstractListModel):
                 if self._db and self._save_executor:
                     self._save_executor.submit(lambda: self._db.update_image_dimensions(str(image.path), width, height))
 
-                # Trigger dimension update signal (debounced ideally, but direct emission works for now)
-                # We emit this so Masonry re-calculates the 1.0 -> Correct AR change
-                self.dimensions_updated.emit()
+                # Trigger debounced dimension update signal so masonry refreshes smoothly.
+                self._schedule_dimensions_updated()
 
         # Queue repaint (dataChanged)
         # In buffered mode, idx is local row, so standard len check fails
@@ -2190,13 +2202,48 @@ class ImageListModel(QAbstractListModel):
                  
              db_bg = ImageIndexDB(self._directory_path)
              
-             # Get files needing enrichment (width=512 AND height=512)
-             placeholders = db_bg.get_placeholder_files()
-             
+             # Prioritize currently loaded/visible pages so masonry in the active view improves first.
+             prioritized_rel_paths = []
+             seen = set()
+             with self._page_load_lock:
+                 loaded_pages = sorted(self._pages.keys())
+                 for page_num in loaded_pages:
+                     page = self._pages.get(page_num, [])
+                     for image in page:
+                         if not image:
+                             continue
+                         try:
+                             rel_path = str(image.path.relative_to(self._directory_path))
+                         except Exception:
+                             rel_path = image.path.name
+
+                         dims = image.dimensions
+                         dims_missing = (not dims or dims[0] is None or dims[1] is None)
+                         # In fast-load mode, 512x512 is often a placeholder and should be enriched.
+                         dims_placeholder = (dims == (512, 512))
+                         tags_missing = (not image.tags)
+
+                         if (dims_missing or dims_placeholder or tags_missing) and rel_path not in seen:
+                             prioritized_rel_paths.append(rel_path)
+                             seen.add(rel_path)
+
+             # Fill with DB candidates (legacy null-dim/no-tag rows).
+             db_candidates = db_bg.get_placeholder_files(limit=5000)
+             placeholders = prioritized_rel_paths[:]
+             for rel_path in db_candidates:
+                 if rel_path not in seen:
+                     placeholders.append(rel_path)
+                     seen.add(rel_path)
+
+             # Bound work per enrichment cycle to keep UI responsive.
+             max_enrich_per_cycle = 1500
+             placeholders = placeholders[:max_enrich_per_cycle]
+
              if not placeholders:
                  return
                  
-             print(f"[ENRICH] Found {len(placeholders)} images needing enrichment in DB")
+             print(f"[ENRICH] Found {len(placeholders)} images needing enrichment "
+                   f"(prioritized={len(prioritized_rel_paths)}, db_candidates={len(db_candidates)})")
              
              enriched_count = 0
              commit_interval = 100
