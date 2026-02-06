@@ -1721,15 +1721,18 @@ class ImageListModel(QAbstractListModel):
         """Called on main thread when thumbnail QImage is ready (batched to reduce repaints).
         
         Args:
-            idx: Global index of image
+            idx: Global index of image (OR Local Row in Buffered Mode)
             width, height: Original dimensions found during load (optional, -1 if unknown)
         """
         # JUST-IN-TIME ENRICHMENT:
         # If we found dimensions during loading and the model doesn't have them (or has None),
         # update them now to fix masonry layout instantly!
-        if idx < len(self.images) and width > 0 and height > 0:
-            image = self.images[idx]
-            # paginated mode check: self.images is shared, but we need to check if we really need updating
+        
+        # Use safe accessor for both Normal and Buffered modes
+        image = self.get_image_at_row(idx)
+        
+        if image and width > 0 and height > 0:
+            # Update dimensions if missing
             if not image.dimensions or image.dimensions[0] is None or image.dimensions[1] is None:
                 # print(f"[JIT] Updating dimensions for {image.path.name}: {width}x{height}")
                 image.dimensions = (width, height)
@@ -1742,7 +1745,15 @@ class ImageListModel(QAbstractListModel):
                 # We emit this so Masonry re-calculates the 1.0 -> Correct AR change
                 self.dimensions_updated.emit()
 
-        if idx < len(self.images):
+        # Queue repaint (dataChanged)
+        # In buffered mode, idx is local row, so standard len check fails
+        valid_idx = False
+        if self._paginated_mode:
+            if idx >= 0: valid_idx = True
+        elif idx < len(self.images):
+            valid_idx = True
+
+        if valid_idx:
             self._pending_thumbnail_updates.add(idx)
             # Restart timer to batch updates (coalesces rapid thumbnail loads)
             self._thumbnail_batch_timer.start()
