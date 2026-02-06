@@ -486,6 +486,9 @@ class ImageListModel(QAbstractListModel):
         self._is_scrolling = False  # Set by view during active scrolling
         self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail) to save when idle
         self._pending_cache_saves_lock = threading.Lock()
+        self._cache_flush_state_lock = threading.Lock()
+        self._cache_flush_inflight = False
+        self._cache_flush_chunk_size = 64
         self._pending_db_cache_flags = []  # Batch DB updates for thumbnail_cached flag (file_name strings)
         self._pending_db_cache_flags_lock = threading.Lock()
 
@@ -1005,14 +1008,8 @@ class ImageListModel(QAbstractListModel):
             if page_num not in self._page_load_order:
                 self._page_load_order.append(page_num)
 
-            # Check if we need to evict pages (but don't do it here - background thread unsafe)
-            if len(self._pages) > self.MAX_PAGES_IN_MEMORY:
-                # Schedule eviction on main thread via QTimer
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, self._evict_old_pages)
-
-    def _evict_old_pages(self):
-        """Evict old pages (called on main thread via QTimer)."""
+    def _evict_old_pages(self, emit_signal: bool = True):
+        """Evict old pages. Call from main thread."""
         evicted_any = False
         with self._page_load_lock:
             while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
@@ -1025,7 +1022,7 @@ class ImageListModel(QAbstractListModel):
                     evicted_any = True
 
         # If pages were evicted, notify masonry that pages changed (avoid layoutChanged crash!)
-        if evicted_any:
+        if evicted_any and emit_signal:
             self._emit_pages_updated()
 
     def _cancel_page_thumbnails(self, page_num: int):
@@ -1103,6 +1100,10 @@ class ImageListModel(QAbstractListModel):
         """Called on main thread when a page finishes loading (via signal)."""
         if not self._paginated_mode:
             return
+
+        # Enforce memory cap on the main thread.
+        # Avoid worker-thread QTimer scheduling races that can leave pages un-evicted.
+        self._evict_old_pages(emit_signal=False)
 
         self._log_flow("PAGE", f"Loaded page {page_num}; in-memory pages={len(self._pages)}",
                        throttle_key="page_loaded", every_s=0.2)
@@ -1652,32 +1653,54 @@ class ImageListModel(QAbstractListModel):
         if not force and self._is_scrolling:
             return  # Wait until truly idle
 
+        # Single-flight: avoid stacking many flush jobs during frequent idle/active transitions.
+        with self._cache_flush_state_lock:
+            if self._cache_flush_inflight and not force:
+                return
+            self._cache_flush_inflight = True
+
         # Do EVERYTHING including list access in background thread to avoid ANY main thread blocking
         def background_flush():
-            # Access the list in background thread to avoid main thread lock contention
-            with self._pending_cache_saves_lock:
-                if not self._pending_cache_saves:
-                    return
+            try:
+                # Access queue in background thread to avoid main-thread lock contention.
+                with self._pending_cache_saves_lock:
+                    if not self._pending_cache_saves:
+                        return
 
-                count = len(self._pending_cache_saves)
+                    count = len(self._pending_cache_saves)
 
-                # Only flush if we have a substantial batch (50+ items) to make it worthwhile
-                # Or force flush (e.g., on app close, or queue too large 300+)
-                if not force and count < 50:
-                    return  # Accumulate more before flushing
+                    # Only flush if we have a substantial batch (50+ items) to make it worthwhile
+                    # Or force flush (e.g., on app close).
+                    if not force and count < 50:
+                        return  # Accumulate more before flushing
 
-                # Swap with a new empty list
-                saves_to_submit = self._pending_cache_saves
-                self._pending_cache_saves = []
+                    # Chunked drain to avoid huge I/O bursts that can make the system feel sluggish.
+                    chunk_size = max(8, int(self._cache_flush_chunk_size))
+                    if force:
+                        saves_to_submit = self._pending_cache_saves
+                        self._pending_cache_saves = []
+                    else:
+                        saves_to_submit = self._pending_cache_saves[:chunk_size]
+                        self._pending_cache_saves = self._pending_cache_saves[chunk_size:]
 
-            # Print and submit all saves
-            print(f"[CACHE] Flushing {len(saves_to_submit)} pending cache saves")
+                    remaining = len(self._pending_cache_saves)
 
-            for path, mtime, width, thumbnail in saves_to_submit:
-                self._save_executor.submit(
-                    self._save_thumbnail_worker,
-                    path, mtime, width, thumbnail
-                )
+                print(f"[CACHE] Flushing {len(saves_to_submit)} pending cache saves (remaining={remaining})")
+
+                # Save sequentially in this background worker to avoid flooding executor queue
+                # with hundreds of tiny tasks.
+                for path, mtime, width, thumbnail in saves_to_submit:
+                    self._save_thumbnail_worker(path, mtime, width, thumbnail)
+            finally:
+                with self._cache_flush_state_lock:
+                    self._cache_flush_inflight = False
+
+                # If still idle and queue remains large, trigger another pass.
+                if not force and not self._is_scrolling:
+                    with self._pending_cache_saves_lock:
+                        still_pending = len(self._pending_cache_saves)
+                    if still_pending >= 50:
+                        self._flush_pending_cache_saves(force=False)
 
         # Run the ENTIRE flush (including lock acquisition) in executor
         self._save_executor.submit(background_flush)
@@ -1714,8 +1737,8 @@ class ImageListModel(QAbstractListModel):
         import time
 
         # Small delay to prevent disk I/O saturation (yield to other I/O operations)
-        # This combined with low thread priority ensures saves never block UI
-        time.sleep(0.05)  # 50ms delay between saves
+        # Keep low but non-zero to smooth writes without creating huge backlogs.
+        time.sleep(0.005)  # 5ms delay between saves
 
         # Removed noisy log: print(f"[CACHE SAVE] Background thread {threading.current_thread().name} saving: {path.name}")
         try:
