@@ -1033,6 +1033,7 @@ class ImageListModel(QAbstractListModel):
         self.cancel_pending_loads_except(keep_window)
 
         # 2. Submit new requests
+        requested_any = False
         for page_num in range(start_page, end_page + 1):
              should_load = False
              
