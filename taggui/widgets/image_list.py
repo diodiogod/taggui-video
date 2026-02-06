@@ -2614,18 +2614,17 @@ class ImageListView(QListView):
         end_page = min((source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE - 1,
                        current_page + buffer_pages)
 
-        # Trigger page loads for this range
-        needed_pages_set = set(range(start_page, end_page + 1))
-        
-        # Prioritize: Cancel any pending loads that are OUTSIDE our needed range
-        # This ensures that if user jumps from Page 0 to Page 100, we don't waste time loading Pages 1-10
-        if hasattr(source_model, 'cancel_pending_loads_except'):
-            source_model.cancel_pending_loads_except(needed_pages_set)
-
-        for page_num in range(start_page, end_page + 1):
-            if page_num not in source_model._pages and page_num not in source_model._loading_pages:
-                # print(f"[LOADER] Requesting load for Page {page_num}")
-                source_model._request_page_load(page_num)
+        # Trigger page loads for this range using DEBOUNCER
+        # This prevents flooding the model with hundreds of requests during fast drags
+        if hasattr(source_model, 'ensure_pages_for_range'):
+            start_row = start_page * source_model.PAGE_SIZE
+            end_row = (end_page + 1) * source_model.PAGE_SIZE
+            source_model.ensure_pages_for_range(start_row, end_row)
+        else:
+            # Fallback for old model versions
+            for page_num in range(start_page, end_page + 1):
+                if page_num not in source_model._pages and page_num not in source_model._loading_pages:
+                    source_model._request_page_load(page_num)
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
