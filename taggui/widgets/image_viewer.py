@@ -212,6 +212,36 @@ class ImageViewer(QWidget):
             # Re-enable auto-hide, show temporarily
             self._show_controls_temporarily()
 
+    def _show_error_placeholder(self, message: str):
+        """Display an error message on the scene."""
+        self.scene.clear()
+        
+        # Create standard background size
+        w, h = 800, 600
+        bg = QGraphicsRectItem(0, 0, w, h)
+        bg.setBrush(Qt.GlobalColor.black)
+        self.scene.addItem(bg)
+        
+        # Add text
+        from PySide6.QtWidgets import QGraphicsSimpleTextItem
+        from PySide6.QtGui import QFont, QColor
+        
+        # Truncate overly long messages
+        display_msg = str(message)
+        if len(display_msg) > 100:
+            display_msg = display_msg[:100] + "..."
+            
+        text = QGraphicsSimpleTextItem(f"⚠️ LOAD FAILED\n\n{display_msg}")
+        text.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        text.setBrush(QColor("#ff5555"))
+        
+        # Center text
+        text_rect = text.boundingRect()
+        text.setPos((w - text_rect.width()) / 2, (h - text_rect.height()) / 2)
+        
+        self.scene.addItem(text)
+        self.view.fitInView(bg, Qt.AspectRatioMode.KeepAspectRatio)
+
     @Slot()
     def load_image(self, proxy_image_index: QModelIndex, is_complete = True):
         try:
@@ -220,6 +250,7 @@ class ImageViewer(QWidget):
             print(f"[IMAGE_VIEWER] ERROR in load_image: {e}")
             import traceback
             traceback.print_exc()
+            self._show_error_placeholder(f"Read Error: {e}")
 
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True):
         persistent_image_index = QPersistentModelIndex(proxy_image_index)
@@ -279,10 +310,12 @@ class ImageViewer(QWidget):
                             self.video_player.play()
                     else:
                         print(f"Video loaded but no frame available: {image.path}")
+                        self._show_error_placeholder("Video loaded (no frame)")
                         return
                 else:
                     # Failed to load video, show error
                     print(f"Failed to load video: {image.path}")
+                    self._show_error_placeholder("Failed to open video file")
                     return
             else:
                 # Hide video controls for static images
