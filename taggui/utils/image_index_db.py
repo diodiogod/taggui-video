@@ -433,11 +433,11 @@ class ImageIndexDB:
 
 
     def _backfill_missing_metadata(self, directory_path: Path):
-        """Backfill missing file_size/ctime for legacy DB entries."""
+        """Backfill missing file_size/ctime/file_type for legacy DB entries."""
         try:
             cursor = self.conn.cursor()
-            # Find entries with missing size
-            cursor.execute("SELECT id, file_name FROM images WHERE file_size IS NULL")
+            # Find entries with missing metadata (size OR type OR ctime)
+            cursor.execute("SELECT id, file_name FROM images WHERE file_size IS NULL OR file_type IS NULL OR ctime IS NULL")
             rows = cursor.fetchall()
             
             if not rows:
@@ -450,19 +450,23 @@ class ImageIndexDB:
             for i, (row_id, rel_path) in enumerate(rows):
                 try:
                     full_path = directory_path / rel_path
-                    # Basic check to avoid crashing on long paths/invalid names
+                    if not full_path.exists():
+                        continue
+                        
                     stat = full_path.stat()
-                    updates.append((stat.st_size, stat.st_ctime, row_id))
+                    suffix = full_path.suffix.lower().lstrip('.')
+                    
+                    updates.append((stat.st_size, suffix, stat.st_ctime, row_id))
                 except (OSError, ValueError):
                     continue
                 
                 if len(updates) >= batch_size:
-                    cursor.executemany("UPDATE images SET file_size=?, ctime=? WHERE id=?", updates)
+                    cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
                     self.conn.commit()
                     updates = []
             
             if updates:
-                cursor.executemany("UPDATE images SET file_size=?, ctime=? WHERE id=?", updates)
+                cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
                 self.conn.commit()
                 
             print(f"[DB] Backfill complete.")
