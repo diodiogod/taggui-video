@@ -246,6 +246,10 @@ class ImageViewer(QWidget):
     def load_image(self, proxy_image_index: QModelIndex, is_complete = True):
         try:
             self._load_image_impl(proxy_image_index, is_complete)
+        except (pilimage.UnidentifiedImageError, OSError, ValueError) as e:
+            # Expected error for corrupt/unsupported files - suppress traceback
+            print(f"[IMAGE_VIEWER] Load failed (expected): {e}")
+            self._show_error_placeholder(f"Read Error: {e}")
         except Exception as e:
             print(f"[IMAGE_VIEWER] ERROR in load_image: {e}")
             import traceback

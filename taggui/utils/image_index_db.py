@@ -427,6 +427,48 @@ class ImageIndexDB:
              
         if new_files_count > 0:
              print(f"[DB] Bulk inserted {new_files_count} new files")
+        
+        # Trigger backfill for legacy entries (missing size/ctime)
+        self._backfill_missing_metadata(directory_path)
+
+
+    def _backfill_missing_metadata(self, directory_path: Path):
+        """Backfill missing file_size/ctime for legacy DB entries."""
+        try:
+            cursor = self.conn.cursor()
+            # Find entries with missing size
+            cursor.execute("SELECT id, file_name FROM images WHERE file_size IS NULL")
+            rows = cursor.fetchall()
+            
+            if not rows:
+                return
+
+            print(f"[DB] Backfilling metadata for {len(rows)} legacy items...")
+            updates = []
+            
+            batch_size = 1000
+            for i, (row_id, rel_path) in enumerate(rows):
+                try:
+                    full_path = directory_path / rel_path
+                    # Basic check to avoid crashing on long paths/invalid names
+                    stat = full_path.stat()
+                    updates.append((stat.st_size, stat.st_ctime, row_id))
+                except (OSError, ValueError):
+                    continue
+                
+                if len(updates) >= batch_size:
+                    cursor.executemany("UPDATE images SET file_size=?, ctime=? WHERE id=?", updates)
+                    self.conn.commit()
+                    updates = []
+            
+            if updates:
+                cursor.executemany("UPDATE images SET file_size=?, ctime=? WHERE id=?", updates)
+                self.conn.commit()
+                
+            print(f"[DB] Backfill complete.")
+            
+        except sqlite3.Error as e:
+            print(f"[DB] Backfill error: {e}")
 
 
     def _bulk_insert_chunk(self, data_chunk):
