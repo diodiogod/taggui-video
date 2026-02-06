@@ -261,6 +261,19 @@ class Scope(str, Enum):
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
 
+    def get_index_for_path(self, path: Path) -> int:
+        """Find the source row index for a given file path. Returns -1 if not found."""
+        try:
+             # Normal Mode: _image_files is a list of Image objects
+             if not self._paginated_mode:
+                 for i, img in enumerate(self._image_files):
+                     if img.path == path:
+                         return i
+             # Paginated Mode support could be added here by querying DB
+        except Exception:
+            pass
+        return -1
+
     # Signals for pagination
     page_loaded = Signal(int)  # Emitted when a page finishes loading (page_num)
     total_count_changed = Signal(int)  # Emitted when total image count changes
