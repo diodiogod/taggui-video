@@ -2089,7 +2089,7 @@ class ImageListModel(QAbstractListModel):
                       elif full_path.suffix.lower() == '.jxl':
                          from utils.jxlutil import get_jxl_size
                          dimensions = get_jxl_size(full_path)
-                       else:
+                      else:
                           # Try fast imagesize first
                           dimensions = imagesize.get(str(full_path))
                           
@@ -2126,7 +2126,7 @@ class ImageListModel(QAbstractListModel):
                                    if dimensions == (-1, -1) and full_path.suffix.lower() in ('.jpg', '.jpeg'):
                                         dimensions = self._read_jpeg_header_dimensions(full_path) or (-1, -1)
                        
-                       if dimensions and dimensions != (-1, -1):
+                      if dimensions and dimensions != (-1, -1):
                            mtime = full_path.stat().st_mtime
                            # Save dimensions
                            db_bg.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime, video_metadata)
