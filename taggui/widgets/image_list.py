@@ -461,6 +461,9 @@ class ImageListView(QListView):
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
         self._drag_release_anchor_active = False
+        self._drag_release_target_page = None
+        self._drag_release_target_until = 0.0
+        self._key_nav_token = 0
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
@@ -1903,6 +1906,8 @@ class ImageListView(QListView):
         self._drag_release_anchor_active = False
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
+        self._drag_release_target_page = None
+        self._drag_release_target_until = 0.0
         self._pending_edge_snap = None
         self._pending_edge_snap_until = 0.0
 
@@ -1955,10 +1960,14 @@ class ImageListView(QListView):
                 self._drag_release_anchor_until = time.time() + 8.0
                 if hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
                     self._current_page = self._drag_release_anchor_idx // source_model.PAGE_SIZE
+                    self._drag_release_target_page = self._current_page
+                    self._drag_release_target_until = time.time() + 2.5
             else:
                 self._drag_release_anchor_active = False
                 self._drag_release_anchor_idx = None
                 self._drag_release_anchor_until = 0.0
+                self._drag_release_target_page = None
+                self._drag_release_target_until = 0.0
 
         if (max_v > 0 and sb.value() >= max_v - 2) or (self._stick_to_edge == "bottom"):
             self._pending_edge_snap = "bottom"
@@ -2751,6 +2760,8 @@ class ImageListView(QListView):
         """Handle keyboard events in the image list."""
         is_home_end = event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End)
         if is_home_end:
+            self._key_nav_token += 1
+            nav_token = self._key_nav_token
             # If user explicitly navigates to edges via keyboard, drop any drag-anchor locks
             # so default Home/End refocus + scroll behavior is not overridden by sticky state.
             self._stick_to_edge = None
@@ -2761,6 +2772,8 @@ class ImageListView(QListView):
             self._drag_release_anchor_active = False
             self._drag_release_anchor_idx = None
             self._drag_release_anchor_until = 0.0
+            self._drag_release_target_page = None
+            self._drag_release_target_until = 0.0
 
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
             is_paginated = bool(source_model and getattr(source_model, '_paginated_mode', False))
@@ -2769,15 +2782,20 @@ class ImageListView(QListView):
                 page_size = int(getattr(source_model, 'PAGE_SIZE', 1000))
                 target_global_idx = 0 if event.key() == Qt.Key.Key_Home else (total_items - 1)
                 target_edge = "top" if event.key() == Qt.Key.Key_Home else "bottom"
+                target_page = target_global_idx // page_size
+                self._drag_release_target_page = target_page
+                self._drag_release_target_until = time.time() + 2.0
 
                 # Prime page loading around the requested edge so row mapping can succeed quickly.
-                target_page = target_global_idx // page_size
                 range_start = max(0, (target_page - 1) * page_size)
                 range_end = min(total_items - 1, ((target_page + 1) * page_size) - 1)
                 if hasattr(source_model, 'ensure_pages_for_range'):
                     source_model.ensure_pages_for_range(range_start, range_end)
 
                 def _focus_target(attempt=0):
+                    # Ignore stale callbacks from previous Home/End key presses.
+                    if nav_token != self._key_nav_token:
+                        return
                     row = -1
                     if hasattr(source_model, 'get_loaded_row_for_global_index'):
                         row = source_model.get_loaded_row_for_global_index(target_global_idx)
@@ -2996,6 +3014,10 @@ class ImageListView(QListView):
             and self._drag_release_anchor_idx is not None
             and current_time < getattr(self, '_drag_release_anchor_until', 0.0)
         )
+        target_page_lock_active = (
+            self._drag_release_target_page is not None
+            and current_time < getattr(self, '_drag_release_target_until', 0.0)
+        )
         stick_bottom = getattr(self, '_stick_to_edge', None) == "bottom"
         stick_top = getattr(self, '_stick_to_edge', None) == "top"
         if not anchor_active and getattr(self, '_drag_release_anchor_active', False):
@@ -3017,6 +3039,8 @@ class ImageListView(QListView):
             if scroll_max > 0 and scroll_offset < scroll_max:
                 self.verticalScrollBar().setValue(scroll_max)
                 scroll_offset = scroll_max
+        elif target_page_lock_active:
+            current_page = max(0, min(last_page, int(self._drag_release_target_page)))
         elif anchor_active:
             current_page = max(0, min(last_page, int(self._drag_release_anchor_idx // source_model.PAGE_SIZE)))
         elif edge_snap_active and self._pending_edge_snap == "top":
@@ -3053,6 +3077,9 @@ class ImageListView(QListView):
         if self._pending_edge_snap is not None and not edge_snap_active:
             self._pending_edge_snap = None
             self._pending_edge_snap_until = 0.0
+        if self._drag_release_target_page is not None and not target_page_lock_active:
+            self._drag_release_target_page = None
+            self._drag_release_target_until = 0.0
 
         if current_page is None:
             # NAVIGATION FIX: Use internal height estimate if scrollbar is collapsed
@@ -3200,39 +3227,40 @@ class ImageListView(QListView):
 
                 # DEBUG: Track items that fail mapping
                 skipped_count = 0
-                first_skipped = []
-                painted_count = 0
+                unresolved_min_idx = None
+                unresolved_max_idx = None
                 
                 # Check if filtering is active
                 is_filtered = hasattr(self.model(), 'filter') and self.model().filter is not None
 
-                if not visible_items and is_buffered:
+                real_visible_items = [it for it in visible_items if it.get('index', -1) >= 0]
+                if is_buffered and not real_visible_items:
+                    # Empty viewport can happen when the current masonry slice contains only spacer tokens
+                    # (window continuity markers) while real pages are still loading. Show feedback and
+                    # proactively request the current-page neighborhood to recover quickly.
                     painter.setPen(Qt.GlobalColor.lightGray)
                     painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "Loading target window...")
+
+                    if source_model and hasattr(source_model, 'ensure_pages_for_range'):
+                        total_items = int(getattr(source_model, '_total_count', 0) or 0)
+                        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                        if total_items > 0 and page_size > 0:
+                            locked_page_active = (
+                                self._drag_release_target_page is not None
+                                and time.time() < getattr(self, '_drag_release_target_until', 0.0)
+                            )
+                            if locked_page_active:
+                                cur_page = max(0, min((total_items - 1) // page_size, int(self._drag_release_target_page)))
+                            else:
+                                cur_page = max(0, min((total_items - 1) // page_size, int(getattr(self, '_current_page', 0))))
+                            force_start = max(0, (cur_page - 1) * page_size)
+                            force_end = min(total_items - 1, ((cur_page + 2) * page_size) - 1)
+                            source_model.ensure_pages_for_range(force_start, force_end)
                 for item in visible_items:
                     # Draw spacers (negative index)
                     if item['index'] < 0:
                         # Spacer tokens keep Y continuity for windowed masonry.
                         # Avoid painting a full opaque block; it can appear as a giant gray square.
-                        continue
-
-                    # Construct valid index for painting
-                    # ALWAYS map global index to loaded row in masonry mode
-                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
-                        src_row = source_model.get_loaded_row_for_global_index(item['index'])
-                    else:
-                        src_row = item['index']
-                        
-                    if src_row == -1:
-                        # Not loaded or belongs to a different view state
-                        skipped_count += 1
-                        continue
-                        
-                        
-                    src_index = source_model.index(src_row, 0)
-                    index = self.model().mapFromSource(src_index)
-
-                    if not index.isValid():
                         continue
 
                     # Adjust rect to viewport coordinates
@@ -3245,6 +3273,40 @@ class ImageListView(QListView):
 
                     # Skip if completely outside viewport (after buffer)
                     if visual_rect.bottom() < -buffer or visual_rect.top() > viewport_height + buffer:
+                        continue
+
+                    # Construct valid index for painting
+                    # ALWAYS map global index to loaded row in masonry mode
+                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                        src_row = source_model.get_loaded_row_for_global_index(item['index'])
+                    else:
+                        src_row = item['index']
+
+                    if src_row == -1:
+                        # Avoid blank holes: paint a lightweight placeholder while page mapping catches up.
+                        skipped_count += 1
+                        unresolved_min_idx = item['index'] if unresolved_min_idx is None else min(unresolved_min_idx, item['index'])
+                        unresolved_max_idx = item['index'] if unresolved_max_idx is None else max(unresolved_max_idx, item['index'])
+                        painter.save()
+                        painter.fillRect(visual_rect, self.palette().alternateBase())
+                        painter.setPen(self.palette().mid().color())
+                        painter.drawRect(visual_rect.adjusted(0, 0, -1, -1))
+                        painter.restore()
+                        continue
+
+                    src_index = source_model.index(src_row, 0)
+                    index = self.model().mapFromSource(src_index)
+
+                    if not index.isValid():
+                        # Same fallback for transient map invalidation.
+                        skipped_count += 1
+                        unresolved_min_idx = item['index'] if unresolved_min_idx is None else min(unresolved_min_idx, item['index'])
+                        unresolved_max_idx = item['index'] if unresolved_max_idx is None else max(unresolved_max_idx, item['index'])
+                        painter.save()
+                        painter.fillRect(visual_rect, self.palette().alternateBase())
+                        painter.setPen(self.palette().mid().color())
+                        painter.drawRect(visual_rect.adjusted(0, 0, -1, -1))
+                        painter.restore()
                         continue
                         
                     # SMART FAST SCROLL: Always show loaded thumbnails
@@ -3306,6 +3368,17 @@ class ImageListView(QListView):
                         # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
 
                     items_painted += 1
+
+                # If we had visible-but-unmapped items, proactively request that range.
+                # This prevents transient "empty strips" after long sessions/evictions.
+                if (
+                    is_buffered
+                    and skipped_count > 0
+                    and unresolved_min_idx is not None
+                    and unresolved_max_idx is not None
+                    and hasattr(source_model, 'ensure_pages_for_range')
+                ):
+                    source_model.ensure_pages_for_range(unresolved_min_idx, unresolved_max_idx)
 
                 painter.end()
             except Exception as e:
@@ -3791,10 +3864,16 @@ class ImageListView(QListView):
             return
 
         current_page = getattr(self, '_current_page', 0)
+        target_page_lock_active = (
+            self._drag_release_target_page is not None
+            and time.time() < getattr(self, '_drag_release_target_until', 0.0)
+        )
         if getattr(self, '_stick_to_edge', None) == "top":
             current_page = 0
         elif getattr(self, '_stick_to_edge', None) == "bottom":
             current_page = max(0, (total_items - 1) // source_model.PAGE_SIZE)
+        elif target_page_lock_active:
+            current_page = max(0, min((total_items - 1) // source_model.PAGE_SIZE, int(self._drag_release_target_page)))
         elif (
             getattr(self, '_drag_release_anchor_active', False)
             and self._drag_release_anchor_idx is not None
@@ -3809,6 +3888,8 @@ class ImageListView(QListView):
             visible_items = self._get_masonry_visible_items(viewport_rect)
             real_items = [it for it in visible_items if it.get('index', -1) >= 0]
             if real_items and getattr(self, '_stick_to_edge', None) is None and not (
+                target_page_lock_active
+                or
                 getattr(self, '_drag_release_anchor_active', False)
                 and self._drag_release_anchor_idx is not None
                 and time.time() < getattr(self, '_drag_release_anchor_until', 0.0)
