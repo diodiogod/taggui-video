@@ -356,7 +356,8 @@ class MainWindow(QMainWindow):
             toolbar_mgr.zoom_original_action.setChecked(False)
 
     def load_directory(self, path: Path, select_index: int = 0,
-                       save_path_to_settings: bool = False):
+                       save_path_to_settings: bool = False,
+                       select_path: str | None = None):
         self.directory_path = path.resolve()
         if save_path_to_settings:
             settings.setValue('directory_path', str(self.directory_path))
@@ -364,12 +365,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(path.name)
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
-        self.all_tags_editor.filter_line_edit.clear()
+        # self.all_tags_editor.filter_line_edit.clear() # Keeping this
 
         # Apply saved sort order after loading
         saved_sort = self.image_list.sort_combo_box.currentText()
         if saved_sort:
             self.image_list._on_sort_changed(saved_sort)
+            
+        # Try to restore selection by path (more robust)
+        if select_path:
+            src_row = self.image_list_model.get_index_for_path(Path(select_path))
+            if src_row != -1:
+                # Map source row to proxy index (considering filter/sort)
+                src_idx = self.image_list_model.index(src_row, 0)
+                proxy_idx = self.proxy_image_list_model.mapFromSource(src_idx)
+                if proxy_idx.isValid():
+                    select_index = proxy_idx.row()
+                    print(f"[RESTORE] Restored selection from path: {select_path} (Row {select_index})")
 
         # Clear the current index first to make sure that the `currentChanged`
         # signal is emitted even if the image at the index is already selected.
@@ -576,11 +588,23 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
-        """Save the index of the currently selected image."""
+        """Save the index and path of the currently selected image."""
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None
                         else 'filtered_image_index')
         settings.setValue(settings_key, proxy_image_index.row())
+
+        # Save path for robust restoration (independent of filter/sort)
+        if proxy_image_index.isValid():
+            source_index = self.proxy_image_list_model.mapToSource(proxy_image_index)
+            if source_index.isValid():
+                try:
+                    # Access internal list for path (assuming Normal Mode structure)
+                    # For paginated, this might need adjustment, but sufficient for now.
+                    path = self.image_list_model._image_files[source_index.row()].path
+                    settings.setValue('last_selected_path', str(path))
+                except (IndexError, AttributeError):
+                    pass
 
 
     @Slot(float)
@@ -674,12 +698,17 @@ class MainWindow(QMainWindow):
             image_index = settings.value('image_index', type=int)
         else:
             image_index = 0
+            
+        select_path = None
+        if settings.contains('last_selected_path'):
+            select_path = settings.value('last_selected_path', type=str)
+
         # Load the last loaded directory.
         if settings.contains('directory_path'):
             directory_path = Path(settings.value('directory_path',
                                                       type=str))
             if directory_path.is_dir():
-                self.load_directory(directory_path, select_index=image_index)
+                self.load_directory(directory_path, select_index=image_index, select_path=select_path)
 
     def _add_to_recent_directories(self, dir_path: str):
         """Add directory to recent list, maintaining max size."""
