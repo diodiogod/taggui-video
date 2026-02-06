@@ -246,6 +246,11 @@ def _load_from_cache(cache_key, items_data, column_width, spacing, num_columns):
             if i >= len(cached_items):
                 return None
             cached_aspect = cached_items[i]['aspect_ratio']
+            
+            # SPACER HANDLING: If aspect_ratio is a tuple (SPACER), skip float validation
+            if isinstance(aspect_ratio, tuple):
+                 continue
+
             if abs(cached_aspect - aspect_ratio) > 0.001:
                 return None
 
