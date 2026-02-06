@@ -1316,7 +1316,32 @@ class ImageListView(QListView):
                         self._recenter_after_layout = False
                         idx = self.currentIndex()
                         if idx.isValid():
-                            self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+                            # Manual scrollTo for masonry to ensure robust centering
+                            # (Standard scrollTo fails with custom layout/buffered data)
+                            try:
+                                # Get global index
+                                global_idx = idx.row()
+                                if hasattr(self.model(), 'mapToSource'):
+                                    src_idx = self.model().mapToSource(idx)
+                                    if hasattr(source_model, 'get_global_index_for_row'):
+                                        global_idx = source_model.get_global_index_for_row(src_idx.row())
+                                    else:
+                                        global_idx = src_idx.row()
+
+                                # Find item rect in masonry map
+                                item_rect = self._get_masonry_item_rect(global_idx)
+                                
+                                if not item_rect.isNull():
+                                    # Scroll to center
+                                    target_y = item_rect.center().y() - (self.viewport().height() // 2)
+                                    target_y = max(0, min(target_y, self.verticalScrollBar().maximum()))
+                                    self.verticalScrollBar().setValue(target_y)
+                                else:
+                                    # Fallback if item not found (e.g. not loaded yet)
+                                    self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+                            except Exception as e:
+                                print(f"[MASONRY] Manual scrollTo failed: {e}")
+                                self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
 
                     # Resume enrichment
                     def resume_enrichment_delayed():
