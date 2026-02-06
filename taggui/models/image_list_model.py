@@ -287,6 +287,32 @@ class ImageListModel(QAbstractListModel):
             pass
         return -1
 
+    def get_image_at_row(self, row: int):
+        """Get Image object at specific row, handling both normal and paginated modes."""
+        try:
+             # Normal Mode
+             if not self._paginated_mode:
+                 if 0 <= row < len(self._image_files):
+                     return self._image_files[row]
+                 return None
+             
+             # Paginated Mode
+             if not hasattr(self, '_pages'):
+                 return None
+                 
+             page_size = getattr(self, 'PAGE_SIZE', 1000)
+             page_num = row // page_size
+             idx_in_page = row % page_size
+             
+             # Note: logic requires page to be loaded. 
+             # If user selected it, page MUST be loaded.
+             if page_num in self._pages:
+                  if idx_in_page < len(self._pages[page_num]):
+                       return self._pages[page_num][idx_in_page]
+        except Exception:
+            pass
+        return None
+
     # Signals for pagination
     page_loaded = Signal(int)  # Emitted when a page finishes loading (page_num)
     total_count_changed = Signal(int)  # Emitted when total image count changes
