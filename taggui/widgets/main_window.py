@@ -604,6 +604,7 @@ class MainWindow(QMainWindow):
                     img = self.image_list_model.get_image_at_row(source_index.row())
                     if img:
                         settings.setValue('last_selected_path', str(img.path))
+                        print(f"[SAVE] Selected path: {img.path.name}")
                 except (IndexError, AttributeError):
                     pass
 
