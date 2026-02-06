@@ -437,13 +437,17 @@ class ImageIndexDB:
         try:
             cursor = self.conn.cursor()
             
-            # 1. Reset suspicious dimensions (Super Tall/Fat) to force re-scan with Smart Logic
-            # Thresholds match Smart Verification (0.2 and 5.0)
+            # 1. Reset suspicious dimensions (Super Tall/Fat OR Huge) to force re-scan with Smart Logic
+            # Thresholds match Smart Verification (0.2, 5.0, 12000px)
             cursor.execute("""
                 UPDATE images 
                 SET width=NULL, height=NULL, aspect_ratio=1.0 
                 WHERE width > 0 AND height > 0 
-                AND (CAST(width AS FLOAT)/height < 0.2 OR CAST(width AS FLOAT)/height > 5.0)
+                AND (
+                    (CAST(width AS FLOAT)/height < 0.2 OR CAST(width AS FLOAT)/height > 5.0)
+                    OR
+                    (width > 12000 OR height > 12000)
+                )
             """)
             if cursor.rowcount > 0:
                 print(f"[DB] Maintenance: Reset dimensions for {cursor.rowcount} suspicious items (will be re-scanned).")

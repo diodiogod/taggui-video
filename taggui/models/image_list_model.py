@@ -2106,6 +2106,10 @@ class ImageListModel(QAbstractListModel):
                               # Normal panoramas might trigger this, but verifying them via PIL is safe/fast enough.
                               if aspect_ratio < 0.2 or aspect_ratio > 5.0:
                                   is_suspicious = True
+                              # New check: Max Dimension (> 12,000px)
+                              # Many corrupted files report huge dims (e.g. 60,000px)
+                              elif dimensions[0] > 12000 or dimensions[1] > 12000:
+                                  is_suspicious = True
 
                           # For Suspicious items OR JPEGs (that risk EXIF rotation issues), verify with PIL
                           # (We verify suspicious PNGs/WebP too)
