@@ -49,6 +49,17 @@ class ImageIndexDB:
                 print(f"[DB] Reconnect failed: {e}")
                 return False
 
+    @staticmethod
+    def _normalize_bindings(bindings) -> tuple:
+        """Normalize SQL bindings into a tuple."""
+        if bindings is None:
+            return ()
+        if isinstance(bindings, tuple):
+            return bindings
+        if isinstance(bindings, list):
+            return tuple(bindings)
+        return (bindings,)
+
     _init_lock = threading.Lock() # Class-level lock for migrations
 
     def _init_db(self):
@@ -681,47 +692,47 @@ class ImageIndexDB:
             sort_dir = 'DESC'
 
         try:
-            cursor = self.conn.cursor()
-            offset = page * page_size
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                offset = page * page_size
 
-            # Handle stable random sorting if requested
-            sort_expr = sort_field
-            if sort_field == 'RANDOM()':
-                # Use a stable random based on ID and provided seed (or default)
-                seed = kwargs.get('random_seed', 1234567)
-                # Better mixing using LCG multiplier and a large prime modulus
-                sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
-            elif sort_field == 'ctime':
-                sort_expr = 'COALESCE(ctime, mtime)'
-            elif sort_field == 'file_size':
-                sort_expr = 'COALESCE(file_size, 0)'
+                # Handle stable random sorting if requested
+                sort_expr = sort_field
+                if sort_field == 'RANDOM()':
+                    seed = kwargs.get('random_seed', 1234567)
+                    sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+                elif sort_field == 'ctime':
+                    sort_expr = 'COALESCE(ctime, mtime)'
+                elif sort_field == 'file_size':
+                    sort_expr = 'COALESCE(file_size, 0)'
 
-            query = f'''
-                SELECT id, file_name, width, height, aspect_ratio, is_video,
-                       video_fps, video_duration, video_frame_count, mtime, rating,
-                       file_size, file_type, ctime
-                FROM images
-            '''
-            if filter_sql:
-                query += f' WHERE {filter_sql} '
-                
-            query += f' ORDER BY {sort_expr} {sort_dir} LIMIT ? OFFSET ?'
+                query = f'''
+                    SELECT id, file_name, width, height, aspect_ratio, is_video,
+                           video_fps, video_duration, video_frame_count, mtime, rating,
+                           file_size, file_type, ctime
+                    FROM images
+                '''
+                if filter_sql:
+                    query += f' WHERE {filter_sql} '
+                    
+                query += f' ORDER BY {sort_expr} {sort_dir} LIMIT ? OFFSET ?'
 
-            cursor.execute(query, tuple(bindings) + (page_size, offset))
-            rows = cursor.fetchall()
-            if not rows:
+                safe_bindings = self._normalize_bindings(bindings)
+                cursor.execute(query, safe_bindings + (page_size, offset))
+                rows = cursor.fetchall()
+                if not rows:
+                    return []
+
+                # sqlite3.Row normally supports dict(row), but under some reconnect/concurrency
+                # conditions rows may be plain tuples. Handle both robustly.
+                first = rows[0]
+                if isinstance(first, sqlite3.Row):
+                    return [dict(row) for row in rows]
+
+                col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+                if col_names:
+                    return [dict(zip(col_names, row)) for row in rows]
                 return []
-
-            # sqlite3.Row normally supports dict(row), but under some reconnect/concurrency
-            # conditions rows may be plain tuples. Handle both robustly.
-            first = rows[0]
-            if isinstance(first, sqlite3.Row):
-                return [dict(row) for row in rows]
-
-            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
-            if col_names:
-                return [dict(zip(col_names, row)) for row in rows]
-            return []
 
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
@@ -744,27 +755,28 @@ class ImageIndexDB:
             sort_dir = 'DESC'
 
         try:
-            cursor = self.conn.cursor()
+            with self._db_lock:
+                cursor = self.conn.cursor()
 
-            # Handle stable random sorting
-            sort_expr = sort_field
-            if sort_field == 'RANDOM()':
-                seed = kwargs.get('random_seed', 1234567)
-                sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
-            elif sort_field == 'ctime':
-                sort_expr = 'COALESCE(ctime, mtime)'
-            elif sort_field == 'file_size':
-                sort_expr = 'COALESCE(file_size, 0)'
+                # Handle stable random sorting
+                sort_expr = sort_field
+                if sort_field == 'RANDOM()':
+                    seed = kwargs.get('random_seed', 1234567)
+                    sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+                elif sort_field == 'ctime':
+                    sort_expr = 'COALESCE(ctime, mtime)'
+                elif sort_field == 'file_size':
+                    sort_expr = 'COALESCE(file_size, 0)'
 
-            query = f'SELECT aspect_ratio FROM images'
-            if filter_sql:
-                query += f' WHERE {filter_sql} '
-            
-            query += f' ORDER BY {sort_expr} {sort_dir}'
+                query = f'SELECT aspect_ratio FROM images'
+                if filter_sql:
+                    query += f' WHERE {filter_sql} '
+                
+                query += f' ORDER BY {sort_expr} {sort_dir}'
 
-            cursor.execute(query, bindings)
-            # Return list of floats (default to 1.0 if null)
-            return [row[0] if row[0] is not None else 1.0 for row in cursor.fetchall()]
+                safe_bindings = self._normalize_bindings(bindings)
+                cursor.execute(query, safe_bindings)
+                return [row[0] if row[0] is not None else 1.0 for row in cursor.fetchall()]
 
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
@@ -835,9 +847,10 @@ class ImageIndexDB:
             return []
 
         try:
-            cursor = self.conn.cursor()
-            cursor.execute('SELECT tag FROM image_tags WHERE image_id = ?', (image_id,))
-            return [row[0] for row in cursor.fetchall()]
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT tag FROM image_tags WHERE image_id = ?', (image_id,))
+                return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f'Database tag query error: {e}')
             return []
@@ -848,28 +861,28 @@ class ImageIndexDB:
             return {}
 
         try:
-            cursor = self.conn.cursor()
-            result: Dict[int, List[str]] = {img_id: [] for img_id in image_ids}
-            
-            # Batch queries to avoid SQLite limit (usually 999)
-            batch_size = 50
-            for i in range(0, len(image_ids), batch_size):
-                batch = image_ids[i:i + batch_size]
-                placeholders = ','.join('?' * len(batch))
-                cursor.execute(f'''
-                    SELECT image_id, tag FROM image_tags
-                    WHERE image_id IN ({placeholders})
-                    ORDER BY image_id
-                ''', tuple(batch))
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                result: Dict[int, List[str]] = {img_id: [] for img_id in image_ids}
+                
+                # Batch queries to avoid SQLite limit (usually 999)
+                batch_size = 50
+                for i in range(0, len(image_ids), batch_size):
+                    batch = image_ids[i:i + batch_size]
+                    placeholders = ','.join('?' * len(batch))
+                    cursor.execute(f'''
+                        SELECT image_id, tag FROM image_tags
+                        WHERE image_id IN ({placeholders})
+                        ORDER BY image_id
+                    ''', tuple(batch))
 
-                for row in cursor.fetchall():
-                    if not row or len(row) < 2:
-                        continue
-                    # Check if key exists (it should initialized above)
-                    if row[0] in result:
-                        result[row[0]].append(row[1])
-            
-            return result
+                    for row in cursor.fetchall():
+                        if not row or len(row) < 2:
+                            continue
+                        if row[0] in result:
+                            result[row[0]].append(row[1])
+                
+                return result
         except sqlite3.Error as e:
             print(f'Database tag query error: {e}')
             return {}
@@ -1217,4 +1230,3 @@ class ImageIndexDB:
                 
         except sqlite3.Error as e:
             print(f"Database backfill error: {e}")
-
