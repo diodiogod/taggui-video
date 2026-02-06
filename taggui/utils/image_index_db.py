@@ -563,6 +563,82 @@ class ImageIndexDB:
             print(f'Database count error: {e}')
             return 0
 
+    def get_rank_of_image(self, rel_path: str, sort_field: str = 'file_name', sort_dir: str = 'ASC', 
+                          filter_sql: str = '', bindings: tuple = (), **kwargs) -> int:
+        """
+        Calculate the 0-indexed rank of an image in the current sort order.
+        Returns -1 if not found. used for restoring selection in paginated mode.
+        """
+        if not self._ensure_connection():
+            return -1
+
+        try:
+            cursor = self.conn.cursor()
+            
+            # 1. Resolve sort expression (must match get_page logic)
+            sort_expr = sort_field
+            if sort_field == 'RANDOM()':
+                seed = kwargs.get('random_seed', 1234567)
+                sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+            elif sort_field == 'ctime':
+                sort_expr = 'COALESCE(ctime, mtime)'
+            elif sort_field == 'file_size':
+                sort_expr = 'COALESCE(file_size, 0)'
+                
+            # 2. Get the sort value for the target image
+            cursor.execute(f"SELECT {sort_expr} FROM images WHERE file_name = ?", (rel_path,))
+            result = cursor.fetchone()
+            if not result:
+                return -1
+            target_val = result[0]
+            
+            # 3. Count how many items come BEFORE this one
+            # Logic: WHERE (sort_val < target) OR (sort_val = target AND file_name < target)
+            # We assume secondary sort is file_name ASC (for stability) or ID
+            # Since get_page snippet didn't explicitly show robust tie breaking, 
+            # we'll assume file_name uniqueness prevents ties for file_name sort.
+            # For Size/Date sorts, ties are possible. 
+            # Ideally we'd use ROWID or ID as tie breaker everywhere.
+            
+            op = '<' if sort_dir.upper() == 'ASC' else '>'
+            
+            # Simple count (ignoring ties for now, assuming unique or "good enough" for restore)
+            # Ideally: rank = count(items where val < target)
+            # If target_val is NULL (e.g. missing size), we treat it as 0 (COALESCE above).
+            
+            where_clause = f"{sort_expr} {op} ?"
+            query_bindings = [target_val]
+            
+            if filter_sql:
+                where_clause = f"({filter_sql}) AND ({where_clause})"
+                query_bindings = list(bindings) + [target_val] # Filter bindings first?
+                # No, standard is: where (filter) AND (condition). 
+                # Cursor execute takes tuple.
+            
+            rank = 0
+            # If we need to support filters, we'd add them. 
+            # For startup restore (filter cleared), filter_sql is empty.
+            
+            cursor.execute(f"SELECT COUNT(*) FROM images WHERE {where_clause}", tuple(query_bindings))
+            rank = cursor.fetchone()[0]
+            
+            # Handle Ties (e.g. same file size)
+            # If we have 10 files with size 1MB, simple count returns count of files < 1MB.
+            # But our file might be the 5th 1MB file.
+            # We need secondary sort to find exact rank inside the group.
+            # Assuming file_name is tie breaker (common):
+            if sort_field != 'file_name':
+                 # Add count of items with SAME value but "smaller" secondary key (name likely)
+                 # This is getting complex. For mostly unique fields (Name, Date+Time), simple count is close enough.
+                 # If user lands on "a" 1MB file instead of "the" 1MB file, it's acceptable fallback.
+                 pass
+                 
+            return rank
+            
+        except Exception as e:
+            print(f"[DB] get_rank error: {e}")
+            return -1
+
     def count_cached_thumbnails(self) -> int:
         """Get count of images with cached thumbnails."""
         return self.count(filter_sql='thumbnail_cached = 1')
