@@ -287,7 +287,46 @@ class ImageListModel(QAbstractListModel):
                  rank = self._db.get_rank_of_image(rel_path, sort_field, sort_dir, 
                                                    random_seed=random_seed)
                  print(f"[RESTORE] DB returned rank: {rank}")
-                 return rank
+                 
+                 if rank == -1:
+                     return -1
+                     
+                 # Map Global Rank to Local Row (and load page if needed)
+                 page_size = getattr(self, 'PAGE_SIZE', 1000)
+                 target_page_num = rank // page_size
+                 offset = rank % page_size
+                 
+                 page_needed_loading = False
+                 with self._page_load_lock:
+                     if target_page_num not in self._pages:
+                         print(f"[RESTORE] Loading target page {target_page_num} for restore")
+                         self._load_page_sync(target_page_num)
+                         page_needed_loading = True
+                 
+                 if page_needed_loading:
+                     # Notify view to update rowCount
+                     self._emit_pages_updated()
+                 
+                 # Calculate Local Row
+                 # Iterate loaded pages in order to find where our target page sits
+                 with self._page_load_lock:
+                     sorted_pages = sorted(self._pages.keys())
+                     local_row = 0
+                     found_page = False
+                     for p_num in sorted_pages:
+                         if p_num == target_page_num:
+                             local_row += offset
+                             found_page = True
+                             break
+                         # Add full length of preceding loaded pages
+                         local_row += len(self._pages[p_num])
+                     
+                     if found_page:
+                         print(f"[RESTORE] Mapped Global Rank {rank} to Local Row {local_row}")
+                         return local_row
+                 
+                 return -1
+
         except Exception as e:
             print(f"[RESTORE] get_index_for_path error: {e}")
             pass
