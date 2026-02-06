@@ -1,6 +1,7 @@
 import random
 import re
 import sys
+import time
 from typing import List, Dict, Any, Optional
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -513,6 +514,19 @@ class ImageListModel(QAbstractListModel):
 
         # Connect page_loaded signal to handler (for pagination mode)
         self.page_loaded.connect(self._on_page_loaded_signal)
+        self._flow_log_last: dict[str, float] = {}
+
+    def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
+                  throttle_key: str | None = None, every_s: float | None = None):
+        """Timestamped, optionally throttled flow logging for pagination/masonry diagnostics."""
+        now = time.time()
+        if throttle_key and every_s is not None:
+            last = self._flow_log_last.get(throttle_key, 0.0)
+            if (now - last) < every_s:
+                return
+            self._flow_log_last[throttle_key] = now
+        ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
+        print(f"[{ts}][{component}][{level}] {message}")
 
     @property
     def is_paginated(self) -> bool:
@@ -574,7 +588,8 @@ class ImageListModel(QAbstractListModel):
 
             # Build aspect ratio list from loaded pages
             # Create a deep snapshot to avoid concurrent modification
-            print(f"[ASPECT_RATIOS] Iterating loaded pages: {loaded_pages}")
+            self._log_flow("ASPECT_RATIOS", f"Iterating loaded pages: {loaded_pages}",
+                           throttle_key="aspect_iter", every_s=1.0)
             for page_num in loaded_pages:
                 if page_num not in self._pages:
                     continue  # Page was evicted during iteration
@@ -597,7 +612,8 @@ class ImageListModel(QAbstractListModel):
         if items_data:
             min_idx = min(item[0] for item in items_data)
             max_idx = max(item[0] for item in items_data)
-            print(f"[ASPECT_RATIOS] Returning {len(items_data)} items, indices {min_idx}-{max_idx}")
+            self._log_flow("ASPECT_RATIOS", f"Returning {len(items_data)} items, indices {min_idx}-{max_idx}",
+                           throttle_key="aspect_return", every_s=1.0)
 
         return (items_data, first_index, last_index)
 
@@ -766,7 +782,7 @@ class ImageListModel(QAbstractListModel):
             self._loading_pages.add(page_num)
 
         # Submit background load
-        print(f"[PAGE request] Requesting Page {page_num}")
+        # print(f"[PAGE request] Requesting Page {page_num}")
         self._page_executor.submit(self._load_page_async, page_num)
 
     def _load_page_sync(self, page_num: int):
@@ -1047,7 +1063,8 @@ class ImageListModel(QAbstractListModel):
                  requested_any = True
 
         if requested_any:
-            print(f"[PAGINATION] Triggered loads for needed pages in range {start_page}-{end_page}")
+            self._log_flow("PAGINATION", f"Triggered loads for page range {start_page}-{end_page}",
+                           throttle_key="page_range", every_s=0.3)
 
     def event(self, event):
         """Handle custom events for page loading."""
@@ -1064,7 +1081,8 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode:
             return
 
-        print(f"[PAGE] Page {page_num} loaded, total pages in memory: {len(self._pages)}")
+        self._log_flow("PAGE", f"Loaded page {page_num}; in-memory pages={len(self._pages)}",
+                       throttle_key="page_loaded", every_s=0.2)
 
         # Track if we're still in initial bootstrap (first 3 pages: 0, 1, 2)
         if not hasattr(self, '_bootstrap_complete'):
@@ -1073,7 +1091,7 @@ class ImageListModel(QAbstractListModel):
         # Mark bootstrap complete once we have pages 0, 1, 2 loaded
         if not self._bootstrap_complete and 0 in self._pages and 1 in self._pages and 2 in self._pages:
             self._bootstrap_complete = True
-            print("[PAGE] Initial bootstrap complete, future page loads will be silent")
+            self._log_flow("PAGE", "Initial bootstrap complete; switching to pages_updated flow", level="INFO")
 
         # CRITICAL: Only trigger masonry recalc during initial bootstrap
         # After that, pages load in background without triggering UI updates
@@ -1108,7 +1126,8 @@ class ImageListModel(QAbstractListModel):
         with self._page_load_lock:
             loaded_pages = list(self._pages.keys())
         self.pages_updated.emit(loaded_pages)
-        print(f"[PAGE] Emitted pages_updated signal with {len(loaded_pages)} pages")
+        self._log_flow("PAGE", f"Emitted pages_updated with {len(loaded_pages)} pages",
+                       throttle_key="pages_updated", every_s=0.3)
 
 
     def _process_enrichment_queue(self):
