@@ -439,6 +439,13 @@ class ImageListModel(QAbstractListModel):
         )
         # Page loader executor for paginated mode
         self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
+        
+        # Debouncer for page requests during scrolling (avoids flooding executor)
+        self._page_debouncer = QTimer(self)
+        self._page_debouncer.setSingleShot(True)
+        self._page_debouncer.setInterval(50)  # 50ms delay
+        self._page_debouncer.timeout.connect(self._process_pending_page_requests)
+        self._pending_page_range = None
         # DISABLED: Cache warming causes UI blocking
         # Cache warming executor: 2 workers for proactive cache building when idle (low priority)
         # Reduced to 1 worker to minimize resource usage during idle warming
@@ -1001,30 +1008,38 @@ class ImageListModel(QAbstractListModel):
                 print(f"[PAGE] Cancelled {cancelled_count} pending thumbnails for evicted page {page_num}")
 
     def ensure_pages_for_range(self, start_idx: int, end_idx: int):
-        """Ensure pages covering the given index range are loaded (for scroll handler)."""
+        """Ensure pages covering the given index range are loaded (throttled for smooth scrolling)."""
         if not self._paginated_mode:
             return
 
+        # Update pending range and restart timer (debounce)
+        self._pending_page_range = (start_idx, end_idx)
+        self._page_debouncer.start()
+
+    def _process_pending_page_requests(self):
+        """Process the latest requested page range (called by debounce timer)."""
+        if not self._pending_page_range or not self._paginated_mode:
+            return
+
+        start_idx, end_idx = self._pending_page_range
         start_page = self._get_page_for_index(start_idx)
         end_page = self._get_page_for_index(end_idx)
         
-        # print(f"[PAGINATION] Ensuring range {start_idx}-{end_idx} (Pages {start_page}-{end_page})")
+        # print(f"[PAGINATION] Processing range {start_idx}-{end_idx} (Pages {start_page}-{end_page})")
 
-        requested_any = False
+        # 1. Cleanup: Cancel pending loads that are far outside the current view
+        # Keep current view +/- 2 pages
+        keep_window = set(range(start_page - 2, end_page + 3))
+        self.cancel_pending_loads_except(keep_window)
+
+        # 2. Submit new requests
         for page_num in range(start_page, end_page + 1):
-             # Force retry if page stuck in loading for > 15s?
-             # For now, just rely on strict checking
              should_load = False
              
              with self._page_load_lock:
                  if page_num not in self._pages:
                      if page_num not in self._loading_pages:
                          should_load = True
-                     else:
-                         # Check if it's been loading for too long (stuck?)
-                         # This requires tracking load start time, which we don't do yet.
-                         # Instead, we rely on the robustness of _request_page_load
-                         pass
              
              if should_load:
                  self._request_page_load(page_num)
