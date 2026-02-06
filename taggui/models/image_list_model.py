@@ -963,31 +963,32 @@ class ImageListModel(QAbstractListModel):
         """Store a loaded page and evict old pages if needed."""
         with self._page_load_lock:
             self._pages[page_num] = images
-            if page_num not in self._page_load_order:
-                self._page_load_order.append(page_num)
+            # Update LRU order: move to end (most recent)
+            if page_num in self._page_load_order:
+                self._page_load_order.remove(page_num)
+            self._page_load_order.append(page_num)
 
-            # Check if we need to evict pages (but don't do it here - background thread unsafe)
+            # Check if we need to evict pages
             if len(self._pages) > self.MAX_PAGES_IN_MEMORY:
-                # Schedule eviction on main thread via QTimer
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, self._evict_old_pages)
+                # Evict IMMEDIATELY within lock to stop memory bloat
+                evicted_count = 0
+                while len(self._pages) > self.MAX_PAGES_IN_MEMORY and self._page_load_order:
+                    oldest_page = self._page_load_order.pop(0)
+                    if oldest_page in self._pages:
+                        # Cancel pending thumbnail loads for evicted page
+                        self._cancel_page_thumbnails(oldest_page)
+                        del self._pages[oldest_page]
+                        evicted_count += 1
+                
+                if evicted_count > 0:
+                    # print(f"[PAGE] Evicted {evicted_count} pages, {len(self._pages)} remain")
+                    # Schedule UI update on main thread
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, self._emit_pages_updated)
 
     def _evict_old_pages(self):
-        """Evict old pages (called on main thread via QTimer)."""
-        evicted_any = False
-        with self._page_load_lock:
-            while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
-                oldest_page = self._page_load_order.pop(0)
-                if oldest_page in self._pages:
-                    # Cancel pending thumbnail loads for evicted page
-                    self._cancel_page_thumbnails(oldest_page)
-                    del self._pages[oldest_page]
-                    # print(f"[PAGE] Evicted page {oldest_page}, {len(self._pages)} pages remain")
-                    evicted_any = True
-
-        # If pages were evicted, notify masonry that pages changed (avoid layoutChanged crash!)
-        if evicted_any:
-            self._emit_pages_updated()
+        """DEPRECATED: Eviction now happens synchronously in _store_page."""
+        pass
 
     def _cancel_page_thumbnails(self, page_num: int):
         """Cancel pending thumbnail loading futures for an evicted page."""
