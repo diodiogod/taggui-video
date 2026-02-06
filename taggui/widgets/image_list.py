@@ -2749,15 +2749,58 @@ class ImageListView(QListView):
 
     def keyPressEvent(self, event):
         """Handle keyboard events in the image list."""
-        if event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End):
+        is_home_end = event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End)
+        if is_home_end:
             # If user explicitly navigates to edges via keyboard, drop any drag-anchor locks
             # so default Home/End refocus + scroll behavior is not overridden by sticky state.
             self._stick_to_edge = None
             self._pending_edge_snap = None
             self._pending_edge_snap_until = 0.0
+            self._scrollbar_dragging = False
+            self._drag_preview_mode = False
             self._drag_release_anchor_active = False
             self._drag_release_anchor_idx = None
             self._drag_release_anchor_until = 0.0
+
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+            is_paginated = bool(source_model and getattr(source_model, '_paginated_mode', False))
+            if is_paginated and hasattr(source_model, '_total_count') and source_model._total_count > 0:
+                total_items = int(source_model._total_count)
+                page_size = int(getattr(source_model, 'PAGE_SIZE', 1000))
+                target_global_idx = 0 if event.key() == Qt.Key.Key_Home else (total_items - 1)
+                target_edge = "top" if event.key() == Qt.Key.Key_Home else "bottom"
+
+                # Prime page loading around the requested edge so row mapping can succeed quickly.
+                target_page = target_global_idx // page_size
+                range_start = max(0, (target_page - 1) * page_size)
+                range_end = min(total_items - 1, ((target_page + 1) * page_size) - 1)
+                if hasattr(source_model, 'ensure_pages_for_range'):
+                    source_model.ensure_pages_for_range(range_start, range_end)
+
+                def _focus_target(attempt=0):
+                    row = -1
+                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                        row = source_model.get_loaded_row_for_global_index(target_global_idx)
+
+                    if row >= 0 and self.model():
+                        idx = self.model().index(row, 0)
+                        if idx.isValid():
+                            self.setCurrentIndex(idx)
+                            self._stick_to_edge = target_edge
+                            sb = self.verticalScrollBar()
+                            if target_edge == "top":
+                                sb.setValue(0)
+                            else:
+                                sb.setValue(sb.maximum())
+                            self.viewport().update()
+                            return
+
+                    if attempt < 20:
+                        QTimer.singleShot(50, lambda: _focus_target(attempt + 1))
+
+                QTimer.singleShot(0, _focus_target)
+                event.accept()
+                return
 
         if event.key() == Qt.Key.Key_Delete:
             # Toggle deletion marking for selected images
@@ -2776,6 +2819,23 @@ class ImageListView(QListView):
 
         # Default behavior for other keys
         super().keyPressEvent(event)
+
+        # In local-anchor masonry, default Qt Home/End may update selection without moving
+        # viewport because the selected row can be outside current masonry window.
+        # Force an explicit edge jump so list refocus always matches viewer/index.
+        if is_home_end:
+            go_home = event.key() == Qt.Key.Key_Home
+            def _force_edge_refocus():
+                sb = self.verticalScrollBar()
+                if go_home:
+                    self._stick_to_edge = "top"
+                    sb.setValue(0)
+                else:
+                    self._stick_to_edge = "bottom"
+                    sb.setValue(sb.maximum())
+                self.viewport().update()
+
+            QTimer.singleShot(0, _force_edge_refocus)
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""

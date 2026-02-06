@@ -236,4 +236,4 @@ echo Starting TagGUI...
 echo ======================================================
 echo.
 python taggui/run_gui.py
-pause
+exit /b %ERRORLEVEL%
