@@ -269,7 +269,20 @@ class ImageListModel(QAbstractListModel):
                  for i, img in enumerate(self._image_files):
                      if img.path == path:
                          return i
-             # Paginated Mode support could be added here by querying DB
+             else:
+                 # Paginated Mode: Query DB for rank
+                 if self._db is None: return -1
+                 try:
+                     rel_path = str(path.relative_to(self._directory_path))
+                 except ValueError:
+                     rel_path = path.name
+                     
+                 sort_field = getattr(self, '_sort_field', 'file_name')
+                 sort_dir = getattr(self, '_sort_dir', 'ASC')
+                 random_seed = getattr(self, '_random_seed', 1234567)
+                 
+                 return self._db.get_rank_of_image(rel_path, sort_field, sort_dir, 
+                                                   random_seed=random_seed)
         except Exception:
             pass
         return -1
