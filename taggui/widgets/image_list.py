@@ -1199,9 +1199,17 @@ class ImageListView(QListView):
             # Final total height estimation
             import math
             if math.isnan(avg_height): avg_height = 100.0
+
+            # Calculate actual columns to fix estimation error
+            # (Previously assumed 1 column, causing massive overestimation with many columns)
+            column_width = self.current_thumbnail_size
+            spacing = 2
+            viewport_width = self.viewport().width()
+            num_columns = max(1, (viewport_width + spacing) // (column_width + spacing))
             
-            self._masonry_total_height = int(avg_height * total_items)
-            self._masonry_total_height = max(self._masonry_total_height, total_items * 10)
+            estimated_rows = math.ceil(total_items / num_columns)
+            self._masonry_total_height = int(estimated_rows * avg_height)
+            self._masonry_total_height = max(self._masonry_total_height, estimated_rows * 10)
 
             # 5. BUFFER MODE SHIFTING & RESCUE
             # Buffer mode logic
