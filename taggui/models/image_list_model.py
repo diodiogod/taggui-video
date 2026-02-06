@@ -414,7 +414,7 @@ class ImageListModel(QAbstractListModel):
         self._pages: dict = {}  # page_num -> list[Image]
         self._page_load_order: list = []  # LRU tracking
         self._loading_pages: set = set()  # Pages currently being loaded
-        self._page_load_lock = threading.Lock()
+        self._page_load_lock = threading.RLock()
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
         self._sort_field = 'mtime'
