@@ -299,14 +299,26 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
+        print("[SHUTDOWN] closeEvent triggered")
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
         # Save marker size setting
-        settings.setValue('fixed_marker_size', self.toolbar_manager.fixed_marker_size_spinbox.value())
+        if hasattr(self, 'toolbar_manager'):
+            settings.setValue('fixed_marker_size', self.toolbar_manager.fixed_marker_size_spinbox.value())
+
+        # Manually save current selection to ensure it persists
+        if hasattr(self, 'image_list') and hasattr(self.image_list, 'list_view'):
+             idx = self.image_list.list_view.currentIndex()
+             if idx.isValid():
+                 # Use the slot directly to save
+                 self.save_image_index(idx)
 
         # Flush any pending DB updates before closing
         if hasattr(self, 'image_list_model'):
             self.image_list_model._flush_db_cache_flags()
+            
+        settings.sync()
+        print("[SHUTDOWN] Settings synced")
 
         super().closeEvent(event)
 
