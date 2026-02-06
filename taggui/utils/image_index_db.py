@@ -428,14 +428,28 @@ class ImageIndexDB:
         if new_files_count > 0:
              print(f"[DB] Bulk inserted {new_files_count} new files")
         
-        # Trigger backfill for legacy entries (missing size/ctime)
-        self._backfill_missing_metadata(directory_path)
+        # Trigger maintenance (metadata backfill + dimension repair)
+        self.run_maintenance(directory_path)
 
 
-    def _backfill_missing_metadata(self, directory_path: Path):
-        """Backfill missing file_size/ctime/file_type for legacy DB entries."""
+    def run_maintenance(self, directory_path: Path):
+        """Run maintenance: backfill metadata and reset suspicious dimensions."""
         try:
             cursor = self.conn.cursor()
+            
+            # 1. Reset suspicious dimensions (Super Tall/Fat) to force re-scan with Smart Logic
+            # Thresholds match Smart Verification (0.2 and 5.0)
+            cursor.execute("""
+                UPDATE images 
+                SET width=NULL, height=NULL, aspect_ratio=1.0 
+                WHERE width > 0 AND height > 0 
+                AND (CAST(width AS FLOAT)/height < 0.2 OR CAST(width AS FLOAT)/height > 5.0)
+            """)
+            if cursor.rowcount > 0:
+                print(f"[DB] Maintenance: Reset dimensions for {cursor.rowcount} suspicious items (will be re-scanned).")
+                self.conn.commit()
+
+            # 2. Backfill missing metadata
             # Find entries with missing metadata (size OR type OR ctime)
             cursor.execute("SELECT id, file_name FROM images WHERE file_size IS NULL OR file_type IS NULL OR ctime IS NULL")
             rows = cursor.fetchall()
@@ -472,7 +486,7 @@ class ImageIndexDB:
             print(f"[DB] Backfill complete.")
             
         except sqlite3.Error as e:
-            print(f"[DB] Backfill error: {e}")
+            print(f"[DB] Maintenance error: {e}")
 
 
     def _bulk_insert_chunk(self, data_chunk):
