@@ -33,6 +33,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.filter: list | None = None
+        self._media_type_filter = 'All'
         self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
         
         # Forward pages_updated signal from source model AND invalidate filter to update mapping
@@ -85,6 +86,23 @@ class ProxyImageListModel(QSortFilterProxyModel):
                         result.append((proxy_row, all_aspect_ratios[source_row]))
 
             return result
+
+    def set_media_type_filter(self, media_type: str):
+        """Set media type filter ('All', 'Images', or 'Videos')."""
+        if media_type == self._media_type_filter:
+            return
+        self._media_type_filter = media_type
+
+        # In paginated mode, delegate to source model (applied via SQL in set_filter)
+        source_model = self.sourceModel()
+        if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            if hasattr(source_model, 'set_media_type_filter'):
+                source_model.set_media_type_filter(media_type)
+            return
+
+        # Normal mode: invalidate to re-run filterAcceptsRow
+        self.invalidateFilter()
+        self.filter_changed.emit()
 
     def set_filter(self, new_filter: list | None):
         self.filter = new_filter
@@ -207,27 +225,36 @@ class ProxyImageListModel(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:
-        # Show all images when there is no filter.
-        if self.filter is None:
-            return True
-            
         # In Paginated Mode, source already filters via SQL.
         source_model = self.sourceModel()
         if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
              return True
 
+        # Show all images when there is no filter and no media type filter.
+        if self.filter is None and self._media_type_filter == 'All':
+            return True
+
         image_index = self.sourceModel().index(source_row, 0)
         image: Image = self.sourceModel().data(image_index,
                                                Qt.ItemDataRole.UserRole)
 
-        # In paginated mode, image might be None if page isn't loaded yet.
-        # Accept unloaded images to allow them to appear and trigger loading.
+        # Accept unloaded images (None) to avoid hiding them.
         if image is None:
             return True
+
+        # Check media type filter
+        if self._media_type_filter == 'Images' and image.is_video:
+            return False
+        if self._media_type_filter == 'Videos' and not image.is_video:
+            return False
 
         return self.does_image_match_filter(image, self.filter)
 
     def is_image_in_filtered_images(self, image: Image) -> bool:
+        if self._media_type_filter == 'Images' and image.is_video:
+            return False
+        if self._media_type_filter == 'Videos' and not image.is_video:
+            return False
         return (self.filter is None
                 or self.does_image_match_filter(image, self.filter))
 
