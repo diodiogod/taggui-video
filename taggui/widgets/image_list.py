@@ -1881,6 +1881,7 @@ class ImageListView(QListView):
                     sb = self.verticalScrollBar()
                     stable_max = self._strict_canonical_domain_max(source_model)
                     old_val = sb.value()
+                    old_max = max(1, sb.maximum())
                     if self._scrollbar_dragging or self._drag_preview_mode:
                         self._restore_strict_drag_domain(sb=sb, source_model=source_model)
                     else:
@@ -1913,8 +1914,10 @@ class ImageListView(QListView):
                             sb.setValue(max(0, min(target_val, stable_max)))
                             self._last_stable_scroll_value = sb.value()
                         else:
-                            if old_val > stable_max:
-                                sb.setValue(stable_max)
+                            # Ratio-preserving: keep thumb at the same visual fraction.
+                            ratio = old_val / old_max
+                            target_val = max(0, min(int(round(ratio * stable_max)), stable_max))
+                            sb.setValue(target_val)
                         sb.blockSignals(prev_block)
                 elif release_anchor_active:
                     release_anchor_found = False
@@ -3005,6 +3008,7 @@ class ImageListView(QListView):
                 # Block signals through the entire strict correction to prevent
                 # _on_scroll_value_changed from recording transient values.
                 saved_val = self.verticalScrollBar().value()
+                saved_max = max(1, self.verticalScrollBar().maximum())
                 self.verticalScrollBar().blockSignals(True)
                 try:
                     super().updateGeometries()
@@ -3026,7 +3030,9 @@ class ImageListView(QListView):
                             _pf = max(0.0, min(1.0, int(_rl_page) / max(1, _tp - 1))) if _tp > 1 else 0.0
                             restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
                         else:
-                            restored_val = min(saved_val, keep_max)
+                            # Ratio-preserving: keep thumb at the same visual fraction.
+                            ratio = saved_val / saved_max
+                            restored_val = max(0, min(int(round(ratio * keep_max)), keep_max))
                         if self.verticalScrollBar().value() != restored_val:
                             self.verticalScrollBar().setValue(restored_val)
                 finally:
@@ -3676,14 +3682,9 @@ class ImageListView(QListView):
                 if page_num not in source_model._pages and page_num not in source_model._loading_pages:
                     source_model._request_page_load(page_num)
 
-        # Strict release lock can end once the target page is resident.
-        if release_lock_active:
-            try:
-                if int(self._release_page_lock_page) in source_model._pages:
-                    self._release_page_lock_page = None
-                    self._release_page_lock_until = 0.0
-            except Exception:
-                pass
+        # Strict release lock persists for its full duration (4s) to prevent
+        # thumb drift from canonical domain growth during post-release masonry
+        # recalculations. Do NOT clear early when the page loads.
 
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
@@ -3818,6 +3819,8 @@ class ImageListView(QListView):
                             self._restore_strict_drag_domain(sb=sb, source_model=source_model)
                         else:
                             prev_block = sb.blockSignals(True)
+                            _old_max = max(1, sb.maximum())
+                            _old_val = sb.value()
                             if sb.maximum() != keep_max:
                                 sb.setRange(0, keep_max)
                             # Re-anchor to locked page when domain changed.
@@ -3832,6 +3835,10 @@ class ImageListView(QListView):
                                 _tp = max(1, (_ti + _ps - 1) // _ps) if _ps > 0 else 1
                                 _pf = max(0.0, min(1.0, int(_rl_page) / max(1, _tp - 1))) if _tp > 1 else 0.0
                                 sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
+                            elif _old_max != keep_max and keep_max > 0:
+                                # Ratio-preserving correction when domain changed.
+                                _ratio = _old_val / _old_max
+                                sb.setValue(max(0, min(int(round(_ratio * keep_max)), keep_max)))
                             elif sb.value() > keep_max:
                                 sb.setValue(keep_max)
                             sb.blockSignals(prev_block)
