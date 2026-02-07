@@ -233,44 +233,37 @@ class ThumbnailCache:
             return None
 
     def save_thumbnail(self, file_path: Path, mtime: float, size: int, icon: QIcon):
-        """
-        Save thumbnail to cache.
+        """Save thumbnail to cache from QIcon (DEPRECATED — prefer save_thumbnail_qimage)."""
+        if not self.enabled or icon.isNull():
+            return
+        try:
+            pixmap = icon.pixmap(size, size)
+            if not pixmap.isNull():
+                pixmap.save(str(self._get_cache_path(self._get_cache_key(file_path, mtime, size))), 'WEBP', quality=85)
+        except Exception as e:
+            print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
 
-        Args:
-            file_path: Path to the image file
-            mtime: File modification time
-            size: Thumbnail size in pixels
-            icon: QIcon to cache
+    def save_thumbnail_qimage(self, file_path: Path, mtime: float, size: int, qimage):
+        """Save thumbnail to cache from QImage (thread-safe, no QPixmap needed).
+
+        Unlike save_thumbnail(), this method uses only QImage which is safe
+        to call from any thread.  QPixmap operations are main-thread-only and
+        cause GIL contention when used in worker threads.
         """
         if not self.enabled:
-            # Don't log every disabled save (too noisy)
             return
-        if icon.isNull():
-            print(f"[CACHE ERROR] Cannot save null icon for: {file_path.name}")
+        if qimage is None or qimage.isNull():
             return
 
         cache_key = self._get_cache_key(file_path, mtime, size)
         cache_path = self._get_cache_path(cache_key)
 
         try:
-            # Get pixmap from icon and save as WebP (much smaller than PNG)
-            pixmap = icon.pixmap(size, size)
-            if pixmap.isNull():
-                print(f"[CACHE ERROR] Icon has null pixmap for: {file_path.name}")
-                return
-
-            result = pixmap.save(str(cache_path), 'WEBP', quality=85)
+            result = qimage.save(str(cache_path), 'WEBP', quality=85)
             if not result:
-                print(f"[CACHE ERROR] pixmap.save() failed for: {file_path.name} -> {cache_path}")
-                # Check if directory exists and is writable
-                if not cache_path.parent.exists():
-                    print(f"[CACHE ERROR] Cache subdirectory missing: {cache_path.parent}")
-                elif not cache_path.parent.is_dir():
-                    print(f"[CACHE ERROR] Cache path is not a directory: {cache_path.parent}")
+                print(f"[CACHE ERROR] qimage.save() failed for: {file_path.name} -> {cache_path}")
         except Exception as e:
             print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
-            import traceback
-            traceback.print_exc()
 
     def clear_old_cache(self, max_age_days: int = 30):
         """
