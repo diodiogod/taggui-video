@@ -524,6 +524,21 @@ class ImageListModel(QAbstractListModel):
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
         """Timestamped, optionally throttled flow logging for pagination/masonry diagnostics."""
+        # TRACE_RESTORE: temporary minimal diagnostics filter for strict drag debugging.
+        # Set `minimal_trace_logs` to False in settings to restore full flow logs.
+        try:
+            minimal_trace = bool(settings.value("minimal_trace_logs", True, type=bool))
+        except Exception:
+            minimal_trace = True
+        if minimal_trace:
+            keep = False
+            if component == "ASPECT_RATIOS" and message.startswith("Iterating loaded pages"):
+                keep = True
+            elif component == "PAGINATION" and message.startswith("Triggered loads"):
+                keep = True
+            if not keep:
+                return
+
         now = time.time()
         if throttle_key and every_s is not None:
             last = self._flow_log_last.get(throttle_key, 0.0)
@@ -531,7 +546,7 @@ class ImageListModel(QAbstractListModel):
                 return
             self._flow_log_last[throttle_key] = now
         ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
-        print(f"[{ts}][{component}][{level}] {message}")
+        print(f"[{ts}][TRACE][{component}][{level}] {message}")
 
     def _schedule_dimensions_updated(self):
         """Coalesce frequent dimension updates into one masonry refresh signal."""
@@ -1007,10 +1022,15 @@ class ImageListModel(QAbstractListModel):
 
             # Check if we need to evict pages (but don't do it here - background thread unsafe)
             if len(self._pages) > self.MAX_PAGES_IN_MEMORY:
-                # Schedule eviction on main thread via QTimer
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, self._evict_old_pages)
+                # Schedule eviction on model's thread (main/UI thread).
+                # QTimer.singleShot from worker context can miss/dispatch inconsistently.
+                QMetaObject.invokeMethod(
+                    self,
+                    "_evict_old_pages",
+                    Qt.ConnectionType.QueuedConnection
+                )
 
+    @Slot()
     def _evict_old_pages(self):
         """Evict old pages (called on main thread via QTimer)."""
         evicted_any = False
