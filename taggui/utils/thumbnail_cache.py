@@ -43,8 +43,42 @@ class ThumbnailCache:
             print(f"[CACHE INIT] Cache directory exists: {self.cache_dir.exists()}")
             # Clean up old PNG cache files (we use WebP now)
             self._cleanup_old_png_cache()
+            # One-time purge of potentially corrupted cache entries from
+            # the row-shift thumbnail bug (fixed in 330eadc).
+            self._purge_corrupted_cache_v1()
         else:
             print("[CACHE INIT] Thumbnail cache DISABLED")
+
+    def _purge_corrupted_cache_v1(self):
+        """One-time purge of all cached thumbnails that may have been corrupted
+        by the row-shift bug in paginated mode (fixed in commit 330eadc).
+
+        Uses a settings flag so this only runs once per installation.
+        """
+        PURGE_KEY = '_thumbnail_cache_purge_v1'
+        if settings.value(PURGE_KEY, False, type=bool):
+            return  # Already purged
+
+        if not self.cache_dir.exists():
+            settings.setValue(PURGE_KEY, True)
+            return
+
+        try:
+            webp_files = list(self.cache_dir.rglob('*.webp'))
+            if webp_files:
+                print(f'[CACHE] Purging {len(webp_files)} potentially corrupted cache entries (one-time fix)...')
+                removed = 0
+                for f in webp_files:
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except Exception:
+                        pass
+                print(f'[CACHE] Purged {removed} entries. Cache will rebuild on demand.')
+        except Exception as e:
+            print(f'[CACHE] Purge failed: {e}')
+
+        settings.setValue(PURGE_KEY, True)
 
     def _cleanup_old_png_cache(self):
         """Remove old PNG cache files (we use WebP now for better compression)."""

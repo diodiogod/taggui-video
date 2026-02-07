@@ -922,6 +922,32 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
 
+    def remove_images_by_paths(self, rel_paths: list):
+        """Remove images (and their tags) from the DB by relative path."""
+        if not self.enabled or not self.conn or not rel_paths:
+            return
+        try:
+            cursor = self.conn.cursor()
+            placeholders = ','.join('?' for _ in rel_paths)
+            # Get IDs first for tag cleanup
+            cursor.execute(
+                f'SELECT id FROM images WHERE file_name IN ({placeholders})',
+                rel_paths
+            )
+            ids = [row[0] for row in cursor.fetchall()]
+            if ids:
+                id_ph = ','.join('?' for _ in ids)
+                cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
+            cursor.execute(
+                f'DELETE FROM images WHERE file_name IN ({placeholders})',
+                rel_paths
+            )
+            self.commit()
+            if ids:
+                print(f'[DB] Removed {len(ids)} deleted images from index.')
+        except Exception as e:
+            print(f'[DB] Error removing deleted images: {e}')
+
     def remove_tag_from_image(self, image_id: int, tag: str):
         """Remove a single tag from an image."""
         if not self.enabled or not self.conn:

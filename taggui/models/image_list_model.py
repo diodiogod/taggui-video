@@ -899,6 +899,12 @@ class ImageListModel(QAbstractListModel):
             # Get tags from DB map (much faster than file I/O)
             tags = tags_map.get(img_id, [])
 
+            # Skip files that no longer exist on disk (deleted outside app
+            # or between sessions).  Lightweight stat check avoids showing
+            # gray placeholders for stale DB entries.
+            if not file_path.exists():
+                continue
+
             image = Image(
                 path=file_path,
                 dimensions=(row['width'], row['height']),
@@ -906,7 +912,7 @@ class ImageListModel(QAbstractListModel):
                 is_video=bool(row['is_video']),
                 rating=row.get('rating', 0.0)
             )
-            
+
             # Populate metadata
             image.file_size = row.get('file_size')
             image.file_type = row.get('file_type')
@@ -1769,7 +1775,11 @@ class ImageListModel(QAbstractListModel):
             traceback.print_exc()
 
     def _flush_db_cache_flags(self):
-        """Batch update DB thumbnail_cached flags (async, non-blocking)."""
+        """Batch update DB thumbnail_cached flags (async, non-blocking).
+
+        Writes in small chunks (50 rows) with short yields between commits
+        so the _db_lock is never held long enough to block page loads.
+        """
         with self._pending_db_cache_flags_lock:
             if not self._pending_db_cache_flags:
                 return
@@ -1779,19 +1789,31 @@ class ImageListModel(QAbstractListModel):
 
         # Submit DB flush to background thread (never blocks main thread)
         def db_flush_worker():
-            """Worker function that performs DB commit in background."""
-            if self._db:
-                try:
+            """Worker function that performs DB commit in small chunks."""
+            import time
+            if not self._db:
+                return
+            CHUNK = 50
+            total = len(batch)
+            flushed = 0
+            try:
+                for i in range(0, total, CHUNK):
+                    chunk = batch[i:i + CHUNK]
                     with self._db._db_lock:
                         cursor = self._db.conn.cursor()
                         cursor.executemany(
                             'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ?',
-                            [(file_name,) for file_name in batch]
+                            [(fn,) for fn in chunk]
                         )
                         self._db.conn.commit()
-                        print(f"[DB] Flushed {len(batch)} thumbnail_cached flags in background")
-                except Exception as e:
-                    print(f"[DB] ERROR batch updating thumbnail_cached flags: {e}")
+                    flushed += len(chunk)
+                    # Yield between chunks so page loads can acquire the lock
+                    if i + CHUNK < total:
+                        time.sleep(0.02)  # 20ms
+                if flushed:
+                    print(f"[DB] Flushed {flushed} thumbnail_cached flags in background")
+            except Exception as e:
+                print(f"[DB] ERROR batch updating thumbnail_cached flags: {e}")
 
         # Submit to save executor (dedicated thread pool for I/O operations)
         self._save_executor.submit(db_flush_worker)
