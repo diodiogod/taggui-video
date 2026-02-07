@@ -1701,10 +1701,10 @@ class ImageListModel(QAbstractListModel):
             # Print and submit all saves
             print(f"[CACHE] Flushing {len(saves_to_submit)} pending cache saves")
 
-            for path, mtime, width, thumbnail in saves_to_submit:
+            for path, mtime, width, qimage in saves_to_submit:
                 self._save_executor.submit(
                     self._save_thumbnail_worker,
-                    path, mtime, width, thumbnail
+                    path, mtime, width, qimage
                 )
 
         # Run the ENTIRE flush (including lock acquisition) in executor
@@ -1736,19 +1736,20 @@ class ImageListModel(QAbstractListModel):
             with self._thumbnail_lock:
                 self._thumbnail_futures.pop(idx, None)
 
-    def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, thumbnail: QIcon):
-        """Worker function that saves thumbnail to disk cache in background thread."""
-        import threading
+    def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, qimage):
+        """Worker function that saves thumbnail QImage to disk cache.
+
+        Accepts a QImage (thread-safe) instead of QIcon/QPixmap to avoid
+        GIL contention that stalls the main thread.
+        """
         import time
 
-        # Small delay to prevent disk I/O saturation (yield to other I/O operations)
-        # This combined with low thread priority ensures saves never block UI
+        # Small delay to prevent disk I/O saturation
         time.sleep(0.05)  # 50ms delay between saves
 
-        # Removed noisy log: print(f"[CACHE SAVE] Background thread {threading.current_thread().name} saving: {path.name}")
         try:
             from utils.thumbnail_cache import get_thumbnail_cache
-            get_thumbnail_cache().save_thumbnail(path, mtime, width, thumbnail)
+            get_thumbnail_cache().save_thumbnail_qimage(path, mtime, width, qimage)
 
             # Queue DB update for deferred batch write (when truly idle)
             if self._db and self._directory_path:
@@ -2095,27 +2096,21 @@ class ImageListModel(QAbstractListModel):
                 should_save = has_flag and not flag_value
 
                 if should_save:
-                    # Defer cache writes during scrolling to avoid I/O blocking
-                    if self._is_scrolling:
-                        with self._pending_cache_saves_lock:
-                            self._pending_cache_saves.append((image.path, image.path.stat().st_mtime,
-                                                              self.thumbnail_generation_width, thumbnail))
-                            queue_size = len(self._pending_cache_saves)
-
-                            # DISABLED: Force flush causes UI freeze
-                            # Auto-flush if queue gets too large (300+) to prevent memory buildup
-                            # if queue_size >= 300:
-                            #     print(f"[CACHE] Queue full ({queue_size} items), force flushing...")
-                            #     self._flush_pending_cache_saves(force=True)
-                    else:
-                        # Submit to save executor (low priority, won't compete with loads)
-                        self._save_executor.submit(
-                            self._save_thumbnail_worker,
-                            image.path,
-                            image.path.stat().st_mtime,
-                            self.thumbnail_generation_width,
-                            thumbnail
-                        )
+                    # Pass QImage (thread-safe) instead of QIcon (needs QPixmap = GIL contention)
+                    save_qimage = image.thumbnail_qimage
+                    if save_qimage and not save_qimage.isNull():
+                        if self._is_scrolling:
+                            with self._pending_cache_saves_lock:
+                                self._pending_cache_saves.append((image.path, image.path.stat().st_mtime,
+                                                                  self.thumbnail_generation_width, save_qimage))
+                        else:
+                            self._save_executor.submit(
+                                self._save_thumbnail_worker,
+                                image.path,
+                                image.path.stat().st_mtime,
+                                self.thumbnail_generation_width,
+                                save_qimage
+                            )
 
                 return thumbnail
 
@@ -2138,20 +2133,19 @@ class ImageListModel(QAbstractListModel):
 
                         # Save to disk cache in background thread if not from cache
                         if not was_cached:
-                            # Debug: why are we saving this?
                             mtime = image.path.stat().st_mtime
                             # Defer during scroll to avoid I/O blocking
                             if self._is_scrolling:
                                 with self._pending_cache_saves_lock:
                                     self._pending_cache_saves.append((image.path, mtime,
-                                                                      self.thumbnail_generation_width, thumbnail))
+                                                                      self.thumbnail_generation_width, qimage))
                             else:
                                 self._save_executor.submit(
                                     self._save_thumbnail_worker,
                                     image.path,
                                     mtime,
                                     self.thumbnail_generation_width,
-                                    thumbnail
+                                    qimage
                                 )
 
                         return thumbnail
@@ -2198,14 +2192,14 @@ class ImageListModel(QAbstractListModel):
                                     if self._is_scrolling:
                                         with self._pending_cache_saves_lock:
                                             self._pending_cache_saves.append((image.path, mtime,
-                                                                              self.thumbnail_generation_width, thumbnail))
+                                                                              self.thumbnail_generation_width, qimage))
                                     else:
                                         self._save_executor.submit(
                                             self._save_thumbnail_worker,
                                             image.path,
                                             mtime,
                                             self.thumbnail_generation_width,
-                                            thumbnail
+                                            qimage
                                         )
 
                             del self._thumbnail_futures[row]
