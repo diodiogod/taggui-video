@@ -1057,7 +1057,8 @@ class ImageListModel(QAbstractListModel):
             cancelled_count = 0
             for idx in range(start_idx, end_idx):
                 if idx in self._thumbnail_futures:
-                    future = self._thumbnail_futures[idx]
+                    entry = self._thumbnail_futures[idx]
+                    future = entry[0] if isinstance(entry, tuple) else entry
                     if not future.done():
                         future.cancel()
                         cancelled_count += 1
@@ -1315,8 +1316,9 @@ class ImageListModel(QAbstractListModel):
 
         # Cancel any existing thumbnail loading
         with self._thumbnail_lock:
-            for future in self._thumbnail_futures.values():
-                future.cancel()
+            for entry in self._thumbnail_futures.values():
+                f = entry[0] if isinstance(entry, tuple) else entry
+                f.cancel()
             self._thumbnail_futures.clear()
 
         # Submit images up to preload_limit (or all if None)
@@ -2140,38 +2142,49 @@ class ImageListModel(QAbstractListModel):
                 return None
 
             # Pagination mode: Async loading with placeholders for smooth scrolling
+            # _thumbnail_futures stores (future, submitted_path) tuples so we can
+            # verify the row still maps to the same image after page eviction.
             with self._thumbnail_lock:
                 # Check if already loading
                 if row in self._thumbnail_futures:
-                    future = self._thumbnail_futures[row]
+                    entry = self._thumbnail_futures[row]
+                    future, submitted_path = (entry if isinstance(entry, tuple)
+                                              else (entry, None))
                     if not future.done():
                         # Still loading - return placeholder
                         return self._get_placeholder_icon()
                     # Future done - check result
                     try:
-                        qimage, was_cached = future.result()
-                        if qimage and not qimage.isNull():
-                            pixmap = QPixmap.fromImage(qimage)
-                            thumbnail = QIcon(pixmap)
-                            image.thumbnail = thumbnail
-                            image._last_thumbnail_was_cached = was_cached
+                        # Path check: if pages were evicted/reloaded, this row
+                        # may now map to a different image.  Discard stale result.
+                        if submitted_path is not None and image.path != submitted_path:
+                            del self._thumbnail_futures[row]
+                            # Fall through to re-submit below
+                        else:
+                            qimage, was_cached = future.result()
+                            thumbnail = None
+                            if qimage and not qimage.isNull():
+                                pixmap = QPixmap.fromImage(qimage)
+                                thumbnail = QIcon(pixmap)
+                                image.thumbnail = thumbnail
+                                image._last_thumbnail_was_cached = was_cached
 
-                            # Save to cache if needed
-                            if not was_cached:
-                                mtime = image.path.stat().st_mtime
-                                # Defer during scroll to avoid I/O blocking
-                                if self._is_scrolling:
-                                    with self._pending_cache_saves_lock:
-                                        self._pending_cache_saves.append((image.path, mtime,
-                                                                          self.thumbnail_generation_width, thumbnail))
-                                else:
-                                    self._save_executor.submit(
-                                        self._save_thumbnail_worker,
-                                        image.path,
-                                        mtime,
-                                        self.thumbnail_generation_width,
-                                        thumbnail
-                                    )
+                                # Save to cache if needed
+                                if not was_cached:
+                                    mtime = image.path.stat().st_mtime
+                                    # Defer during scroll to avoid I/O blocking
+                                    if self._is_scrolling:
+                                        with self._pending_cache_saves_lock:
+                                            self._pending_cache_saves.append((image.path, mtime,
+                                                                              self.thumbnail_generation_width, thumbnail))
+                                    else:
+                                        self._save_executor.submit(
+                                            self._save_thumbnail_worker,
+                                            image.path,
+                                            mtime,
+                                            self.thumbnail_generation_width,
+                                            thumbnail
+                                        )
 
                             del self._thumbnail_futures[row]
                             return thumbnail
@@ -2180,15 +2193,16 @@ class ImageListModel(QAbstractListModel):
                         del self._thumbnail_futures[row]
                         return None
 
-                # Not loading yet - submit to background thread
-                future = self._load_executor.submit(
-                    self._load_thumbnail_async,
-                    image.path,
-                    image.crop,
-                    image.is_video,
-                    row
-                )
-                self._thumbnail_futures[row] = future
+                # Not loading yet (or stale entry was discarded) - submit to background thread
+                if row not in self._thumbnail_futures:
+                    future = self._load_executor.submit(
+                        self._load_thumbnail_async,
+                        image.path,
+                        image.crop,
+                        image.is_video,
+                        row
+                    )
+                    self._thumbnail_futures[row] = (future, image.path)
 
                 # Return placeholder immediately (smooth scrolling)
                 # print(f"[DATA DEBUG] Returning PLACEHOLDER for row {row}")

@@ -1906,6 +1906,11 @@ class ImageListView(QListView):
                     implied_avg = self._masonry_total_height / strict_rows
                     if 10.0 < implied_avg < 5000.0 and implied_avg > self._get_strict_virtual_avg_height():
                         self._strict_virtual_avg_height = implied_avg
+                        # Also grow masonry_avg_h so canonical domain covers
+                        # the actual tail content (otherwise the scrollbar max
+                        # is too small to reach the true bottom by scrolling).
+                        if implied_avg > float(getattr(self, '_strict_masonry_avg_h', 0.0) or 0.0):
+                            self._strict_masonry_avg_h = implied_avg
                     self._log_flow(
                         "MASONRY",
                         f"Strict tail extend: total_height {previous_height}->{self._masonry_total_height}",
@@ -1949,9 +1954,21 @@ class ImageListView(QListView):
                             self._current_page = 0
                         elif release_lock_live:
                             page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                            # Item-based fraction to match masonry spacer positions.
-                            page_frac = max(0.0, min(1.0, (int(release_lock_page) * page_size) / max(1, total_items)))
-                            target_val = int(round(page_frac * stable_max))
+                            # Prefer actual masonry y-coordinate of the locked page's
+                            # first item so the viewport aligns with real content
+                            # (formula-based fraction drifts when real heights != avg_h).
+                            _lock_start_idx = int(release_lock_page) * page_size
+                            _lock_item = None
+                            for _it in self._masonry_items:
+                                if _it.get('index', -1) >= _lock_start_idx:
+                                    _lock_item = _it
+                                    break
+                            if _lock_item is not None:
+                                target_val = max(0, min(int(_lock_item['y']), stable_max))
+                            else:
+                                # Fallback: item-based fraction.
+                                page_frac = max(0.0, min(1.0, (_lock_start_idx) / max(1, total_items)))
+                                target_val = int(round(page_frac * stable_max))
                             sb.setValue(max(0, min(target_val, stable_max)))
                             self._last_stable_scroll_value = sb.value()
                         else:
@@ -3068,11 +3085,19 @@ class ImageListView(QListView):
                             and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
                         )
                         if _rl_live and keep_max > 0:
-                            _ti = int(getattr(source_model, '_total_count', 0) or 0)
                             _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                            # Item-based fraction to match masonry spacer positions.
-                            _pf = max(0.0, min(1.0, (int(_rl_page) * _ps) / max(1, _ti)))
-                            restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
+                            _lock_idx = int(_rl_page) * _ps
+                            _lock_it = None
+                            for _it in self._masonry_items:
+                                if _it.get('index', -1) >= _lock_idx:
+                                    _lock_it = _it
+                                    break
+                            if _lock_it is not None:
+                                restored_val = max(0, min(int(_lock_it['y']), keep_max))
+                            else:
+                                _ti = int(getattr(source_model, '_total_count', 0) or 0)
+                                _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
+                                restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
                         else:
                             # Ratio-preserving: keep thumb at the same visual fraction.
                             ratio = saved_val / saved_max
@@ -3157,13 +3182,21 @@ class ImageListView(QListView):
             for global_idx, item in self._masonry_index_map.items():
                 item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
                 if item_rect.contains(adjusted_point):
-                    # Map global index to row
+                    # Map global index → source row → source index → proxy index.
+                    # Must go through mapFromSource; using self.model().index(row)
+                    # directly would create a proxy index at the source row number,
+                    # which is wrong when filtering shifts proxy rows.
                     if hasattr(source_model, 'get_loaded_row_for_global_index'):
                          row = source_model.get_loaded_row_for_global_index(global_idx)
                     else:
                          row = global_idx
-                         
+
                     if row != -1:
+                        src_index = source_model.index(row, 0)
+                        proxy_index = self.model().mapFromSource(src_index) if hasattr(self.model(), 'mapFromSource') else src_index
+                        if proxy_index.isValid():
+                            return proxy_index
+                        # Fallback if mapFromSource fails (item filtered out)
                         return self.model().index(row, 0)
             
             return QModelIndex()
@@ -3388,8 +3421,228 @@ class ImageListView(QListView):
                 except Exception as e:
                     print(f"[ERROR] Failed to toggle deletion marking: {e}")
 
+        # Ctrl+Shift+D: Dev diagnostic / repair for thumbnail-image mismatch
+        if (event.key() == Qt.Key.Key_D
+                and event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+            self._dev_diagnose_selection()
+            event.accept()
+            return
+
+        # Home/End: navigate to first/last item in masonry paginated mode
+        if event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End) and self.use_masonry:
+            source_model = (self.model().sourceModel()
+                            if self.model() and hasattr(self.model(), 'sourceModel')
+                            else self.model())
+            if source_model and getattr(source_model, '_paginated_mode', False):
+                self._masonry_home_end(event.key() == Qt.Key.Key_End, source_model)
+                event.accept()
+                return
+
         # Default behavior for other keys
         super().keyPressEvent(event)
+
+    def _dev_diagnose_selection(self):
+        """Ctrl+Shift+D: Diagnose and repair thumbnail-image mismatch.
+
+        Prints a full mapping trace for the current selection and forces
+        a page reload + masonry rebuild if a mismatch is detected.
+        """
+        import os
+        print("\n" + "=" * 70)
+        print("[DEV-DIAG] Ctrl+Shift+D: Thumbnail/Image mapping diagnostic")
+        print("=" * 70)
+        source_model = (self.model().sourceModel()
+                        if self.model() and hasattr(self.model(), 'sourceModel')
+                        else self.model())
+        proxy_model = self.model()
+        current_proxy_idx = self.currentIndex()
+
+        # ── 1. Current selection info ──
+        if not current_proxy_idx.isValid():
+            print("[DEV-DIAG] No item currently selected.")
+            print("=" * 70 + "\n")
+            return
+
+        proxy_row = current_proxy_idx.row()
+        src_idx = proxy_model.mapToSource(current_proxy_idx) if hasattr(proxy_model, 'mapToSource') else current_proxy_idx
+        src_row = src_idx.row() if src_idx.isValid() else -1
+        image_via_proxy = proxy_model.data(current_proxy_idx, Qt.ItemDataRole.UserRole)
+        image_path_proxy = getattr(image_via_proxy, 'path', '??') if image_via_proxy else 'None'
+
+        print(f"  Proxy row      : {proxy_row}")
+        print(f"  Source row     : {src_row}")
+        print(f"  Image (proxy)  : {os.path.basename(str(image_path_proxy))}")
+
+        # ── 2. Reverse-map: what global index does this source row correspond to? ──
+        global_from_row = -1
+        if hasattr(source_model, 'get_global_index_for_row'):
+            global_from_row = source_model.get_global_index_for_row(src_row)
+        print(f"  Global idx (from source row): {global_from_row}")
+
+        # ── 3. Find the masonry item the user likely clicked ──
+        scroll_val = self.verticalScrollBar().value()
+        viewport_rect = self.viewport().rect().translated(0, scroll_val)
+        visible_items = self._get_masonry_visible_items(viewport_rect) if self._masonry_items else []
+        real_vis = [it for it in visible_items if it.get('index', -1) >= 0]
+        masonry_global = None
+        masonry_path = None
+        if real_vis:
+            # Find the masonry item whose mapped row matches proxy_row
+            for it in real_vis:
+                g_idx = it.get('index', -1)
+                if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                    mapped_row = source_model.get_loaded_row_for_global_index(g_idx)
+                else:
+                    mapped_row = g_idx
+                if mapped_row == src_row:
+                    masonry_global = g_idx
+                    break
+            if masonry_global is None and real_vis:
+                # Fallback: check middle visible item
+                mid = real_vis[len(real_vis) // 2]
+                masonry_global = mid.get('index', -1)
+        print(f"  Masonry global idx (matched): {masonry_global}")
+
+        # ── 4. Forward-map the masonry global index and compare ──
+        if masonry_global is not None and masonry_global >= 0 and hasattr(source_model, 'get_loaded_row_for_global_index'):
+            fwd_src_row = source_model.get_loaded_row_for_global_index(masonry_global)
+            if fwd_src_row >= 0:
+                fwd_src_idx = source_model.index(fwd_src_row, 0)
+                fwd_proxy_idx = proxy_model.mapFromSource(fwd_src_idx) if hasattr(proxy_model, 'mapFromSource') else fwd_src_idx
+                fwd_image = proxy_model.data(fwd_proxy_idx, Qt.ItemDataRole.UserRole) if fwd_proxy_idx.isValid() else None
+                fwd_path = getattr(fwd_image, 'path', '??') if fwd_image else 'None'
+                print(f"  Forward-mapped source row: {fwd_src_row}")
+                print(f"  Forward-mapped image     : {os.path.basename(str(fwd_path))}")
+                mismatch = str(image_path_proxy) != str(fwd_path)
+                if mismatch:
+                    print(f"  *** MISMATCH DETECTED ***")
+                    print(f"      Viewer shows  : {os.path.basename(str(image_path_proxy))}")
+                    print(f"      Masonry expects: {os.path.basename(str(fwd_path))}")
+                else:
+                    print(f"  Mapping OK - no mismatch.")
+            else:
+                print(f"  Forward-mapped source row: -1 (page not loaded)")
+
+        # ── 5. Loaded pages state ──
+        if hasattr(source_model, '_pages'):
+            loaded_pages = sorted(source_model._pages.keys())
+            page_sizes = {p: len(source_model._pages[p]) for p in loaded_pages[:10]}
+            print(f"  Loaded pages   : {loaded_pages}")
+            print(f"  Page sizes (first 10): {page_sizes}")
+            if hasattr(source_model, 'PAGE_SIZE'):
+                total_loaded = sum(len(source_model._pages[p]) for p in loaded_pages)
+                print(f"  Total loaded rows: {total_loaded}  (model rowCount: {source_model.rowCount()})")
+
+        # ── 6. Repair: clear stale thumbnail (memory + disk cache) + force reload ──
+        print("[DEV-DIAG] Clearing stale thumbnail on selected image...")
+        if image_via_proxy is not None:
+            # Wipe in-memory cached thumbnail
+            image_via_proxy.thumbnail = None
+            image_via_proxy.thumbnail_qimage = None
+            print(f"  Cleared in-memory thumbnail on: {os.path.basename(str(image_path_proxy))}")
+
+            # Delete corrupted disk cache entry so it gets regenerated from source file
+            try:
+                from utils.thumbnail_cache import get_thumbnail_cache
+                cache = get_thumbnail_cache()
+                if cache.enabled:
+                    thumb_width = getattr(source_model, 'thumbnail_generation_width', 512)
+                    mtime = image_via_proxy.path.stat().st_mtime
+                    cache_key = cache._get_cache_key(image_via_proxy.path, mtime, thumb_width)
+                    cache_path = cache._get_cache_path(cache_key)
+                    if cache_path.exists():
+                        cache_path.unlink()
+                        print(f"  Deleted disk cache entry: {cache_path.name}")
+                    else:
+                        print(f"  No disk cache entry found for this file.")
+            except Exception as e:
+                print(f"  Failed to clear disk cache: {e}")
+
+            # Also clear any pending future for this row
+            if hasattr(source_model, '_thumbnail_futures') and hasattr(source_model, '_thumbnail_lock'):
+                with source_model._thumbnail_lock:
+                    source_model._thumbnail_futures.pop(src_row, None)
+                    source_model._thumbnail_futures.pop(proxy_row, None)
+
+        print("[DEV-DIAG] Triggering repair: viewport repaint (thumbnail will reload from source file)...")
+        self.viewport().update()
+        print("=" * 70 + "\n")
+
+    def _masonry_home_end(self, go_end: bool, source_model):
+        """Navigate to first (Home) or last (End) item in paginated masonry.
+
+        Loads the target page synchronously, sets _current_page so the masonry
+        window is computed around the target, then scrolls and selects.
+        """
+        total_items = int(getattr(source_model, '_total_count', 0) or 0)
+        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        if total_items <= 0:
+            return
+
+        if go_end:
+            target_global_idx = total_items - 1
+            target_page = target_global_idx // page_size
+        else:
+            target_global_idx = 0
+            target_page = 0
+
+        # Ensure the target page is loaded
+        if hasattr(source_model, '_load_page_sync'):
+            if target_page not in getattr(source_model, '_pages', {}):
+                source_model._load_page_sync(target_page)
+                source_model._emit_pages_updated()
+
+        # Set _current_page BEFORE masonry rebuild so the window is centered
+        # on the target page, not the old position.
+        self._current_page = target_page
+
+        # Set scroll position BEFORE masonry rebuild so the layout sees the
+        # correct scroll_val for source_idx determination.
+        sb = self.verticalScrollBar()
+        strategy = getattr(self, '_masonry_strategy', '')
+        sb.blockSignals(True)
+        if strategy == 'windowed_strict':
+            canonical_max = self._strict_canonical_domain_max(source_model)
+            sb.setMaximum(canonical_max)
+            sb.setValue(canonical_max if go_end else 0)
+        else:
+            sb.setValue(sb.maximum() if go_end else 0)
+        sb.blockSignals(False)
+
+        # Force masonry rebuild — will use _current_page + scroll position
+        self._last_masonry_window_signature = None
+        self._masonry_index_map = None
+        self._last_masonry_signal = "home_end_nav"
+        self._calculate_masonry_layout()
+
+        # After masonry is built for the correct window, find the actual item
+        # position and scroll to it precisely.
+        if go_end and self._masonry_items:
+            real_items = [it for it in self._masonry_items if it.get('index', -1) >= 0]
+            if real_items:
+                last_item = max(real_items, key=lambda it: it['y'] + it['height'])
+                bottom_y = last_item['y'] + last_item['height']
+                viewport_h = max(1, self.viewport().height())
+                target_scroll = max(0, bottom_y - viewport_h)
+                sb.blockSignals(True)
+                if sb.maximum() < target_scroll:
+                    sb.setMaximum(target_scroll)
+                sb.setValue(target_scroll)
+                sb.blockSignals(False)
+
+        # Select the target item
+        loaded_row = source_model.get_loaded_row_for_global_index(target_global_idx)
+        if loaded_row >= 0:
+            src_idx = source_model.index(loaded_row, 0)
+            proxy = self.model()
+            if hasattr(proxy, 'mapFromSource'):
+                proxy_idx = proxy.mapFromSource(src_idx)
+            else:
+                proxy_idx = src_idx
+            if proxy_idx.isValid():
+                self.setCurrentIndex(proxy_idx)
+
+        self.viewport().update()
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
@@ -3874,11 +4127,19 @@ class ImageListView(QListView):
                                 and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
                             )
                             if _rl_live and keep_max > 0:
-                                _ti = int(getattr(source_model, '_total_count', 0) or 0)
                                 _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                                # Item-based fraction to match masonry spacer positions.
-                                _pf = max(0.0, min(1.0, (int(_rl_page) * _ps) / max(1, _ti)))
-                                sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
+                                _lock_idx = int(_rl_page) * _ps
+                                _lock_it = None
+                                for _it in self._masonry_items:
+                                    if _it.get('index', -1) >= _lock_idx:
+                                        _lock_it = _it
+                                        break
+                                if _lock_it is not None:
+                                    sb.setValue(max(0, min(int(_lock_it['y']), keep_max)))
+                                else:
+                                    _ti = int(getattr(source_model, '_total_count', 0) or 0)
+                                    _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
+                                    sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
                             elif _old_max != keep_max and keep_max > 0:
                                 # Ratio-preserving correction when domain changed.
                                 _ratio = _old_val / _old_max
@@ -4552,10 +4813,22 @@ class ImageListView(QListView):
             and time.time() < getattr(self, '_drag_release_anchor_until', 0.0)
         )
         if self.use_masonry and strategy == "windowed_strict":
-            # Strict mode: derive page from canonical scroll position (not selection).
+            # Strict mode: derive page from actual visible masonry items so
+            # the indicator matches what the user sees (not the formula-based
+            # estimate which drifts when real item heights != masonry_avg_h).
             if not _anchor_resolved:
-                current_page = self._strict_page_from_position(
-                    self.verticalScrollBar().value(), source_model)
+                scroll_offset = self.verticalScrollBar().value()
+                viewport_rect = self.viewport().rect().translated(0, scroll_offset)
+                vis_items = self._get_masonry_visible_items(viewport_rect)
+                real_vis = [it for it in vis_items if it.get('index', -1) >= 0]
+                if real_vis:
+                    mid_idx = real_vis[len(real_vis) // 2]['index']
+                    current_page = max(0, min(
+                        (total_items - 1) // source_model.PAGE_SIZE,
+                        mid_idx // source_model.PAGE_SIZE))
+                else:
+                    current_page = self._strict_page_from_position(
+                        scroll_offset, source_model)
         elif self.use_masonry:
             # Non-strict masonry: prefer viewport-visible items for page indicator.
             scroll_offset = self.verticalScrollBar().value()
