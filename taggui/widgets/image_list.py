@@ -467,6 +467,7 @@ class ImageListView(QListView):
         self._release_page_lock_page = None
         self._release_page_lock_until = 0.0
         self._strict_virtual_avg_height = 0.0
+        self._strict_masonry_avg_h = 0.0  # avg_h used to BUILD current masonry items
         self._strict_drag_frozen_max = 0
         self._strict_drag_frozen_until = 0.0
         self._strict_scroll_max_floor = 0
@@ -737,7 +738,14 @@ class ImageListView(QListView):
             avail_width = viewport_width - sb_width - 24
             num_cols = max(1, avail_width // (col_w + spacing))
             rows = max(1, math.ceil(total_items / num_cols))
-            avg_h = float(self._get_strict_virtual_avg_height())
+            # Use the avg_h from the LAST masonry computation so the canonical
+            # domain matches the masonry spacer y-coordinates exactly.
+            # Without this, avg_h grows after each masonry completion, the
+            # domain overshoots the masonry items, and after release-lock
+            # expires the viewport cascades to the wrong page.
+            avg_h = float(getattr(self, '_strict_masonry_avg_h', 0.0) or 0.0)
+            if avg_h <= 1.0:
+                avg_h = float(self._get_strict_virtual_avg_height())
             est_total_h = int(rows * max(10.0, avg_h))
             viewport_height = max(1, int(self.viewport().height()))
             return max(10000, est_total_h - viewport_height)
@@ -1351,6 +1359,11 @@ class ImageListView(QListView):
                     if getattr(self, "_strict_virtual_avg_height", 0.0) <= 1.0 and isinstance(seed, (int, float)) and 10.0 < float(seed) < 5000.0:
                         self._strict_virtual_avg_height = float(seed)
                     avg_h = self._get_strict_virtual_avg_height()
+                    # Store the avg_h used to BUILD this masonry layout so
+                    # _strict_canonical_domain_max() uses the same value.
+                    # This prevents the coordinate-space mismatch where the
+                    # domain uses post-completion avg_h but spacers use this one.
+                    self._strict_masonry_avg_h = float(avg_h)
                 else:
                     avg_h = getattr(self, '_stable_avg_item_height', 100.0)
                     if avg_h < 1:
@@ -1753,7 +1766,22 @@ class ImageListView(QListView):
                     viewport_width_for_avg = self.viewport().width()
                     num_columns_for_avg = max(1, (viewport_width_for_avg + spacing_for_avg) // (column_width_for_avg + spacing_for_avg))
                     chunk_rows = max(1, math.ceil(chunk_items / num_columns_for_avg))
-                    real_avg = total_height_chunk / chunk_rows
+                    if strict_mode:
+                        # In strict/windowed mode, total_height_chunk includes the
+                        # prefix spacer which inflates the average and creates a
+                        # runaway growth loop (bigger avg → bigger spacer → bigger
+                        # total_height → bigger avg → ...).  Compute real_avg from
+                        # only the real items' vertical extent.
+                        real_items_for_avg = [it for it in self._masonry_items if it.get('index', -1) >= 0]
+                        if len(real_items_for_avg) >= 2:
+                            min_real_y = min(it['y'] for it in real_items_for_avg)
+                            max_real_y = max(it['y'] + it['height'] for it in real_items_for_avg)
+                            content_h = max_real_y - min_real_y
+                            real_avg = content_h / chunk_rows
+                        else:
+                            real_avg = total_height_chunk / chunk_rows
+                    else:
+                        real_avg = total_height_chunk / chunk_rows
                     if 10.0 < real_avg < 5000.0:
                         if strict_mode:
                             current_strict_avg = float(getattr(self, "_strict_virtual_avg_height", 0.0) or 0.0)
@@ -1897,6 +1925,7 @@ class ImageListView(QListView):
                     stable_max = self._strict_canonical_domain_max(source_model)
                     old_val = sb.value()
                     old_max = max(1, sb.maximum())
+                    print(f"[STRICT-DOMAIN] masonry_avg_h={self._strict_masonry_avg_h:.1f}  virtual_avg_h={self._strict_virtual_avg_height:.1f}  domain={stable_max}  old_max={old_max}  delta={stable_max - old_max}")
                     if self._scrollbar_dragging or self._drag_preview_mode:
                         self._restore_strict_drag_domain(sb=sb, source_model=source_model)
                     else:
@@ -4072,10 +4101,11 @@ class ImageListView(QListView):
         self._current_page = 0
         self._last_stable_scroll_value = 0
         self._strict_virtual_avg_height = 0.0
+        self._strict_masonry_avg_h = 0.0
         self._strict_drag_frozen_max = 0
         self._strict_drag_frozen_until = 0.0
         self._strict_scroll_max_floor = 0
-        
+
         # Reset preload state and start thumbnail loading immediately
         self._preload_index = 0
         self._preload_complete = False
