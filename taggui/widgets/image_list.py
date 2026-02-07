@@ -2091,6 +2091,10 @@ class ImageListView(QListView):
             if not self._preload_complete:
                 self._idle_preload_timer.start(100)
 
+            # Finalize pending Home/End navigation now that masonry items exist.
+            if getattr(self, '_pending_home_end_nav', None) is not None:
+                self._finish_home_end_nav()
+
             # CRITICAL FIX: Check if a new calculation was requested while we were busy
             # This handles the case where pages loaded WHILE we were calculating spacers
             if getattr(self, '_masonry_recalc_pending', False):
@@ -3572,7 +3576,8 @@ class ImageListView(QListView):
         """Navigate to first (Home) or last (End) item in paginated masonry.
 
         Loads the target page synchronously, sets _current_page so the masonry
-        window is computed around the target, then scrolls and selects.
+        window is computed around the target.  The final scroll + select happens
+        in _on_masonry_calculation_complete via _pending_home_end_nav.
         """
         total_items = int(getattr(source_model, '_total_count', 0) or 0)
         page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
@@ -3609,14 +3614,34 @@ class ImageListView(QListView):
             sb.setValue(sb.maximum() if go_end else 0)
         sb.blockSignals(False)
 
+        # Store pending nav — masonry calc is async, so the final scroll + select
+        # is deferred to _on_masonry_calculation_complete.
+        self._pending_home_end_nav = {
+            'go_end': go_end,
+            'target_global_idx': target_global_idx,
+        }
+
         # Force masonry rebuild — will use _current_page + scroll position
         self._last_masonry_window_signature = None
         self._masonry_index_map = None
         self._last_masonry_signal = "home_end_nav"
         self._calculate_masonry_layout()
 
-        # After masonry is built for the correct window, find the actual item
-        # position and scroll to it precisely.
+    def _finish_home_end_nav(self):
+        """Called from _on_masonry_calculation_complete to finalize Home/End scroll."""
+        nav = getattr(self, '_pending_home_end_nav', None)
+        if nav is None:
+            return
+        self._pending_home_end_nav = None
+
+        go_end = nav['go_end']
+        target_global_idx = nav['target_global_idx']
+
+        source_model = (self.model().sourceModel()
+                        if self.model() and hasattr(self.model(), 'sourceModel')
+                        else self.model())
+
+        sb = self.verticalScrollBar()
         if go_end and self._masonry_items:
             real_items = [it for it in self._masonry_items if it.get('index', -1) >= 0]
             if real_items:
@@ -3629,18 +3654,23 @@ class ImageListView(QListView):
                     sb.setMaximum(target_scroll)
                 sb.setValue(target_scroll)
                 sb.blockSignals(False)
+        elif not go_end:
+            sb.blockSignals(True)
+            sb.setValue(0)
+            sb.blockSignals(False)
 
         # Select the target item
-        loaded_row = source_model.get_loaded_row_for_global_index(target_global_idx)
-        if loaded_row >= 0:
-            src_idx = source_model.index(loaded_row, 0)
-            proxy = self.model()
-            if hasattr(proxy, 'mapFromSource'):
-                proxy_idx = proxy.mapFromSource(src_idx)
-            else:
-                proxy_idx = src_idx
-            if proxy_idx.isValid():
-                self.setCurrentIndex(proxy_idx)
+        if source_model:
+            loaded_row = source_model.get_loaded_row_for_global_index(target_global_idx)
+            if loaded_row >= 0:
+                src_idx = source_model.index(loaded_row, 0)
+                proxy = self.model()
+                if hasattr(proxy, 'mapFromSource'):
+                    proxy_idx = proxy.mapFromSource(src_idx)
+                else:
+                    proxy_idx = src_idx
+                if proxy_idx.isValid():
+                    self.setCurrentIndex(proxy_idx)
 
         self.viewport().update()
 
@@ -4685,6 +4715,23 @@ class ImageListView(QListView):
                 if not caption_file.moveToTrash():
                     # For caption files, try permanent deletion without asking again
                     caption_file.remove()  # Silent operation for captions
+
+        # Remove deleted images from DB index so they don't reappear on reload
+        try:
+            _src_model = self.proxy_image_list_model.sourceModel()
+            if hasattr(_src_model, '_db') and _src_model._db:
+                from utils.settings import settings as _settings
+                directory_path = Path(_settings.value('directory_path', type=str))
+                rel_paths = []
+                for image in selected_images:
+                    try:
+                        rel_paths.append(str(image.path.relative_to(directory_path)))
+                    except ValueError:
+                        rel_paths.append(image.path.name)
+                _src_model._db.remove_images_by_paths(rel_paths)
+        except Exception as e:
+            print(f"[DELETE] Warning: failed to clean DB index: {e}")
+
         self.directory_reload_requested.emit()
 
     @Slot()
@@ -5498,5 +5545,21 @@ class ImageList(QDockWidget):
                 caption_file = QFile(caption_file_path)
                 if not caption_file.moveToTrash():
                     caption_file.remove()
+
+        # Remove deleted images from DB index so they don't reappear on reload
+        # (load_directory uses DB cache for datasets with 1000+ images).
+        try:
+            if hasattr(source_model, '_db') and source_model._db:
+                from utils.settings import settings as _settings
+                directory_path = Path(_settings.value('directory_path', type=str))
+                rel_paths = []
+                for image in marked_images:
+                    try:
+                        rel_paths.append(str(image.path.relative_to(directory_path)))
+                    except ValueError:
+                        rel_paths.append(image.path.name)
+                source_model._db.remove_images_by_paths(rel_paths)
+        except Exception as e:
+            print(f"[DELETE] Warning: failed to clean DB index: {e}")
 
         self.directory_reload_requested.emit()
