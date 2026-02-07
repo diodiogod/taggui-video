@@ -367,6 +367,14 @@ class MainWindow(QMainWindow):
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
 
+        # Apply persisted media type filter (All/Images/Videos).
+        # Must call delayed_filter() directly — clear() above won't fire
+        # textChanged if the field was already empty (e.g. on startup).
+        media_type = self.image_list.media_type_combo_box.currentText()
+        if media_type != 'All':
+            self.proxy_image_list_model.set_media_type_filter(media_type)
+            self.delayed_filter()
+
         # Apply saved sort order after loading
         saved_sort = self.image_list.sort_combo_box.currentText()
         if saved_sort:
@@ -567,6 +575,8 @@ class MainWindow(QMainWindow):
         self.delayed_filter()
 
     def delayed_filter(self):
+        media_type = self.image_list.media_type_combo_box.currentText()
+        self.proxy_image_list_model.set_media_type_filter(media_type)
         filter_ = self.image_list.filter_line_edit.parse_filter_text()
         self.proxy_image_list_model.set_filter(filter_)
         # filter_changed.emit() is already called by set_filter() - don't emit twice!

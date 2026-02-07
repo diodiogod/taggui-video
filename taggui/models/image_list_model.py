@@ -420,8 +420,11 @@ class ImageListModel(QAbstractListModel):
         self._directory_path: Path = None
         self._sort_field = 'mtime'
         self._sort_dir = 'DESC'
-        self._filter_sql = ""
-        self._filter_bindings = ()
+        self._filter_sql = ""       # Combined SQL passed to DB calls
+        self._filter_bindings = ()  # Combined bindings
+        self._text_filter_sql = ""  # Text filter portion only
+        self._text_filter_bindings = ()
+        self._media_type_sql = ""   # Media type portion only
         self._random_seed = 0
         self._pause_thumbnail_loading = False  # Pause during scrollbar drag for smooth dragging
 
@@ -640,7 +643,10 @@ class ImageListModel(QAbstractListModel):
                     for offset, image in enumerate(list(page)):
                         if image and hasattr(image, 'aspect_ratio'):
                             global_idx = page_start_idx + offset
-                            items_data.append((global_idx, image.aspect_ratio))
+                            ar = image.aspect_ratio
+                            if ar < 1/3:
+                                ar = 1/3  # Cap at 3:1 tall to match thumbnail crop
+                            items_data.append((global_idx, ar))
                 except Exception as e:
                     # Page was modified during iteration, skip it
                     print(f"[MASONRY] Page {page_num} modified during snapshot: {e}")
@@ -691,9 +697,9 @@ class ImageListModel(QAbstractListModel):
                     if ar > 100:
                         corrupted_count += 1
                         ar = 100
-                    if ar < 0.01:
-                        corrupted_count += 1
-                        ar = 0.01
+                    if ar < 1/3:
+                        # Cap at 3:1 tall to match thumbnail crop limit
+                        ar = 1/3
                     new_cache.append(ar)
                 except Exception as e:
                     # Corrupted image object - use fallback
@@ -930,29 +936,58 @@ class ImageListModel(QAbstractListModel):
 
         return images
 
+    def _rebuild_combined_filter(self):
+        """Rebuild _filter_sql/_filter_bindings from text + media type parts."""
+        parts = []
+        bindings = ()
+        if self._media_type_sql:
+            parts.append(self._media_type_sql)
+        if self._text_filter_sql:
+            parts.append(f"({self._text_filter_sql})")
+            bindings = self._text_filter_bindings
+        self._filter_sql = " AND ".join(parts)
+        self._filter_bindings = bindings
+
+    def set_media_type_filter(self, media_type: str):
+        """Set media type filter for paginated mode."""
+        if media_type == 'Images':
+            new_sql = "is_video = 0"
+        elif media_type == 'Videos':
+            new_sql = "is_video = 1"
+        else:
+            new_sql = ""
+
+        if new_sql == self._media_type_sql:
+            return
+        self._media_type_sql = new_sql
+        # Don't reload here — apply_filter will be called right after by the proxy
+
     def apply_filter(self, filter_struct: list | str | None):
         """Apply a filter to the paginated database view."""
         if not self._paginated_mode or not self._db:
             return
 
         try:
-            sql, bindings = self._build_filter_sql(filter_struct)
+            text_sql, text_bindings = self._build_filter_sql(filter_struct)
         except Exception as e:
             print(f"Filter build error: {e}")
-            sql, bindings = "", ()
-        
-        # Only update if changed
-        if sql == self._filter_sql and bindings == self._filter_bindings:
+            text_sql, text_bindings = "", ()
+
+        # Store text filter parts, then rebuild combined
+        self._text_filter_sql = text_sql
+        self._text_filter_bindings = text_bindings
+        old_combined = (self._filter_sql, self._filter_bindings)
+        self._rebuild_combined_filter()
+
+        # Only reload if combined result changed
+        if (self._filter_sql, self._filter_bindings) == old_combined:
             return
 
-        self._filter_sql = sql
-        self._filter_bindings = bindings
-
-        # Update total count based on filter
-        self._total_count = self._db.count(filter_sql=sql, bindings=bindings)
+        # Update total count based on combined filter
+        self._total_count = self._db.count(
+            filter_sql=self._filter_sql, bindings=self._filter_bindings)
 
         # Clear cache and reset
-        # Clear cache
         self._pages.clear()
 
         # Bootstrap load first pages

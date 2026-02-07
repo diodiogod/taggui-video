@@ -170,12 +170,6 @@ class ImageDelegate(QStyledItemDelegate):
         try:
             icon = index.data(Qt.ItemDataRole.DecorationRole)
             if icon and not icon.isNull():
-                # Paint icon filling the rect (maintaining aspect ratio is handled by QIcon.paint if modes used, 
-                # but here we just fill the target rect which masonry already calculated)
-                
-                # Draw centered and scaled to fit (QIcon.paint does this automatically usually)
-                # But to be safe and crisp:
-                # We can just pass the rect.
                 icon.paint(painter, option.rect, Qt.AlignmentFlag.AlignCenter)
         except RuntimeError:
             return
@@ -753,10 +747,12 @@ class ImageListView(QListView):
             return max(10000, int(self.verticalScrollBar().maximum()))
 
     def _strict_page_from_position(self, scroll_value: int, source_model=None) -> int:
-        """Derive page index from scroll position using canonical domain.
+        """Derive page index from scroll position.
 
-        Uses item-based mapping (scroll fraction → item index → page) so
-        that scroll coordinates align with masonry spacer positions.
+        Uses the actual scrollbar maximum as the domain, since scroll_value
+        is always relative to it.  This avoids drift when the scrollbar max
+        was set by a different code path (drag domain, masonry height, etc.)
+        than _strict_canonical_domain_max().
         """
         if source_model is None:
             source_model = (self.model().sourceModel()
@@ -767,7 +763,10 @@ class ImageListView(QListView):
         if total_items <= 0 or page_size <= 0:
             return 0
         last_page = max(0, (total_items - 1) // page_size)
-        domain = max(1, self._strict_canonical_domain_max(source_model))
+        # Use the actual scrollbar maximum — scroll_value is relative to it.
+        # Only fall back to canonical domain if scrollbar max is unset.
+        sb_max = self.verticalScrollBar().maximum()
+        domain = max(1, sb_max if sb_max > 0 else self._strict_canonical_domain_max(source_model))
         frac = max(0.0, min(1.0, int(scroll_value) / domain))
         # Item-based: fraction maps to item index, then to page.
         item_idx = int(frac * total_items)
@@ -991,29 +990,48 @@ class ImageListView(QListView):
 
 
     def _on_paginated_enrichment_complete(self):
-        """Handle completion of background enrichment in paginated mode."""
-        self._log_flow("ENRICH", "Paginated enrichment complete; reloading active pages", level="INFO")
-        self._masonry_sticky_page = getattr(self, '_current_page', 0)
-        self._masonry_sticky_until = time.time() + 0.5  # Prevent immediate window rebasing/jitter
-        # Re-anchor the scroll position to the current page during enrichment
-        # recalc so the viewport doesn't jump when avg_height changes.
+        """Handle completion of background enrichment in paginated mode.
+
+        Silently reload loaded pages so masonry gets accurate dimensions.
+        Anchors scroll + selection so the user isn't disrupted.
+        """
         cur_page = int(getattr(self, '_current_page', 0) or 0)
+        self._log_flow("ENRICH", f"Paginated enrichment complete; current_page={cur_page}", level="INFO")
+
+        # Snapshot the user's current scroll and selection BEFORE reload
+        scroll_val = self.verticalScrollBar().value()
+        scroll_max = self.verticalScrollBar().maximum()
+
+        # Lock the viewport to the current page so the masonry recalc
+        # doesn't jump somewhere else when avg_height changes.
+        self._masonry_sticky_page = cur_page
+        self._masonry_sticky_until = time.time() + 5.0
         self._release_page_lock_page = cur_page
-        self._release_page_lock_until = time.time() + 6.0
+        self._release_page_lock_until = time.time() + 8.0
         self._last_masonry_window_signature = None  # Force recalc with enriched dimensions
-        
-        # CRITICAL FIX: Defer to avoid race with masonry cleanup
+
         def reload_pages():
             source_model = self.proxy_image_list_model.sourceModel()
-            if hasattr(source_model, '_pages'):
-                 for page_num in list(source_model._pages.keys()):
-                     source_model._load_page_sync(page_num)
+            if not hasattr(source_model, '_pages'):
+                return
+            pages_to_reload = list(source_model._pages.keys())
+            if not pages_to_reload:
+                return
+            for page_num in pages_to_reload:
+                source_model._load_page_sync(page_num)
             self._last_masonry_signal = "enrichment_complete"
+            # Restore scroll position before emitting update to prevent jump
+            sb = self.verticalScrollBar()
+            sb.blockSignals(True)
+            if scroll_max > 0 and sb.maximum() > 0:
+                # Preserve same fraction through the domain
+                frac = scroll_val / scroll_max
+                sb.setValue(int(frac * sb.maximum()))
+            sb.blockSignals(False)
             source_model._emit_pages_updated()
-        
+
         from PySide6.QtCore import QTimer
         QTimer.singleShot(250, reload_pages)
-        # source_model.layoutChanged.emit() # Optional, already covered by pages_updated logic if connected
 
     def _on_pages_updated(self, loaded_pages: list):
         """Handle page load/eviction in buffered mode (safe alternative to layoutChanged)."""
@@ -1396,29 +1414,53 @@ class ImageListView(QListView):
                         except Exception:
                             target_ready = False
                     if not target_ready:
-                        try:
-                            if hasattr(source_model, 'ensure_pages_for_range'):
-                                start_row = window_start_page * page_size
-                                end_row = min(total_items - 1, ((window_end_page + 1) * page_size) - 1)
-                                source_model.ensure_pages_for_range(start_row, end_row)
-                            else:
-                                for p in range(window_start_page, window_end_page + 1):
-                                    if p not in source_model._pages and p not in source_model._loading_pages:
-                                        source_model._request_page_load(p)
-                        except Exception:
-                            pass
-                        self._log_flow(
-                            "MASONRY",
-                            f"Waiting target page {current_page} before strict calc (window {window_start_page}-{window_end_page})",
-                            throttle_key="strict_wait_target_page",
-                            every_s=0.5,
-                        )
-                        self._masonry_calculating = False
-                        if source_model and hasattr(source_model, '_enrichment_paused'):
-                            source_model._enrichment_paused.clear()
-                        from PySide6.QtCore import QTimer
-                        QTimer.singleShot(120, self._calculate_masonry_layout)
-                        return
+                        wait_count = getattr(self, '_strict_wait_count', 0) + 1
+                        self._strict_wait_count = wait_count
+
+                        # Safety net: after many retries, snap to loaded pages to
+                        # break deadlocks (e.g. domain mismatch causing page drift).
+                        if wait_count > 20:
+                            loaded_list = sorted(loaded_pages_now) if loaded_pages_now else []
+                            if loaded_list:
+                                old_page = int(current_page)
+                                current_page = loaded_list[len(loaded_list) // 2]
+                                window_start_page = max(0, current_page - window_buffer)
+                                window_end_page = min(max_page - 1, current_page + window_buffer)
+                                min_idx = window_start_page * page_size
+                                max_idx = min(total_items, (window_end_page + 1) * page_size)
+                                print(f"[MASONRY] Snap to loaded page {current_page} after "
+                                      f"{wait_count} retries (scroll-derived: {old_page}, "
+                                      f"loaded: {loaded_list[0]}-{loaded_list[-1]})")
+                                self._strict_wait_count = 0
+                            # Fall through to proceed with layout
+                        else:
+                            # Request page loads and wait for them
+                            try:
+                                if hasattr(source_model, 'ensure_pages_for_range'):
+                                    start_row = window_start_page * page_size
+                                    end_row = min(total_items - 1, ((window_end_page + 1) * page_size) - 1)
+                                    source_model.ensure_pages_for_range(start_row, end_row)
+                                else:
+                                    for p in range(window_start_page, window_end_page + 1):
+                                        if p not in source_model._pages and p not in source_model._loading_pages:
+                                            source_model._request_page_load(p)
+                            except Exception:
+                                pass
+                            self._log_flow(
+                                "MASONRY",
+                                f"Waiting target page {current_page} before strict calc "
+                                f"(window {window_start_page}-{window_end_page}, retry {wait_count})",
+                                throttle_key="strict_wait_target_page",
+                                every_s=0.5,
+                            )
+                            self._masonry_calculating = False
+                            if source_model and hasattr(source_model, '_enrichment_paused'):
+                                source_model._enrichment_paused.clear()
+                            from PySide6.QtCore import QTimer
+                            QTimer.singleShot(120, self._calculate_masonry_layout)
+                            return
+                    else:
+                        self._strict_wait_count = 0
 
                 loaded_pages_sig = tuple(sorted(source_model._pages.keys())) if hasattr(source_model, '_pages') else ()
                 window_signature = (
@@ -5057,10 +5099,15 @@ class ImageList(QDockWidget):
         self.sort_combo_box.addItems(['Default', 'Name', 'Modified', 'Created',
                                        'Size', 'Type', 'Random'])
 
+        self.media_type_combo_box = SettingsComboBox(key='media_type_filter')
+        self.media_type_combo_box.addItems(['All', 'Images', 'Videos'])
+        self.media_type_combo_box.setMinimumWidth(70)
+
         selection_sort_layout.addWidget(selection_mode_label)
         selection_sort_layout.addWidget(self.selection_mode_combo_box, stretch=1)
         selection_sort_layout.addWidget(sort_label)
         selection_sort_layout.addWidget(self.sort_combo_box, stretch=1)
+        selection_sort_layout.addWidget(self.media_type_combo_box)
 
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)

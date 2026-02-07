@@ -97,6 +97,8 @@ class SignalManager:
 
         image_list.filter_line_edit.textChanged.connect(
             self.main_window.set_image_list_filter)
+        image_list.media_type_combo_box.currentTextChanged.connect(
+            lambda _: self.main_window.delayed_filter())
         image_list_selection_model.currentChanged.connect(
             self.main_window.save_image_index)
         image_list_selection_model.currentChanged.connect(
