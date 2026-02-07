@@ -709,9 +709,10 @@ class ImageListView(QListView):
     def _strict_canonical_domain_max(self, source_model=None) -> int:
         """Single source of truth for the strict-mode scrollbar domain.
 
-        Deterministic from dataset geometry only (total_items, viewport_width,
-        thumbnail_size, avg_height).  No mutable drag/freeze/floor state is used,
-        so every caller that maps fraction → page gets the same answer.
+        Uses the SAME column/spacing formula as the masonry layout so that
+        scroll_value maps exactly to the masonry y-coordinate for that item.
+        No headroom factor — headroom creates a coordinate-space mismatch
+        that causes the viewport to overshoot the masonry items.
         """
         try:
             if source_model is None:
@@ -731,18 +732,24 @@ class ImageListView(QListView):
             spacing = 2
             viewport_width = max(1, int(self.viewport().width()))
             col_w = max(16, int(self.current_thumbnail_size))
-            num_cols = max(1, (viewport_width + spacing) // (col_w + spacing))
+            # Match masonry's column calculation (subtracts scrollbar + margins).
+            sb_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
+            avail_width = viewport_width - sb_width - 24
+            num_cols = max(1, avail_width // (col_w + spacing))
             rows = max(1, math.ceil(total_items / num_cols))
             avg_h = float(self._get_strict_virtual_avg_height())
             est_total_h = int(rows * max(10.0, avg_h))
             viewport_height = max(1, int(self.viewport().height()))
-            # 10 % headroom absorbs minor estimation error without causing drift.
-            return max(10000, int((est_total_h - viewport_height) * 1.10))
+            return max(10000, est_total_h - viewport_height)
         except Exception:
             return max(10000, int(self.verticalScrollBar().maximum()))
 
     def _strict_page_from_position(self, scroll_value: int, source_model=None) -> int:
-        """Derive page index from scroll position using canonical domain."""
+        """Derive page index from scroll position using canonical domain.
+
+        Uses item-based mapping (scroll fraction → item index → page) so
+        that scroll coordinates align with masonry spacer positions.
+        """
         if source_model is None:
             source_model = (self.model().sourceModel()
                             if self.model() and hasattr(self.model(), 'sourceModel')
@@ -754,7 +761,10 @@ class ImageListView(QListView):
         last_page = max(0, (total_items - 1) // page_size)
         domain = max(1, self._strict_canonical_domain_max(source_model))
         frac = max(0.0, min(1.0, int(scroll_value) / domain))
-        return max(0, min(last_page, int(round(frac * last_page))))
+        # Item-based: fraction maps to item index, then to page.
+        item_idx = int(frac * total_items)
+        page = item_idx // page_size
+        return max(0, min(last_page, page))
     # ────────────────────────────────────────────────────────────────────
 
     def contextMenuEvent(self, event):
@@ -977,6 +987,11 @@ class ImageListView(QListView):
         self._log_flow("ENRICH", "Paginated enrichment complete; reloading active pages", level="INFO")
         self._masonry_sticky_page = getattr(self, '_current_page', 0)
         self._masonry_sticky_until = time.time() + 0.5  # Prevent immediate window rebasing/jitter
+        # Re-anchor the scroll position to the current page during enrichment
+        # recalc so the viewport doesn't jump when avg_height changes.
+        cur_page = int(getattr(self, '_current_page', 0) or 0)
+        self._release_page_lock_page = cur_page
+        self._release_page_lock_until = time.time() + 6.0
         self._last_masonry_window_signature = None  # Force recalc with enriched dimensions
         
         # CRITICAL FIX: Defer to avoid race with masonry cleanup
@@ -1905,11 +1920,8 @@ class ImageListView(QListView):
                             self._current_page = 0
                         elif release_lock_live:
                             page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                            total_pages = max(1, (total_items + page_size - 1) // page_size)
-                            if total_pages > 1:
-                                page_frac = max(0.0, min(1.0, int(release_lock_page) / (total_pages - 1)))
-                            else:
-                                page_frac = 0.0
+                            # Item-based fraction to match masonry spacer positions.
+                            page_frac = max(0.0, min(1.0, (int(release_lock_page) * page_size) / max(1, total_items)))
                             target_val = int(round(page_frac * stable_max))
                             sb.setValue(max(0, min(target_val, stable_max)))
                             self._last_stable_scroll_value = sb.value()
@@ -2344,8 +2356,9 @@ class ImageListView(QListView):
                 page_size = int(getattr(source_model, 'PAGE_SIZE', 0) or 0)
                 total_pages = max(1, (total_items + page_size - 1) // page_size) if page_size > 0 else 1
                 cur_page = int(getattr(self, '_current_page', 0) or 0)
-                if total_pages > 1 and 0 <= cur_page < total_pages:
-                    ratio = max(0.0, min(1.0, cur_page / (total_pages - 1)))
+                if total_items > 0 and page_size > 0 and 0 <= cur_page < total_pages:
+                    # Item-based fraction for consistency with masonry coordinates.
+                    ratio = max(0.0, min(1.0, (cur_page * page_size) / max(1, total_items)))
             except Exception:
                 pass
         self._strict_drag_live_fraction = ratio
@@ -2414,7 +2427,10 @@ class ImageListView(QListView):
                         slider_target_page = max(0, min(total_pages - 1, int(round(release_fraction * (total_pages - 1)))))
                     else:
                         slider_target_page = max(0, min(total_pages - 1, int(slider_target_page)))
-                if total_pages > 1:
+                if strategy == "windowed_strict":
+                    # Item-based fraction for consistency with masonry coordinates.
+                    release_fraction = max(0.0, min(1.0, (slider_target_page * source_model.PAGE_SIZE) / max(1, total_items)))
+                elif total_pages > 1:
                     release_fraction = slider_target_page / (total_pages - 1)
                 self._drag_target_page = slider_target_page
                 at_bottom_strict = max_v > 0 and sb.value() >= max_v - 2
@@ -2422,10 +2438,11 @@ class ImageListView(QListView):
                 # Intent thresholds for drag preview: if user releases very low/high, snap to edge.
                 # Keep this strict: broad thresholds caused accidental snaps near the lower region.
                 if strategy == "windowed_strict":
-                    # In strict mode, transient range changes can fake "at bottom/top".
-                    # Use fraction-only intent from the original drag baseline.
-                    bottom_intent = release_fraction >= 0.99
-                    top_intent = release_fraction <= 0.02
+                    # In strict mode, detect intent from raw slider position vs domain
+                    # (not item-based fraction, which doesn't reach 1.0 for the last page).
+                    raw_frac = max(0.0, min(1.0, slider_pos / max(1, baseline_max)))
+                    bottom_intent = raw_frac >= 0.98
+                    top_intent = raw_frac <= 0.02
                 else:
                     bottom_intent = at_bottom_strict or (self._drag_preview_mode and release_fraction >= 0.99)
                     top_intent = at_top_strict or (self._drag_preview_mode and release_fraction <= 0.02)
@@ -2476,10 +2493,8 @@ class ImageListView(QListView):
                         pass
                     # Keep scrollbar value aligned to the strict virtual domain for this page.
                     if strategy == "windowed_strict":
-                        if total_pages > 1:
-                            page_fraction = max(0.0, min(1.0, self._current_page / (total_pages - 1)))
-                        else:
-                            page_fraction = 0.0
+                        # Item-based fraction to match masonry spacer positions.
+                        page_fraction = max(0.0, min(1.0, (self._current_page * source_model.PAGE_SIZE) / max(1, total_items)))
                         if bottom_intent:
                             target_slider = baseline_max
                         elif top_intent:
@@ -3026,8 +3041,8 @@ class ImageListView(QListView):
                         if _rl_live and keep_max > 0:
                             _ti = int(getattr(source_model, '_total_count', 0) or 0)
                             _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                            _tp = max(1, (_ti + _ps - 1) // _ps) if _ps > 0 else 1
-                            _pf = max(0.0, min(1.0, int(_rl_page) / max(1, _tp - 1))) if _tp > 1 else 0.0
+                            # Item-based fraction to match masonry spacer positions.
+                            _pf = max(0.0, min(1.0, (int(_rl_page) * _ps) / max(1, _ti)))
                             restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
                         else:
                             # Ratio-preserving: keep thumb at the same visual fraction.
@@ -3832,8 +3847,8 @@ class ImageListView(QListView):
                             if _rl_live and keep_max > 0:
                                 _ti = int(getattr(source_model, '_total_count', 0) or 0)
                                 _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                                _tp = max(1, (_ti + _ps - 1) // _ps) if _ps > 0 else 1
-                                _pf = max(0.0, min(1.0, int(_rl_page) / max(1, _tp - 1))) if _tp > 1 else 0.0
+                                # Item-based fraction to match masonry spacer positions.
+                                _pf = max(0.0, min(1.0, (int(_rl_page) * _ps) / max(1, _ti)))
                                 sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
                             elif _old_max != keep_max and keep_max > 0:
                                 # Ratio-preserving correction when domain changed.
