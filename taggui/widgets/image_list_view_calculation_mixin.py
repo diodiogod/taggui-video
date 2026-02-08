@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_masonry_submission_service import MasonrySubmissionService
+from widgets.image_list_masonry_window_planner_service import MasonryWindowPlannerService
 
 class ImageListViewCalculationMixin:
     def _get_masonry_submission_service(self) -> MasonrySubmissionService:
@@ -7,6 +8,13 @@ class ImageListViewCalculationMixin:
         if service is None:
             service = MasonrySubmissionService(self)
             self._masonry_submission_service = service
+        return service
+
+    def _get_masonry_window_planner_service(self) -> MasonryWindowPlannerService:
+        service = getattr(self, "_masonry_window_planner_service", None)
+        if service is None:
+            service = MasonryWindowPlannerService(self)
+            self._masonry_window_planner_service = service
         return service
 
     def _calculate_masonry_layout(self):
@@ -111,105 +119,30 @@ class ImageListViewCalculationMixin:
                 strict_mode = strategy == "windowed_strict"
                 local_anchor_mode = self._use_local_anchor_masonry(source_model)
             
-                # CRITICAL FIX: Compute current page DIRECTLY from scroll position
-                # Prefer visible masonry top index (stable), fallback to scroll fraction.
-                scroll_val = self.verticalScrollBar().value()
-                scroll_max = self.verticalScrollBar().maximum()
-                dragging_mode = self._scrollbar_dragging or self._drag_preview_mode
-                source_idx = None
-                anchor_active = (
-                    getattr(self, '_drag_release_anchor_active', False)
-                    and self._drag_release_anchor_idx is not None
-                    and time.time() < getattr(self, '_drag_release_anchor_until', 0.0)
+                planner = self._get_masonry_window_planner_service()
+                current_page = planner.resolve_current_page(
+                    source_model=source_model,
+                    page_size=page_size,
+                    total_items=total_items,
+                    strict_mode=strict_mode,
+                    local_anchor_mode=local_anchor_mode,
                 )
-                stick_bottom = getattr(self, '_stick_to_edge', None) == "bottom"
-                stick_top = getattr(self, '_stick_to_edge', None) == "top"
-                if stick_bottom and total_items > 0:
-                    source_idx = total_items - 1
-                elif stick_top:
-                    source_idx = 0
-                elif anchor_active:
-                    source_idx = int(self._drag_release_anchor_idx)
-                elif strict_mode:
-                    if dragging_mode and self._drag_target_page is not None:
-                        strict_page = max(0, min(max(0, (total_items - 1) // page_size) if total_items > 0 else 0, int(self._drag_target_page)))
-                    elif dragging_mode:
-                        slider_pos = int(self.verticalScrollBar().sliderPosition())
-                        strict_page = self._strict_page_from_position(slider_pos, source_model)
-                    else:
-                        strict_page = self._strict_page_from_position(scroll_val, source_model)
-                    source_idx = max(0, min(total_items - 1, strict_page * page_size))
 
-                if (not strict_mode) and local_anchor_mode and total_items > 0 and scroll_max > 0:
-                    scroll_fraction = max(0.0, min(1.0, scroll_val / scroll_max))
-                    source_idx = int(scroll_fraction * total_items)
-                elif (not strict_mode) and (not anchor_active) and (not stick_bottom) and (not stick_top) and self._masonry_items:
-                    viewport_height = self.viewport().height()
-                    viewport_rect = QRect(0, scroll_val, self.viewport().width(), viewport_height)
-                    visible_now = self._get_masonry_visible_items(viewport_rect)
-                    if visible_now:
-                        # Ignore spacer tokens (negative indices) when estimating current page.
-                        real_visible = [it for it in visible_now if it.get('index', -1) >= 0]
-                        if real_visible:
-                            top_item = min(real_visible, key=lambda x: x['rect'].y())
-                            source_idx = top_item['index']
-
-                # If no real visible item is available (e.g. viewport currently on spacers),
-                # prefer the tracked current page from scroll logic to avoid oscillation.
-                if total_items > 0 and scroll_val <= 2:
-                    source_idx = 0
-                elif total_items > 0 and scroll_max > 0 and scroll_val >= scroll_max - 2:
-                    source_idx = total_items - 1
-
-                if source_idx is None and hasattr(self, '_current_page'):
-                    source_idx = max(0, int(self._current_page) * page_size)
-
-                if source_idx is None and scroll_max > 0 and total_items > 0:
-                    scroll_fraction = scroll_val / scroll_max
-                    source_idx = int(scroll_fraction * total_items)
-
-                if source_idx is None:
-                    source_idx = 0
-
-                candidate_page = max(0, min((total_items - 1) // page_size if total_items > 0 else 0, source_idx // page_size))
-                prev_page = self._current_page if hasattr(self, '_current_page') else candidate_page
-
-                # Hysteresis: avoid page flapping near boundaries.
-                current_page = candidate_page
-                if (not local_anchor_mode) and (not anchor_active) and (not stick_bottom) and (not stick_top) and total_items > 0 and candidate_page != prev_page:
-                    half_page = max(1, page_size // 2)
-                    if candidate_page > prev_page:
-                        if source_idx < ((prev_page + 1) * page_size + half_page):
-                            current_page = prev_page
-                    else:
-                        if source_idx > (prev_page * page_size - half_page):
-                            current_page = prev_page
-
-                # Sticky window right after enrichment/layout refresh.
-                if (not local_anchor_mode) and (not anchor_active) and (not stick_bottom) and (not stick_top) and time.time() < getattr(self, '_masonry_sticky_until', 0.0):
-                    current_page = getattr(self, '_masonry_sticky_page', current_page)
-            
-                # Update cached value for other uses
-                self._current_page = current_page
-            
-                # Keep masonry calculations local to the current region.
-                # This is intentionally small for responsive correction on large folders.
-                try:
-                    window_buffer = int(settings.value('thumbnail_eviction_pages', 3, type=int))
-                except Exception:
-                    window_buffer = 3
-                window_buffer = max(1, min(window_buffer, 6))
+                window_buffer = planner.get_window_buffer()
                 max_page = (total_items + page_size - 1) // page_size
-                full_layout_mode = False
-                local_anchor_mode = self._use_local_anchor_masonry(source_model)
-
-                # Accuracy mode: when most/all items are loaded, compute full masonry to preserve
-                # true column state. Windowed spacer mode cannot reproduce exact column heights.
-                loaded_count = len(items_data)
-                if total_items > 0 and strategy != "windowed_strict":
-                    coverage = loaded_count / total_items
-                    if coverage >= 0.95 and total_items <= 50000:
-                        full_layout_mode = True
+                window_info = planner.compute_window_bounds(
+                    total_items=total_items,
+                    page_size=page_size,
+                    current_page=current_page,
+                    strategy=strategy,
+                    loaded_count=len(items_data),
+                    window_buffer=window_buffer,
+                )
+                full_layout_mode = window_info["full_layout_mode"]
+                window_start_page = window_info["window_start_page"]
+                window_end_page = window_info["window_end_page"]
+                min_idx = window_info["min_idx"]
+                max_idx = window_info["max_idx"]
 
                 # Estimate row/column metrics for spacer heights once
                 if strict_mode:
@@ -229,19 +162,6 @@ class ImageListViewCalculationMixin:
                 scroll_bar_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
                 avail_width = viewport_width - scroll_bar_width - 24  # margins
                 num_cols_est = max(1, avail_width // (column_width + spacing))
-
-                if full_layout_mode:
-                    window_start_page = 0
-                    window_end_page = max_page - 1
-                    min_idx = 0
-                    max_idx = total_items
-                else:
-                    # Window layout around current page (not full 0..N), with prefix/suffix spacers
-                    # to preserve absolute Y positioning while keeping token count small.
-                    window_start_page = max(0, current_page - window_buffer)
-                    window_end_page = min(max_page - 1, current_page + window_buffer)
-                    min_idx = window_start_page * page_size
-                    max_idx = min(total_items, (window_end_page + 1) * page_size)
 
                 # Strict mode guard: do not build a spacer-only layout for an unloaded target window.
                 # Wait until the target page is resident to avoid empty-list regressions.
@@ -359,124 +279,17 @@ class ImageListViewCalculationMixin:
                     QTimer.singleShot(120, self._calculate_masonry_layout)
                     return
             
-                # GAP FILLING: Detect missing index ranges and insert spacers
-                # This ensures consistent Y-coordinates even if pages are missing
-                items_data = []
-                if filtered_items:
-                    # Sort by index just in case
-                    filtered_items.sort(key=lambda x: x[0])
-                
-                    # Insert prefix spacer for pages before the window so layout coordinates remain absolute.
-                    if min_idx > 0:
-                        import math
-                        prefix_rows = math.ceil(min_idx / num_cols_est)
-                        prefix_h = int(prefix_rows * avg_h)
-                        items_data.append((-3, ('SPACER', prefix_h)))
-
-                    # Initialize last_idx to start of window (minus 1)
-                    # This ensures we insert a spacer if the first loaded item is NOT min_idx
-                    last_idx = min_idx - 1
-                
-                    for item in filtered_items:
-                        curr_idx = item[0]
-                        gap = curr_idx - last_idx - 1
-                        if gap > 0:
-                            # Found a gap (missing items)
-                            # Convert item count to approximate pixel height
-                            # Each row has 'num_cols_est' items.
-                            # height = (gap / cols) * row_height
-                            import math
-                            gap_rows = math.ceil(gap / num_cols_est)
-                            spacer_h = int(gap_rows * avg_h)
-                        
-                            # Insert spacer token
-                            # print(f"[MASONRY] Inserting spacer for gap {last_idx+1}-{curr_idx-1} ({gap} items, ~{spacer_h}px)")
-                            items_data.append((-1, ('SPACER', spacer_h))) 
-                        
-                        items_data.append(item)
-                        last_idx = curr_idx
-                
-                    # TAIL GAP FILLER: Check if the window extends beyond the last loaded item
-                    # This ensures we reserve space for missing pages at the bottom of the window
-                    if total_items > 0: # Ensure we have a valid total count
-                         last_item_idx = filtered_items[-1][0]
-                         # Our window goes up to max_idx (exclusive).
-                         # But the dataset might end before max_idx.
-                         # We want to fill up to the smaller of (window_end, dataset_end).
-                     
-                         target_end_idx = min(max_idx, total_items)
-                         gap = target_end_idx - last_item_idx - 1
-                     
-                         if gap > 0:
-                            import math
-                            gap_rows = math.ceil(gap / num_cols_est)
-                            spacer_h = int(gap_rows * avg_h)
-                        
-                            # items_data.append((-1, ('SPACER', spacer_h))) 
-                            # We use a special index for the tail spacer so it doesn't conflict
-                            items_data.append((-2, ('SPACER', spacer_h))) 
-                        
-                else:
-                    # Window is outside currently loaded items (e.g. jumped to Page 50, only Page 0-5 loaded)
-                    # We need to insert a spacer for this entire window so the user sees "something" (blank space)
-                    # and the scrollbar maintains its size/position while we wait for loads.
-                    if total_items > 0:
-                         # Calculate how many items *should* be in this window
-                         # min_idx to max_idx, clamped to total_items
-                         start = min(min_idx, total_items)
-                         end = min(max_idx, total_items)
-                         count = end - start
-                     
-                         if count > 0:
-                            # Insert a single spacer for this block
-                             import math
-                             # Estimate how many rows this missing block would take
-                             num_cols_est = max(1, avail_width // (column_width + spacing))
-                             rows = math.ceil(count / num_cols_est)
-                             spacer_h = int(rows * avg_h)
-                         
-                             # We use a special index structure: (-1, ('SPACER', h))
-                             # But let's use a unique index based on the window start to avoid collisions if we merge
-                             if min_idx > 0:
-                                 import math
-                                 prefix_rows = math.ceil(min_idx / num_cols_est)
-                                 prefix_h = int(prefix_rows * avg_h)
-                                 items_data = [(-3, ('SPACER', prefix_h)), (min_idx, ('SPACER', spacer_h))]
-                             else:
-                                 items_data = [(min_idx, ('SPACER', spacer_h))]
-                             # print(f"[MASONRY] Buffered: Inserted full-window spacer for indices {start}-{end} ({spacer_h}px)")
-                    else:
-                        items_data = []
-
-                # FINAL SAFETY/BLIND SPOT HANDLER
-                # If we still have no items, but we are within the dataset range, we MUST insert a spacer.
-                # This handles cases where filtered_items was empty, or checks failed.
-                if not items_data and total_items > 0:
-                     start = min(min_idx, total_items)
-                     end = min(max_idx, total_items)
-                     count = end - start
-                 
-                     if count > 0:
-                         import math
-                         num_cols_est = max(1, avail_width // (column_width + spacing))
-                         rows = math.ceil(count / num_cols_est)
-                     
-                         # Robust avg height (fallback to 100 if invalid)
-                         safe_avg = avg_h if avg_h > 1 else 100.0
-                         spacer_h = int(rows * safe_avg)
-                     
-                         if min_idx > 0:
-                             import math
-                             prefix_rows = math.ceil(min_idx / num_cols_est)
-                             prefix_h = int(prefix_rows * avg_h)
-                             items_data = [(-3, ('SPACER', prefix_h)), (min_idx, ('SPACER', spacer_h))]
-                         else:
-                             items_data = [(min_idx, ('SPACER', spacer_h))]
-                         # print(f"[MASONRY] Buffered: Inserted SAFETY spacer for indices {start}-{end} ({spacer_h}px) due to empty items")
-
-                if not items_data:
-                     # print(f"[MASONRY] Buffered: No items in visible window (Page {current_page} +/- {window_buffer})")
-                     pass 
+                items_data = planner.build_items_with_spacers(
+                    filtered_items=filtered_items,
+                    min_idx=min_idx,
+                    max_idx=max_idx,
+                    total_items=total_items,
+                    num_cols_est=num_cols_est,
+                    avg_h=avg_h,
+                    avail_width=avail_width,
+                    column_width=column_width,
+                    spacing=spacing,
+                )
  
 
                 if full_layout_mode:
