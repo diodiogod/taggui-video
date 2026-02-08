@@ -1,53 +1,22 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from widgets.image_list_masonry_lifecycle_service import MasonryLifecycleService
 
 class ImageListViewLayoutMixin:
+    def _get_masonry_lifecycle_service(self) -> MasonryLifecycleService:
+        service = getattr(self, "_masonry_lifecycle_service", None)
+        if service is None:
+            service = MasonryLifecycleService(self)
+            self._masonry_lifecycle_service = service
+        return service
+
     def _check_masonry_completion(self):
         """Check if multiprocessing calculation is complete (non-blocking poll)."""
-        if self._masonry_calc_future and self._masonry_calc_future.done():
-            try:
-                result = self._masonry_calc_future.result()
-                self._on_masonry_calculation_complete(result)
-            except Exception as e:
-                # print(f"Masonry calculation error: {e}")
-                import traceback
-                traceback.print_exc()
-                self._masonry_calculating = False
-
-                # Resume enrichment even on error
-                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-                if source_model and hasattr(source_model, '_enrichment_paused'):
-                    source_model._enrichment_paused.clear()
-                    print("[MASONRY] Resumed enrichment after error")
-        else:
-            # WATCHDOG: Check if we've been calculating for too long (e.g. > 5 seconds)
-            # This handles cases where the future silently hangs or the worker died uniquely
-            import time
-            current_time = time.time()
-            start_time = getattr(self, '_masonry_start_time', 0)
-            if self._masonry_calculating and (current_time - start_time > 5.0):
-                print(f"[MASONRY] ⚠️ Watchdog triggered: Calculation stuck for {current_time - start_time:.1f}s. Resetting state.")
-                self._masonry_calculating = False
-                self._masonry_calc_future = None # Abandon broken future
-                if hasattr(source_model, '_enrichment_paused'):
-                     source_model._enrichment_paused.clear()
-                return # Stop polling this dead task
-
-            # Check again in 50ms
-            QTimer.singleShot(50, self._check_masonry_completion)
-        
-            # Heartbeat logging (every 2 seconds approx)
-            if not hasattr(self, '_masonry_poll_counter'):
-                self._masonry_poll_counter = 0
-            self._masonry_poll_counter += 1
-            if self._masonry_poll_counter % 40 == 0:
-                 # print("[MASONRY] Waiting for worker...")
-                 pass
+        self._get_masonry_lifecycle_service().check_masonry_completion()
 
 
     def _on_masonry_calculation_progress(self, current, total):
         """Update progress bar during calculation."""
-        if hasattr(self, '_masonry_progress_bar'):
-            self._masonry_progress_bar.setValue(current)
+        self._get_masonry_lifecycle_service().on_masonry_calculation_progress(current, total)
 
 
     def _on_masonry_calculation_complete(self, result):
