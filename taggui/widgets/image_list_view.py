@@ -10,6 +10,7 @@ from widgets.image_list_view_scroll_mixin import ImageListViewScrollMixin
 from widgets.image_list_view_paint_selection_mixin import ImageListViewPaintSelectionMixin
 from widgets.image_list_view_file_ops_mixin import ImageListViewFileOpsMixin
 from widgets.image_list_strict_domain_service import StrictScrollDomainService
+from widgets.image_list_masonry_lifecycle_service import MasonryLifecycleService
 
 class ImageListView(
     ImageListViewStrategyMixin,
@@ -166,6 +167,7 @@ class ImageListView(
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
         self._strict_domain_service = StrictScrollDomainService(self)
+        self._masonry_lifecycle_service = MasonryLifecycleService(self)
 
         # Loading progress bar for thumbnail preloading
         self._thumbnail_progress_bar = None  # Created on demand
