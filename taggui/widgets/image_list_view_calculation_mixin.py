@@ -1,6 +1,14 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from widgets.image_list_masonry_submission_service import MasonrySubmissionService
 
 class ImageListViewCalculationMixin:
+    def _get_masonry_submission_service(self) -> MasonrySubmissionService:
+        service = getattr(self, "_masonry_submission_service", None)
+        if service is None:
+            service = MasonrySubmissionService(self)
+            self._masonry_submission_service = service
+        return service
+
     def _calculate_masonry_layout(self):
         """Calculate masonry layout positions for all items (async with thread)."""
         if not self.use_masonry or not self.model():
@@ -50,23 +58,8 @@ class ImageListViewCalculationMixin:
                 QTimer.singleShot(remaining, self._calculate_masonry_layout)
                 return
     
-        # CRITICAL FIX: Recreate executor periodically to prevent thread pool exhaustion
-        # After many rapid operations, thread state can accumulate and cause crashes
-        if not hasattr(self, '_masonry_calc_count'):
-            self._masonry_calc_count = 0
-    
-        self._masonry_calc_count += 1
-        if self._masonry_calc_count % 20 == 0:  # Reset every 20 calculations
-            print(f"[MASONRY] Recreating executor after {self._masonry_calc_count} calculations")
-            try:
-                old_executor = self._masonry_executor
-                from concurrent.futures import ThreadPoolExecutor
-                self._masonry_executor = ThreadPoolExecutor(max_workers=1)
-                # Shut down old executor in background
-                import threading
-                threading.Thread(target=lambda: old_executor.shutdown(wait=True), daemon=True).start()
-            except Exception as e:
-                print(f"[MASONRY] Failed to recreate executor: {e}")
+        # Recreate executor periodically to prevent thread-pool degradation.
+        self._get_masonry_submission_service().prepare_executor()
 
         self._masonry_calculating = True
         import time
@@ -515,34 +508,21 @@ class ImageListViewCalculationMixin:
             return
 
         try:
-            # Generate cache key
             cache_key = self._get_masonry_cache_key()
-        
-            # CRITICAL: Make a defensive copy of items_data to prevent race conditions
-            # If the main thread modifies items_data while the worker is iterating,
-            # it can cause crashes. This was causing the second masonry call to fail.
-            items_data_copy = list(items_data)
-        
-            # Validate data before sending to worker
-            if not all(isinstance(item, (tuple, list)) and len(item) >= 2 for item in items_data_copy[:10]):
-                print(f"[MASONRY] WARNING: items_data contains invalid entries, skipping calculation")
-                self._masonry_calculating = False
-                return
-
-            # Submit to worker process (NO GIL BLOCKING!)
-            self._masonry_calc_future = self._masonry_executor.submit(
-                calculate_masonry_layout,
-                items_data_copy,  # Pass the copy, not the original!
-                column_width,
-                spacing,
-                num_columns,
-                cache_key
-            )
         except Exception as e:
             print(f"[MASONRY] CRITICAL ERROR starting calculation: {e}")
             import traceback
             traceback.print_exc()
             self._masonry_calculating = False
+            return
+
+        if not self._get_masonry_submission_service().submit_layout_job(
+            items_data=items_data,
+            column_width=column_width,
+            spacing=spacing,
+            num_columns=num_columns,
+            cache_key=cache_key,
+        ):
             return
 
         # Poll for completion using QTimer
