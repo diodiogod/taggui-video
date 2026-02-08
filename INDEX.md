@@ -63,6 +63,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_list_strict_domain_service.py`: Strict virtual scroll domain math extracted as a dedicated service.
 - `image_list_masonry_lifecycle_service.py`: Masonry recalculation gating and async completion lifecycle service.
 - `image_list_masonry_submission_service.py`: Masonry worker submission and executor-rotation service.
+- `image_list_masonry_window_planner_service.py`: Current-page window selection and spacer-token planning service.
 - `image_list_dock.py`: `ImageList` dock widget (toolbar/filter/status integration).
 - `image_viewer.py`: Main image/video preview viewer.
 - `image_tags_editor.py`: Tag editing panel for current media.
