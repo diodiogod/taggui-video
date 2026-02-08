@@ -368,11 +368,15 @@ class ImageIndexDB:
                 print(f'Database write error: {e}')
                 return
 
-    def bulk_insert_files(self, file_paths: List[Path], directory_path: Path):
+    def bulk_insert_files(self, file_paths: List[Path], directory_path: Path,
+                          progress_callback=None):
         """
         Bulk insert initial file records into the database.
         Used when initializing large folders to ensure DB has records for pagination.
         Skips files that already exist in DB.
+
+        Args:
+            progress_callback: Optional callable(current, total) for UI progress.
         """
         if not self.enabled or not self.conn or not file_paths:
             return
@@ -380,33 +384,24 @@ class ImageIndexDB:
         # Prepare data chunks for insertion
         files_data = []
         now = time.time()
-        
+
         # Get set of existing filenames to avoid duplicates (faster than INSERT OR IGNORE for 1M files)
         try:
              existing_files = set(self.get_all_paths())
-        except:
+        except Exception:
              existing_files = set()
 
         new_files_count = 0
-        for path in file_paths:
-             # Store just the filename relative to directory_path, but simplified to just name 
-             # because DB schema says 'file_name TEXT UNIQUE'.
-             # In cache logic: 'relative_path = str(image_path.relative_to(directory_path))'
-             # Wait, db.save_info uses file_name. 
-             # schema says file_name UNIQUE.
-             
-             # Let's match what save_info does.
-             # In fast load: get_cached_info(relative_path...)
-             # So we should store relative path.
+        total_files = len(file_paths)
+        for i, path in enumerate(file_paths):
              try:
                  rel_path = str(path.relative_to(directory_path))
              except ValueError:
-                 rel_path = path.name # Fallback
-             
+                 rel_path = path.name
+
              if rel_path in existing_files:
                  continue
-                 
-             # Fallback values for new files
+
              try:
                  stat = path.stat()
                  mtime = stat.st_mtime
@@ -418,27 +413,34 @@ class ImageIndexDB:
              suffix = path.suffix.lower()
              is_video = suffix in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
              file_type = suffix.lstrip('.') if suffix else ''
-             
+
              files_data.append((
-                 rel_path, 
-                 None, None, 1.0,  # Placeholder dims (NULL)
-                 int(is_video), 
+                 rel_path,
+                 None, None, 1.0,  # Placeholder dims
+                 int(is_video),
                  None, None, None, # Video metadata
                  mtime, 0.0, now,
                  file_size, file_type, ctime
              ))
              new_files_count += 1
-             
-             if len(files_data) >= 1000:
+
+             if len(files_data) >= 5000:
                  self._bulk_insert_chunk(files_data)
                  files_data = []
-                 
+
+             # Progress every 10k files (covers both new and skipped)
+             if (i + 1) % 10000 == 0:
+                 if progress_callback:
+                     progress_callback(i + 1, total_files)
+                 if new_files_count % 50000 == 0 and new_files_count > 0:
+                     print(f"[DB] Indexed {new_files_count:,}/{total_files:,} new files...")
+
         if files_data:
              self._bulk_insert_chunk(files_data)
-             
+
         if new_files_count > 0:
-             print(f"[DB] Bulk inserted {new_files_count} new files")
-        
+             print(f"[DB] Bulk inserted {new_files_count:,} new files")
+
         # Trigger maintenance (metadata backfill + dimension repair)
         self.run_maintenance(directory_path)
 
