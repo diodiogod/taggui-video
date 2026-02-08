@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from widgets.image_list_strict_domain_service import StrictScrollDomainService
 
 class ImageListViewStrategyMixin:
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
@@ -84,142 +85,40 @@ class ImageListViewStrategyMixin:
         return max(0, min(last_page, int(round(frac * last_page))))
 
 
+    def _get_strict_domain_service(self) -> StrictScrollDomainService:
+        service = getattr(self, "_strict_domain_service", None)
+        if service is None:
+            service = StrictScrollDomainService(self)
+            self._strict_domain_service = service
+        return service
+
+
     def _get_strict_virtual_avg_height(self) -> float:
-        """Return a stable virtual row height used by strict windowed masonry."""
-        value = float(getattr(self, "_strict_virtual_avg_height", 0.0) or 0.0)
-        if value > 1.0:
-            return value
-        # Deterministic fallback tied to thumbnail size; avoids thumb drift.
-        value = max(32.0, float(self.current_thumbnail_size) + 2.0)
-        self._strict_virtual_avg_height = value
-        return value
+        return self._get_strict_domain_service().get_strict_virtual_avg_height()
 
 
     def _estimate_strict_virtual_scroll_max(self, source_model=None) -> int:
-        """Estimate a stable virtual scrollbar max for strict mode drag mapping."""
-        try:
-            if source_model is None:
-                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-            if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
-                return max(1, int(self.verticalScrollBar().maximum()))
-
-            total_items = int(getattr(source_model, '_total_count', 0) or 0)
-            if total_items <= 0:
-                return max(1, int(self.verticalScrollBar().maximum()))
-
-            spacing = 2
-            viewport_width = max(1, int(self.viewport().width()))
-            col_w = max(16, int(self.current_thumbnail_size))
-            num_cols = max(1, (viewport_width + spacing) // (col_w + spacing))
-
-            import math
-            rows = max(1, math.ceil(total_items / num_cols))
-            avg_h = float(self._get_strict_virtual_avg_height())
-            est_total_h = int(rows * max(10.0, avg_h))
-            return max(1, est_total_h - max(1, int(self.viewport().height())))
-        except Exception:
-            return max(1, int(self.verticalScrollBar().maximum()))
+        return self._get_strict_domain_service().estimate_strict_virtual_scroll_max(source_model)
 
 
     def _get_strict_min_domain(self, source_model=None) -> int:
-        """Return a stable strict domain aligned with virtual masonry height."""
-        try:
-            if source_model is None:
-                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-            est = int(self._estimate_strict_virtual_scroll_max(source_model))
-            # Keep small headroom to absorb minor relayout changes without collapsing.
-            return max(10000, int(est * 1.10))
-        except Exception:
-            return max(10000, int(self.verticalScrollBar().maximum()))
+        return self._get_strict_domain_service().get_strict_min_domain(source_model)
 
 
     def _get_strict_scroll_domain_max(self, source_model=None, *, include_drag_baseline: bool = False) -> int:
-        """Return a robust strict-mode virtual scroll max used for page ownership mapping."""
-        domain_max = max(
-            1,
-            int(self._get_strict_min_domain(source_model)),
-            int(self._estimate_strict_virtual_scroll_max(source_model)),
-            int(getattr(self, "_strict_scroll_max_floor", 0) or 0),
-            int(getattr(self, "_strict_drag_frozen_max", 0) or 0),
+        return self._get_strict_domain_service().get_strict_scroll_domain_max(
+            source_model,
+            include_drag_baseline=include_drag_baseline,
         )
-        if include_drag_baseline:
-            domain_max = max(domain_max, int(getattr(self, "_drag_scroll_max_baseline", 0) or 0))
-        return max(1, domain_max)
 
     # ── Canonical strict-mode domain controller ──────────────────────────
 
     def _strict_canonical_domain_max(self, source_model=None) -> int:
-        """Single source of truth for the strict-mode scrollbar domain.
-
-        Uses the SAME column/spacing formula as the masonry layout so that
-        scroll_value maps exactly to the masonry y-coordinate for that item.
-        No headroom factor — headroom creates a coordinate-space mismatch
-        that causes the viewport to overshoot the masonry items.
-        """
-        try:
-            if source_model is None:
-                source_model = (self.model().sourceModel()
-                                if self.model() and hasattr(self.model(), 'sourceModel')
-                                else self.model())
-            if (not source_model
-                    or not hasattr(source_model, '_paginated_mode')
-                    or not source_model._paginated_mode):
-                return max(1, int(self.verticalScrollBar().maximum()))
-
-            total_items = int(getattr(source_model, '_total_count', 0) or 0)
-            if total_items <= 0:
-                return max(1, int(self.verticalScrollBar().maximum()))
-
-            import math
-            spacing = 2
-            viewport_width = max(1, int(self.viewport().width()))
-            col_w = max(16, int(self.current_thumbnail_size))
-            # Match masonry's column calculation (subtracts scrollbar + margins).
-            sb_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
-            avail_width = viewport_width - sb_width - 24
-            num_cols = max(1, avail_width // (col_w + spacing))
-            rows = max(1, math.ceil(total_items / num_cols))
-            # Use the avg_h from the LAST masonry computation so the canonical
-            # domain matches the masonry spacer y-coordinates exactly.
-            # Without this, avg_h grows after each masonry completion, the
-            # domain overshoots the masonry items, and after release-lock
-            # expires the viewport cascades to the wrong page.
-            avg_h = float(getattr(self, '_strict_masonry_avg_h', 0.0) or 0.0)
-            if avg_h <= 1.0:
-                avg_h = float(self._get_strict_virtual_avg_height())
-            est_total_h = int(rows * max(10.0, avg_h))
-            viewport_height = max(1, int(self.viewport().height()))
-            return max(10000, est_total_h - viewport_height)
-        except Exception:
-            return max(10000, int(self.verticalScrollBar().maximum()))
+        return self._get_strict_domain_service().strict_canonical_domain_max(source_model)
 
 
     def _strict_page_from_position(self, scroll_value: int, source_model=None) -> int:
-        """Derive page index from scroll position.
-
-        Uses the actual scrollbar maximum as the domain, since scroll_value
-        is always relative to it.  This avoids drift when the scrollbar max
-        was set by a different code path (drag domain, masonry height, etc.)
-        than _strict_canonical_domain_max().
-        """
-        if source_model is None:
-            source_model = (self.model().sourceModel()
-                            if self.model() and hasattr(self.model(), 'sourceModel')
-                            else self.model())
-        total_items = int(getattr(source_model, '_total_count', 0) or 0)
-        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-        if total_items <= 0 or page_size <= 0:
-            return 0
-        last_page = max(0, (total_items - 1) // page_size)
-        # Use the actual scrollbar maximum — scroll_value is relative to it.
-        # Only fall back to canonical domain if scrollbar max is unset.
-        sb_max = self.verticalScrollBar().maximum()
-        domain = max(1, sb_max if sb_max > 0 else self._strict_canonical_domain_max(source_model))
-        frac = max(0.0, min(1.0, int(scroll_value) / domain))
-        # Item-based: fraction maps to item index, then to page.
-        item_idx = int(frac * total_items)
-        page = item_idx // page_size
-        return max(0, min(last_page, page))
+        return self._get_strict_domain_service().strict_page_from_position(scroll_value, source_model)
     # ────────────────────────────────────────────────────────────────────
 
 
