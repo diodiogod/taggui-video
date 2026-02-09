@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_strict_domain_service import StrictScrollDomainService
+from widgets.image_list_masonry_incremental_service import MasonryIncrementalService
 
 class ImageListViewStrategyMixin:
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
@@ -121,6 +122,12 @@ class ImageListViewStrategyMixin:
         return self._get_strict_domain_service().strict_page_from_position(scroll_value, source_model)
     # ────────────────────────────────────────────────────────────────────
 
+    def _get_masonry_incremental_service(self) -> MasonryIncrementalService:
+        service = getattr(self, "_masonry_incremental_service", None)
+        if service is None:
+            service = MasonryIncrementalService(self)
+            self._masonry_incremental_service = service
+        return service
 
     def contextMenuEvent(self, event):
         self.context_menu.exec_(event.globalPos())
@@ -313,7 +320,6 @@ class ImageListViewStrategyMixin:
         to avoid a cascade of reload → re-check → re-enrich.
         """
         cur_page = int(getattr(self, '_current_page', 0) or 0)
-        print(f"[ENRICH-COMPLETE] Enrichment done, will reload window around page {cur_page}")
 
         # Suppress immediate re-trigger from the page reload this will cause
         self._last_enrich_trigger_time = time.time()
@@ -329,6 +335,7 @@ class ImageListViewStrategyMixin:
         self._release_page_lock_page = cur_page
         self._release_page_lock_until = time.time() + 8.0
         self._last_masonry_window_signature = None  # Force recalc with enriched dimensions
+        self._get_masonry_incremental_service().invalidate("enrichment_complete")
 
         # Capture window range to reload (only current window, not all pages)
         window_buffer = 3
@@ -338,7 +345,7 @@ class ImageListViewStrategyMixin:
         def reload_pages():
             source_model = self.proxy_image_list_model.sourceModel()
             if not hasattr(source_model, '_pages'):
-                print(f"[ENRICH-RELOAD] Aborted: no _pages attribute")
+                print(f"[ENRICH] Aborted: no _pages attribute")
                 return
             # Only reload pages in the current window
             reloaded = 0
@@ -356,8 +363,7 @@ class ImageListViewStrategyMixin:
                         if img and (not img.dimensions or img.dimensions[0] is None):
                             unenriched_after += 1
                     reloaded += 1
-            print(f"[ENRICH-RELOAD] Reloaded {reloaded} pages ({window_start}-{window_end}), "
-                  f"unenriched: {unenriched_before} -> {unenriched_after}")
+            print(f"[ENRICH] Reloaded {reloaded} pages, unenriched: {unenriched_before}->{unenriched_after}")
             if reloaded == 0:
                 return
             self._last_masonry_signal = "enrichment_complete"
@@ -376,24 +382,113 @@ class ImageListViewStrategyMixin:
 
 
     def _on_pages_updated(self, loaded_pages: list):
-        """Handle page load/eviction in buffered mode (safe alternative to layoutChanged)."""
+        """Handle page load/eviction in buffered mode (safe alternative to layoutChanged).
+
+        Tries incremental masonry first (append new pages without disturbing existing
+        item positions). Falls back to full recalc only when necessary (jump, resize,
+        enrichment, or no prior cache).
+        """
         if not self.use_masonry:
             return
 
-        self._log_flow("PAGES", f"Pages updated ({len(loaded_pages)} loaded); scheduling masonry recalc",
-                       throttle_key="pages_updated", every_s=0.3)
+        source_model = self.proxy_image_list_model.sourceModel()
+        is_paginated = (
+            source_model
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+        )
 
-        # Recalculate masonry for currently loaded pages
-        # This is safe because it doesn't emit layoutChanged
+        if not is_paginated:
+            # Non-paginated: always full recalc
+            self._last_masonry_window_signature = None
+            self._recalculate_masonry_if_needed("pages_updated")
+            self.viewport().update()
+            return
+
+        incremental = self._get_masonry_incremental_service()
+        loaded_set = set(loaded_pages)
+        cached_pages = incremental.get_cached_pages()
+
+        # If incremental cache is active, check for extensions
+        if incremental.is_active and cached_pages:
+            new_pages = loaded_set - cached_pages
+            if not new_pages:
+                # No new pages — just a re-emit. Repaint but skip recalc.
+                self.viewport().update()
+                self._check_and_enrich_loaded_pages()
+                return
+
+            # Try incremental extend for each new page
+            extended = []
+            for page_num in sorted(new_pages):
+                if incremental.can_extend_down(page_num):
+                    if self._try_incremental_extend(page_num, source_model, direction="down"):
+                        extended.append(page_num)
+                elif incremental.can_extend_up(page_num):
+                    if self._try_incremental_extend(page_num, source_model, direction="up"):
+                        extended.append(page_num)
+
+            if extended:
+                # Purge far pages from cache to respect memory limits
+                cur_page = int(getattr(self, '_current_page', 0) or 0)
+                incremental.purge_far_pages(cur_page)
+                # Assemble items from cache (no worker needed)
+                self._masonry_items = incremental.assemble_items()
+                self._masonry_index_map = None
+                self.viewport().update()
+                self._check_and_enrich_loaded_pages()
+                return
+
+            # New pages aren't adjacent — this is a jump or gap. Full recalc.
+
+        # Enrichment-complete forces full recalc (aspect ratios changed).
+        if self._last_masonry_signal == "enrichment_complete":
+            incremental.invalidate("enrichment")
+
+        self._log_flow("PAGES", f"Pages updated ({len(loaded_pages)} loaded); full masonry recalc",
+                       throttle_key="pages_updated", every_s=0.3)
         self._last_masonry_window_signature = None
         self._recalculate_masonry_if_needed("pages_updated")
-
-        # Request viewport repaint (safe, doesn't invalidate model)
         self.viewport().update()
-
-        # Check if newly loaded pages have unenriched images (NULL dimensions).
-        # If so, trigger a focused enrichment cycle so masonry gets real aspect ratios.
         self._check_and_enrich_loaded_pages()
+
+    def _try_incremental_extend(self, page_num, source_model, *, direction="down"):
+        """Compute masonry for a single new page and add to incremental cache.
+
+        Returns True on success, False if we need to fall back to full recalc.
+        """
+        incremental = self._get_masonry_incremental_service()
+        page_size = source_model.PAGE_SIZE
+        total_items = int(getattr(source_model, '_total_count', 0) or 0)
+
+        # Get page images from model
+        page_images = source_model._pages.get(page_num)
+        if not page_images:
+            return False
+
+        # Build items_data for this page
+        items_data = []
+        start_idx = page_num * page_size
+        for i, image in enumerate(page_images):
+            if not image:
+                continue
+            idx = start_idx + i
+            ar = image.aspect_ratio
+            items_data.append((idx, ar))
+
+        if not items_data:
+            return False
+
+        if direction == "down":
+            new_items = incremental.compute_page_down(page_num, items_data)
+        else:
+            new_items = incremental.compute_page_up(page_num, items_data, total_items)
+
+        if new_items is None:
+            return False
+
+        print(f"[MASONRY-INCR] Extended {direction}: page {page_num}, +{len(new_items)} items")
+        return True
 
     def _check_and_enrich_loaded_pages(self):
         """Detect unenriched images on current WINDOW pages and trigger enrichment.

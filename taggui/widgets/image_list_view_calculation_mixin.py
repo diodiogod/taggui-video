@@ -272,6 +272,11 @@ class ImageListViewCalculationMixin:
         self._masonry_calculating = True
         self._masonry_start_time = time.time()
 
+        # Full recalc invalidates incremental cache (will be rebuilt on completion).
+        if hasattr(self, '_get_masonry_incremental_service'):
+            signal = getattr(self, '_last_masonry_signal', 'unknown')
+            self._get_masonry_incremental_service().invalidate(f"full_recalc:{signal}")
+
         if source_model and hasattr(source_model, "_enrichment_paused"):
             source_model._enrichment_paused.set()
             self._log_flow(

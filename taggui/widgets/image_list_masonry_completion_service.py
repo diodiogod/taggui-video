@@ -238,7 +238,7 @@ class MasonryCompletionService:
                     stable_max = v._strict_canonical_domain_max(source_model)
                     old_val = sb.value()
                     old_max = max(1, sb.maximum())
-                    print(f"[STRICT-DOMAIN] masonry_avg_h={v._strict_masonry_avg_h:.1f}  virtual_avg_h={v._strict_virtual_avg_height:.1f}  domain={stable_max}  old_max={old_max}  delta={stable_max - old_max}")
+                    # print(f"[STRICT-DOMAIN] masonry_avg_h={v._strict_masonry_avg_h:.1f}  virtual_avg_h={v._strict_virtual_avg_height:.1f}  domain={stable_max}  old_max={old_max}  delta={stable_max - old_max}")
                     if v._scrollbar_dragging or v._drag_preview_mode:
                         v._restore_strict_drag_domain(sb=sb, source_model=source_model)
                     else:
@@ -342,6 +342,16 @@ class MasonryCompletionService:
         
             elif not is_buffered:
                 v._masonry_total_height = total_height_chunk
+
+            # 5b. CACHE per-page masonry for incremental scroll updates
+            if is_buffered and v._masonry_items and hasattr(v, '_get_masonry_incremental_service'):
+                try:
+                    page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
+                    v._get_masonry_incremental_service().cache_from_full_result(
+                        v._masonry_items, page_size, column_width, spacing, num_columns, avg_height,
+                    )
+                except Exception as e:
+                    print(f"[MASONRY-INCR] Cache store failed: {e}")
 
             # 6. ASYNC UI UPDATE
             from PySide6.QtCore import QTimer
