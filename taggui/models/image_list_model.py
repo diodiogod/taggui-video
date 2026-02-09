@@ -2280,10 +2280,25 @@ class ImageListModel(QAbstractListModel):
             target = f'{image.target_dimension.width()}:{image.target_dimension.height()}'
             return f'{path}\n{dimensions} 🠮 {target}'
 
-    def _start_paginated_enrichment(self):
-        """Start background enrichment for paginated mode (using DB placeholders)."""
-        if hasattr(self, '_enrichment_cancelled') and self._enrichment_cancelled.is_set():
-             self._enrichment_cancelled.clear()
+    def _start_paginated_enrichment(self, *, window_pages=None):
+        """Start background enrichment for paginated mode (using DB placeholders).
+
+        Args:
+            window_pages: Optional range/iterable of page numbers to enrich.
+                          If provided, ONLY images from these pages are enriched.
+                          If None, falls back to all loaded pages (legacy behavior).
+        """
+        # Cancel any running enrichment so it doesn't waste time on stale pages
+        if hasattr(self, '_enrichment_cancelled'):
+            self._enrichment_cancelled.set()
+        # Brief pause to let the running worker notice the cancel flag
+        import time as _time
+        _time.sleep(0.01)
+        if hasattr(self, '_enrichment_cancelled'):
+            self._enrichment_cancelled.clear()
+
+        # Snapshot the window pages for the worker closure
+        _window_page_set = set(window_pages) if window_pages is not None else None
 
         def enrich_worker():
              from utils.image_index_db import ImageIndexDB
@@ -2291,20 +2306,25 @@ class ImageListModel(QAbstractListModel):
              import time
              from pathlib import Path
              import imagesize
-             
+
              if not self._directory_path:
                  return
-                 
+
              db_bg = ImageIndexDB(self._directory_path)
-             
-             # Prioritize most recently loaded pages (closest to current view) first.
-             # Sort loaded pages by recency (last in _page_load_order = most recent).
+
+             # Collect unenriched images — scoped to window pages if provided.
              prioritized_rel_paths = []
              seen = set()
              with self._page_load_lock:
-                 # _page_load_order has oldest first; reverse for most-recent-first
-                 recent_first = list(reversed(self._page_load_order)) if self._page_load_order else sorted(self._pages.keys())
-                 for page_num in recent_first:
+                 if _window_page_set is not None:
+                     # Enrich center-out so visible pages get enriched first
+                     pages_to_scan = sorted(_window_page_set)
+                     center = pages_to_scan[len(pages_to_scan) // 2]
+                     pages_to_scan.sort(key=lambda p: abs(p - center))
+                 else:
+                     # Legacy: all loaded pages, most-recent-first
+                     pages_to_scan = list(reversed(self._page_load_order)) if self._page_load_order else sorted(self._pages.keys())
+                 for page_num in pages_to_scan:
                      page = self._pages.get(page_num, [])
                      for image in page:
                          if not image:
@@ -2316,7 +2336,6 @@ class ImageListModel(QAbstractListModel):
 
                          dims = image.dimensions
                          dims_missing = (not dims or dims[0] is None or dims[1] is None)
-                         # In fast-load mode, 512x512 is often a placeholder and should be enriched.
                          dims_placeholder = (dims == (512, 512))
                          tags_missing = (not image.tags)
 
@@ -2324,23 +2343,26 @@ class ImageListModel(QAbstractListModel):
                              prioritized_rel_paths.append(rel_path)
                              seen.add(rel_path)
 
-             # Fill with DB candidates (legacy null-dim/no-tag rows).
-             db_candidates = db_bg.get_placeholder_files(limit=5000)
-             placeholders = prioritized_rel_paths[:]
-             for rel_path in db_candidates:
-                 if rel_path not in seen:
-                     placeholders.append(rel_path)
-                     seen.add(rel_path)
+             # Only add DB candidates if no window scope (initial bootstrap enrichment)
+             if _window_page_set is None:
+                 db_candidates = db_bg.get_placeholder_files(limit=5000)
+                 placeholders = prioritized_rel_paths[:]
+                 for rel_path in db_candidates:
+                     if rel_path not in seen:
+                         placeholders.append(rel_path)
+                         seen.add(rel_path)
+             else:
+                 placeholders = prioritized_rel_paths[:]
 
-             # Bound work per enrichment cycle to keep UI responsive.
+             # Keep small for fast first-cycle masonry fix (~3-4s).
              max_enrich_per_cycle = 1500
              placeholders = placeholders[:max_enrich_per_cycle]
 
              if not placeholders:
                  return
                  
-             print(f"[ENRICH] Found {len(placeholders)} images needing enrichment "
-                   f"(prioritized={len(prioritized_rel_paths)}, db_candidates={len(db_candidates)})")
+             scope = f"pages {sorted(_window_page_set)[:3]}..." if _window_page_set else "all loaded"
+             print(f"[ENRICH] {len(placeholders)} to enrich ({scope})")
              
              enriched_count = 0
              commit_interval = 100
@@ -2432,17 +2454,18 @@ class ImageListModel(QAbstractListModel):
                                    db_bg.add_tag_to_image(image_id, '__no_tags__')
                                    
                            enriched_count += 1
-                           
+
                            if enriched_count % commit_interval == 0:
                                 db_bg.commit()
-                                print(f"[ENRICH] Progress: {enriched_count}/{len(placeholders)} enriched (dims+tags)")
 
                  except Exception as e:
                       pass
-                      
+
              db_bg.commit()
-             print(f"[ENRICH] Completed paginated enrichment: {enriched_count} images")
-             
+             self._enrichment_exhausted = (enriched_count < max_enrich_per_cycle)
+             print(f"[ENRICH] Enriched {enriched_count}/{len(placeholders)} ({scope})"
+                   f"{' [ALL DONE]' if self._enrichment_exhausted else ''}")
+
              # Signal completion from background thread
              self.enrichment_complete.emit()
              
@@ -2839,10 +2862,6 @@ class ImageListModel(QAbstractListModel):
                         # Commit to database at intervals
                         if enriched_count % commit_interval == 0:
                             db_bg.commit()
-                            # Log progress every commit
-                            import time
-                            timestamp = time.strftime("%H:%M:%S")
-                            print(f"[ENRICH {timestamp}] Progress: {enriched_count}/{total_images} images enriched, queue size: {self._enrichment_queue.qsize()}")
 
                     except Exception:
                         pass  # Skip problematic images silently
@@ -2850,10 +2869,7 @@ class ImageListModel(QAbstractListModel):
                 db_bg.commit()
                 db_bg.close()
 
-                import time
-                timestamp = time.strftime("%H:%M:%S")
-                print(f"[ENRICH {timestamp}] Background enrichment complete: {enriched_count} images updated")
-                print(f"[ENRICH {timestamp}] Queue has {self._enrichment_queue.qsize()} pending updates for main thread")
+                print(f"[ENRICH] BG enrichment done: {enriched_count} updated, {self._enrichment_queue.qsize()} queued")
 
                 # Timer will continue processing queue until empty, then stop itself
 

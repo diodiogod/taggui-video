@@ -206,6 +206,11 @@ class ImageListViewPreloadMixin:
         """Called when user starts dragging scrollbar."""
         import time
         self._scrollbar_dragging = True
+        # Cancel any running enrichment so it restarts scoped to the new location
+        source_model_pre = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model_pre and hasattr(source_model_pre, '_enrichment_cancelled'):
+            source_model_pre._enrichment_cancelled.set()
+        self._enrich_first_refresh_done = False
         sb = self.verticalScrollBar()
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
         old_max = max(1, int(sb.maximum()))
