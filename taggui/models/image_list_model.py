@@ -2280,25 +2280,30 @@ class ImageListModel(QAbstractListModel):
             target = f'{image.target_dimension.width()}:{image.target_dimension.height()}'
             return f'{path}\n{dimensions} 🠮 {target}'
 
-    def _start_paginated_enrichment(self, *, window_pages=None):
+    def _start_paginated_enrichment(self, *, window_pages=None, scope='window'):
         """Start background enrichment for paginated mode (using DB placeholders).
 
         Args:
             window_pages: Optional range/iterable of page numbers to enrich.
                           If provided, ONLY images from these pages are enriched.
                           If None, falls back to all loaded pages (legacy behavior).
+            scope: 'window' for visible-area enrichment (triggers masonry refresh
+                   on completion), 'preload' for ahead-of-scroll enrichment
+                   (no masonry refresh, no retrigger).
         """
         # Cancel any running enrichment so it doesn't waste time on stale pages
         if hasattr(self, '_enrichment_cancelled'):
             self._enrichment_cancelled.set()
-        # Brief pause to let the running worker notice the cancel flag
-        import time as _time
-        _time.sleep(0.01)
-        if hasattr(self, '_enrichment_cancelled'):
-            self._enrichment_cancelled.clear()
+            # Non-blocking: worker checks cancel flag every 10 files (~20ms),
+            # so it will notice quickly without blocking the UI thread here.
+            self._enrichment_cancelled = threading.Event()
 
         # Snapshot the window pages for the worker closure
         _window_page_set = set(window_pages) if window_pages is not None else None
+
+        self._enrichment_running = True
+        self._enrichment_scope = scope
+        self._enrichment_target_pages = frozenset(_window_page_set) if _window_page_set else None
 
         def enrich_worker():
              from utils.image_index_db import ImageIndexDB
@@ -2308,6 +2313,7 @@ class ImageListModel(QAbstractListModel):
              import imagesize
 
              if not self._directory_path:
+                 self._enrichment_running = False
                  return
 
              db_bg = ImageIndexDB(self._directory_path)
@@ -2315,52 +2321,77 @@ class ImageListModel(QAbstractListModel):
              # Collect unenriched images — scoped to window pages if provided.
              prioritized_rel_paths = []
              seen = set()
-             with self._page_load_lock:
-                 if _window_page_set is not None:
-                     # Enrich center-out so visible pages get enriched first
-                     pages_to_scan = sorted(_window_page_set)
-                     center = pages_to_scan[len(pages_to_scan) // 2]
-                     pages_to_scan.sort(key=lambda p: abs(p - center))
-                 else:
-                     # Legacy: all loaded pages, most-recent-first
-                     pages_to_scan = list(reversed(self._page_load_order)) if self._page_load_order else sorted(self._pages.keys())
-                 for page_num in pages_to_scan:
-                     page = self._pages.get(page_num, [])
-                     for image in page:
-                         if not image:
-                             continue
-                         try:
-                             rel_path = str(image.path.relative_to(self._directory_path))
-                         except Exception:
-                             rel_path = image.path.name
-
-                         dims = image.dimensions
-                         dims_missing = (not dims or dims[0] is None or dims[1] is None)
-                         dims_placeholder = (dims == (512, 512))
-                         tags_missing = (not image.tags)
-
-                         if (dims_missing or dims_placeholder or tags_missing) and rel_path not in seen:
+             if _window_page_set is not None:
+                 # Window-scoped: use DB to find unenriched files (avoids stale in-memory data).
+                 # Query DB for placeholder files in the page range, ordered center-out.
+                 pages_sorted = sorted(_window_page_set)
+                 center = pages_sorted[len(pages_sorted) // 2]
+                 page_size = self.PAGE_SIZE if hasattr(self, 'PAGE_SIZE') else 1000
+                 _sort_field = getattr(self, '_sort_field', 'file_name')
+                 _sort_dir = getattr(self, '_sort_dir', 'ASC')
+                 _filter_sql = getattr(self, '_filter_sql', '')
+                 _filter_bindings = getattr(self, '_filter_bindings', ())
+                 _random_seed = getattr(self, '_random_seed', 1234567)
+                 for page_num in sorted(pages_sorted, key=lambda p: abs(p - center)):
+                     start_rank = page_num * page_size
+                     end_rank = start_rank + page_size
+                     page_placeholders = db_bg.get_placeholder_files_in_range(
+                         start_rank, end_rank,
+                         sort_field=_sort_field,
+                         sort_dir=_sort_dir,
+                         filter_sql=_filter_sql,
+                         bindings=_filter_bindings,
+                         random_seed=_random_seed,
+                     )
+                     for rel_path in page_placeholders:
+                         if rel_path not in seen:
                              prioritized_rel_paths.append(rel_path)
                              seen.add(rel_path)
-
-             # Only add DB candidates if no window scope (initial bootstrap enrichment)
-             if _window_page_set is None:
+                 # DB query is the source of truth for what needs enrichment.
+                 # No in-memory fallback — stale in-memory objects report dims=None
+                 # even after DB has real values, causing infinite re-enrichment.
+                 placeholders = prioritized_rel_paths[:]
+             else:
+                 # Legacy: scan in-memory pages + DB candidates
+                 with self._page_load_lock:
+                     pages_to_scan = list(reversed(self._page_load_order)) if self._page_load_order else sorted(self._pages.keys())
+                     for page_num in pages_to_scan:
+                         page = self._pages.get(page_num, [])
+                         for image in page:
+                             if not image:
+                                 continue
+                             try:
+                                 rel_path = str(image.path.relative_to(self._directory_path))
+                             except Exception:
+                                 rel_path = image.path.name
+                             dims = image.dimensions
+                             if (not dims or dims[0] is None or dims[1] is None or dims == (512, 512)) and rel_path not in seen:
+                                 prioritized_rel_paths.append(rel_path)
+                                 seen.add(rel_path)
                  db_candidates = db_bg.get_placeholder_files(limit=5000)
                  placeholders = prioritized_rel_paths[:]
                  for rel_path in db_candidates:
                      if rel_path not in seen:
                          placeholders.append(rel_path)
                          seen.add(rel_path)
-             else:
-                 placeholders = prioritized_rel_paths[:]
 
              # Keep small for fast first-cycle masonry fix (~3-4s).
              max_enrich_per_cycle = 1500
              placeholders = placeholders[:max_enrich_per_cycle]
 
              if not placeholders:
+                 self._enrichment_exhausted = True
+                 self._enrichment_running = False
+                 if scope == 'window':
+                     # Window enrichment found nothing = area already enriched.
+                     # Signal so handler can do masonry refresh.
+                     self.enrichment_complete.emit()
+                 else:
+                     # Preload found nothing = fringe area already enriched.
+                     # No masonry refresh needed — stop silently.
+                     print("[ENRICH] Preload: 0 files to enrich, done")
                  return
-                 
+
              scope = f"pages {sorted(_window_page_set)[:3]}..." if _window_page_set else "all loaded"
              print(f"[ENRICH] {len(placeholders)} to enrich ({scope})")
              
@@ -2368,12 +2399,17 @@ class ImageListModel(QAbstractListModel):
              commit_interval = 100
              video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
              
-             for rel_path in placeholders:
+             for i, rel_path in enumerate(placeholders):
                  if hasattr(self, '_enrichment_cancelled') and self._enrichment_cancelled.is_set():
                      db_bg.commit()
+                     self._enrichment_running = False
                      print("[ENRICH] Cancelled")
                      return
-                     
+
+                 # Yield disk time every 10 files to avoid blocking thumbnail I/O
+                 if i > 0 and i % 10 == 0:
+                     time.sleep(0.002)
+
                  full_path = self._directory_path / rel_path
                  
                  try:
@@ -2463,12 +2499,13 @@ class ImageListModel(QAbstractListModel):
 
              db_bg.commit()
              self._enrichment_exhausted = (enriched_count < max_enrich_per_cycle)
+             self._enrichment_running = False
              print(f"[ENRICH] Enriched {enriched_count}/{len(placeholders)} ({scope})"
                    f"{' [ALL DONE]' if self._enrichment_exhausted else ''}")
 
              # Signal completion from background thread
              self.enrichment_complete.emit()
-             
+
         self._load_executor.submit(enrich_worker)
 
     def load_directory(self, directory_path: Path):

@@ -315,31 +315,47 @@ class ImageListViewStrategyMixin:
     def _on_paginated_enrichment_complete(self):
         """Handle completion of background enrichment in paginated mode.
 
-        First cycle: reload center pages + silent masonry refresh (fixes visible area).
-        Subsequent cycles: completely silent — just re-trigger until exhausted.
-        Enrichment uses center-out page ordering so visible images enrich first.
+        Uses scope-based routing to prevent infinite loops:
+        - scope='window' + not exhausted: retrigger window enrichment
+        - scope='window' + exhausted: masonry refresh → start preload
+        - scope='preload' + not exhausted: continue preload (no refresh)
+        - scope='preload' + exhausted: stop (all done)
         """
-        cur_page = int(getattr(self, '_current_page', 0) or 0)
-        self._last_enrich_trigger_time = time.time()
         source_model = self.proxy_image_list_model.sourceModel()
         if not source_model:
             return
 
+        scope = getattr(source_model, '_enrichment_scope', 'window')
+        exhausted = getattr(source_model, '_enrichment_exhausted', True)
+
+        cur_page = int(getattr(self, '_current_page', 0) or 0)
         window_buffer = 3
         ws = max(0, cur_page - window_buffer)
         we = cur_page + window_buffer
-        first_done = getattr(self, '_enrich_first_refresh_done', False)
 
-        if first_done:
-            # Subsequent cycles: silent re-trigger if worker hasn't exhausted work
-            exhausted = getattr(source_model, '_enrichment_exhausted', True)
-            if not exhausted and hasattr(source_model, '_start_paginated_enrichment'):
+        if scope == 'preload':
+            # Pre-enrichment: never do masonry refresh, never retrigger window
+            if not exhausted:
+                # More preload work — continue with same scope
+                self._last_enrich_trigger_time = time.time()
                 source_model._start_paginated_enrichment(
-                    window_pages=range(ws, we + 1)
+                    window_pages=getattr(source_model, '_enrichment_target_pages', None),
+                    scope='preload',
                 )
+            # else: preload exhausted — all done, stop silently
             return
 
-        # First cycle: reload pages + silent masonry refresh
+        # scope == 'window'
+        self._last_enrich_trigger_time = time.time()
+
+        if not exhausted:
+            # More window work — silently re-trigger without any UI change
+            source_model._start_paginated_enrichment(
+                window_pages=range(ws, we + 1), scope='window',
+            )
+            return
+
+        # ALL window images enriched — do a single masonry refresh
         self._enrich_first_refresh_done = True
 
         def silent_refresh():
@@ -409,15 +425,28 @@ class ImageListViewStrategyMixin:
 
             self._masonry_items = result
             self._masonry_index_map = None
+            self._last_masonry_window_signature = None
+            self._masonry_recalc_pending = True
+            # Populate incremental cache so subsequent page loads extend
+            # from correct (enriched) positions instead of stale 1:1 cache.
+            incr.cache_from_full_result(result, page_size, col_w, spacing, num_cols, avg_h)
             self.viewport().update()
             print(f"[ENRICH] Masonry refreshed ({len(new_items)} items)")
 
-            # Re-trigger for remaining pages (subsequent cycles are silent)
-            exhausted = getattr(source_model, '_enrichment_exhausted', True)
-            if not exhausted and hasattr(source_model, '_start_paginated_enrichment'):
+            # Start pre-enrichment for fringe pages (±15 ahead) with 'preload' scope
+            pre_enrich_buffer = 15
+            total_pages = 1
+            if hasattr(source_model, '_total_count') and hasattr(source_model, 'PAGE_SIZE'):
+                tc = int(getattr(source_model, '_total_count', 0) or 0)
+                ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                total_pages = max(1, (tc + ps - 1) // ps)
+            pre_start = max(0, ws - pre_enrich_buffer)
+            pre_end = min(total_pages - 1, we + pre_enrich_buffer)
+            if pre_start < ws or pre_end > we:
                 self._last_enrich_trigger_time = time.time()
                 source_model._start_paginated_enrichment(
-                    window_pages=range(ws, we + 1)
+                    window_pages=range(pre_start, pre_end + 1),
+                    scope='preload',
                 )
 
         from PySide6.QtCore import QTimer
@@ -546,17 +575,30 @@ class ImageListViewStrategyMixin:
         if not hasattr(source_model, '_pages') or not source_model._pages:
             return
 
-        # Debounce: don't re-trigger if enrichment was recently requested
-        now = time.time()
-        last_trigger = getattr(self, '_last_enrich_trigger_time', 0.0)
-        if now - last_trigger < 5.0:
-            return
-
         # Only check pages in the current masonry window (not all loaded pages)
         cur_page = int(getattr(self, '_current_page', 0) or 0)
         window_buffer = 3
         window_start = max(0, cur_page - window_buffer)
         window_end = cur_page + window_buffer
+
+        # Compare current window to what enrichment is targeting (if anything).
+        now = time.time()
+        current_window = set(range(window_start, window_end + 1))
+        target = getattr(source_model, '_enrichment_target_pages', None)
+        window_changed = target is None or not (current_window & target)
+
+        if getattr(source_model, '_enrichment_running', False):
+            if not window_changed:
+                # Enrichment is already working on our window — let it finish
+                return
+            # Enrichment is targeting a different location — cancel + restart below
+
+        # Debounce: only when enrichment targets the same window (prevents re-trigger
+        # while cycles are still processing). Skip debounce after a jump (window changed).
+        if not window_changed:
+            last_trigger = getattr(self, '_last_enrich_trigger_time', 0.0)
+            if now - last_trigger < 5.0:
+                return
 
         unenriched_count = 0
         with source_model._page_load_lock:
@@ -577,6 +619,8 @@ class ImageListViewStrategyMixin:
 
         if unenriched_count >= 5:
             self._last_enrich_trigger_time = now
+            # New scroll position needs masonry refresh after enrichment
+            self._enrich_first_refresh_done = False
             self._log_flow(
                 "ENRICH",
                 f"Window pages {window_start}-{window_end} have unenriched images, triggering enrichment",
