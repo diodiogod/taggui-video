@@ -308,11 +308,15 @@ class ImageListViewStrategyMixin:
     def _on_paginated_enrichment_complete(self):
         """Handle completion of background enrichment in paginated mode.
 
-        Silently reload loaded pages so masonry gets accurate dimensions.
-        Anchors scroll + selection so the user isn't disrupted.
+        Silently reload current window pages so masonry gets accurate dimensions.
+        Only reloads the pages around the current view (not all loaded pages)
+        to avoid a cascade of reload → re-check → re-enrich.
         """
         cur_page = int(getattr(self, '_current_page', 0) or 0)
-        self._log_flow("ENRICH", f"Paginated enrichment complete; current_page={cur_page}", level="INFO")
+        print(f"[ENRICH-COMPLETE] Enrichment done, will reload window around page {cur_page}")
+
+        # Suppress immediate re-trigger from the page reload this will cause
+        self._last_enrich_trigger_time = time.time()
 
         # Snapshot the user's current scroll and selection BEFORE reload
         scroll_val = self.verticalScrollBar().value()
@@ -326,15 +330,36 @@ class ImageListViewStrategyMixin:
         self._release_page_lock_until = time.time() + 8.0
         self._last_masonry_window_signature = None  # Force recalc with enriched dimensions
 
+        # Capture window range to reload (only current window, not all pages)
+        window_buffer = 3
+        window_start = max(0, cur_page - window_buffer)
+        window_end = cur_page + window_buffer
+
         def reload_pages():
             source_model = self.proxy_image_list_model.sourceModel()
             if not hasattr(source_model, '_pages'):
+                print(f"[ENRICH-RELOAD] Aborted: no _pages attribute")
                 return
-            pages_to_reload = list(source_model._pages.keys())
-            if not pages_to_reload:
+            # Only reload pages in the current window
+            reloaded = 0
+            unenriched_before = 0
+            unenriched_after = 0
+            for page_num in range(window_start, window_end + 1):
+                if page_num in source_model._pages:
+                    # Count unenriched before reload
+                    for img in source_model._pages.get(page_num, []):
+                        if img and (not img.dimensions or img.dimensions[0] is None):
+                            unenriched_before += 1
+                    source_model._load_page_sync(page_num)
+                    # Count unenriched after reload
+                    for img in source_model._pages.get(page_num, []):
+                        if img and (not img.dimensions or img.dimensions[0] is None):
+                            unenriched_after += 1
+                    reloaded += 1
+            print(f"[ENRICH-RELOAD] Reloaded {reloaded} pages ({window_start}-{window_end}), "
+                  f"unenriched: {unenriched_before} -> {unenriched_after}")
+            if reloaded == 0:
                 return
-            for page_num in pages_to_reload:
-                source_model._load_page_sync(page_num)
             self._last_masonry_signal = "enrichment_complete"
             # Restore scroll position before emitting update to prevent jump
             sb = self.verticalScrollBar()
@@ -354,19 +379,75 @@ class ImageListViewStrategyMixin:
         """Handle page load/eviction in buffered mode (safe alternative to layoutChanged)."""
         if not self.use_masonry:
             return
-    
+
         self._log_flow("PAGES", f"Pages updated ({len(loaded_pages)} loaded); scheduling masonry recalc",
                        throttle_key="pages_updated", every_s=0.3)
-    
+
         # Recalculate masonry for currently loaded pages
         # This is safe because it doesn't emit layoutChanged
         self._last_masonry_window_signature = None
         self._recalculate_masonry_if_needed("pages_updated")
-    
+
         # Request viewport repaint (safe, doesn't invalidate model)
         self.viewport().update()
 
+        # Check if newly loaded pages have unenriched images (NULL dimensions).
+        # If so, trigger a focused enrichment cycle so masonry gets real aspect ratios.
+        self._check_and_enrich_loaded_pages()
 
+    def _check_and_enrich_loaded_pages(self):
+        """Detect unenriched images on current WINDOW pages and trigger enrichment.
+
+        Only checks the pages in the active masonry window (current_page ± buffer),
+        not all loaded pages, to avoid an enrichment loop when distant pages are also
+        loaded but unenriched.
+        """
+        source_model = self.proxy_image_list_model.sourceModel()
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            return
+        if not hasattr(source_model, '_pages') or not source_model._pages:
+            return
+
+        # Debounce: don't re-trigger if enrichment was recently requested
+        now = time.time()
+        last_trigger = getattr(self, '_last_enrich_trigger_time', 0.0)
+        if now - last_trigger < 5.0:
+            return
+
+        # Only check pages in the current masonry window (not all loaded pages)
+        cur_page = int(getattr(self, '_current_page', 0) or 0)
+        window_buffer = 3
+        window_start = max(0, cur_page - window_buffer)
+        window_end = cur_page + window_buffer
+
+        unenriched_count = 0
+        with source_model._page_load_lock:
+            for page_num in range(window_start, window_end + 1):
+                page = source_model._pages.get(page_num)
+                if not page:
+                    continue
+                for image in page:
+                    if not image:
+                        continue
+                    dims = image.dimensions
+                    if not dims or dims[0] is None or dims[1] is None:
+                        unenriched_count += 1
+                        if unenriched_count >= 5:
+                            break
+                if unenriched_count >= 5:
+                    break
+
+        if unenriched_count >= 5:
+            self._last_enrich_trigger_time = now
+            self._log_flow(
+                "ENRICH",
+                f"Window pages {window_start}-{window_end} have unenriched images, triggering enrichment",
+                level="INFO",
+                throttle_key="enrich_trigger",
+                every_s=5.0,
+            )
+            if hasattr(source_model, '_start_paginated_enrichment'):
+                source_model._start_paginated_enrichment()
 
     def _recalculate_masonry_if_needed(self, signal_name="unknown"):
         """Recalculate masonry layout if in masonry mode (debounced with adaptive delay)."""

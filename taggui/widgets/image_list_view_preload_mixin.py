@@ -5,11 +5,13 @@ class ImageListViewPreloadMixin:
         """Get total size from masonry results."""
         if not self._masonry_items:
             return QSize(0, 0)
-        # Calculate width from columns
+        # Calculate width from columns (scrollbar-aware to match worker)
         column_width = self.current_thumbnail_size
         spacing = 2
         viewport_width = self.viewport().width()
-        num_columns = max(1, (viewport_width + spacing) // (column_width + spacing))
+        sb_w = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 15
+        avail_w = viewport_width - sb_w - 24
+        num_columns = max(1, avail_w // (column_width + spacing))
         width = num_columns * (column_width + spacing) - spacing
         return QSize(width, self._masonry_total_height)
 
