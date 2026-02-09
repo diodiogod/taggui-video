@@ -1015,6 +1015,55 @@ class ImageIndexDB:
              print(f'Database query error: {e}')
              return 0
 
+    def get_placeholder_files_in_range(self, start_rank: int, end_rank: int,
+                                       sort_field: str = 'file_name',
+                                       sort_dir: str = 'ASC',
+                                       filter_sql: str = '',
+                                       bindings: tuple = (),
+                                       **kwargs) -> List[str]:
+        """Get unenriched file names within a rank range (page).
+
+        Uses the same sort order as get_page so ranks correspond to pages.
+        Returns file_name values where width IS NULL (need enrichment).
+        """
+        if not self.enabled or not self.conn:
+            return []
+
+        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating',
+                             'width', 'height', 'id', 'RANDOM()',
+                             'width * height', 'file_size', 'file_type', 'ctime'}
+        if sort_field not in valid_sort_fields:
+            sort_field = 'file_name'
+        if sort_dir.upper() not in ('ASC', 'DESC'):
+            sort_dir = 'ASC'
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                page_size = end_rank - start_rank
+
+                sort_expr = sort_field
+                if sort_field == 'RANDOM()':
+                    seed = kwargs.get('random_seed', 1234567)
+                    sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+                elif sort_field == 'ctime':
+                    sort_expr = 'COALESCE(ctime, mtime)'
+                elif sort_field == 'file_size':
+                    sort_expr = 'COALESCE(file_size, 0)'
+
+                inner_query = 'SELECT file_name, width FROM images'
+                if filter_sql:
+                    inner_query += f' WHERE {filter_sql}'
+                inner_query += f' ORDER BY {sort_expr} {sort_dir} LIMIT ? OFFSET ?'
+
+                safe_bindings = self._normalize_bindings(bindings)
+                query = f'SELECT file_name FROM ({inner_query}) sub WHERE sub.width IS NULL'
+                cursor.execute(query, safe_bindings + (page_size, start_rank))
+                return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database placeholder range query error: {e}')
+            return []
+
     def get_placeholder_files(self, limit: int = 1000) -> List[str]:
         """
         Get list of files that have placeholder dimensions (need enrichment)
