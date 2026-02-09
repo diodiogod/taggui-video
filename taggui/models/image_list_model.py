@@ -2297,12 +2297,14 @@ class ImageListModel(QAbstractListModel):
                  
              db_bg = ImageIndexDB(self._directory_path)
              
-             # Prioritize currently loaded/visible pages so masonry in the active view improves first.
+             # Prioritize most recently loaded pages (closest to current view) first.
+             # Sort loaded pages by recency (last in _page_load_order = most recent).
              prioritized_rel_paths = []
              seen = set()
              with self._page_load_lock:
-                 loaded_pages = sorted(self._pages.keys())
-                 for page_num in loaded_pages:
+                 # _page_load_order has oldest first; reverse for most-recent-first
+                 recent_first = list(reversed(self._page_load_order)) if self._page_load_order else sorted(self._pages.keys())
+                 for page_num in recent_first:
                      page = self._pages.get(page_num, [])
                      for image in page:
                          if not image:

@@ -68,7 +68,9 @@ class MasonryCompletionService:
                     column_width_for_avg = v.current_thumbnail_size
                     spacing_for_avg = 2
                     viewport_width_for_avg = v.viewport().width()
-                    num_columns_for_avg = max(1, (viewport_width_for_avg + spacing_for_avg) // (column_width_for_avg + spacing_for_avg))
+                    sb_w = v.verticalScrollBar().width() if v.verticalScrollBar().isVisible() else 15
+                    avail_w_for_avg = viewport_width_for_avg - sb_w - 24
+                    num_columns_for_avg = max(1, avail_w_for_avg // (column_width_for_avg + spacing_for_avg))
                     chunk_rows = max(1, math.ceil(chunk_items / num_columns_for_avg))
                     if strict_mode:
                         # In strict/windowed mode, total_height_chunk includes the
@@ -117,7 +119,9 @@ class MasonryCompletionService:
             column_width = v.current_thumbnail_size
             spacing = 2
             viewport_width = v.viewport().width()
-            num_columns = max(1, (viewport_width + spacing) // (column_width + spacing))
+            sb_w2 = v.verticalScrollBar().width() if v.verticalScrollBar().isVisible() else 15
+            avail_w2 = viewport_width - sb_w2 - 24
+            num_columns = max(1, avail_w2 // (column_width + spacing))
         
             estimated_rows = math.ceil(total_items / num_columns)
             v._masonry_total_height = int(estimated_rows * avg_height)

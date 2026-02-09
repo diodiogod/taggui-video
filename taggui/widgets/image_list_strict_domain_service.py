@@ -36,7 +36,9 @@ class StrictScrollDomainService:
             spacing = 2
             viewport_width = max(1, int(self._view.viewport().width()))
             col_w = max(16, int(self._view.current_thumbnail_size))
-            num_cols = max(1, (viewport_width + spacing) // (col_w + spacing))
+            sb_width = self._view.verticalScrollBar().width() if self._view.verticalScrollBar().isVisible() else 15
+            avail_width = viewport_width - sb_width - 24
+            num_cols = max(1, avail_width // (col_w + spacing))
 
             import math
             rows = max(1, math.ceil(total_items / num_cols))
@@ -89,7 +91,8 @@ class StrictScrollDomainService:
             viewport_width = max(1, int(self._view.viewport().width()))
             col_w = max(16, int(self._view.current_thumbnail_size))
             # Match masonry's column calculation (subtracts scrollbar + margins).
-            sb_width = self._view.verticalScrollBar().width() if self._view.verticalScrollBar().isVisible() else 0
+            # Always assume scrollbar visible to prevent column count drift.
+            sb_width = self._view.verticalScrollBar().width() if self._view.verticalScrollBar().isVisible() else 15
             avail_width = viewport_width - sb_width - 24
             num_cols = max(1, avail_width // (col_w + spacing))
             rows = max(1, math.ceil(total_items / num_cols))
