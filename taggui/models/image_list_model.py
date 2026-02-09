@@ -2381,15 +2381,11 @@ class ImageListModel(QAbstractListModel):
 
              if not placeholders:
                  self._enrichment_exhausted = True
+                 self._enrichment_actual_count = 0
                  self._enrichment_running = False
-                 if scope == 'window':
-                     # Window enrichment found nothing = area already enriched.
-                     # Signal so handler can do masonry refresh.
-                     self.enrichment_complete.emit()
-                 else:
-                     # Preload found nothing = fringe area already enriched.
-                     # No masonry refresh needed — stop silently.
-                     print("[ENRICH] Preload: 0 files to enrich, done")
+                 # 0 files to enrich = area already enriched in DB.
+                 # Don't emit — no data changed, so masonry refresh would be
+                 # pointless and can break restore scroll position at startup.
                  return
 
              scope = f"pages {sorted(_window_page_set)[:3]}..." if _window_page_set else "all loaded"
@@ -2499,6 +2495,7 @@ class ImageListModel(QAbstractListModel):
 
              db_bg.commit()
              self._enrichment_exhausted = (enriched_count < max_enrich_per_cycle)
+             self._enrichment_actual_count = enriched_count
              self._enrichment_running = False
              print(f"[ENRICH] Enriched {enriched_count}/{len(placeholders)} ({scope})"
                    f"{' [ALL DONE]' if self._enrichment_exhausted else ''}")

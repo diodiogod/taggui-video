@@ -355,6 +355,13 @@ class ImageListViewStrategyMixin:
             )
             return
 
+        # Skip masonry refresh if nothing was actually enriched (no data changed).
+        # This prevents a startup race where enrichment for page 0 fires before
+        # restore completes, and the masonry refresh overwrites the scroll position.
+        actual = getattr(source_model, '_enrichment_actual_count', -1)
+        if actual == 0:
+            return
+
         # ALL window images enriched — do a single masonry refresh
         self._enrich_first_refresh_done = True
 
