@@ -395,9 +395,17 @@ class ImageListViewGeometryMixin:
                                 _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
                                 restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
                         else:
-                            # Ratio-preserving: keep thumb at the same visual fraction.
-                            ratio = saved_val / saved_max
-                            restored_val = max(0, min(int(round(ratio * keep_max)), keep_max))
+                            restore_target = (
+                                self._get_restore_anchor_scroll_value(source_model, keep_max)
+                                if hasattr(self, '_get_restore_anchor_scroll_value')
+                                else None
+                            )
+                            if restore_target is not None:
+                                restored_val = max(0, min(int(restore_target), keep_max))
+                            else:
+                                # Ratio-preserving: keep thumb at the same visual fraction.
+                                ratio = saved_val / saved_max
+                                restored_val = max(0, min(int(round(ratio * keep_max)), keep_max))
                         if self.verticalScrollBar().value() != restored_val:
                             self.verticalScrollBar().setValue(restored_val)
                 finally:

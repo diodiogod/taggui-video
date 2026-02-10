@@ -129,6 +129,106 @@ class ImageListViewStrategyMixin:
             self._masonry_incremental_service = service
         return service
 
+    def _rebind_current_index_to_selected_global(self, source_model=None) -> bool:
+        """Re-map selection to stable global index after buffered page set changes."""
+        target_global = getattr(self, "_selected_global_index", None)
+        if target_global is None:
+            return False
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0:
+            return False
+
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if not source_model or not hasattr(source_model, "get_loaded_row_for_global_index"):
+            return False
+
+        loaded_row = source_model.get_loaded_row_for_global_index(target_global)
+        if loaded_row < 0:
+            return False
+
+        src_idx = source_model.index(loaded_row, 0)
+        proxy_model = self.model()
+        proxy_idx = (
+            proxy_model.mapFromSource(src_idx)
+            if proxy_model and hasattr(proxy_model, "mapFromSource")
+            else src_idx
+        )
+        if not proxy_idx.isValid():
+            return False
+
+        current = self.currentIndex()
+        if current.isValid():
+            try:
+                current_src = (
+                    proxy_model.mapToSource(current)
+                    if proxy_model and hasattr(proxy_model, "mapToSource")
+                    else current
+                )
+                current_global = (
+                    source_model.get_global_index_for_row(current_src.row())
+                    if hasattr(source_model, "get_global_index_for_row")
+                    else current_src.row()
+                )
+                if int(current_global) == target_global:
+                    return False
+            except Exception:
+                pass
+
+        self.setCurrentIndex(proxy_idx)
+        return True
+
+    def _get_restore_anchor_scroll_value(self, source_model=None, domain_max=None):
+        """Resolve restore-time scroll anchor from target global index (fallback: target page)."""
+        try:
+            until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+        except Exception:
+            until = 0.0
+        if until <= 0.0 or time.time() > until:
+            return None
+
+        target_global = getattr(self, "_restore_target_global_index", None)
+        if target_global is None:
+            return None
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return None
+        if target_global < 0:
+            return None
+
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+
+        if domain_max is None:
+            domain_max = self.verticalScrollBar().maximum()
+        domain_max = max(0, int(domain_max))
+
+        for item in (self._masonry_items or []):
+            if int(item.get("index", -1)) == target_global:
+                item_center_y = int(item.get("y", 0)) + int(item.get("height", 0)) // 2
+                target = item_center_y - (self.viewport().height() // 2)
+                return max(0, min(target, domain_max))
+
+        # Fallback until target item is materialized: keep target page ownership.
+        restore_page = getattr(self, "_restore_target_page", None)
+        if restore_page is None or not source_model:
+            return None
+        try:
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+            page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+            max_page = max(1, (total_items + page_size - 1) // page_size) - 1
+            if max_page > 0:
+                return max(0, min(int(int(restore_page) / max_page * domain_max), domain_max))
+            return 0
+        except Exception:
+            return None
+
     def contextMenuEvent(self, event):
         self.context_menu.exec_(event.globalPos())
 
@@ -148,6 +248,11 @@ class ImageListViewStrategyMixin:
 
         user_driven = self._scrollbar_dragging or self._mouse_scrolling
         if user_driven:
+            # User is actively navigating: drop startup restore override.
+            if getattr(self, '_restore_target_page', None) is not None:
+                self._restore_target_page = None
+                self._restore_target_global_index = None
+                self._restore_anchor_until = 0.0
             # User moved again: clear temporary strict post-release ownership lock.
             if self._use_local_anchor_masonry(source_model):
                 self._release_page_lock_page = None
@@ -369,6 +474,27 @@ class ImageListViewStrategyMixin:
             if not hasattr(source_model, '_pages'):
                 return
 
+            # Keep the same logical item anchored through enrichment-only refreshes.
+            sb = self.verticalScrollBar()
+            old_scroll = int(sb.value())
+            anchor_global = getattr(self, '_selected_global_index', None)
+            if not (isinstance(anchor_global, int) and anchor_global >= 0):
+                anchor_global = None
+                cur_idx = self.currentIndex()
+                if cur_idx.isValid():
+                    try:
+                        src_idx = (
+                            self.model().mapToSource(cur_idx)
+                            if self.model() and hasattr(self.model(), 'mapToSource')
+                            else cur_idx
+                        )
+                        if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
+                            mapped = source_model.get_global_index_for_row(src_idx.row())
+                            if isinstance(mapped, int) and mapped >= 0:
+                                anchor_global = mapped
+                    except Exception:
+                        pass
+
             # Reload window pages to pick up enriched dimensions
             for p in range(ws, we + 1):
                 if p in source_model._pages:
@@ -403,6 +529,8 @@ class ImageListViewStrategyMixin:
             if avg_h < 1:
                 avg_h = 100.0
             prefix_h = int(math.ceil(min_idx / max(1, num_cols)) * avg_h) if min_idx > 0 else 0
+            if avg_h > 1.0:
+                self._strict_masonry_avg_h = float(avg_h)
 
             column_heights = [prefix_h] * num_cols
             incr = self._get_masonry_incremental_service()
@@ -434,9 +562,52 @@ class ImageListViewStrategyMixin:
             self._masonry_index_map = None
             self._last_masonry_window_signature = None
             self._masonry_recalc_pending = True
+
+            # Keep total height in sync with refreshed virtual window so later
+            # geometry/range updates don't clamp against stale heights.
+            try:
+                max_real_y = 0
+                for _it in result:
+                    max_real_y = max(max_real_y, int(_it.get('y', 0)) + int(_it.get('height', 0)))
+                self._masonry_total_height = max(
+                    int(getattr(self, '_masonry_total_height', 0) or 0),
+                    max_real_y,
+                    self.viewport().height() + 1,
+                )
+            except Exception:
+                pass
+
             # Populate incremental cache so subsequent page loads extend
             # from correct (enriched) positions instead of stale 1:1 cache.
             incr.cache_from_full_result(result, page_size, col_w, spacing, num_cols, avg_h)
+
+            # Rebind selection after buffered row shifts and preserve anchor scroll.
+            self._rebind_current_index_to_selected_global(source_model)
+
+            target_scroll = None
+            restore_target = self._get_restore_anchor_scroll_value(source_model, sb.maximum())
+            if restore_target is not None:
+                target_scroll = int(restore_target)
+            elif anchor_global is not None:
+                for _it in result:
+                    if int(_it.get('index', -1)) == int(anchor_global):
+                        target_scroll = int(_it.get('y', 0)) + int(_it.get('height', 0)) // 2 - (self.viewport().height() // 2)
+                        break
+
+            # Apply range/value atomically in strict mode to prevent transient writer races.
+            strict_mode = self._get_masonry_strategy(source_model) == "windowed_strict"
+            prev_block = sb.blockSignals(True)
+            try:
+                if strict_mode:
+                    keep_max = self._strict_canonical_domain_max(source_model)
+                    sb.setRange(0, keep_max)
+                if target_scroll is not None:
+                    sb.setValue(max(0, min(int(target_scroll), sb.maximum())))
+                else:
+                    sb.setValue(max(0, min(old_scroll, sb.maximum())))
+            finally:
+                sb.blockSignals(prev_block)
+
             self.viewport().update()
             print(f"[ENRICH] Masonry refreshed ({len(new_items)} items)")
 
@@ -483,6 +654,10 @@ class ImageListViewStrategyMixin:
             self._recalculate_masonry_if_needed("pages_updated")
             self.viewport().update()
             return
+
+        # In buffered mode, source rows can shift when pages are inserted.
+        # Rebind selection by global id to keep list/viewer aligned.
+        self._rebind_current_index_to_selected_global(source_model)
 
         incremental = self._get_masonry_incremental_service()
         loaded_set = set(loaded_pages)

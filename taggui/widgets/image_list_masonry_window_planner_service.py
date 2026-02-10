@@ -37,6 +37,12 @@ class MasonryWindowPlannerService:
         stick_bottom = getattr(self._view, "_stick_to_edge", None) == "bottom"
         stick_top = getattr(self._view, "_stick_to_edge", None) == "top"
 
+        # Restore override: main_window scroll restore sets this to bypass
+        # scrollbar-to-page derivation (which drifts through competing writers).
+        restore_page = getattr(self._view, '_restore_target_page', None)
+        if restore_page is not None and not dragging_mode:
+            return max(0, min(max(0, (total_items - 1) // page_size) if total_items > 0 else 0, int(restore_page)))
+
         if stick_bottom and total_items > 0:
             source_idx = total_items - 1
         elif stick_top:
