@@ -235,6 +235,7 @@ echo ======================================================
 echo Starting TagGUI...
 echo ======================================================
 echo.
+:: set TAGGUI_ENABLE_FAULTHANDLER=1  REM Enable only for crash diagnostics
 python taggui/run_gui.py
 set EXITCODE=%ERRORLEVEL%
 if not "%EXITCODE%"=="0" (

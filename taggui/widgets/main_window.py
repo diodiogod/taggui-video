@@ -451,6 +451,18 @@ class MainWindow(QMainWindow):
         _restore_global_rank = getattr(self, '_restore_global_rank', -1)
         view._selected_global_index = _restore_global_rank if _restore_global_rank >= 0 else None
 
+        def _fresh_view_index(index: QModelIndex) -> QModelIndex:
+            """Re-resolve row against current model to avoid stale QModelIndex crashes."""
+            model = view.model()
+            if model is None or not index.isValid():
+                return QModelIndex()
+            if index.model() is not model:
+                return QModelIndex()
+            row = index.row()
+            if row < 0 or row >= model.rowCount():
+                return QModelIndex()
+            return model.index(row, 0)
+
         is_paginated_strict = (
             getattr(source_model, '_paginated_mode', False)
             and hasattr(view, '_use_local_anchor_masonry')
@@ -543,8 +555,8 @@ class MainWindow(QMainWindow):
                                     if hasattr(proxy_model, 'mapFromSource')
                                     else src_idx
                                 )
+                                rebound_proxy_index = _fresh_view_index(rebound_proxy_index)
                                 if (rebound_proxy_index.isValid()
-                                        and rebound_proxy_index.model() is view.model()
                                         and view.currentIndex() != rebound_proxy_index):
                                     view.setCurrentIndex(rebound_proxy_index)
 
@@ -581,8 +593,8 @@ class MainWindow(QMainWindow):
                             if rebound_proxy_index.isValid()
                             else selected_index
                         )
-                        if (fallback_index.isValid()
-                                and fallback_index.model() is view.model()):
+                        fallback_index = _fresh_view_index(fallback_index)
+                        if fallback_index.isValid():
                             view.scrollTo(
                                 fallback_index,
                                 QAbstractItemView.ScrollHint.PositionAtCenter,
@@ -600,10 +612,10 @@ class MainWindow(QMainWindow):
                     return
 
             # Non-paginated or no restore info: simple scrollTo
-            if (selected_index.isValid()
-                    and selected_index.model() is view.model()):
+            selected_index_fresh = _fresh_view_index(selected_index)
+            if selected_index_fresh.isValid():
                 view.scrollTo(
-                    selected_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    selected_index_fresh, QAbstractItemView.ScrollHint.PositionAtCenter)
 
         self.image_list.list_view.layout_ready.connect(do_scroll)
 
@@ -653,7 +665,8 @@ class MainWindow(QMainWindow):
         if select_index >= self.proxy_image_list_model.rowCount():
             select_index = self.proxy_image_list_model.rowCount() - 1
         target_index = self.proxy_image_list_model.index(select_index, 0)
-        self.image_list.list_view.setCurrentIndex(target_index)
+        if target_index.isValid():
+            self.image_list.list_view.setCurrentIndex(target_index)
 
         # Scroll to selected image after layout is ready (same pattern as load_directory)
         scroll_done = [False]
@@ -668,10 +681,17 @@ class MainWindow(QMainWindow):
                     pass
                 return
             scroll_done[0] = True
-            if (target_index.isValid()
-                    and target_index.model() is self.image_list.list_view.model()):
+            current_model = self.image_list.list_view.model()
+            fresh_target_index = QModelIndex()
+            if (current_model is not None
+                    and target_index.isValid()
+                    and target_index.model() is current_model):
+                row = target_index.row()
+                if 0 <= row < current_model.rowCount():
+                    fresh_target_index = current_model.index(row, 0)
+            if fresh_target_index.isValid():
                 self.image_list.list_view.scrollTo(
-                    target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    fresh_target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
             try:
                 self.image_list.list_view.layout_ready.disconnect(do_scroll)
             except:
