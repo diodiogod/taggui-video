@@ -4,6 +4,9 @@ import sys
 import traceback
 import warnings
 import io
+import threading
+import faulthandler
+from datetime import datetime
 
 # Suppress ffmpeg verbose output BEFORE any OpenCV imports
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
@@ -32,6 +35,61 @@ def qt_message_handler(msg_type, msg_context, msg_string):
     # print(f"[Qt] {msg_string}")
 
 qInstallMessageHandler(qt_message_handler)
+
+CRASH_LOG_PATH = os.path.abspath('taggui_crash.log')
+FATAL_LOG_PATH = os.path.abspath('taggui_fatal.log')
+_fatal_log_handle = None
+
+
+def _append_crash_log(title: str, exc_info=None):
+    """Append a timestamped crash entry to the crash log."""
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        with open(CRASH_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write("\n" + "=" * 80 + "\n")
+            f.write(f"{ts} | {title}\n")
+            f.write("=" * 80 + "\n")
+            if exc_info is None:
+                f.write(traceback.format_exc())
+            else:
+                f.writelines(traceback.format_exception(*exc_info))
+            f.write("\n")
+    except Exception as log_error:
+        print(f"[CRASH] Failed to write crash log: {log_error}")
+    print(f"[CRASH] Details written to: {CRASH_LOG_PATH}")
+
+
+def install_crash_handlers():
+    """Install Python/thread/fatal crash handlers for diagnostics."""
+    global _fatal_log_handle
+    if _fatal_log_handle is not None:
+        return
+
+    def _unhandled_exception(exc_type, exc_value, exc_traceback):
+        _append_crash_log("UNHANDLED EXCEPTION", (exc_type, exc_value, exc_traceback))
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    def _thread_exception(args):
+        thread_name = getattr(args.thread, 'name', 'unknown')
+        _append_crash_log(
+            f"THREAD EXCEPTION ({thread_name})",
+            (args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = _unhandled_exception
+    threading.excepthook = _thread_exception
+
+    # Capture fatal/native crashes (e.g., C-extension aborts) with stack dumps.
+    try:
+        _fatal_log_handle = open(FATAL_LOG_PATH, 'a', encoding='utf-8', buffering=1)
+        _fatal_log_handle.write(
+            "\n" + "=" * 80 + "\n"
+            f"{datetime.now().isoformat()} | SESSION START pid={os.getpid()}\n"
+            + "=" * 80 + "\n"
+        )
+        faulthandler.enable(file=_fatal_log_handle, all_threads=True)
+    except Exception as e:
+        print(f"[WARNING] Could not enable faulthandler: {e}")
 
 
 def suppress_warnings():
@@ -127,20 +185,17 @@ def run_gui():
         except Exception as e:
             print(f"[WARNING] Could not install Windows console handler: {e}")
 
-    sys.exit(app.exec())
+    return int(app.exec())
 
 
 if __name__ == '__main__':
     # Suppress all warnings when not in a development environment.
     suppress_warnings()
+    install_crash_handlers()
     try:
-        run_gui()
+        sys.exit(run_gui())
     except Exception as exception:
-        try:
-            with open('taggui_crash.log', 'w') as f:
-                f.write(str(exception) + "\n" + traceback.format_exc())
-        except:
-            print("Failed to write crash log")
+        _append_crash_log("TOP-LEVEL EXCEPTION", sys.exc_info())
         # DON'T clear settings on every crash - only show error
         # settings.clear()  # REMOVED: This destroys user's recent files/settings on any crash
         error_message_box = QMessageBox()
@@ -149,4 +204,5 @@ if __name__ == '__main__':
         error_message_box.setText(str(exception))
         error_message_box.setDetailedText(traceback.format_exc())
         error_message_box.exec()
-        raise exception
+        print(f"[CRASH] Fatal trace dump path: {FATAL_LOG_PATH}")
+        sys.exit(1)

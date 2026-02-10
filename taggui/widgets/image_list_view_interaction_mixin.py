@@ -93,9 +93,15 @@ class ImageListViewInteractionMixin:
                     self.viewport().update()
                 else:
                     # Normal click: clear and select only this item
-                    self.selectionModel().clearSelection()
-                    self.selectionModel().select(index, QItemSelectionModel.Select)
-                    self.setCurrentIndex(index)
+                    # Use a single Qt selection operation. This is safer than
+                    # clearSelection()+select() during rapid layout updates.
+                    sel_model = self.selectionModel()
+                    if sel_model:
+                        sel_model.setCurrentIndex(
+                            index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        )
+                        self.setCurrentIndex(index)
+                        self.viewport().update()
 
                 # Accept the event to prevent further processing
                 event.accept()

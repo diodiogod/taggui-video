@@ -15,6 +15,7 @@ sys.path.insert(0, str(taggui_package))
 
 # Now import and run - imports will work relative to taggui package
 if __name__ == '__main__':
-    from run_gui import run_gui, suppress_warnings
+    from run_gui import run_gui, suppress_warnings, install_crash_handlers
     suppress_warnings()
-    run_gui()
+    install_crash_handlers()
+    sys.exit(run_gui())

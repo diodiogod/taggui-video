@@ -236,4 +236,13 @@ echo Starting TagGUI...
 echo ======================================================
 echo.
 python taggui/run_gui.py
-exit /b %ERRORLEVEL%
+set EXITCODE=%ERRORLEVEL%
+if not "%EXITCODE%"=="0" (
+    echo.
+    echo ======================================================
+    echo TagGUI exited with error code %EXITCODE%
+    echo Check taggui_crash.log and taggui_fatal.log for diagnostics.
+    echo ======================================================
+    pause
+)
+exit /b %EXITCODE%

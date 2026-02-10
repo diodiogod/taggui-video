@@ -1,5 +1,6 @@
 import threading
 import traceback
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -15,7 +16,13 @@ class MasonrySubmissionService:
         self._view = view
 
     def prepare_executor(self):
-        """Periodically recreate executor to avoid long-lived thread pool issues."""
+        """Optionally recreate executor (disabled by default for stability)."""
+        # Recreating thread pools while queued callbacks/events are active has
+        # been linked to sporadic native crashes on Windows. Keep this off by
+        # default; enable only for targeted diagnostics.
+        if os.getenv("TAGGUI_RECREATE_MASONRY_EXECUTOR", "0") != "1":
+            return
+
         if not hasattr(self._view, "_masonry_calc_count"):
             self._view._masonry_calc_count = 0
 
@@ -23,9 +30,13 @@ class MasonrySubmissionService:
         if self._view._masonry_calc_count % 20 != 0:
             return
 
-        print(f"[MASONRY] Recreating executor after {self._view._masonry_calc_count} calculations")
+        print(f"[MASONRY] Recreating executor after {self._view._masonry_calc_count} calculations (diagnostic mode)")
         try:
             old_executor = self._view._masonry_executor
+            # Avoid swapping while a calc future is still running.
+            calc_future = getattr(self._view, "_masonry_calc_future", None)
+            if calc_future is not None and not calc_future.done():
+                return
             self._view._masonry_executor = ThreadPoolExecutor(max_workers=1)
             threading.Thread(target=lambda: old_executor.shutdown(wait=True), daemon=True).start()
         except Exception as e:
