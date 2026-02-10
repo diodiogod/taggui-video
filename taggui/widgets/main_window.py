@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model)
         self.create_central_widget()
+        self._update_main_window_title()
 
         # Create toolbar and menus
         self.toolbar_manager.create_toolbar()
@@ -362,6 +363,17 @@ class MainWindow(QMainWindow):
         central_widget.addWidget(self.image_viewer)
         self.setCentralWidget(central_widget)
 
+    def _update_main_window_title(self, selected_file_name: str | None = None):
+        """Show folder and selected file name in the main window title."""
+        base_title = "TagGUI"
+        folder_name = self.directory_path.name if self.directory_path else None
+        if folder_name:
+            base_title = f"{base_title} - {folder_name}"
+        if selected_file_name:
+            self.setWindowTitle(f"{base_title} - {selected_file_name}")
+        else:
+            self.setWindowTitle(base_title)
+
     @Slot()
     def zoom(self, factor):
         toolbar_mgr = self.toolbar_manager
@@ -382,10 +394,17 @@ class MainWindow(QMainWindow):
         if save_path_to_settings:
             settings.setValue('directory_path', str(self.directory_path))
             self._add_to_recent_directories(str(self.directory_path))
-        self.setWindowTitle(path.name)
+        self._update_main_window_title()
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
+
+        # Track unfiltered total right after load to detect media-filter empty states.
+        source_total_before_media_filter = (
+            int(getattr(self.image_list_model, '_total_count', 0) or 0)
+            if getattr(self.image_list_model, '_paginated_mode', False)
+            else int(self.image_list_model.rowCount())
+        )
 
         # Apply persisted media type filter (All/Images/Videos).
         # Must call delayed_filter() directly — clear() above won't fire
@@ -394,6 +413,12 @@ class MainWindow(QMainWindow):
         if media_type != 'All':
             self.proxy_image_list_model.set_media_type_filter(media_type)
             self.delayed_filter()
+            # Folder-load fallback only: if persisted media filter empties results
+            # on a non-empty folder, reset to All to avoid "looks stuck" confusion.
+            if (source_total_before_media_filter > 0
+                    and self.proxy_image_list_model.rowCount() == 0):
+                print(f"[MEDIA] Persisted filter '{media_type}' returned 0 items on folder load; resetting to 'All'")
+                self.image_list.media_type_combo_box.setCurrentText('All')
 
         # Apply saved sort order after loading
         saved_sort = self.image_list.sort_combo_box.currentText()
@@ -749,6 +774,10 @@ class MainWindow(QMainWindow):
                         else 'filtered_image_index')
         settings.setValue(settings_key, proxy_image_index.row())
 
+        if not proxy_image_index.isValid():
+            self._update_main_window_title()
+            return
+
         # Save path for robust restoration (independent of filter/sort)
         if proxy_image_index.isValid():
             source_index = self.proxy_image_list_model.mapToSource(
@@ -760,8 +789,13 @@ class MainWindow(QMainWindow):
                     if img:
                         settings.setValue('last_selected_path', str(img.path))
                         print(f"[SAVE] Selected path: {img.path.name}")
+                        self._update_main_window_title(img.path.name)
+                    else:
+                        self._update_main_window_title()
                 except (IndexError, AttributeError):
-                    pass
+                    self._update_main_window_title()
+            else:
+                self._update_main_window_title()
 
 
     @Slot(float)
