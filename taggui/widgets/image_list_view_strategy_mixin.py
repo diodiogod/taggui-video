@@ -146,6 +146,21 @@ class ImageListViewStrategyMixin:
             source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
         if not source_model or not hasattr(source_model, "get_loaded_row_for_global_index"):
             return False
+        if getattr(self, "_model_resetting", False):
+            return False
+        if hasattr(source_model, "_loading_pages"):
+            try:
+                load_lock = getattr(source_model, "_page_load_lock", None)
+                if load_lock is not None:
+                    with load_lock:
+                        if source_model._loading_pages:
+                            self._schedule_rebind_current_index_to_selected_global()
+                            return False
+                elif source_model._loading_pages:
+                    self._schedule_rebind_current_index_to_selected_global()
+                    return False
+            except Exception:
+                pass
 
         loaded_row = source_model.get_loaded_row_for_global_index(target_global)
         if loaded_row < 0:
@@ -160,45 +175,36 @@ class ImageListViewStrategyMixin:
         )
         if not proxy_idx.isValid():
             return False
+        target_row = int(proxy_idx.row())
+        if target_row < 0:
+            return False
 
-        # Never mutate current index while paint is active; defer to next tick.
-        if getattr(self, "_painting", False):
+        # Never mutate current index while paint/layout interaction is active.
+        if (
+            getattr(self, "_painting", False)
+            or getattr(self, "_masonry_calculating", False)
+            or getattr(self, "_scrollbar_dragging", False)
+            or getattr(self, "_mouse_scrolling", False)
+        ):
             self._schedule_rebind_current_index_to_selected_global()
             return False
 
         # If already on the same proxy row, no rebind needed.
         current = self.currentIndex()
-        if current.isValid() and current.row() == proxy_idx.row():
+        if current.isValid() and current.row() == target_row:
             return False
 
         # Guard against stale mapping windows during rapid buffered updates.
-        if proxy_model and proxy_idx.row() >= proxy_model.rowCount():
+        if proxy_model and target_row >= proxy_model.rowCount():
             return False
 
-        try:
-            sel_model = self.selectionModel()
-            if sel_model:
-                sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.NoUpdate)
-            else:
-                self.setCurrentIndex(proxy_idx)
-            return True
-        except Exception:
-            return False
+        # Rebind mutation was a startup crash source on some Windows/PySide builds.
+        # Keep global target tracking, but avoid forcing current-index mutation here.
+        return False
 
     def _schedule_rebind_current_index_to_selected_global(self):
         """Queue a single rebind attempt on the next event-loop tick."""
-        if getattr(self, "_rebind_selected_global_pending", False):
-            return
-        self._rebind_selected_global_pending = True
-
-        def _run():
-            self._rebind_selected_global_pending = False
-            try:
-                self._rebind_current_index_to_selected_global()
-            except Exception:
-                pass
-
-        QTimer.singleShot(0, _run)
+        return
 
     def _get_restore_anchor_scroll_value(self, source_model=None, domain_max=None):
         """Resolve restore-time scroll anchor from target global index (fallback: target page)."""

@@ -37,6 +37,21 @@ class ImageListViewInteractionMixin:
             index = self.indexAt(event.pos())
 
             if index.isValid():
+                # Normalize to a fresh model-owned index (guards stale indexAt results
+                # during rapid proxy/page churn).
+                model = self.model()
+                if model is None:
+                    event.accept()
+                    return
+                row = index.row()
+                if row < 0 or row >= model.rowCount():
+                    event.accept()
+                    return
+                index = model.index(row, 0)
+                if not index.isValid():
+                    event.accept()
+                    return
+
                 # Check modifiers
                 modifiers = event.modifiers()
 
@@ -100,7 +115,6 @@ class ImageListViewInteractionMixin:
                         sel_model.setCurrentIndex(
                             index, QItemSelectionModel.SelectionFlag.ClearAndSelect
                         )
-                        self.setCurrentIndex(index)
                         self.viewport().update()
 
                 # Accept the event to prevent further processing

@@ -60,7 +60,8 @@ class ImageViewer(QWidget):
         layout.addWidget(self.view)
         self.setLayout(layout)
 
-        self.proxy_image_index: QPersistentModelIndex = None
+        self.proxy_image_index: QPersistentModelIndex = QPersistentModelIndex()
+        self._viewer_model_resetting = False
         self.marking_items: list[MarkingItem] = []
 
         self.view.wheelEvent = self.wheelEvent
@@ -80,6 +81,10 @@ class ImageViewer(QWidget):
         self._controls_hide_timer = QTimer(self)
         self._controls_hide_timer.setSingleShot(True)
         self._controls_hide_timer.timeout.connect(self._hide_controls)
+
+        # Guard against stale index access during proxy/source model resets.
+        self.proxy_image_list_model.modelAboutToBeReset.connect(self._on_proxy_model_about_to_reset)
+        self.proxy_image_list_model.modelReset.connect(self._on_proxy_model_reset)
 
         # Position controls (will restore saved position if exists)
         self._position_video_controls()
@@ -107,6 +112,58 @@ class ImageViewer(QWidget):
         self.setMouseTracking(True)
         self.view.setMouseTracking(True)
         self.view.viewport().setMouseTracking(True)
+
+    @Slot()
+    def _on_proxy_model_about_to_reset(self):
+        self._viewer_model_resetting = True
+        self.proxy_image_index = QPersistentModelIndex()
+
+    @Slot()
+    def _on_proxy_model_reset(self):
+        self._viewer_model_resetting = False
+        self.proxy_image_index = QPersistentModelIndex()
+
+    def _normalize_proxy_index(self, index_like) -> QModelIndex:
+        """Build a fresh, bounds-checked proxy index from QModelIndex/Persistent index."""
+        try:
+            if index_like is None:
+                return QModelIndex()
+            if isinstance(index_like, QPersistentModelIndex):
+                if not index_like.isValid():
+                    return QModelIndex()
+                model = index_like.model()
+                row = index_like.row()
+                col = index_like.column()
+            else:
+                if not hasattr(index_like, 'isValid') or not index_like.isValid():
+                    return QModelIndex()
+                model = index_like.model()
+                row = index_like.row()
+                col = index_like.column()
+
+            if model is None or model is not self.proxy_image_list_model:
+                return QModelIndex()
+            if row < 0 or row >= model.rowCount() or col < 0:
+                return QModelIndex()
+            return model.index(row, col)
+        except Exception:
+            return QModelIndex()
+
+    def _safe_get_image(self, proxy_index: QModelIndex):
+        """Resolve current Image via source model mapping with reset/bounds guards."""
+        if self._viewer_model_resetting or not proxy_index.isValid():
+            return None
+        try:
+            source_model = self.proxy_image_list_model.sourceModel()
+            source_index = self.proxy_image_list_model.mapToSource(proxy_index)
+            if not source_model or not source_index.isValid():
+                return None
+            row = source_index.row()
+            if row < 0 or row >= source_model.rowCount():
+                return None
+            return source_model.data(source_index, Qt.ItemDataRole.UserRole)
+        except Exception:
+            return None
 
     def _position_video_controls(self, force_bottom=False):
         """Position video controls overlay at saved position."""
@@ -257,18 +314,25 @@ class ImageViewer(QWidget):
             self._show_error_placeholder(f"Read Error: {e}")
 
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True):
-        persistent_image_index = QPersistentModelIndex(proxy_image_index)
+        if self._viewer_model_resetting:
+            return
+        proxy_index = self._normalize_proxy_index(proxy_image_index)
 
         # Check if we should skip this reload
-        if not persistent_image_index.isValid():
+        if not proxy_index.isValid():
             return
 
-        if self.inhibit_reload_image and self.proxy_image_index and persistent_image_index == self.proxy_image_index:
+        if (
+            self.inhibit_reload_image
+            and self.proxy_image_index.isValid()
+            and proxy_index.row() == self.proxy_image_index.row()
+            and proxy_index.column() == self.proxy_image_index.column()
+        ):
             return
 
-        self.proxy_image_index = persistent_image_index
+        self.proxy_image_index = QPersistentModelIndex(proxy_index)
 
-        image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        image: Image = self._safe_get_image(proxy_index)
         if image is None:
             # Page not loaded yet in pagination mode - wait
             return

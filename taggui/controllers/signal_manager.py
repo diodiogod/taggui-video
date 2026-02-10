@@ -120,10 +120,23 @@ class SignalManager:
         image_list_model.dataChanged.connect(lambda *args: self._update_tag_counts())
         image_list_model.dataChanged.connect(
             image_tags_editor.reload_image_tags_if_changed)
-        image_list_model.dataChanged.connect(
-            lambda start, end, roles:
-                image_viewer.load_image(image_viewer.proxy_image_index, False)
-                if (start.row() <= image_viewer.proxy_image_index.row() <= end.row()) else 0)
+        def refresh_viewer_on_data_change(start: QModelIndex, end: QModelIndex, roles):
+            """Reload viewer only for the live current selection to avoid stale-index crashes."""
+            try:
+                if getattr(image_viewer, "_viewer_model_resetting", False):
+                    return
+                current = image_list_selection_model.currentIndex()
+                if not current.isValid():
+                    return
+                if current.model() is not proxy_image_list_model:
+                    return
+                current_row = current.row()
+                if start.isValid() and end.isValid() and start.row() <= current_row <= end.row():
+                    image_viewer.load_image(current, False)
+            except Exception as e:
+                print(f"[SIGNAL] ERROR in dataChanged->load_image: {e}")
+
+        image_list_model.dataChanged.connect(refresh_viewer_on_data_change)
         image_list_model.update_undo_and_redo_actions_requested.connect(
             menu_manager.update_undo_and_redo_actions)
         proxy_image_list_model.filter_changed.connect(

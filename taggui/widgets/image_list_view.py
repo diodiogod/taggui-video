@@ -171,6 +171,9 @@ class ImageListView(
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
         self._selected_global_index = None  # Stable identity across buffered row shifts
+        self._selected_rows_cache: set[int] = set()
+        self._current_proxy_row_cache = -1
+        self._model_resetting = False
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
         self._strict_domain_service = StrictScrollDomainService(self)
@@ -272,8 +275,57 @@ class ImageListView(
         self.context_menu.addAction(self.restore_backup_action)
         self.selectionModel().selectionChanged.connect(
             self.update_context_menu_actions)
+        self.selectionModel().selectionChanged.connect(
+            self._on_selection_changed_cache)
         self.selectionModel().currentChanged.connect(
             self._remember_selected_global_index)
+        self.selectionModel().currentChanged.connect(
+            self._on_current_changed_cache)
+        source_model.modelAboutToBeReset.connect(self._on_model_about_to_reset)
+        source_model.modelReset.connect(self._on_model_reset_complete)
+        source_model.modelAboutToBeReset.connect(self._clear_selection_cache)
+        source_model.modelReset.connect(self._clear_selection_cache)
+
+    @Slot(QItemSelection, QItemSelection)
+    def _on_selection_changed_cache(self, selected: QItemSelection, deselected: QItemSelection):
+        """Maintain a paint-safe snapshot of selected proxy rows."""
+        try:
+            for sel_range in deselected:
+                if sel_range.left() <= 0 <= sel_range.right():
+                    self._selected_rows_cache.difference_update(
+                        range(sel_range.top(), sel_range.bottom() + 1)
+                    )
+            for sel_range in selected:
+                if sel_range.left() <= 0 <= sel_range.right():
+                    self._selected_rows_cache.update(
+                        range(sel_range.top(), sel_range.bottom() + 1)
+                    )
+        except Exception:
+            # Keep stale cache rather than risking crashes in selection internals.
+            pass
+
+    @Slot(QModelIndex, QModelIndex)
+    def _on_current_changed_cache(self, current: QModelIndex, previous: QModelIndex):
+        """Cache current proxy row for paint without touching selection model."""
+        try:
+            self._current_proxy_row_cache = current.row() if current.isValid() else -1
+        except Exception:
+            self._current_proxy_row_cache = -1
+
+    @Slot()
+    def _clear_selection_cache(self):
+        self._selected_rows_cache.clear()
+        self._current_proxy_row_cache = -1
+
+    @Slot()
+    def _on_model_about_to_reset(self):
+        self._model_resetting = True
+        self._clear_selection_cache()
+
+    @Slot()
+    def _on_model_reset_complete(self):
+        self._model_resetting = False
+        self._clear_selection_cache()
 
     @Slot(QModelIndex, QModelIndex)
     def _remember_selected_global_index(self, current: QModelIndex, previous: QModelIndex):
