@@ -17,8 +17,9 @@ class ImageListViewScrollMixin:
         self._idle_preload_timer.stop()
         self._idle_preload_timer.start(0)  # Immediate start - no delay
 
-        # DON'T force repaint - let Qt do it naturally to avoid blocking during disk I/O
-        # self.viewport().update()
+        # Ensure one repaint after wheel-scroll throttle ends. Without this,
+        # the last throttled frame can leave viewport stale/blank until click.
+        self.viewport().update()
 
         # Start cache flush timer (2 seconds = truly idle)
         self._cache_flush_timer.stop()
@@ -51,6 +52,9 @@ class ImageListViewScrollMixin:
         if self.use_masonry:
             # Force viewport update when scrolling in masonry mode
             self.viewport().update()
+            # Queue a repaint to land after this event burst; helps recover
+            # when paint throttling skipped the last frame.
+            QTimer.singleShot(0, self.viewport().update)
 
             # Preload thumbnails for smoother scrolling (only nearby items)
             self._preload_nearby_thumbnails()

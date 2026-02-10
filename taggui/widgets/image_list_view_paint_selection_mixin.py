@@ -14,9 +14,10 @@ class ImageListViewPaintSelectionMixin:
             if not hasattr(self, '_last_paint_time'):
                 self._last_paint_time = 0
 
-            # During scrolling, throttle to max 30fps (33ms between paints)
-            # This prevents overwhelming the GPU with too many repaints
-            if self._scrollbar_dragging or self._mouse_scrolling:
+            # During scrollbar-thumb dragging, throttle to max 30fps (33ms).
+            # Do NOT throttle wheel/trackpad scrolling here; skipping those
+            # paints can cause visible blank "curtain" artifacts while moving.
+            if self._scrollbar_dragging:
                 time_since_paint = (current_time - self._last_paint_time) * 1000
                 if time_since_paint < 33:  # 33ms = 30fps
                     event.accept()
