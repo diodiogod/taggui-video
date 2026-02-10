@@ -179,6 +179,36 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(masonry_strategy_combo, 7, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        # Thumbnail eviction pages (VRAM behavior in paginated mode)
+        grid_layout.addWidget(QLabel('Thumbnail eviction pages (VRAM)'), 8, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        eviction_pages_spin_box = SettingsSpinBox(
+            key='thumbnail_eviction_pages',
+            minimum=1, maximum=5)
+        eviction_pages_spin_box.setToolTip(
+            'How many pages around the viewport keep thumbnails resident.\n'
+            '1 = lower VRAM, more refill/pop-in\n'
+            '3 = balanced default\n'
+            '5 = higher VRAM, smoother revisits\n'
+            'Applied live.')
+        grid_layout.addWidget(eviction_pages_spin_box, 8, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        # Max pages in memory (page object budget for paginated mode)
+        grid_layout.addWidget(QLabel('Max pages in memory (RAM)'), 9, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        max_pages_spin_box = SettingsSpinBox(
+            key='max_pages_in_memory',
+            minimum=3, maximum=60, default=20)
+        max_pages_spin_box.setToolTip(
+            'Maximum paginated pages kept in RAM.\n'
+            'Lower = less RAM, more refetch on jumps\n'
+            'Higher = smoother revisits, more RAM use\n'
+            'Guardrail: effective value is at least (2 * eviction pages + 1).\n'
+            'Applied live.')
+        grid_layout.addWidget(max_pages_spin_box, 9, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 
@@ -293,24 +323,10 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(thumbnail_cache_location_button, 3, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        # Thumbnail eviction pages (VRAM management)
-        grid_layout.addWidget(QLabel('Thumbnail eviction pages (VRAM)'), 4, 0,
-                              Qt.AlignmentFlag.AlignRight)
-        eviction_pages_spin_box = SettingsSpinBox(
-            key='thumbnail_eviction_pages',
-            minimum=1, maximum=5)
-        eviction_pages_spin_box.setToolTip(
-            'How many pages to keep loaded on each side of visible area.\n'
-            '1 = ~2000 thumbnails (low VRAM)\n'
-            '3 = ~6000 thumbnails (default)\n'
-            '5 = ~10000 thumbnails (high VRAM, smoother scrolling)')
-        grid_layout.addWidget(eviction_pages_spin_box, 4, 1,
-                              Qt.AlignmentFlag.AlignLeft)
-
         # Cache management section (continue grid layout)
-        grid_layout.addWidget(QLabel(''), 5, 0)  # Spacer row
+        grid_layout.addWidget(QLabel(''), 4, 0)  # Spacer row
 
-        grid_layout.addWidget(QLabel('Cache Management'), 6, 0,
+        grid_layout.addWidget(QLabel('Cache Management'), 5, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         cache_buttons_layout = QVBoxLayout()
@@ -406,7 +422,7 @@ class SettingsDialog(QDialog):
         cache_buttons_layout.addSpacing(10)
         cache_buttons_layout.addLayout(all_db_row_layout)
 
-        grid_layout.addLayout(cache_buttons_layout, 6, 1,
+        grid_layout.addLayout(cache_buttons_layout, 5, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         layout.addLayout(grid_layout)

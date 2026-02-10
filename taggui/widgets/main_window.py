@@ -237,6 +237,7 @@ class MainWindow(QMainWindow):
         self._unfreeze_timer = QTimer()
         self._unfreeze_timer.setSingleShot(True)
         self._unfreeze_timer.timeout.connect(self._refreeze_after_interaction)
+        settings.change.connect(self._on_setting_changed)
 
     def _freeze_list_view(self):
         """Called when video playback starts."""
@@ -329,6 +330,24 @@ class MainWindow(QMainWindow):
             'font_size', defaultValue=DEFAULT_SETTINGS['font_size'], type=int)
         font.setPointSize(font_size)
         self.app.setFont(font)
+
+    @Slot(str, object)
+    def _on_setting_changed(self, key: str, _value):
+        """Apply selected settings live without requiring restart."""
+        if key not in ('max_pages_in_memory', 'thumbnail_eviction_pages'):
+            return
+
+        raw_max, eviction_pages, effective_max = self.image_list_model._resolve_page_memory_limits()
+        self.image_list_model.MAX_PAGES_IN_MEMORY = effective_max
+        if getattr(self.image_list_model, '_paginated_mode', False):
+            self.image_list_model._evict_old_pages()
+        if effective_max != raw_max:
+            print(
+                f"[PAGINATION] Live max pages in memory: {effective_max} "
+                f"(raised from {raw_max} for eviction window {eviction_pages})"
+            )
+        else:
+            print(f"[PAGINATION] Live max pages in memory: {effective_max}")
 
     def create_central_widget(self):
         central_widget = QStackedWidget()
