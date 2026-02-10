@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
                             Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint)
-from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag
+from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag, QPolygon, QCursor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QMenu, QMessageBox, QVBoxLayout,
@@ -110,6 +110,12 @@ class ImageDelegate(QStyledItemDelegate):
         self.labels = {}
         self._paint_cache = {}  # Cache to skip redundant paint operations
         self._paint_version = 0  # Increment when cache should be invalidated
+        self._video_stamp_margin = 5
+        self._video_stamp_diameter = 18
+        self._filename_tooltip_delay_ms = 1300
+        self._filename_tooltip_token = 0
+        self._last_hover_move_monotonic = time.monotonic()
+        self._tracked_viewport = None
 
     def clear_labels(self):
         """Clear all stored labels (called on model reset)."""
@@ -218,41 +224,119 @@ class ImageDelegate(QStyledItemDelegate):
             del self.labels[p_index]
             self.parent().update(index)
 
+    def _video_stamp_rect(self, option):
+        return self._video_stamp_rect_from_rect(option.rect)
+
+    def _video_stamp_rect_from_rect(self, rect):
+        return QRect(
+            rect.left() + self._video_stamp_margin,
+            rect.top() + self._video_stamp_margin,
+            self._video_stamp_diameter,
+            self._video_stamp_diameter,
+        )
+
+    def _show_delayed_filename_tooltip(self, view, p_index, token):
+        if token != self._filename_tooltip_token:
+            return
+        try:
+            if not p_index.isValid():
+                return
+            viewport = view.viewport()
+            if viewport is None:
+                return
+
+            cursor_pos = viewport.mapFromGlobal(QCursor.pos())
+            if not viewport.rect().contains(cursor_pos):
+                return
+
+            current_index = view.indexAt(cursor_pos)
+            if not current_index.isValid() or QPersistentModelIndex(current_index) != p_index:
+                return
+
+            # Do not override badge hover; badge tooltip should stay primary/fast.
+            item_rect = view.visualRect(current_index)
+            badge_rect = self._video_stamp_rect_from_rect(item_rect).adjusted(-2, -2, 2, 2)
+            if badge_rect.contains(cursor_pos):
+                return
+
+            image = p_index.data(Qt.ItemDataRole.UserRole)
+            if not image:
+                return
+            file_name = getattr(getattr(image, 'path', None), 'name', None)
+            if file_name:
+                QToolTip.showText(QCursor.pos(), str(file_name), view, item_rect, 1500)
+        except Exception:
+            pass
+
+    def _ensure_hover_tracking(self, view):
+        try:
+            viewport = view.viewport()
+            if viewport is None:
+                return
+            if self._tracked_viewport is viewport:
+                return
+            if self._tracked_viewport is not None:
+                self._tracked_viewport.removeEventFilter(self)
+            viewport.setMouseTracking(True)
+            viewport.installEventFilter(self)
+            self._tracked_viewport = viewport
+        except Exception:
+            pass
+
+    def eventFilter(self, watched, event):
+        if watched is self._tracked_viewport:
+            event_type = event.type()
+            if event_type in (QEvent.MouseMove, QEvent.HoverMove):
+                self._last_hover_move_monotonic = time.monotonic()
+                self._filename_tooltip_token += 1
+            elif event_type in (QEvent.Leave, QEvent.Wheel, QEvent.MouseButtonPress):
+                self._last_hover_move_monotonic = time.monotonic()
+                self._filename_tooltip_token += 1
+                QToolTip.hideText()
+        return super().eventFilter(watched, event)
+
     def helpEvent(self, event, view, option, index):
-        """Provide tooltip for N*4+1 stamp on hover."""
+        """Show filename on hover and keep video stamp tooltip behavior."""
+        self._ensure_hover_tracking(view)
         if event.type() == QEvent.ToolTip and index.isValid():
             try:
-                # Get the image data
                 image = index.data(Qt.ItemDataRole.UserRole)
-                if not image or not hasattr(image, 'is_video') or not image.is_video:
-                    return False
+                if not image:
+                    return super().helpEvent(event, view, option, index)
 
-                # Check if video has metadata with frame count
-                if not hasattr(image, 'video_metadata') or not image.video_metadata:
-                    return False
+                # Keep existing N*4+1 stamp tooltip when hovering the stamp.
+                if (
+                    hasattr(image, 'is_video')
+                    and image.is_video
+                    and hasattr(image, 'video_metadata')
+                    and image.video_metadata
+                ):
+                    frame_count = image.video_metadata.get('frame_count', 0)
+                    if frame_count > 0:
+                        is_valid = (frame_count - 1) % 4 == 0
+                        stamp_rect = self._video_stamp_rect(option).adjusted(-2, -2, 2, 2)
+                        if stamp_rect.contains(event.pos()):
+                            self._filename_tooltip_token += 1
+                            tooltip_text = (
+                                f"N*4+1 validation: {'Valid' if is_valid else 'Invalid'}\n"
+                                f"Frame count: {frame_count}"
+                            )
+                            QToolTip.showText(event.globalPos(), tooltip_text, view, option.rect, 2000)
+                            return True
 
-                frame_count = image.video_metadata.get('frame_count', 0)
-                if frame_count <= 0:
-                    return False
-
-                # Check N*4+1 rule: (frame_count - 1) % 4 == 0
-                is_valid = (frame_count - 1) % 4 == 0
-
-                # Stamp position: top-left corner
-                margin = 2
-                stamp_rect = QRect(option.rect.left() + margin,
-                                  option.rect.top() + margin,
-                                  80, 20)
-
-                # Check if mouse is over the stamp
-                if stamp_rect.contains(event.pos()):
-                    tooltip_text = f"N*4+1 validation: {'Valid' if is_valid else 'Invalid'}\nFrame count: {frame_count}"
-                    QToolTip.showText(event.globalPos(), tooltip_text, view, 2000)  # 2 second duration
+                # Default hover tooltip for all items: filename only.
+                file_name = getattr(getattr(image, 'path', None), 'name', None)
+                if file_name:
+                    self._filename_tooltip_token += 1
+                    token = self._filename_tooltip_token
+                    p_index = QPersistentModelIndex(index)
+                    elapsed_ms = int((time.monotonic() - self._last_hover_move_monotonic) * 1000)
+                    delay_ms = max(0, self._filename_tooltip_delay_ms - elapsed_ms)
+                    QTimer.singleShot(
+                        delay_ms,
+                        lambda: self._show_delayed_filename_tooltip(view, p_index, token),
+                    )
                     return True
-                else:
-                    # Hide tooltip if not over stamp
-                    QToolTip.hideText()
-                    return False
             except Exception:
                 pass
         return super().helpEvent(event, view, option, index)
@@ -280,42 +364,47 @@ class ImageDelegate(QStyledItemDelegate):
             # Check N*4+1 rule: (frame_count - 1) % 4 == 0
             is_valid = (frame_count - 1) % 4 == 0
 
-            # OPTIMIZATION: Skip stamp drawing if item rect is very small (zoomed out)
-            # Stamp is unreadable below 50px anyway
-            if option.rect.width() < 50:
+            # Skip stamp drawing when items are too small for the badge.
+            if option.rect.width() < 26 or option.rect.height() < 26:
                 return
 
             # Set up painter for stamp
             painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-            # Stamp position: top-left corner
-            margin = 2
-            text_rect = QRect(option.rect.left() + margin,
-                              option.rect.top() + margin,
-                              80, 20)  # Width and height for text
+            # Reuse cached pens/brushes to keep paint lightweight.
+            if not hasattr(self, '_stamp_outline_pen'):
+                self._stamp_outline_pen = QPen(QColor(255, 255, 255, 235), 1.3)
+                self._stamp_shadow_pen = QPen(QColor(0, 0, 0, 70), 1.3)
+                self._stamp_green_brush = QColor(76, 175, 80, 235)
+                self._stamp_red_brush = QColor(244, 67, 54, 235)
+                self._stamp_shadow_brush = QColor(0, 0, 0, 65)
+                self._stamp_play_color = QColor(255, 255, 255, 240)
 
-            # OPTIMIZATION: Use static font instead of creating new one each paint
-            if not hasattr(self, '_stamp_font'):
-                self._stamp_font = painter.font()
-                self._stamp_font.setPointSize(10)
-                self._stamp_font.setBold(True)
-                # Precompute colors
-                self._stamp_green_pen = QPen(QColor(76, 175, 80), 2)
-                self._stamp_red_pen = QPen(QColor(244, 67, 54), 2)
-                self._stamp_shadow_pen = QPen(QColor(0, 0, 0, 100), 1)
+            stamp_rect = self._video_stamp_rect(option)
+            shadow_rect = stamp_rect.translated(1, 1)
 
-            painter.setFont(self._stamp_font)
-
-            # Draw subtle glow (shadow)
+            # Shadow pass
             painter.setPen(self._stamp_shadow_pen)
-            glow_text = "✓N*4+1" if is_valid else "✗N*4+1"
-            painter.drawText(text_rect.adjusted(1, 1, 1, 1), Qt.AlignLeft | Qt.AlignTop, glow_text)
+            painter.setBrush(self._stamp_shadow_brush)
+            painter.drawEllipse(shadow_rect)
 
-            # Set text color
-            painter.setPen(self._stamp_green_pen if is_valid else self._stamp_red_pen)
+            # Colored status badge
+            painter.setPen(self._stamp_outline_pen)
+            painter.setBrush(self._stamp_green_brush if is_valid else self._stamp_red_brush)
+            painter.drawEllipse(stamp_rect)
 
-            # Draw text
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, glow_text)
+            # Play triangle
+            cx = stamp_rect.center().x()
+            cy = stamp_rect.center().y()
+            triangle = QPolygon([
+                QPoint(cx - 2, cy - 4),
+                QPoint(cx - 2, cy + 4),
+                QPoint(cx + 4, cy),
+            ])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._stamp_play_color)
+            painter.drawPolygon(triangle)
 
             painter.restore()
 
