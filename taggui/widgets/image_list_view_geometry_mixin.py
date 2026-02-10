@@ -7,6 +7,17 @@ class ImageListViewGeometryMixin:
         if not source_model or not hasattr(source_model, 'PAGE_SIZE'):
             self._queue_building = False
             return
+        is_paginated = bool(
+            hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
+        )
+        total_count = (
+            int(getattr(source_model, '_total_count', 0) or 0)
+            if is_paginated
+            else int(source_model.rowCount())
+        )
+        if total_count <= 0:
+            self._queue_building = False
+            return
 
         # Get visible items
         scroll_offset = self.verticalScrollBar().value()
@@ -70,7 +81,7 @@ class ImageListViewGeometryMixin:
                 break
 
         # ZONE 2: High (near buffer)
-        for i in range(max_visible + 1, min(max_visible + near_buffer_below + 1, source_model.rowCount())):
+        for i in range(max_visible + 1, min(max_visible + near_buffer_below + 1, total_count)):
             if i not in visited:
                 self._high_queue.append(i)
                 visited.add(i)
@@ -81,7 +92,7 @@ class ImageListViewGeometryMixin:
 
         # ZONE 3: Low (far buffer)
         far_start_below = max_visible + near_buffer_below + 1
-        for i in range(far_start_below, min(far_start_below + far_buffer_below, source_model.rowCount())):
+        for i in range(far_start_below, min(far_start_below + far_buffer_below, total_count)):
             if i not in visited:
                 self._low_queue.append(i)
                 visited.add(i)
