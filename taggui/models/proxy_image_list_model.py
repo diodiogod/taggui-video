@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import (QModelIndex, QSortFilterProxyModel, Qt, QRect,
+                            QTimer,
                             QSize, Signal)
 from transformers import PreTrainedTokenizerBase
 
@@ -35,14 +36,23 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.filter: list | None = None
         self._media_type_filter = 'All'
         self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
+        self._pending_pages_payload: list[int] = []
+        self._pages_update_timer = QTimer(self)
+        self._pages_update_timer.setSingleShot(True)
+        self._pages_update_timer.setInterval(40)
+        self._pages_update_timer.timeout.connect(self._flush_pages_updated)
         image_list_model.pages_updated.connect(self._on_source_pages_updated)
 
     def _on_source_pages_updated(self, pages):
         """Handle page updates from source model in buffered mode."""
-        # NOTE: invalidate()/invalidateFilter() on buffered page updates has caused
-        # native Qt access violations on Windows in this code path.
-        # Forward only; view logic already consumes source pages directly.
-        self.pages_updated.emit(list(pages) if pages else [])
+        # Defer invalidation to coalesce bursts and avoid re-entrancy during source updates.
+        self._pending_pages_payload = list(pages) if pages else []
+        self._pages_update_timer.start()
+
+    def _flush_pages_updated(self):
+        """Apply proxy remap and forward latest loaded-page payload."""
+        self.invalidate()
+        self.pages_updated.emit(list(self._pending_pages_payload))
 
     def get_filtered_aspect_ratios(self) -> list[tuple[int, float]]:
         """Get (row, aspect_ratio) pairs for filtered items without iterating Qt model.
