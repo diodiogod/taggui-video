@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self.directory_path = None
         self.is_running = True
         self.post_deletion_index = None  # Track index to focus after deletion
+        self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -390,6 +391,8 @@ class MainWindow(QMainWindow):
     def load_directory(self, path: Path, select_index: int = 0,
                        save_path_to_settings: bool = False,
                        select_path: str | None = None):
+        self._load_session_id += 1
+        load_session_id = self._load_session_id
         self.directory_path = path.resolve()
         if save_path_to_settings:
             settings.setValue('directory_path', str(self.directory_path))
@@ -423,7 +426,7 @@ class MainWindow(QMainWindow):
         # Apply saved sort order after loading
         saved_sort = self.image_list.sort_combo_box.currentText()
         if saved_sort:
-            self.image_list._on_sort_changed(saved_sort)
+            self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
             
         # Try to restore selection by path (more robust)
         self._restore_global_rank = -1
@@ -477,6 +480,12 @@ class MainWindow(QMainWindow):
         def do_scroll():
             if scroll_done[0]:
                 return
+            if load_session_id != self._load_session_id:
+                try:
+                    self.image_list.list_view.layout_ready.disconnect(do_scroll)
+                except Exception:
+                    pass
+                return
             scroll_done[0] = True
             try:
                 self.image_list.list_view.layout_ready.disconnect(do_scroll)
@@ -510,6 +519,13 @@ class MainWindow(QMainWindow):
                     def do_final_scroll():
                         if final_done[0]:
                             return
+                        if load_session_id != self._load_session_id:
+                            final_done[0] = True
+                            try:
+                                view.layout_ready.disconnect(do_final_scroll)
+                            except Exception:
+                                pass
+                            return
                         final_attempts[0] += 1
 
                         # Rebind current selection by GLOBAL rank (not stale local row).
@@ -527,7 +543,9 @@ class MainWindow(QMainWindow):
                                     if hasattr(proxy_model, 'mapFromSource')
                                     else src_idx
                                 )
-                                if rebound_proxy_index.isValid() and view.currentIndex() != rebound_proxy_index:
+                                if (rebound_proxy_index.isValid()
+                                        and rebound_proxy_index.model() is view.model()
+                                        and view.currentIndex() != rebound_proxy_index):
                                     view.setCurrentIndex(rebound_proxy_index)
 
                         # Find item position directly in masonry items.
@@ -563,10 +581,12 @@ class MainWindow(QMainWindow):
                             if rebound_proxy_index.isValid()
                             else selected_index
                         )
-                        view.scrollTo(
-                            fallback_index,
-                            QAbstractItemView.ScrollHint.PositionAtCenter,
-                        )
+                        if (fallback_index.isValid()
+                                and fallback_index.model() is view.model()):
+                            view.scrollTo(
+                                fallback_index,
+                                QAbstractItemView.ScrollHint.PositionAtCenter,
+                            )
 
                     view.layout_ready.connect(do_final_scroll)
                     # Keep restore override alive through startup page-load/recalc bursts.
@@ -580,8 +600,10 @@ class MainWindow(QMainWindow):
                     return
 
             # Non-paginated or no restore info: simple scrollTo
-            view.scrollTo(
-                selected_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            if (selected_index.isValid()
+                    and selected_index.model() is view.model()):
+                view.scrollTo(
+                    selected_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
         self.image_list.list_view.layout_ready.connect(do_scroll)
 
@@ -624,6 +646,7 @@ class MainWindow(QMainWindow):
             select_index = settings.value(select_index_key, type=int) or 0
 
         self.load_directory(self.directory_path)
+        load_session_id = self._load_session_id
         self.image_list.filter_line_edit.setText(filter_text)
         # If the selected image index is out of bounds due to images being
         # deleted, select the last image.
@@ -638,9 +661,17 @@ class MainWindow(QMainWindow):
         def do_scroll():
             if scroll_done[0]:
                 return
+            if load_session_id != self._load_session_id:
+                try:
+                    self.image_list.list_view.layout_ready.disconnect(do_scroll)
+                except Exception:
+                    pass
+                return
             scroll_done[0] = True
-            self.image_list.list_view.scrollTo(
-                target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            if (target_index.isValid()
+                    and target_index.model() is self.image_list.list_view.model()):
+                self.image_list.list_view.scrollTo(
+                    target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
             try:
                 self.image_list.list_view.layout_ready.disconnect(do_scroll)
             except:

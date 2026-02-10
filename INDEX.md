@@ -34,6 +34,8 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 ## Main Package (`taggui/`)
 
 - `taggui/run_gui.py`: Main GUI entry point.
+  - Crash diagnostics note: native fatal stack dumping (`faulthandler`) is intentionally disabled by default because always-on mode can cause video playback stutter/tearing on Windows in this project.
+  - Enable only when investigating hard/native crashes by setting `TAGGUI_ENABLE_FAULTHANDLER=1` before launch (PowerShell: `$env:TAGGUI_ENABLE_FAULTHANDLER="1"`).
 
 ### Models (`taggui/models/`)
 
