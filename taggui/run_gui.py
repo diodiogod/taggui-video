@@ -122,6 +122,15 @@ def run_gui():
     app.setStyle('Fusion')
     # Disable the allocation limit to allow loading large images.
     QImageReader.setAllocationLimit(0)
+
+    # Warm thumbnail cache singleton on UI thread before worker threads start.
+    # This avoids concurrent first-time cache initialization in background loaders.
+    try:
+        from utils.thumbnail_cache import get_thumbnail_cache
+        get_thumbnail_cache()
+    except Exception as cache_error:
+        print(f"[CACHE INIT] Warmup failed: {cache_error}")
+
     main_window = MainWindow(app)
     main_window.show()
 

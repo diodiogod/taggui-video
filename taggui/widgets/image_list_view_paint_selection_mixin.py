@@ -183,6 +183,22 @@ class ImageListViewPaintSelectionMixin:
                 # Check if filtering is active
                 is_filtered = hasattr(self.model(), 'filter') and self.model().filter is not None
 
+                # Snapshot selection state once per paint pass.
+                # Avoid per-item selectionModel().isSelected(index) calls, which have
+                # triggered native crashes during rapid async model updates.
+                selected_rows = set()
+                current_index = QModelIndex()
+                sel_model = self.selectionModel()
+                if sel_model:
+                    try:
+                        current_index = sel_model.currentIndex()
+                        for sel_idx in sel_model.selectedRows(0):
+                            if sel_idx.isValid():
+                                selected_rows.add(sel_idx.row())
+                    except Exception:
+                        selected_rows.clear()
+                        current_index = QModelIndex()
+
                 real_visible_items = [it for it in visible_items if it.get('index', -1) >= 0]
                 if (not visible_items or not real_visible_items) and is_buffered:
                     painter.setPen(Qt.GlobalColor.lightGray)
@@ -286,8 +302,8 @@ class ImageListViewPaintSelectionMixin:
                     option.palette = self.palette()  # Set palette for stamp drawing
 
                     # Set state flags
-                    is_selected = self.selectionModel() and self.selectionModel().isSelected(index)
-                    is_current = self.currentIndex() == index
+                    is_selected = index.row() in selected_rows
+                    is_current = current_index.isValid() and current_index == index
 
                     # DEBUG: Report skipped items (only at deep scroll to avoid spam)
                     # if skipped_count > 0 and scroll_offset > 50000:

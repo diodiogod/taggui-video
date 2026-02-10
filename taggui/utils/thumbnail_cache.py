@@ -82,12 +82,18 @@ class ThumbnailCache:
 
     def _cleanup_old_png_cache(self):
         """Remove old PNG cache files (we use WebP now for better compression)."""
+        CLEANUP_KEY = '_thumbnail_cache_png_cleanup_v1'
+        if settings.value(CLEANUP_KEY, False, type=bool):
+            return
+
         if not self.cache_dir.exists():
+            settings.setValue(CLEANUP_KEY, True)
             return
 
         try:
             png_files = list(self.cache_dir.rglob('*.png'))
             if not png_files:
+                settings.setValue(CLEANUP_KEY, True)
                 return
 
             print(f'Cleaning up {len(png_files)} old PNG cache files...')
@@ -104,6 +110,9 @@ class ThumbnailCache:
 
         except Exception as e:
             print(f'Failed to cleanup PNG cache: {e}')
+        finally:
+            # Never retry on every startup; expensive cache walks can stall/crash workers.
+            settings.setValue(CLEANUP_KEY, True)
 
     def _migrate_cache(self, old_dir: Path, new_dir: Path):
         """
