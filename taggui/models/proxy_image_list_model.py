@@ -1,5 +1,6 @@
 import operator
 import re
+import time
 from typing import List, Dict, Any, Optional
 from fnmatch import fnmatchcase
 
@@ -37,21 +38,30 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self._media_type_filter = 'All'
         self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
         self._pending_pages_payload: list[int] = []
+        self._last_proxy_invalidate_ts = 0.0
         self._pages_update_timer = QTimer(self)
         self._pages_update_timer.setSingleShot(True)
-        self._pages_update_timer.setInterval(40)
         self._pages_update_timer.timeout.connect(self._flush_pages_updated)
         image_list_model.pages_updated.connect(self._on_source_pages_updated)
 
     def _on_source_pages_updated(self, pages):
         """Handle page updates from source model in buffered mode."""
-        # Defer invalidation to coalesce bursts and avoid re-entrancy during source updates.
+        # Coalesce bursts; deferred flush applies throttled proxy remap.
         self._pending_pages_payload = list(pages) if pages else []
-        self._pages_update_timer.start()
+        source_model = self.sourceModel()
+        is_scrolling = bool(getattr(source_model, '_is_scrolling', False))
+        self._pages_update_timer.start(120 if is_scrolling else 40)
 
     def _flush_pages_updated(self):
-        """Apply proxy remap and forward latest loaded-page payload."""
-        self.invalidate()
+        """Apply throttled proxy remap and forward latest loaded-page payload."""
+        source_model = self.sourceModel()
+        is_scrolling = bool(getattr(source_model, '_is_scrolling', False))
+        now = time.monotonic()
+        min_interval = 0.25 if is_scrolling else 0.08
+        if (now - self._last_proxy_invalidate_ts) >= min_interval:
+            # Keep proxy/source row mapping in sync to avoid boundary voids.
+            self.invalidate()
+            self._last_proxy_invalidate_ts = now
         self.pages_updated.emit(list(self._pending_pages_payload))
 
     def get_filtered_aspect_ratios(self) -> list[tuple[int, float]]:

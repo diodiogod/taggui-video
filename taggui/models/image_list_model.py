@@ -35,6 +35,8 @@ UNDO_STACK_SIZE = 32
 
 # Global lock for video operations (OpenCV/ffmpeg is not thread-safe)
 _video_lock = threading.Lock()
+# Global lock for thumbnail cache writes (limits I/O contention during scroll).
+_thumbnail_save_lock = threading.Lock()
 
 # Custom event for background load completion
 class BackgroundLoadCompleteEvent(QEvent):
@@ -67,7 +69,9 @@ def pil_to_qimage(pil_image):
     qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
     return qimage
 
-def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool) -> tuple[QImage | None, bool]:
+def load_thumbnail_data(
+    image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool
+) -> tuple[QImage | None, bool, tuple[int, int] | None]:
     """
     Load thumbnail data (can run in background thread - uses QImage which IS thread-safe).
 
@@ -78,7 +82,8 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
         is_video: Whether this is a video file
 
     Returns:
-        (qimage, was_cached): QImage and whether it was loaded from cache
+        (qimage, was_cached, original_size): QImage, cache-hit flag,
+        and original dimensions when available.
     """
     from utils.thumbnail_cache import get_thumbnail_cache
 
@@ -91,11 +96,12 @@ def load_thumbnail_data(image_path: Path, crop: QRect, thumbnail_width: int, is_
             cache_key = cache._get_cache_key(image_path, mtime, thumbnail_width)
             cache_path = cache._get_cache_path(cache_key)
 
+            cached_qimage = None
             if cache_path.exists():
                 # Load directly as QImage (thread-safe, no QIcon/QPixmap needed)
                 cached_qimage = QImage(str(cache_path))
-        if not cached_qimage.isNull():
-                    return (cached_qimage, True, None)  # Cache hit! (No original dims from cache)
+            if cached_qimage is not None and not cached_qimage.isNull():
+                return (cached_qimage, True, None)  # Cache hit! (No original dims from cache)
     except Exception:
         pass  # Cache check failed, fall through to generation
 
@@ -442,9 +448,9 @@ class ImageListModel(QAbstractListModel):
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
         # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
         self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
-        # Save executor: 2 workers for background cache writing (LOW OS PRIORITY to never block UI)
+        # Save executor: single worker keeps disk pressure predictable during scroll.
         self._save_executor = ThreadPoolExecutor(
-            max_workers=2,
+            max_workers=1,
             thread_name_prefix="thumb_save",
             initializer=self._set_low_priority_thread
         )
@@ -1756,7 +1762,7 @@ class ImageListModel(QAbstractListModel):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
         try:
             # Load QImage in background thread (thread-safe, I/O bound)
-            qimage, was_cached = load_thumbnail_data(path, crop, width, is_video)
+            qimage, was_cached, _ = load_thumbnail_data(path, crop, width, is_video)
 
             if qimage and not qimage.isNull():
                 # Find image by PATH, not by idx (array may have been sorted!)
@@ -1791,7 +1797,8 @@ class ImageListModel(QAbstractListModel):
 
         try:
             from utils.thumbnail_cache import get_thumbnail_cache
-            get_thumbnail_cache().save_thumbnail_qimage(path, mtime, width, qimage)
+            with _thumbnail_save_lock:
+                get_thumbnail_cache().save_thumbnail_qimage(path, mtime, width, qimage)
 
             # Queue DB update for deferred batch write (when truly idle)
             if self._db and self._directory_path:
@@ -2073,6 +2080,7 @@ class ImageListModel(QAbstractListModel):
                                 # Row is in this page
                                 page_offset = row - cumulative
                                 if page_offset < len(page):
+                                    self._touch_page(page_num)
                                     image = page[page_offset]
                                     break
                                 else:
@@ -2163,7 +2171,7 @@ class ImageListModel(QAbstractListModel):
             if not self._paginated_mode and not image.is_video:
                 # Normal mode for images: Load synchronously (enables preloading to work)
                 try:
-                    qimage, was_cached = load_thumbnail_data(
+                    qimage, was_cached, _ = load_thumbnail_data(
                         image.path, image.crop, self.thumbnail_generation_width, image.is_video
                     )
 
