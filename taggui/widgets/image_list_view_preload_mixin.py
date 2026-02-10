@@ -1,6 +1,37 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewPreloadMixin:
+    def _proxy_index_from_global(self, global_idx: int):
+        """Map a masonry global index to a valid proxy index for thumbnail prefetch."""
+        model = self.model()
+        if not model:
+            return QModelIndex()
+        source_model = model.sourceModel() if hasattr(model, 'sourceModel') else model
+
+        try:
+            gidx = int(global_idx)
+        except Exception:
+            return QModelIndex()
+        if gidx < 0:
+            return QModelIndex()
+
+        # Paginated masonry stores global indices; convert to loaded source row first.
+        if (
+            source_model
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+            and hasattr(source_model, 'get_loaded_row_for_global_index')
+        ):
+            loaded_row = source_model.get_loaded_row_for_global_index(gidx)
+            if loaded_row < 0:
+                return QModelIndex()
+            src_idx = source_model.index(loaded_row, 0)
+            if hasattr(model, 'mapFromSource'):
+                return model.mapFromSource(src_idx)
+            return src_idx
+
+        return model.index(gidx, 0)
+
     def _get_masonry_total_size(self):
         """Get total size from masonry results."""
         if not self._masonry_items:
@@ -115,7 +146,7 @@ class ImageListViewPreloadMixin:
 
         # Trigger thumbnail loading (async, non-blocking)
         for item in items_to_preload:
-            index = self.model().index(item['index'], 0)
+            index = self._proxy_index_from_global(item['index'])
             if index.isValid():
                 # This triggers thumbnail generation if not cached
                 _ = index.data(Qt.ItemDataRole.DecorationRole)
@@ -443,8 +474,9 @@ class ImageListViewPreloadMixin:
 
     def _preload_pagination_pages(self):
         """Smart preload: prioritize visible items, then expand outward (pagination mode)."""
-        # Don't preload while user is scrolling (keeps scroll smooth)
-        if self._scrollbar_dragging or self._mouse_scrolling:
+        # Dragging the scrollbar must stay latency-free.
+        # Wheel/trackpad scrolling can still preload with small batches.
+        if self._scrollbar_dragging:
             return
 
         source_model = self.model().sourceModel()
@@ -508,10 +540,11 @@ class ImageListViewPreloadMixin:
                 idx = queue.pop(0)
                 if idx in self._pagination_loaded_items:
                     continue  # Already loaded, skip
-                # Queue thumbnail load asynchronously
-                source_model = self.model().sourceModel()
-                if source_model and hasattr(source_model, 'queue_thumbnail_load'):
-                    source_model.queue_thumbnail_load(idx)
+                # Trigger DecorationRole for mapped proxy index; this reuses the
+                # model's async thumbnail pipeline and de-duping futures map.
+                proxy_index = self._proxy_index_from_global(idx)
+                if proxy_index.isValid():
+                    _ = proxy_index.data(Qt.ItemDataRole.DecorationRole)
                     self._pagination_loaded_items.add(idx)
                     loaded += 1
             return loaded
