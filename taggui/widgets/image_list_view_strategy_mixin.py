@@ -161,26 +161,44 @@ class ImageListViewStrategyMixin:
         if not proxy_idx.isValid():
             return False
 
+        # Never mutate current index while paint is active; defer to next tick.
+        if getattr(self, "_painting", False):
+            self._schedule_rebind_current_index_to_selected_global()
+            return False
+
+        # If already on the same proxy row, no rebind needed.
         current = self.currentIndex()
-        if current.isValid():
+        if current.isValid() and current.row() == proxy_idx.row():
+            return False
+
+        # Guard against stale mapping windows during rapid buffered updates.
+        if proxy_model and proxy_idx.row() >= proxy_model.rowCount():
+            return False
+
+        try:
+            sel_model = self.selectionModel()
+            if sel_model:
+                sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.NoUpdate)
+            else:
+                self.setCurrentIndex(proxy_idx)
+            return True
+        except Exception:
+            return False
+
+    def _schedule_rebind_current_index_to_selected_global(self):
+        """Queue a single rebind attempt on the next event-loop tick."""
+        if getattr(self, "_rebind_selected_global_pending", False):
+            return
+        self._rebind_selected_global_pending = True
+
+        def _run():
+            self._rebind_selected_global_pending = False
             try:
-                current_src = (
-                    proxy_model.mapToSource(current)
-                    if proxy_model and hasattr(proxy_model, "mapToSource")
-                    else current
-                )
-                current_global = (
-                    source_model.get_global_index_for_row(current_src.row())
-                    if hasattr(source_model, "get_global_index_for_row")
-                    else current_src.row()
-                )
-                if int(current_global) == target_global:
-                    return False
+                self._rebind_current_index_to_selected_global()
             except Exception:
                 pass
 
-        self.setCurrentIndex(proxy_idx)
-        return True
+        QTimer.singleShot(0, _run)
 
     def _get_restore_anchor_scroll_value(self, source_model=None, domain_max=None):
         """Resolve restore-time scroll anchor from target global index (fallback: target page)."""
@@ -581,8 +599,9 @@ class ImageListViewStrategyMixin:
             # from correct (enriched) positions instead of stale 1:1 cache.
             incr.cache_from_full_result(result, page_size, col_w, spacing, num_cols, avg_h)
 
-            # Rebind selection after buffered row shifts and preserve anchor scroll.
-            self._rebind_current_index_to_selected_global(source_model)
+            # Rebind selection after buffered row shifts on next tick
+            # to avoid re-entrancy while model updates are still propagating.
+            self._schedule_rebind_current_index_to_selected_global()
 
             target_scroll = None
             restore_target = self._get_restore_anchor_scroll_value(source_model, sb.maximum())
@@ -656,8 +675,8 @@ class ImageListViewStrategyMixin:
             return
 
         # In buffered mode, source rows can shift when pages are inserted.
-        # Rebind selection by global id to keep list/viewer aligned.
-        self._rebind_current_index_to_selected_global(source_model)
+        # Queue rebind by global id to keep list/viewer aligned safely.
+        self._schedule_rebind_current_index_to_selected_global()
 
         incremental = self._get_masonry_incremental_service()
         loaded_set = set(loaded_pages)

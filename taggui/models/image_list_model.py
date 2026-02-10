@@ -2466,13 +2466,15 @@ class ImageListModel(QAbstractListModel):
                                    with pilimage.open(full_path) as img:
                                        # Trust PIL dimensions over imagesize (fixes corruption cases)
                                        dimensions = img.size
-                                       
-                                       # Check Orientation (Only relevant for formats that support it)
-                                       exif = img.getexif()
-                                       if exif:
-                                           orientation = exif.get(274)
-                                           if orientation in (5, 6, 7, 8):
-                                               dimensions = (dimensions[1], dimensions[0])
+
+                                       # Orientation is relevant only for EXIF-backed formats.
+                                       # Avoid getexif() for PNG/WebP to reduce decoder crash surface.
+                                       if full_path.suffix.lower() in ('.jpg', '.jpeg', '.tif', '.tiff'):
+                                           exif = img.getexif()
+                                           if exif:
+                                               orientation = exif.get(274)
+                                               if orientation in (5, 6, 7, 8):
+                                                   dimensions = (dimensions[1], dimensions[0])
                                except:
                                    # If PIL fails, fall back to whatever imagesize got (or try custom parser)
                                    if dimensions == (-1, -1) and full_path.suffix.lower() in ('.jpg', '.jpeg'):
