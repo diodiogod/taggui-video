@@ -81,7 +81,7 @@ class ImageListViewPaintSelectionMixin:
                             buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
                         except Exception:
                             buffer_pages = 3
-                        buffer_pages = max(1, min(buffer_pages, 6))
+                        buffer_pages = max(1, min(buffer_pages, 5))
                         req_start = max(0, (cur_page - buffer_pages) * page_size)
                         req_end = min(total_items - 1, ((cur_page + buffer_pages + 1) * page_size) - 1)
                     else:
@@ -180,24 +180,11 @@ class ImageListViewPaintSelectionMixin:
                 first_skipped = []
                 painted_count = 0
             
-                # Check if filtering is active
-                is_filtered = hasattr(self.model(), 'filter') and self.model().filter is not None
-
-                # Snapshot selection state once per paint pass.
-                # Avoid per-item selectionModel().isSelected(index) calls, which have
-                # triggered native crashes during rapid async model updates.
-                selected_rows = set()
-                current_index = QModelIndex()
-                sel_model = self.selectionModel()
-                if sel_model:
-                    try:
-                        current_index = sel_model.currentIndex()
-                        for sel_idx in sel_model.selectedRows(0):
-                            if sel_idx.isValid():
-                                selected_rows.add(sel_idx.row())
-                    except Exception:
-                        selected_rows.clear()
-                        current_index = QModelIndex()
+                # Snapshot cached selection state (updated via selection signals).
+                # Avoid querying selectionModel() from paint; it has triggered
+                # sporadic native crashes during rapid async page updates.
+                selected_rows = set(getattr(self, "_selected_rows_cache", set()))
+                current_row = int(getattr(self, "_current_proxy_row_cache", -1))
 
                 real_visible_items = [it for it in visible_items if it.get('index', -1) >= 0]
                 if (not visible_items or not real_visible_items) and is_buffered:
@@ -280,20 +267,6 @@ class ImageListViewPaintSelectionMixin:
                     if visual_rect.bottom() < -buffer or visual_rect.top() > viewport_height + buffer:
                         continue
                     
-                    # SMART FAST SCROLL: Always show loaded thumbnails
-                    # Only skip delegate for items that aren't loaded yet
-                    has_thumbnail = False
-                    if is_buffered and not is_filtered:
-                         # Unfiltered buffered mode: use global index
-                         image = source_model._get_image_at_index(item['index'])
-                         if image:
-                             has_thumbnail = bool(image.thumbnail or image.thumbnail_qimage)
-                    else:
-                         # Normal mode or filtered mode: get via proxy index
-                         image = self.model().data(index, Qt.ItemDataRole.UserRole)
-                         if image:
-                             has_thumbnail = bool(getattr(image, 'thumbnail', None) or getattr(image, 'thumbnail_qimage', None))
-
                     # Create option for delegate using QStyleOptionViewItem
                     option = QStyleOptionViewItem()
                     option.rect = visual_rect
@@ -303,7 +276,7 @@ class ImageListViewPaintSelectionMixin:
 
                     # Set state flags
                     is_selected = index.row() in selected_rows
-                    is_current = current_index.isValid() and current_index == index
+                    is_current = (current_row >= 0) and (index.row() == current_row)
 
                     # DEBUG: Report skipped items (only at deep scroll to avoid spam)
                     # if skipped_count > 0 and scroll_offset > 50000:
