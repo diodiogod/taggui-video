@@ -138,21 +138,56 @@ class ImageListViewGeometryMixin:
         # Keep items within N pages of visible area (configurable for VRAM management)
         eviction_pages = settings.value('thumbnail_eviction_pages', defaultValue=3, type=int)
         eviction_pages = max(1, min(eviction_pages, 5))  # Clamp to 1-5
-        keep_range_start = max(0, min_visible - source_model.PAGE_SIZE * eviction_pages)
-        keep_range_end = min(max_visible + source_model.PAGE_SIZE * eviction_pages, source_model.rowCount())
+        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        is_paginated = bool(
+            hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
+        )
+        total_count = (
+            int(getattr(source_model, '_total_count', 0) or 0)
+            if is_paginated
+            else int(source_model.rowCount())
+        )
+        if total_count <= 0:
+            return
+
+        keep_range_start = max(0, min_visible - page_size * eviction_pages)
+        keep_range_end = min(total_count - 1, max_visible + page_size * eviction_pages)
 
         # Evict thumbnails outside keep range
         evicted_count = 0
-        for i in range(len(source_model.images)):
-            if i < keep_range_start or i > keep_range_end:
-                image = source_model.images[i]
-                if image.thumbnail or image.thumbnail_qimage:
-                    image.thumbnail = None
-                    image.thumbnail_qimage = None
-                    evicted_count += 1
-                    # Remove from loaded tracking
-                    if hasattr(self, '_pagination_loaded_items'):
-                        self._pagination_loaded_items.discard(i)
+        if is_paginated and hasattr(source_model, '_pages'):
+            lock = getattr(source_model, '_page_load_lock', None)
+            if lock:
+                with lock:
+                    pages_snapshot = list(source_model._pages.items())
+            else:
+                pages_snapshot = list(source_model._pages.items())
+
+            for page_num, page in pages_snapshot:
+                if not page:
+                    continue
+                base_idx = int(page_num) * page_size
+                for offset, image in enumerate(page):
+                    if image is None:
+                        continue
+                    global_idx = base_idx + offset
+                    if global_idx < keep_range_start or global_idx > keep_range_end:
+                        if image.thumbnail or image.thumbnail_qimage:
+                            image.thumbnail = None
+                            image.thumbnail_qimage = None
+                            evicted_count += 1
+                            # Pagination preload tracks global indices.
+                            if hasattr(self, '_pagination_loaded_items'):
+                                self._pagination_loaded_items.discard(global_idx)
+        else:
+            for i, image in enumerate(source_model.images):
+                if i < keep_range_start or i > keep_range_end:
+                    if image.thumbnail or image.thumbnail_qimage:
+                        image.thumbnail = None
+                        image.thumbnail_qimage = None
+                        evicted_count += 1
+                        if hasattr(self, '_pagination_loaded_items'):
+                            self._pagination_loaded_items.discard(i)
 
         if evicted_count > 0:
             print(f"[EVICT] Evicted {evicted_count} distant thumbnails (keeping indices {keep_range_start}-{keep_range_end})")

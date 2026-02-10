@@ -2917,6 +2917,27 @@ class ImageListModel(QAbstractListModel):
             # Submit background enrichment task
             self._load_executor.submit(enrich_dimensions)
 
+    def _resolve_page_memory_limits(self) -> tuple[int, int, int]:
+        """Resolve raw + effective paginated page-memory limits from settings."""
+        raw_max = settings.value(
+            'max_pages_in_memory',
+            defaultValue=DEFAULT_SETTINGS.get('max_pages_in_memory', 20),
+            type=int,
+        )
+        raw_max = max(3, min(int(raw_max), 60))
+
+        eviction_pages = settings.value(
+            'thumbnail_eviction_pages',
+            defaultValue=DEFAULT_SETTINGS.get('thumbnail_eviction_pages', 3),
+            type=int,
+        )
+        eviction_pages = max(1, min(int(eviction_pages), 5))
+
+        # Must at least hold current page plus eviction window on both sides.
+        required_min = (2 * eviction_pages) + 1
+        effective_max = max(raw_max, required_min)
+        return raw_max, eviction_pages, effective_max
+
     def _load_directory_paginated(self, directory_path: Path, image_paths: list[Path], file_paths: set[Path]):
         """Load a large directory using buffered virtual pagination (1M+ images).
 
@@ -2932,10 +2953,15 @@ class ImageListModel(QAbstractListModel):
         # Initialize database
         self._directory_path = directory_path
         
-        # Load max pages from settings
-        max_pages = settings.value('max_pages_in_memory', 20, type=int)
-        self.MAX_PAGES_IN_MEMORY = max_pages
-        print(f"[PAGINATION] Max pages in memory: {self.MAX_PAGES_IN_MEMORY}")
+        # Load max pages from settings with safety guardrail:
+        # keep at least the current +/- eviction window (+ current page).
+        raw_max, eviction_pages, effective_max = self._resolve_page_memory_limits()
+        self.MAX_PAGES_IN_MEMORY = effective_max
+        if effective_max != raw_max:
+            print(f"[PAGINATION] Max pages in memory: {effective_max} "
+                  f"(raised from {raw_max} to satisfy eviction window {eviction_pages})")
+        else:
+            print(f"[PAGINATION] Max pages in memory: {self.MAX_PAGES_IN_MEMORY}")
 
         self._db = ImageIndexDB(directory_path)
         self._paginated_mode = True
