@@ -280,10 +280,18 @@ class MasonryCompletionService:
                             sb.setValue(max(0, min(target_val, stable_max)))
                             v._last_stable_scroll_value = sb.value()
                         else:
-                            # Ratio-preserving: keep thumb at the same visual fraction.
-                            ratio = old_val / old_max
-                            target_val = max(0, min(int(round(ratio * stable_max)), stable_max))
-                            sb.setValue(target_val)
+                            restore_target = (
+                                v._get_restore_anchor_scroll_value(source_model, stable_max)
+                                if hasattr(v, '_get_restore_anchor_scroll_value')
+                                else None
+                            )
+                            if restore_target is not None:
+                                sb.setValue(max(0, min(int(restore_target), stable_max)))
+                            else:
+                                # Ratio-preserving: keep thumb at the same visual fraction.
+                                ratio = old_val / old_max
+                                target_val = max(0, min(int(round(ratio * stable_max)), stable_max))
+                                sb.setValue(target_val)
                         sb.blockSignals(prev_block)
                 elif release_anchor_active:
                     release_anchor_found = False

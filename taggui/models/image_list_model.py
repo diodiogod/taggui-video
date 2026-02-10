@@ -345,16 +345,23 @@ class ImageListModel(QAbstractListModel):
              # Paginated Mode
              if not hasattr(self, '_pages'):
                  return None
-                 
-             page_size = getattr(self, 'PAGE_SIZE', 1000)
-             page_num = row // page_size
-             idx_in_page = row % page_size
-             
-             # Note: logic requires page to be loaded. 
-             # If user selected it, page MUST be loaded.
-             if page_num in self._pages:
-                  if idx_in_page < len(self._pages[page_num]):
-                       return self._pages[page_num][idx_in_page]
+
+             # In buffered pagination, `row` is the position in the concatenated
+             # loaded-pages list (sorted by page number), not a global rank.
+             if row < 0:
+                 return None
+
+             with self._page_load_lock:
+                 cumulative = 0
+                 for page_num in sorted(self._pages.keys()):
+                     page = self._pages.get(page_num) or []
+                     page_size = len(page)
+                     if row < cumulative + page_size:
+                         idx_in_page = row - cumulative
+                         if 0 <= idx_in_page < page_size:
+                             return page[idx_in_page]
+                         return None
+                     cumulative += page_size
         except Exception:
             pass
         return None

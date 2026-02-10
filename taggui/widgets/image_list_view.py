@@ -167,6 +167,10 @@ class ImageListView(
         self._strict_drag_frozen_max = 0
         self._strict_drag_frozen_until = 0.0
         self._strict_scroll_max_floor = 0
+        self._restore_target_page = None  # Set by main_window scroll restore
+        self._restore_target_global_index = None
+        self._restore_anchor_until = 0.0
+        self._selected_global_index = None  # Stable identity across buffered row shifts
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
         self._strict_domain_service = StrictScrollDomainService(self)
@@ -268,5 +272,35 @@ class ImageListView(
         self.context_menu.addAction(self.restore_backup_action)
         self.selectionModel().selectionChanged.connect(
             self.update_context_menu_actions)
+        self.selectionModel().currentChanged.connect(
+            self._remember_selected_global_index)
+
+    @Slot(QModelIndex, QModelIndex)
+    def _remember_selected_global_index(self, current: QModelIndex, previous: QModelIndex):
+        """Track selection by global index so buffered row insertions can't remap it."""
+        if not current.isValid():
+            return
+        try:
+            proxy_model = self.model()
+            source_model = (
+                proxy_model.sourceModel()
+                if proxy_model and hasattr(proxy_model, "sourceModel")
+                else proxy_model
+            )
+            src_idx = (
+                proxy_model.mapToSource(current)
+                if proxy_model and hasattr(proxy_model, "mapToSource")
+                else current
+            )
+            if not src_idx.isValid():
+                return
+            if source_model and hasattr(source_model, "get_global_index_for_row"):
+                global_idx = source_model.get_global_index_for_row(src_idx.row())
+            else:
+                global_idx = src_idx.row()
+            if isinstance(global_idx, int) and global_idx >= 0:
+                self._selected_global_index = global_idx
+        except Exception:
+            pass
 
 __all__ = ["ImageListView"]

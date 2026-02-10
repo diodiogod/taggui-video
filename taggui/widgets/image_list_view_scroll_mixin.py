@@ -101,10 +101,18 @@ class ImageListViewScrollMixin:
             sb = self.verticalScrollBar()
             canonical = self._strict_canonical_domain_max(source_model)
             if sb.maximum() != canonical:
-                old_pos = max(0, int(sb.sliderPosition()))
-                old_max_v = max(1, int(sb.maximum()))
-                ratio = max(0.0, min(1.0, old_pos / old_max_v))
-                new_pos = int(round(ratio * canonical))
+                restore_target = (
+                    self._get_restore_anchor_scroll_value(source_model, canonical)
+                    if hasattr(self, '_get_restore_anchor_scroll_value')
+                    else None
+                )
+                if restore_target is not None:
+                    new_pos = int(restore_target)
+                else:
+                    old_pos = max(0, int(sb.sliderPosition()))
+                    old_max_v = max(1, int(sb.maximum()))
+                    ratio = max(0.0, min(1.0, old_pos / old_max_v))
+                    new_pos = int(round(ratio * canonical))
                 prev_block = sb.blockSignals(True)
                 try:
                     sb.setRange(0, canonical)
@@ -146,7 +154,13 @@ class ImageListViewScrollMixin:
             self._release_page_lock_page = None
             self._release_page_lock_until = 0.0
         current_page = None
-        if dragging_mode:
+        # Restore override from main_window scroll restore
+        restore_page = getattr(self, '_restore_target_page', None)
+        if restore_page is not None and not dragging_mode:
+            current_page = max(0, min(last_page, int(restore_page)))
+        if current_page is not None:
+            pass  # skip all other derivation
+        elif dragging_mode:
             if strict_mode:
                 # Strict mode: map using canonical domain.
                 slider_pos = int(self.verticalScrollBar().sliderPosition())
