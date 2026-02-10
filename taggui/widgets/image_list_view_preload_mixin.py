@@ -534,10 +534,10 @@ class ImageListViewPreloadMixin:
         # === PRIORITY-BASED BATCH LOADING ===
         # Determine batch sizes based on scroll state
         if self._scrollbar_dragging or self._mouse_scrolling:
-            # During active scrolling: ONLY load urgent (visible) items
-            # Keep batch small to avoid lock contention on main thread
-            urgent_batch = 5    # Load visible items (small batches = less blocking)
-            high_batch = 0      # Pause near buffer
+            # During active scrolling: prioritize visible and a tiny near-buffer.
+            # This reduces temporary empty spots while still keeping UI responsive.
+            urgent_batch = 10   # Visible items
+            high_batch = 3      # Small near-buffer
             low_batch = 0       # Pause far buffer
         else:
             # Idle state: Larger batches (6 workers can process these quickly)
@@ -575,7 +575,7 @@ class ImageListViewPreloadMixin:
         if self._urgent_queue or self._high_queue or self._low_queue:
             # Adaptive cadence: slower during scroll to reduce main thread overhead
             if self._scrollbar_dragging or self._mouse_scrolling:
-                cadence = 100  # 100ms during scroll (reduce overhead)
+                cadence = 45   # Faster refills during scroll
             elif self._urgent_queue:
                 cadence = 30   # 30ms for urgent when idle (fast)
             elif self._high_queue:
