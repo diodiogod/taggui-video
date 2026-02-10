@@ -39,6 +39,7 @@ qInstallMessageHandler(qt_message_handler)
 CRASH_LOG_PATH = os.path.abspath('taggui_crash.log')
 FATAL_LOG_PATH = os.path.abspath('taggui_fatal.log')
 _fatal_log_handle = None
+ENABLE_FATAL_CRASH_DUMPS = os.getenv('TAGGUI_ENABLE_FAULTHANDLER', '0') == '1'
 
 
 def _append_crash_log(title: str, exc_info=None):
@@ -60,7 +61,7 @@ def _append_crash_log(title: str, exc_info=None):
 
 
 def install_crash_handlers():
-    """Install Python/thread/fatal crash handlers for diagnostics."""
+    """Install Python/thread crash handlers; fatal dumps are opt-in."""
     global _fatal_log_handle
     if _fatal_log_handle is not None:
         return
@@ -79,17 +80,19 @@ def install_crash_handlers():
     sys.excepthook = _unhandled_exception
     threading.excepthook = _thread_exception
 
-    # Capture fatal/native crashes (e.g., C-extension aborts) with stack dumps.
-    try:
-        _fatal_log_handle = open(FATAL_LOG_PATH, 'a', encoding='utf-8', buffering=1)
-        _fatal_log_handle.write(
-            "\n" + "=" * 80 + "\n"
-            f"{datetime.now().isoformat()} | SESSION START pid={os.getpid()}\n"
-            + "=" * 80 + "\n"
-        )
-        faulthandler.enable(file=_fatal_log_handle, all_threads=True)
-    except Exception as e:
-        print(f"[WARNING] Could not enable faulthandler: {e}")
+    # Optional: capture fatal/native crashes (C-extension aborts) with stack dumps.
+    if ENABLE_FATAL_CRASH_DUMPS:
+        try:
+            _fatal_log_handle = open(FATAL_LOG_PATH, 'a', encoding='utf-8', buffering=1)
+            _fatal_log_handle.write(
+                "\n" + "=" * 80 + "\n"
+                f"{datetime.now().isoformat()} | SESSION START pid={os.getpid()}\n"
+                + "=" * 80 + "\n"
+            )
+            faulthandler.enable(file=_fatal_log_handle, all_threads=True)
+            print(f"[CRASH] Fatal trace dumps enabled: {FATAL_LOG_PATH}")
+        except Exception as e:
+            print(f"[WARNING] Could not enable faulthandler: {e}")
 
 
 def suppress_warnings():

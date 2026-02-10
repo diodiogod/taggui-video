@@ -179,7 +179,7 @@ class ImageList(QDockWidget):
         return self.list_view.get_selected_image_indices()
 
     @Slot(str)
-    def _on_sort_changed(self, sort_by: str):
+    def _on_sort_changed(self, sort_by: str, preserve_selection: bool = True):
         """Sort images when sort option changes."""
         # Get the source model
         source_model = self.proxy_image_list_model.sourceModel()
@@ -200,23 +200,24 @@ class ImageList(QDockWidget):
 
         # Sort the images list
         try:
-            # Get currently selected image BEFORE sorting (to scroll to it after)
-            current_index = self.list_view.currentIndex()
             selected_image = None
-            if current_index.isValid():
-                selected_image = source_model.data(
-                    self.proxy_image_list_model.mapToSource(current_index),
-                    Qt.ItemDataRole.UserRole
-                )
+            if preserve_selection:
+                # Get currently selected image BEFORE sorting (to scroll to it after).
+                # During folder-load replay, currentIndex can be stale while models churn.
+                current_index = self.list_view.currentIndex()
+                if (current_index.isValid()
+                        and current_index.model() is self.proxy_image_list_model):
+                    source_index = self.proxy_image_list_model.mapToSource(current_index)
+                    if source_index.isValid():
+                        selected_image = source_model.data(
+                            source_index, Qt.ItemDataRole.UserRole
+                        )
                 if selected_image:
                     print(f"[SORT] Will scroll to selected image: {selected_image.path.name}")
                 else:
-                    print(f"[SORT] Could not get selected image object")
+                    print(f"[SORT] No valid current index to scroll to")
             else:
-                print(f"[SORT] No valid current index to scroll to")
-
-            # Emit layoutAboutToBeChanged before sorting
-            source_model.layoutAboutToBeChanged.emit()
+                print("[SORT] Skipping selection capture during folder-load sort replay")
 
             # BUFFERED PAGINATION MODE: Update DB sort params and reload pages
             if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
@@ -320,8 +321,6 @@ class ImageList(QDockWidget):
             import traceback
             print(f"Sort error: {e}")
             traceback.print_exc()
-            # Ensure layoutChanged is emitted even on error
-            source_model.layoutChanged.emit()
 
     @Slot()
     def _do_scroll_after_sort(self):
