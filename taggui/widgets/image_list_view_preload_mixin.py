@@ -130,26 +130,39 @@ class ImageListViewPreloadMixin:
         """Preload thumbnails for items near viewport for smoother scrolling."""
         if not self.use_masonry or not self._masonry_items or not self.model():
             return
+        if self._scrollbar_dragging:
+            return
 
         # Load visible + buffer (2 screens above/below) during scroll
         # Background preloading is paused during scroll, so this has priority
         scroll_offset = self.verticalScrollBar().value()
         viewport_height = self.viewport().height()
 
-        # Preload items within 2 screens above and below
-        preload_buffer = viewport_height * 2
+        # Keep this lightweight during active wheel scrolling.
+        preload_buffer = viewport_height if self._mouse_scrolling else (viewport_height * 2)
         preload_rect = QRect(0, scroll_offset - preload_buffer,
                             self.viewport().width(), viewport_height + (preload_buffer * 2))
 
         # Get items in preload range
         items_to_preload = self._get_masonry_visible_items(preload_rect)
+        real_items = [it for it in items_to_preload if it.get('index', -1) >= 0]
+        if not real_items:
+            return
+
+        center_y = scroll_offset + (viewport_height // 2)
+        real_items.sort(key=lambda it: abs(int(it['rect'].center().y()) - center_y))
+        max_requests = 24 if self._mouse_scrolling else 80
 
         # Trigger thumbnail loading (async, non-blocking)
-        for item in items_to_preload:
+        loaded_now = 0
+        for item in real_items:
+            if loaded_now >= max_requests:
+                break
             index = self._proxy_index_from_global(item['index'])
             if index.isValid():
                 # This triggers thumbnail generation if not cached
                 _ = index.data(Qt.ItemDataRole.DecorationRole)
+                loaded_now += 1
                 # Track this thumbnail as loaded
                 if item['index'] not in self._thumbnails_loaded:
                     self._thumbnails_loaded.add(item['index'])

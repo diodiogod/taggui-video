@@ -6,6 +6,11 @@ class ImageListViewScrollMixin:
         self._mouse_scrolling = False
         # print("[SCROLL] Mouse scroll stopped")
 
+        # Notify model that scrolling ended (allows deferred background work).
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        if source_model and hasattr(source_model, 'set_scrolling_state'):
+            source_model.set_scrolling_state(False)
+
         # DON'T flush cache saves immediately - still might be scrolling
         # Just mark that scroll detection stopped (200ms is too short for flush)
 
@@ -50,14 +55,17 @@ class ImageListViewScrollMixin:
             self._scroll_direction = 'down' if dy < 0 else 'up'
 
         if self.use_masonry:
-            # Force viewport update when scrolling in masonry mode
-            self.viewport().update()
-            # Queue a repaint to land after this event burst; helps recover
-            # when paint throttling skipped the last frame.
-            QTimer.singleShot(0, self.viewport().update)
+            # Avoid forcing repaint every scroll tick; Qt's native scrolling
+            # already repaints. Extra forced updates can block input.
+            import time
+            now = time.time()
 
             # Preload thumbnails for smoother scrolling (only nearby items)
-            self._preload_nearby_thumbnails()
+            if not hasattr(self, '_last_nearby_preload_time'):
+                self._last_nearby_preload_time = 0.0
+            if (now - self._last_nearby_preload_time) >= 0.12:  # 120ms cadence
+                self._last_nearby_preload_time = now
+                self._preload_nearby_thumbnails()
 
             # Update progress bar position to follow scroll
             self._update_progress_bar_position()

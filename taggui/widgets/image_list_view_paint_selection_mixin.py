@@ -14,12 +14,13 @@ class ImageListViewPaintSelectionMixin:
             if not hasattr(self, '_last_paint_time'):
                 self._last_paint_time = 0
 
-            # During scrollbar-thumb dragging, throttle to max 30fps (33ms).
-            # Do NOT throttle wheel/trackpad scrolling here; skipping those
-            # paints can cause visible blank "curtain" artifacts while moving.
-            if self._scrollbar_dragging:
+            # Only throttle during scrollbar-thumb dragging. Wheel scrolling
+            # should paint naturally to avoid stepped/choppy movement.
+            min_interval_ms = 33 if self._scrollbar_dragging else 0
+
+            if min_interval_ms > 0:
                 time_since_paint = (current_time - self._last_paint_time) * 1000
-                if time_since_paint < 33:  # 33ms = 30fps
+                if time_since_paint < min_interval_ms:
                     event.accept()
                     return  # Skip this paint, too soon
 
