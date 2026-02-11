@@ -84,6 +84,8 @@ class ImageListView(
         self._masonry_executor = ThreadPoolExecutor(max_workers=1)  # Single worker thread (ProcessPoolExecutor fails on Windows with heavy threading)
         self._masonry_items = []  # Positioned items from multiprocessing
         self._masonry_total_height = 0  # Total layout height
+        self._masonry_mode_generation = 0  # Bumps when switching List/Icon mode
+        self._masonry_calc_mode_generation = 0  # Generation captured at calc submission
         self._last_known_total_count = 0 # Cache for total items count to prevent collapse during model updates
         self._painting = False  # Flag to prevent layout changes during paint (prevents re-entrancy)
         self._last_stable_scroll_value = 0 # Track stable scroll position to survive layout resets
@@ -192,7 +194,16 @@ class ImageListView(
         # Display size can match generation size since we have the quality
         self.min_thumbnail_size = 64
         self.max_thumbnail_size = 512  # Can display at full 512px since generated at 512px
-        self.column_switch_threshold = 150  # Below this size, switch to multi-column
+        raw_switch_threshold = settings.value(
+            'masonry_list_switch_threshold', 150, type=int)
+        self.column_switch_threshold = max(
+            self.min_thumbnail_size,
+            min(1024, int(raw_switch_threshold))
+        )
+        # Prevent rapid mode thrash (List <-> Masonry) when zooming near threshold.
+        self._view_mode_hysteresis_px = 30
+        self._view_mode_switch_cooldown_s = 0.35
+        self._last_view_mode_switch_time = 0.0
 
         # Load saved zoom level or use default
         # Since thumbnails are generated at 512px, default to showing them at full size

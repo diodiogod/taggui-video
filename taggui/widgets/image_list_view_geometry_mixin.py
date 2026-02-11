@@ -272,15 +272,46 @@ class ImageListViewGeometryMixin:
             # Fade out effect
             QTimer.singleShot(500, self._thumbnail_progress_bar.hide)  # Hide after 500ms
 
+    def _invalidate_pending_masonry_for_mode_switch(self):
+        """Invalidate in-flight masonry work when switching List/Icon mode."""
+        self._masonry_mode_generation = int(getattr(self, "_masonry_mode_generation", 0)) + 1
+        self._masonry_calculating = False
+        self._masonry_recalc_pending = False
+        if hasattr(self, "_masonry_recalc_timer"):
+            self._masonry_recalc_timer.stop()
+        if hasattr(self, "_resize_timer"):
+            self._resize_timer.stop()
+
 
     def _update_view_mode(self):
         """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
+        import time
         previous_mode = self.viewMode()
+        now = time.time()
+        hysteresis = int(getattr(self, "_view_mode_hysteresis_px", 30) or 30)
+        cooldown_s = float(getattr(self, "_view_mode_switch_cooldown_s", 0.35) or 0.35)
+        threshold = int(getattr(self, "column_switch_threshold", 150) or 150)
 
-        if self.current_thumbnail_size >= self.column_switch_threshold:
+        # Use hysteresis to avoid rapid toggling around threshold.
+        if previous_mode == QListView.ViewMode.ListMode:
+            switch_to_list = self.current_thumbnail_size > max(self.min_thumbnail_size, threshold - hysteresis)
+        else:
+            switch_to_list = self.current_thumbnail_size >= threshold
+
+        desired_mode = QListView.ViewMode.ListMode if switch_to_list else QListView.ViewMode.IconMode
+        if desired_mode != previous_mode:
+            if (now - float(getattr(self, "_last_view_mode_switch_time", 0.0) or 0.0)) < cooldown_s:
+                # Keep current mode during cooldown to avoid unsafe mode churn.
+                self.use_masonry = (previous_mode == QListView.ViewMode.IconMode)
+                return
+            self._last_view_mode_switch_time = now
+
+        if switch_to_list:
             # Large thumbnails: single column list view
             self.use_masonry = False
-            self.setViewMode(QListView.ViewMode.ListMode)
+            if previous_mode != QListView.ViewMode.ListMode:
+                self._invalidate_pending_masonry_for_mode_switch()
+                self.setViewMode(QListView.ViewMode.ListMode)
             self.setFlow(QListView.Flow.TopToBottom)
             self.setResizeMode(QListView.ResizeMode.Adjust)
             self.setWrapping(False)
@@ -294,7 +325,9 @@ class ImageListViewGeometryMixin:
         else:
             # Small thumbnails: masonry grid view (Pinterest-style)
             self.use_masonry = True
-            self.setViewMode(QListView.ViewMode.IconMode)
+            if previous_mode != QListView.ViewMode.IconMode:
+                self._invalidate_pending_masonry_for_mode_switch()
+                self.setViewMode(QListView.ViewMode.IconMode)
             self.setFlow(QListView.Flow.LeftToRight)
             self.setResizeMode(QListView.ResizeMode.Fixed)
             self.setWrapping(True)
@@ -303,7 +336,7 @@ class ImageListViewGeometryMixin:
             # Disable default grid - we'll handle positioning with masonry
             self.setGridSize(QSize(-1, -1))
             # Calculate masonry layout (will re-center via flag)
-            self._recenter_after_layout = True
+            self._recenter_after_layout = (previous_mode != QListView.ViewMode.IconMode)
             self._calculate_masonry_layout()
             # Force item delegate to recalculate sizes and update viewport
             self.scheduleDelayedItemsLayout()
@@ -581,11 +614,14 @@ class ImageListViewGeometryMixin:
 
                     if row != -1:
                         src_index = source_model.index(row, 0)
+                        if not src_index.isValid():
+                            return QModelIndex()
                         proxy_index = self.model().mapFromSource(src_index) if hasattr(self.model(), 'mapFromSource') else src_index
                         if proxy_index.isValid():
                             return proxy_index
-                        # Fallback if mapFromSource fails (item filtered out)
-                        return self.model().index(row, 0)
+                        # During proxy/page churn mapFromSource may be transiently invalid.
+                        # Do NOT fallback to proxy row by number; that can select a different image.
+                        return QModelIndex()
         
             return QModelIndex()
         else:

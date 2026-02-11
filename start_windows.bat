@@ -5,6 +5,7 @@ set LOGFILE=taggui_setup.log
 set SKIP_GIT=0
 set CLEAR_CACHE=0
 set CLEAN_OLD=0
+set ENABLE_CRASH_DIAG=0
 
 echo Logging to %LOGFILE%
 echo.
@@ -25,9 +26,13 @@ if !ERRORLEVEL! NEQ 0 (
 echo Found Python
 
 :: Parse command line arguments
-if "%1"=="--skip-git" set SKIP_GIT=1
-if "%1"=="--clear-cache" set CLEAR_CACHE=1
-if "%1"=="--clean-old" set CLEAN_OLD=1
+for %%A in (%*) do (
+    if /I "%%~A"=="--skip-git" set SKIP_GIT=1
+    if /I "%%~A"=="--clear-cache" set CLEAR_CACHE=1
+    if /I "%%~A"=="--clean-old" set CLEAN_OLD=1
+    if /I "%%~A"=="--crash-log" set ENABLE_CRASH_DIAG=1
+    if /I "%%~A"=="--no-crash-log" set ENABLE_CRASH_DIAG=0
+)
 
 :: Check if git repo exists
 if not exist .git goto no_git
@@ -235,7 +240,13 @@ echo ======================================================
 echo Starting TagGUI...
 echo ======================================================
 echo.
-:: set TAGGUI_ENABLE_FAULTHANDLER=1  REM Enable only for crash diagnostics
+if !ENABLE_CRASH_DIAG! EQU 1 (
+    set TAGGUI_ENABLE_FAULTHANDLER=1
+    echo Crash diagnostics: ON ^(taggui_fatal.log^)
+) else (
+    set TAGGUI_ENABLE_FAULTHANDLER=0
+    echo Crash diagnostics: OFF
+)
 python taggui/run_gui.py
 set EXITCODE=%ERRORLEVEL%
 if not "%EXITCODE%"=="0" (

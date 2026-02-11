@@ -507,6 +507,20 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(trainer_target_resolution_spin_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        # Masonry/List auto-switch threshold
+        grid_layout.addWidget(QLabel('Keep masonry until (thumbnail px)'), 1, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        masonry_switch_threshold_spin_box = SettingsSpinBox(
+            key='masonry_list_switch_threshold',
+            minimum=64, maximum=1024, default=150)
+        masonry_switch_threshold_spin_box.setToolTip(
+            'Auto-switches to List mode when thumbnail size reaches this value.\n'
+            'Higher value = masonry allowed for larger thumbnails.\n'
+            'Set above 512 to effectively disable auto-switch.\n'
+            'Applied live.')
+        grid_layout.addWidget(masonry_switch_threshold_spin_box, 1, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 

@@ -335,6 +335,12 @@ class ImageListViewCalculationMixin:
             self._masonry_calculating = False
             return
 
+        # Capture mode generation so completion can ignore stale results
+        # from calculations submitted before a List/Icon mode flip.
+        self._masonry_calc_mode_generation = int(
+            getattr(self, "_masonry_mode_generation", 0)
+        )
+
         if not self._get_masonry_submission_service().submit_layout_job(
             items_data=ctx.items_data,
             column_width=ctx.column_width,

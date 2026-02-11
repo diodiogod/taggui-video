@@ -338,6 +338,20 @@ class MainWindow(QMainWindow):
     @Slot(str, object)
     def _on_setting_changed(self, key: str, _value):
         """Apply selected settings live without requiring restart."""
+        if key == 'masonry_list_switch_threshold':
+            list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+            if list_view is None:
+                return
+            try:
+                threshold = int(_value)
+            except (TypeError, ValueError):
+                threshold = DEFAULT_SETTINGS['masonry_list_switch_threshold']
+            threshold = max(list_view.min_thumbnail_size, min(1024, threshold))
+            list_view.column_switch_threshold = threshold
+            list_view._update_view_mode()
+            print(f"[MASONRY] Live list auto-switch threshold: {threshold}px")
+            return
+
         if key not in ('max_pages_in_memory', 'thumbnail_eviction_pages'):
             return
 
