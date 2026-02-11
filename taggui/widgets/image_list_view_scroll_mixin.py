@@ -170,6 +170,16 @@ class ImageListViewScrollMixin:
         restore_page = getattr(self, '_restore_target_page', None)
         if restore_page is not None and not dragging_mode:
             current_page = max(0, min(last_page, int(restore_page)))
+        # Resize/zoom anchor override keeps ownership stable while viewport
+        # geometry and strict domains are being recalculated.
+        resize_page = getattr(self, '_resize_anchor_page', None)
+        resize_until = float(getattr(self, '_resize_anchor_until', 0.0) or 0.0)
+        if current_page is None and resize_page is not None and not dragging_mode:
+            if current_time <= resize_until:
+                current_page = max(0, min(last_page, int(resize_page)))
+            else:
+                self._resize_anchor_page = None
+                self._resize_anchor_until = 0.0
         if current_page is not None:
             pass  # skip all other derivation
         elif dragging_mode:

@@ -508,6 +508,13 @@ class ImageListViewInteractionMixin:
                 self._stick_to_edge = None
 
         if event.modifiers() == Qt.ControlModifier:
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), 'sourceModel')
+                else self.model()
+            )
+            if self.use_masonry and hasattr(self, '_activate_resize_anchor'):
+                self._activate_resize_anchor(source_model=source_model, hold_s=4.0)
             # Get scroll direction
             delta = event.angleDelta().y()
 
@@ -531,7 +538,7 @@ class ImageListViewInteractionMixin:
                 if self.use_masonry:
                     # Debounce: recalculate and re-center after user stops zooming
                     self._resize_timer.stop()
-                    self._resize_timer.start(300)
+                    self._resize_timer.start(420)
 
                 # Save to settings
                 settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)

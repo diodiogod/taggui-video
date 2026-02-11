@@ -190,8 +190,14 @@ class ImageListViewPaintSelectionMixin:
 
                 real_visible_items = [it for it in visible_items if it.get('index', -1) >= 0]
                 if (not visible_items or not real_visible_items) and is_buffered:
-                    painter.setPen(Qt.GlobalColor.lightGray)
-                    painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "Loading target window...")
+                    import time
+                    resize_anchor_live = (
+                        getattr(self, '_resize_anchor_page', None) is not None
+                        and time.time() <= float(getattr(self, '_resize_anchor_until', 0.0) or 0.0)
+                    )
+                    if not resize_anchor_live:
+                        painter.setPen(Qt.GlobalColor.lightGray)
+                        painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "Loading target window...")
                     # Strict-mode recovery: if viewport landed in spacer void after a jump,
                     # move to nearest real masonry item so painting can resume immediately.
                     strategy = self._get_masonry_strategy(source_model) if source_model else "full_compat"

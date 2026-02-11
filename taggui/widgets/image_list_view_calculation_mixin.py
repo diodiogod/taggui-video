@@ -111,9 +111,13 @@ class ImageListViewCalculationMixin:
                 except Exception:
                     target_ready = False
             if not target_ready:
+                resize_anchor_live = (
+                    getattr(self, '_resize_anchor_page', None) is not None
+                    and time.time() <= float(getattr(self, '_resize_anchor_until', 0.0) or 0.0)
+                )
                 wait_count = getattr(self, "_strict_wait_count", 0) + 1
                 self._strict_wait_count = wait_count
-                if wait_count > 20:
+                if wait_count > 20 and not resize_anchor_live:
                     loaded_list = sorted(loaded_pages_now) if loaded_pages_now else []
                     if loaded_list:
                         old_page = int(ctx.current_page)
@@ -129,6 +133,10 @@ class ImageListViewCalculationMixin:
                         )
                         self._strict_wait_count = 0
                 else:
+                    if wait_count > 40:
+                        # Keep waiting while resize anchor is active; avoid snapping
+                        # to a different loaded page and losing viewport context.
+                        self._strict_wait_count = 20
                     try:
                         if hasattr(source_model, "ensure_pages_for_range"):
                             start_row = ctx.window_start_page * ctx.page_size
@@ -164,7 +172,7 @@ class ImageListViewCalculationMixin:
         )
         if (
             window_signature == self._last_masonry_window_signature
-            and self._last_masonry_signal not in {"resize", "enrichment_complete"}
+            and self._last_masonry_signal != "enrichment_complete"
         ):
             self._log_flow(
                 "MASONRY",

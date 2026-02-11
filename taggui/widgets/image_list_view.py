@@ -170,6 +170,8 @@ class ImageListView(
         self._restore_target_page = None  # Set by main_window scroll restore
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
+        self._resize_anchor_page = None
+        self._resize_anchor_until = 0.0
         self._selected_global_index = None  # Stable identity across buffered row shifts
         self._selected_rows_cache: set[int] = set()
         self._current_proxy_row_cache = -1
@@ -341,6 +343,8 @@ class ImageListView(
         self._restore_target_page = None
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
+        self._resize_anchor_page = None
+        self._resize_anchor_until = 0.0
         self._current_page = 0
         self._last_stable_scroll_value = 0
         self._masonry_items = []
