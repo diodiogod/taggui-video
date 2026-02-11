@@ -338,22 +338,72 @@ class ImageListModel(QAbstractListModel):
                      self._emit_pages_updated()
                  
                  # Calculate Local Row
-                 # Iterate loaded pages in order to find where our target page sits
+                 # Iterate loaded pages in order to find where our target page sits.
+                 # Important: loaded pages may be shorter than PAGE_SIZE because
+                 # missing files are skipped when building Image objects.
                  with self._page_load_lock:
+                     base_dir = Path(self._directory_path)
+
+                     def _norm_rel(p: Path) -> str:
+                         try:
+                             rel = p.relative_to(base_dir)
+                         except Exception:
+                             rel = p
+                         return str(rel).replace('\\', '/').casefold()
+
+                     target_norm = _norm_rel(path)
+                     target_name = path.name.casefold()
                      sorted_pages = sorted(self._pages.keys())
-                     local_row = 0
+                     row_offset = 0
                      found_page = False
                      for p_num in sorted_pages:
                          if p_num == target_page_num:
-                             local_row += offset
                              found_page = True
                              break
                          # Add full length of preceding loaded pages
-                         local_row += len(self._pages[p_num])
+                         row_offset += len(self._pages[p_num])
                      
                      if found_page:
-                         print(f"[RESTORE] Mapped Global Rank {rank} to Local Row {local_row}")
-                         return local_row
+                         page_images = self._pages.get(target_page_num, [])
+
+                         # Fast-path if offset still maps to the exact requested path.
+                         if 0 <= offset < len(page_images):
+                             try:
+                                 candidate = page_images[offset]
+                                 if candidate and (
+                                     _norm_rel(candidate.path) == target_norm
+                                     or candidate.path.name.casefold() == target_name
+                                 ):
+                                     local_row = row_offset + offset
+                                     print(f"[RESTORE] Mapped Global Rank {rank} to Local Row {local_row}")
+                                     return local_row
+                             except Exception:
+                                 pass
+
+                         # Robust fallback: resolve by exact path inside the loaded page.
+                         for i, img in enumerate(page_images):
+                             try:
+                                 if img and (
+                                     _norm_rel(img.path) == target_norm
+                                     or img.path.name.casefold() == target_name
+                                 ):
+                                     local_row = row_offset + i
+                                     print(
+                                         f"[RESTORE] Remapped path within page {target_page_num}: "
+                                         f"rank {rank} -> Local Row {local_row}"
+                                     )
+                                     return local_row
+                             except Exception:
+                                 continue
+
+                         # If the exact image isn't present in the loaded page
+                         # (stale DB / file moved), fail safely instead of returning
+                         # a potentially wrong row.
+                         print(
+                             f"[RESTORE] Target path not found in loaded page {target_page_num}; "
+                             f"aborting row map for rank {rank}"
+                         )
+                         return -1
                  
                  return -1
 
@@ -839,7 +889,10 @@ class ImageListModel(QAbstractListModel):
             # Note: We must iterate in the same order as data() and rowCount()
             for page_num in sorted(self._pages.keys()):
                 if page_num == target_page:
-                    return row_offset + target_offset
+                    page_images = self._pages.get(page_num, [])
+                    if 0 <= target_offset < len(page_images):
+                        return row_offset + target_offset
+                    return -1
                 row_offset += len(self._pages[page_num])
         
         return -1

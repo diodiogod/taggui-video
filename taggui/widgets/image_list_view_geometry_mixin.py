@@ -378,6 +378,8 @@ class ImageListViewGeometryMixin:
         """Recalculate masonry layout on resize (debounced)."""
         super().resizeEvent(event)
         if self.use_masonry:
+            if getattr(self, '_skip_next_resize_recalc', False):
+                return
             import time
             if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
                 # Startup restore in progress: skip resize-driven recalc churn.
@@ -398,6 +400,10 @@ class ImageListViewGeometryMixin:
     def _on_resize_finished(self):
         """Called after resize stops (debounced)."""
         if self.use_masonry:
+            if getattr(self, '_skip_next_resize_recalc', False):
+                self._skip_next_resize_recalc = False
+                print("[RESIZE] Skipped stale queued recalc after user click")
+                return
             import time
             if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
                 return
@@ -481,12 +487,20 @@ class ImageListViewGeometryMixin:
                 # _on_scroll_value_changed from recording transient values.
                 saved_val = self.verticalScrollBar().value()
                 saved_max = max(1, self.verticalScrollBar().maximum())
+                _click_scroll_freeze = (
+                    time.time()
+                    < float(getattr(self, '_user_click_selection_frozen_until', 0.0) or 0.0)
+                )
                 self.verticalScrollBar().blockSignals(True)
                 try:
                     super().updateGeometries()
                     keep_max = self._strict_canonical_domain_max(source_model)
                     if self._scrollbar_dragging or self._drag_preview_mode:
                         self._restore_strict_drag_domain(source_model=source_model)
+                    elif _click_scroll_freeze:
+                        # User recently clicked — update range but keep value.
+                        self.verticalScrollBar().setRange(0, keep_max)
+                        self.verticalScrollBar().setValue(max(0, min(saved_val, keep_max)))
                     else:
                         self.verticalScrollBar().setRange(0, keep_max)
                         # Re-anchor to locked page so thumb stays put when domain grows.
@@ -518,9 +532,8 @@ class ImageListViewGeometryMixin:
                             if restore_target is not None:
                                 restored_val = max(0, min(int(restore_target), keep_max))
                             else:
-                                # Ratio-preserving: keep thumb at the same visual fraction.
-                                ratio = saved_val / saved_max
-                                restored_val = max(0, min(int(round(ratio * keep_max)), keep_max))
+                                # Preserve absolute scroll value (clamped).
+                                restored_val = max(0, min(saved_val, keep_max))
                         if self.verticalScrollBar().value() != restored_val:
                             self.verticalScrollBar().setValue(restored_val)
                 finally:
@@ -557,6 +570,62 @@ class ImageListViewGeometryMixin:
             super().updateGeometries()
 
 
+    def scrollTo(self, index, hint=None):
+        """Override scrollTo to use masonry positions instead of Qt's row-based layout.
+
+        Qt calls this internally from setCurrentIndex(), which knows nothing
+        about masonry coordinates.  Without this override, clicking an item
+        triggers scrollTo → Qt computes scroll from row number → viewport
+        jumps to the wrong position.
+        """
+        if hint is None:
+            hint = QAbstractItemView.ScrollHint.EnsureVisible
+
+        if not (self.use_masonry and self._masonry_items and index.isValid()):
+            super().scrollTo(index, hint)
+            return
+
+        # Map proxy row → global index → masonry rect.
+        global_idx = index.row()
+        source_model = (
+            self.model().sourceModel()
+            if hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        if source_model and hasattr(source_model, 'get_global_index_for_row'):
+            global_idx = source_model.get_global_index_for_row(index.row())
+        elif source_model and getattr(source_model, '_paginated_mode', False):
+            global_idx = self._map_row_to_global_index_safely(index.row())
+
+        rect = self._get_masonry_item_rect(global_idx)
+        if not rect.isValid():
+            return  # Item not in current masonry window — don't jump blindly.
+
+        sb = self.verticalScrollBar()
+        scroll_val = sb.value()
+        vh = self.viewport().height()
+        item_top = rect.y()
+        item_bot = rect.y() + rect.height()
+
+        if hint == QAbstractItemView.ScrollHint.EnsureVisible:
+            # Already fully visible → do nothing.
+            if item_top >= scroll_val and item_bot <= scroll_val + vh:
+                return
+            # Partially above → scroll up just enough.
+            if item_top < scroll_val:
+                sb.setValue(max(0, item_top))
+            # Partially below → scroll down just enough.
+            elif item_bot > scroll_val + vh:
+                sb.setValue(max(0, item_bot - vh))
+        elif hint == QAbstractItemView.ScrollHint.PositionAtCenter:
+            center_y = item_top + rect.height() // 2
+            target = max(0, center_y - vh // 2)
+            sb.setValue(min(target, sb.maximum()))
+        elif hint == QAbstractItemView.ScrollHint.PositionAtTop:
+            sb.setValue(max(0, min(item_top, sb.maximum())))
+        elif hint == QAbstractItemView.ScrollHint.PositionAtBottom:
+            sb.setValue(max(0, min(item_bot - vh, sb.maximum())))
+
     def visualRect(self, index):
         """Return the visual rectangle for an index, using masonry positions."""
         if self.use_masonry and self._drag_preview_mode:
@@ -585,44 +654,59 @@ class ImageListViewGeometryMixin:
 
 
     def indexAt(self, point):
-        """Return the index at the given point, using masonry positions."""
+        """Return the index at the given point, using masonry positions.
+
+        Prefers the painted-geometry snapshot when fresh so that hit-testing
+        matches what the user actually sees (immune to async recalc swaps).
+        """
         if self.use_masonry and self._drag_preview_mode:
             return super().indexAt(point)
         if self.use_masonry and self._masonry_items:
-            # Adjust point for scroll offset
-            scroll_offset = self.verticalScrollBar().value()
-            adjusted_point = QPoint(point.x(), point.y() + scroll_offset)
-
+            import time as _t
             source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
-        
-            # Use the optimized map for fast lookup
-            if not hasattr(self, '_masonry_index_map') or self._masonry_index_map is None:
-                self._rebuild_masonry_index_map()
-        
-            # Linear search in the map rects (could be optimized with spatial index if 32k+)
-            for global_idx, item in self._masonry_index_map.items():
-                item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
-                if item_rect.contains(adjusted_point):
-                    # Map global index → source row → source index → proxy index.
-                    # Must go through mapFromSource; using self.model().index(row)
-                    # directly would create a proxy index at the source row number,
-                    # which is wrong when filtering shifts proxy rows.
-                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
-                         row = source_model.get_loaded_row_for_global_index(global_idx)
-                    else:
-                         row = global_idx
 
-                    if row != -1:
-                        src_index = source_model.index(row, 0)
-                        if not src_index.isValid():
-                            return QModelIndex()
-                        proxy_index = self.model().mapFromSource(src_index) if hasattr(self.model(), 'mapFromSource') else src_index
-                        if proxy_index.isValid():
-                            return proxy_index
-                        # During proxy/page churn mapFromSource may be transiently invalid.
-                        # Do NOT fallback to proxy row by number; that can select a different image.
+            hit_global = -1
+
+            # 1. Try painted snapshot first (matches what user sees).
+            #    Use the scroll offset captured at paint time, not the current
+            #    value — updateGeometries() can shift it between paints.
+            painted = getattr(self, '_painted_hit_regions', None)
+            painted_age = _t.time() - float(getattr(self, '_painted_hit_regions_time', 0.0) or 0.0)
+            if painted and painted_age < 2.0:
+                snap_scroll = int(getattr(self, '_painted_hit_regions_scroll_offset', 0) or 0)
+                adjusted_point = QPoint(point.x(), point.y() + snap_scroll)
+                for g_idx, rect in painted.items():
+                    if rect.contains(adjusted_point):
+                        hit_global = int(g_idx)
+                        break
+
+            # 2. Fallback to live masonry index map.
+            if hit_global < 0:
+                scroll_offset = self.verticalScrollBar().value()
+                adjusted_point = QPoint(point.x(), point.y() + scroll_offset)
+                if not hasattr(self, '_masonry_index_map') or self._masonry_index_map is None:
+                    self._rebuild_masonry_index_map()
+                for global_idx, item in self._masonry_index_map.items():
+                    item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
+                    if item_rect.contains(adjusted_point):
+                        hit_global = int(global_idx)
+                        break
+
+            if hit_global >= 0:
+                # Map global index → source row → source index → proxy index.
+                if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                    row = source_model.get_loaded_row_for_global_index(hit_global)
+                else:
+                    row = hit_global
+                if row != -1:
+                    src_index = source_model.index(row, 0)
+                    if not src_index.isValid():
                         return QModelIndex()
-        
+                    proxy_index = self.model().mapFromSource(src_index) if hasattr(self.model(), 'mapFromSource') else src_index
+                    if proxy_index.isValid():
+                        return proxy_index
+                    return QModelIndex()
+
             return QModelIndex()
         else:
             return super().indexAt(point)

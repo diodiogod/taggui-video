@@ -247,9 +247,19 @@ class MasonryCompletionService:
                     stable_max = v._strict_canonical_domain_max(source_model)
                     old_val = sb.value()
                     old_max = max(1, sb.maximum())
-                    # print(f"[STRICT-DOMAIN] masonry_avg_h={v._strict_masonry_avg_h:.1f}  virtual_avg_h={v._strict_virtual_avg_height:.1f}  domain={stable_max}  old_max={old_max}  delta={stable_max - old_max}")
+                    _click_scroll_freeze = (
+                        time.time()
+                        < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0)
+                    )
                     if v._scrollbar_dragging or v._drag_preview_mode:
                         v._restore_strict_drag_domain(sb=sb, source_model=source_model)
+                    elif _click_scroll_freeze:
+                        # User recently clicked — update range but keep scroll
+                        # value unchanged so the viewport doesn't jump.
+                        prev_block = sb.blockSignals(True)
+                        sb.setRange(0, stable_max)
+                        sb.setValue(max(0, min(old_val, stable_max)))
+                        sb.blockSignals(prev_block)
                     else:
                         # Block signals so the range change doesn't corrupt
                         # _last_stable_scroll_value via _on_scroll_value_changed.
@@ -297,10 +307,11 @@ class MasonryCompletionService:
                             if restore_target is not None:
                                 sb.setValue(max(0, min(int(restore_target), stable_max)))
                             else:
-                                # Ratio-preserving: keep thumb at the same visual fraction.
-                                ratio = old_val / old_max
-                                target_val = max(0, min(int(round(ratio * stable_max)), stable_max))
-                                sb.setValue(target_val)
+                                # Preserve absolute scroll value (clamped to new range).
+                                # Ratio-preserving caused runaway drift: after zoom the
+                                # domain changes dramatically so ratio * new_max maps
+                                # to 0 or a distant position, corrupting the viewport.
+                                sb.setValue(max(0, min(old_val, stable_max)))
                         sb.blockSignals(prev_block)
                 elif release_anchor_active:
                     release_anchor_found = False
@@ -374,13 +385,37 @@ class MasonryCompletionService:
             from PySide6.QtCore import QTimer
             def apply_and_signal():
                 try:
-                    v._apply_layout_to_ui(timestamp)
+                    # If a recent user click is protecting the selection, block
+                    # selection-model signals during the apply phase.  This
+                    # prevents updateGeometries / Qt layout churn from firing
+                    # spurious currentChanged that overwrite the clicked image.
+                    _click_freeze = (
+                        time.time()
+                        < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0)
+                    )
+                    _sel_model = v.selectionModel() if _click_freeze else None
+                    if _sel_model:
+                        _sel_model.blockSignals(True)
+                    try:
+                        v._apply_layout_to_ui(timestamp)
+                    finally:
+                        if _sel_model:
+                            _sel_model.blockSignals(False)
                     v.layout_ready.emit()
 
                     def _ensure_selected_anchor_if_needed():
-                        """Keep selected image anchored during resize/zoom relayout bursts."""
+                        """Keep selected image anchored during resize/zoom relayout bursts.
+
+                        Only scrolls when the target item would be OFF-SCREEN.
+                        Never touches scroll when a user click freeze is active.
+                        """
                         try:
                             now = time.time()
+
+                            # User recently clicked — viewport must NOT move.
+                            if now < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0):
+                                return
+
                             resize_anchor_live = (
                                 getattr(v, '_resize_anchor_page', None) is not None
                                 and now <= float(getattr(v, '_resize_anchor_until', 0.0) or 0.0)
@@ -403,26 +438,29 @@ class MasonryCompletionService:
                             if not source_model_local:
                                 return
 
-                            # Rebind current index safely so image viewer stays synced.
-                            if hasattr(source_model_local, 'get_loaded_row_for_global_index'):
-                                loaded_row = source_model_local.get_loaded_row_for_global_index(target_global)
-                                if loaded_row >= 0:
-                                    src_idx = source_model_local.index(loaded_row, 0)
-                                    proxy_model_local = v.model()
-                                    proxy_idx = (
-                                        proxy_model_local.mapFromSource(src_idx)
-                                        if proxy_model_local and hasattr(proxy_model_local, 'mapFromSource')
-                                        else src_idx
-                                    )
-                                    if proxy_idx.isValid() and v.currentIndex() != proxy_idx:
-                                        sel_model = v.selectionModel()
-                                        if sel_model is not None:
-                                            sel_model.setCurrentIndex(
-                                                proxy_idx,
-                                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                                            )
-                                        else:
-                                            v.setCurrentIndex(proxy_idx)
+                            # IMPORTANT: avoid selection rebinding during resize/zoom anchoring.
+                            # It can remap through transient buffered rows and cause jumpy
+                            # "wrong image selected" behavior. Keep rebind only for restore.
+                            if restore_anchor_live and (not resize_anchor_live):
+                                if hasattr(source_model_local, 'get_loaded_row_for_global_index'):
+                                    loaded_row = source_model_local.get_loaded_row_for_global_index(target_global)
+                                    if loaded_row >= 0:
+                                        src_idx = source_model_local.index(loaded_row, 0)
+                                        proxy_model_local = v.model()
+                                        proxy_idx = (
+                                            proxy_model_local.mapFromSource(src_idx)
+                                            if proxy_model_local and hasattr(proxy_model_local, 'mapFromSource')
+                                            else src_idx
+                                        )
+                                        if proxy_idx.isValid() and v.currentIndex() != proxy_idx:
+                                            sel_model = v.selectionModel()
+                                            if sel_model is not None:
+                                                sel_model.setCurrentIndex(
+                                                    proxy_idx,
+                                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                                                )
+                                            else:
+                                                v.setCurrentIndex(proxy_idx)
 
                             # Anchor viewport to actual masonry item position.
                             target_item = None
@@ -434,7 +472,18 @@ class MasonryCompletionService:
                                 return
 
                             sb_local = v.verticalScrollBar()
-                            target_y = int(target_item.get('y', 0)) + int(target_item.get('height', 0)) // 2 - (v.viewport().height() // 2)
+                            cur_scroll = sb_local.value()
+                            vh = v.viewport().height()
+                            item_top = int(target_item.get('y', 0))
+                            item_bot = item_top + int(target_item.get('height', 0))
+
+                            # Only scroll if target item is NOT already visible.
+                            # Unconditional centering caused viewport jumps when
+                            # the user was viewing items away from the selection.
+                            if item_top >= cur_scroll and item_bot <= (cur_scroll + vh):
+                                return  # Already visible — don't move viewport
+
+                            target_y = item_top + (item_bot - item_top) // 2 - (vh // 2)
                             target_y = max(0, min(target_y, int(sb_local.maximum())))
                             prev_block = sb_local.blockSignals(True)
                             try:

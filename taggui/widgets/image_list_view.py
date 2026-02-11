@@ -90,7 +90,7 @@ class ImageListView(
         self._painting = False  # Flag to prevent layout changes during paint (prevents re-entrancy)
         self._last_stable_scroll_value = 0 # Track stable scroll position to survive layout resets
         self.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
-        
+
         # Setup signals
         self.verticalScrollBar().valueChanged.connect(self._check_and_load_pages)
         self.horizontalScrollBar().valueChanged.connect(self._check_and_load_pages)
@@ -106,6 +106,7 @@ class ImageListView(
         self._last_filter_keystroke_time = 0
         self._rapid_input_detected = False
         self._last_masonry_signal = "unknown"  # Track which signal triggered masonry
+        self._user_click_selection_frozen_until = 0.0  # Post-click selection freeze
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
@@ -134,6 +135,7 @@ class ImageListView(
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._on_resize_finished)
+        self._skip_next_resize_recalc = False
 
         # Mouse scroll detection timer (pause loading during scroll)
         self._mouse_scroll_timer = QTimer(self)
@@ -174,7 +176,11 @@ class ImageListView(
         self._restore_anchor_until = 0.0
         self._resize_anchor_page = None
         self._resize_anchor_until = 0.0
+        self._skip_next_resize_recalc = False
         self._selected_global_index = None  # Stable identity across buffered row shifts
+        self._painted_hit_regions = {}  # Snapshot of painted geometry for click hit-testing
+        self._painted_hit_regions_time = 0.0
+        self._painted_hit_regions_scroll_offset = 0  # Scroll offset when snapshot was captured
         self._selected_rows_cache: set[int] = set()
         self._current_proxy_row_cache = -1
         self._model_resetting = False
@@ -360,6 +366,9 @@ class ImageListView(
         self._last_stable_scroll_value = 0
         self._masonry_items = []
         self._masonry_index_map = None
+        self._painted_hit_regions = {}
+        self._painted_hit_regions_time = 0.0
+        self._painted_hit_regions_scroll_offset = 0
         self._masonry_total_height = 0
         self._last_masonry_window_signature = None
         sb = self.verticalScrollBar()
@@ -380,6 +389,16 @@ class ImageListView(
     def _remember_selected_global_index(self, current: QModelIndex, previous: QModelIndex):
         """Track selection by global index so buffered row insertions can't remap it."""
         if not current.isValid():
+            return
+        # Ignore transient remaps while masonry is being recalculated.
+        if self.use_masonry and (
+            getattr(self, '_masonry_calculating', False)
+            or (hasattr(self, '_resize_timer') and self._resize_timer.isActive())
+        ):
+            return
+        # Post-click freeze: user's deliberate click owns the selection.
+        import time as _t
+        if _t.time() < float(getattr(self, '_user_click_selection_frozen_until', 0.0) or 0.0):
             return
         try:
             proxy_model = self.model()

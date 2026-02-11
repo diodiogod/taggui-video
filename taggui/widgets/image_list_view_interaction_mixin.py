@@ -7,37 +7,26 @@ class ImageListViewInteractionMixin:
         # Stop delayed zoom-finished recalc if user already made a deliberate click.
         if hasattr(self, '_resize_timer'):
             self._resize_timer.stop()
+        # If a stale zoom/resize recalc was already queued, skip it once.
+        self._skip_next_resize_recalc = True
         # Clear recenter intent from prior mode/zoom transitions.
         self._recenter_after_layout = False
         # Drop resize anchor lock so completion handler won't snap to stale target.
         if time.time() < float(getattr(self, '_resize_anchor_until', 0.0) or 0.0):
             self._resize_anchor_page = None
             self._resize_anchor_until = 0.0
+        # Drop restore anchor — user's deliberate click supersedes startup restore.
+        self._restore_anchor_until = 0.0
+        self._restore_target_page = None
+        self._restore_target_global_index = None
+        # Clear main_window's restore-in-progress so save_image_index isn't suppressed.
+        mw = self.window()
+        if mw and hasattr(mw, '_restore_in_progress'):
+            mw._restore_in_progress = False
+            mw._restore_target_global_rank = -1
 
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
-        # DIAGNOSTIC LOG (Requested by user for deep page debugging)
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        pos = event.pos()
-        val = self.verticalScrollBar().value()
-        row_idx = -1
-    
-        # Identify what was clicked
-        index = self.indexAt(pos)
-        if index.isValid():
-            row_idx = index.row()
-        
-        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-        page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
-        page_num = row_idx // page_size if row_idx >= 0 else -1
-    
-        # Check if index is in current masonry layout
-        in_layout = any(item['index'] == row_idx for item in self._masonry_items) if hasattr(self, '_masonry_items') else False
-        layout_count = len(self._masonry_items) if hasattr(self, '_masonry_items') else 0
-    
-
-
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
     
         # Pause enrichment during interaction to prevent crashes
@@ -46,11 +35,95 @@ class ImageListViewInteractionMixin:
             # Will resume after 500ms idle (see mouseReleaseEvent)
 
         if self.use_masonry and self._masonry_items:
+            # If zoom/resize relayout is in-flight, ignore click to avoid stale
+            # indexAt mapping against transient geometry.
+            if getattr(self, '_masonry_calculating', False):
+                event.accept()
+                return
+            if hasattr(self, '_resize_timer') and self._resize_timer.isActive():
+                event.accept()
+                return
+
+            # Clear previous click freeze so THIS click's signals propagate.
+            self._user_click_selection_frozen_until = 0.0
+
             # Prioritize user's explicit click over any pending zoom/resize anchor work.
             self._cancel_pending_zoom_anchor_on_user_click()
 
-            # Get the index at click position
-            index = self.indexAt(event.pos())
+            # Resolve click target using the PAINTED geometry snapshot.
+            # This is the key fix for post-zoom click drift: the user clicks
+            # what was rendered, not what an async recalc may have replaced.
+            index = QModelIndex()
+            click_pos = event.pos()
+            try:
+                import time as _t
+                clicked_global = -1
+
+                # Prefer painted snapshot (immune to async recalc swaps).
+                # CRITICAL: use the scroll offset that was active WHEN the
+                # snapshot was captured, not the current scrollbar value.
+                # updateGeometries() can change the scroll value between
+                # paints, and using the wrong offset causes the hit-test to
+                # resolve to a wrong item.
+                painted = getattr(self, '_painted_hit_regions', None)
+                painted_age = _t.time() - float(getattr(self, '_painted_hit_regions_time', 0.0) or 0.0)
+                if painted and painted_age < 2.0:
+                    snap_scroll = int(getattr(self, '_painted_hit_regions_scroll_offset', 0) or 0)
+                    adjusted_point = QPoint(click_pos.x(), click_pos.y() + snap_scroll)
+                    for g_idx, rect in painted.items():
+                        if rect.contains(adjusted_point):
+                            clicked_global = int(g_idx)
+                            break
+                else:
+                    # Fallback: live masonry items (no recent paint).
+                    scroll_offset = int(self.verticalScrollBar().value())
+                    adjusted_point = QPoint(click_pos.x(), click_pos.y() + scroll_offset)
+                    for item in reversed(self._masonry_items):
+                        g_idx = int(item.get('index', -1))
+                        if g_idx < 0:
+                            continue
+                        item_rect = QRect(
+                            int(item.get('x', 0)),
+                            int(item.get('y', 0)),
+                            int(item.get('width', 0)),
+                            int(item.get('height', 0)),
+                        )
+                        if item_rect.contains(adjusted_point):
+                            clicked_global = g_idx
+                            break
+
+                if clicked_global >= 0 and source_model is not None:
+                    self._selected_global_index = int(clicked_global)
+                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                        src_row = source_model.get_loaded_row_for_global_index(clicked_global)
+                    else:
+                        src_row = clicked_global
+
+                    if isinstance(src_row, int) and src_row >= 0:
+                        src_idx = source_model.index(src_row, 0)
+                        proxy_model = self.model()
+                        if proxy_model and hasattr(proxy_model, 'mapFromSource'):
+                            index = proxy_model.mapFromSource(src_idx)
+                        else:
+                            index = src_idx
+                        if index.isValid():
+                            _cur_scroll = int(self.verticalScrollBar().value())
+                            _snap_s = int(getattr(self, '_painted_hit_regions_scroll_offset', 0) or 0)
+                            _used_snap = painted and painted_age < 2.0
+                            _delta = _cur_scroll - _snap_s if _used_snap else 0
+                            print(f"[CLICK-HIT] global={clicked_global} proxy_row={index.row()} scroll={_cur_scroll} snap_scroll={_snap_s} delta={_delta} used_snap={_used_snap}")
+                    else:
+                        # If target page is not loaded yet, request it and ignore this click.
+                        if hasattr(source_model, 'ensure_pages_for_range'):
+                            source_model.ensure_pages_for_range(clicked_global, clicked_global + 1)
+                        event.accept()
+                        return
+            except Exception:
+                index = QModelIndex()
+
+            if not index.isValid():
+                # Fallback path
+                index = self.indexAt(click_pos)
 
             if index.isValid():
                 # Normalize to a fresh model-owned index (guards stale indexAt results
@@ -132,6 +205,15 @@ class ImageListViewInteractionMixin:
                             index, QItemSelectionModel.SelectionFlag.ClearAndSelect
                         )
                         self.viewport().update()
+
+                # Freeze selection against recalc-driven mutations.
+                # The click's own setCurrentIndex already fired synchronously above,
+                # so all handlers (save_image_index, load_image, etc.) already ran
+                # with the CORRECT index.  Any subsequent currentChanged triggered
+                # by updateGeometries / layout churn in the completion path must NOT
+                # overwrite the user's deliberate click.
+                import time as _time_mod
+                self._user_click_selection_frozen_until = _time_mod.time() + 2.0
 
                 # Accept the event to prevent further processing
                 event.accept()
@@ -245,6 +327,8 @@ class ImageListViewInteractionMixin:
 
     def keyPressEvent(self, event):
         """Handle keyboard events in the image list."""
+        # Clear click-selection freeze so keyboard nav propagates normally.
+        self._user_click_selection_frozen_until = 0.0
         if event.key() == Qt.Key.Key_Delete:
             # Toggle deletion marking for selected images
             selected_indices = self.selectedIndexes()
@@ -532,6 +616,9 @@ class ImageListViewInteractionMixin:
                 if self.model() and hasattr(self.model(), 'sourceModel')
                 else self.model()
             )
+            # A prior click may have set _skip_next_resize_recalc.  Clear it so
+            # the zoom's own resize timer fires properly with scroll anchoring.
+            self._skip_next_resize_recalc = False
             if (
                 self.use_masonry
                 and hasattr(self, '_activate_resize_anchor')

@@ -40,9 +40,10 @@ class ImageListViewStrategyMixin:
         until = time.time() + max(0.2, float(hold_s))
         self._resize_anchor_page = anchor_page
         self._resize_anchor_until = until
-        # Keep restore fields untouched; resize anchoring is independent.
-        self._release_page_lock_page = anchor_page
-        self._release_page_lock_until = time.time() + min(1.2, max(0.2, float(hold_s)))
+        # Do NOT set _release_page_lock here.  That lock snaps scroll to the
+        # first masonry item of the page (y≈0 for page 0), which destroys the
+        # user's viewport position during zoom.  The resize anchor +
+        # _ensure_selected_anchor_if_needed handle post-zoom centering instead.
         return True
 
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
@@ -630,7 +631,11 @@ class ImageListViewStrategyMixin:
             self._masonry_items = result
             self._masonry_index_map = None
             self._last_masonry_window_signature = None
-            self._masonry_recalc_pending = True
+            # NOTE: Do NOT set _masonry_recalc_pending here.  silent_refresh
+            # already computes masonry synchronously and rebuilds the
+            # incremental cache.  Setting the pending flag would trigger a
+            # redundant full async recalc on the next completion, feeding
+            # the cascading-recalc loop that causes post-zoom layout drift.
 
             # Keep total height in sync with refreshed virtual window so later
             # geometry/range updates don't clamp against stale heights.
@@ -898,10 +903,13 @@ class ImageListViewStrategyMixin:
         # Store signal name for _do_recalculate_masonry to check
         self._last_masonry_signal = signal_name
 
-        # Low-priority signal: don't keep restarting the timer if dimensions updates
-        # are arriving continuously and a recalc is already queued/running.
-        if signal_name == "dimensions_updated":
+        # Low-priority signals: don't pile up timers when a recalc is already
+        # queued/running.  For pages_updated, set the pending flag so the
+        # current calc's completion handler starts a follow-up (instead of
+        # spawning a competing timer that causes cascading recalcs / drift).
+        if signal_name in ("dimensions_updated", "pages_updated"):
             if self._masonry_calculating:
+                self._masonry_recalc_pending = True
                 return
             if self._masonry_recalc_timer.isActive():
                 return
