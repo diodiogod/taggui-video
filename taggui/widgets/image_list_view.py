@@ -320,6 +320,40 @@ class ImageListView(
     @Slot()
     def _on_model_about_to_reset(self):
         self._model_resetting = True
+        # Reset strict/domain anchors so folder switches don't inherit stale
+        # virtual heights or edge snaps from the previous dataset.
+        self._pending_edge_snap = None
+        self._pending_edge_snap_until = 0.0
+        self._stick_to_edge = None
+        self._drag_release_anchor_idx = None
+        self._drag_release_anchor_until = 0.0
+        self._drag_release_anchor_active = False
+        self._drag_scroll_max_baseline = 0
+        self._drag_target_page = None
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
+        self._strict_virtual_avg_height = 0.0
+        self._strict_masonry_avg_h = 0.0
+        self._strict_drag_frozen_max = 0
+        self._strict_drag_frozen_until = 0.0
+        self._strict_scroll_max_floor = 0
+        self._strict_drag_live_fraction = 0.0
+        self._restore_target_page = None
+        self._restore_target_global_index = None
+        self._restore_anchor_until = 0.0
+        self._current_page = 0
+        self._last_stable_scroll_value = 0
+        self._masonry_items = []
+        self._masonry_index_map = None
+        self._masonry_total_height = 0
+        self._last_masonry_window_signature = None
+        sb = self.verticalScrollBar()
+        prev_block = sb.blockSignals(True)
+        try:
+            sb.setRange(0, 0)
+            sb.setValue(0)
+        finally:
+            sb.blockSignals(prev_block)
         self._clear_selection_cache()
 
     @Slot()

@@ -22,6 +22,21 @@ class StrictScrollDomainService:
         self._view._strict_virtual_avg_height = value
         return value
 
+    def _is_tiny_paginated_dataset(self, source_model=None) -> bool:
+        """Whether strict large-domain floors should be disabled."""
+        source_model = self._resolve_source_model(source_model)
+        if not source_model or not hasattr(source_model, "_paginated_mode") or not source_model._paginated_mode:
+            return False
+        try:
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+            page_size = int(getattr(source_model, "PAGE_SIZE", 0) or 0)
+            if total_items <= 0 or page_size <= 0:
+                return False
+            total_pages = max(1, (total_items + page_size - 1) // page_size)
+            return total_pages <= 2
+        except Exception:
+            return False
+
     def estimate_strict_virtual_scroll_max(self, source_model=None) -> int:
         """Estimate a stable virtual scrollbar max for strict mode drag mapping."""
         try:
@@ -53,6 +68,8 @@ class StrictScrollDomainService:
         try:
             source_model = self._resolve_source_model(source_model)
             est = int(self.estimate_strict_virtual_scroll_max(source_model))
+            if self._is_tiny_paginated_dataset(source_model):
+                return max(1, est)
             # Keep small headroom to absorb minor relayout changes without collapsing.
             return max(10000, int(est * 1.10))
         except Exception:
@@ -102,7 +119,10 @@ class StrictScrollDomainService:
                 avg_h = float(self.get_strict_virtual_avg_height())
             est_total_h = int(rows * max(10.0, avg_h))
             viewport_height = max(1, int(self._view.viewport().height()))
-            return max(10000, est_total_h - viewport_height)
+            domain = est_total_h - viewport_height
+            if self._is_tiny_paginated_dataset(source_model):
+                return max(1, domain)
+            return max(10000, domain)
         except Exception:
             return max(10000, int(self._view.verticalScrollBar().maximum()))
 
