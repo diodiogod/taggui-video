@@ -101,11 +101,17 @@ class SignalManager:
             lambda _: self.main_window.delayed_filter())
         image_list_selection_model.currentChanged.connect(
             self.main_window.save_image_index)
+        def safe_update_index_label(current, previous):
+            if self.main_window._should_suppress_transient_drag_selection(current):
+                return
+            image_list.update_image_index_label(current)
         image_list_selection_model.currentChanged.connect(
-            image_list.update_image_index_label)
+            safe_update_index_label)
         def safe_load_image(current, previous):
             try:
                 if self.main_window._should_suppress_transient_restore_index(current):
+                    return
+                if self.main_window._should_suppress_transient_drag_selection(current):
                     return
                 # Post-click freeze: ignore recalc-driven selection mutations.
                 import time as _t
@@ -121,6 +127,8 @@ class SignalManager:
 
         image_list_selection_model.currentChanged.connect(safe_load_image)
         def safe_load_tags(current, previous):
+            if self.main_window._should_suppress_transient_drag_selection(current):
+                return
             import time as _t
             view = self.main_window.image_list.list_view
             if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):

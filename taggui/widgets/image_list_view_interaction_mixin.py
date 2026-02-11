@@ -35,6 +35,9 @@ class ImageListViewInteractionMixin:
             # Will resume after 500ms idle (see mouseReleaseEvent)
 
         if self.use_masonry and self._masonry_items:
+            # Explicit click means user is choosing a new selection identity.
+            self._selected_global_lock_until = 0.0
+            self._selected_global_lock_value = None
             # If zoom/resize relayout is in-flight, ignore click to avoid stale
             # indexAt mapping against transient geometry.
             if getattr(self, '_masonry_calculating', False):
@@ -361,8 +364,210 @@ class ImageListViewInteractionMixin:
                 event.accept()
                 return
 
+        # Arrow/Page navigation: if selected image is offscreen after a drag jump,
+        # first re-anchor viewport to the selected global item before moving.
+        nav_keys = {
+            Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
+            Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+        }
+        if event.key() in nav_keys and self.use_masonry:
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), 'sourceModel')
+                else self.model()
+            )
+            if source_model and getattr(source_model, '_paginated_mode', False):
+                import time as _t
+                lock_active = _t.time() < float(getattr(self, '_selected_global_lock_until', 0.0) or 0.0)
+                target_global = (
+                    getattr(self, '_selected_global_lock_value', None)
+                    if lock_active else
+                    getattr(self, '_selected_global_index', None)
+                )
+                if isinstance(target_global, int) and target_global >= 0:
+                    should_reanchor = False
+                    current_global = None
+                    try:
+                        cur_idx = self.currentIndex()
+                        if cur_idx.isValid():
+                            src_idx = (
+                                self.model().mapToSource(cur_idx)
+                                if self.model() and hasattr(self.model(), 'mapToSource')
+                                else cur_idx
+                            )
+                            if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
+                                current_global = source_model.get_global_index_for_row(src_idx.row())
+                    except Exception:
+                        current_global = None
+
+                    if current_global != target_global:
+                        should_reanchor = True
+                    else:
+                        rect = self._get_masonry_item_rect(target_global)
+                        if not rect.isValid():
+                            should_reanchor = True
+                        else:
+                            sb_val = int(self.verticalScrollBar().value())
+                            vp_h = int(self.viewport().height())
+                            item_top = int(rect.y())
+                            item_bottom = int(rect.y() + rect.height())
+                            if item_bottom < sb_val or item_top > (sb_val + vp_h):
+                                should_reanchor = True
+
+                    if should_reanchor:
+                        # While lock is active, never navigate from remapped local
+                        # currentIndex. First resolve back to stable selected global.
+                        resolved = self._resolve_keyboard_anchor(source_model, target_global)
+                        if resolved:
+                            self._selected_global_lock_until = 0.0
+                            self._selected_global_lock_value = None
+                        else:
+                            # Keep key consumed until stable target is materialized.
+                            event.accept()
+                            return
+                    elif lock_active:
+                        # Already anchored on stable global; release lock and navigate.
+                        self._selected_global_lock_until = 0.0
+                        self._selected_global_lock_value = None
+
         # Default behavior for other keys
         super().keyPressEvent(event)
+
+    def _resolve_keyboard_anchor(self, source_model, target_global: int) -> bool:
+        """Best-effort selection rebind for first keypress after drag jumps."""
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0:
+            return False
+
+        # Fast path: already anchored.
+        cur_global = self._current_global_from_current_index(source_model)
+        if isinstance(cur_global, int) and cur_global == target_global:
+            return True
+
+        # First try locked-global enforcement (used by pages_updated flow).
+        try:
+            if self._enforce_locked_selected_global(source_model):
+                cur_global = self._current_global_from_current_index(source_model)
+                if isinstance(cur_global, int) and cur_global == target_global:
+                    return True
+        except Exception:
+            pass
+
+        # Fallback: explicit re-anchor helper (can request/force target page).
+        try:
+            self._reanchor_keyboard_to_selected_global(source_model, target_global)
+        except Exception:
+            return False
+
+        cur_global = self._current_global_from_current_index(source_model)
+        return isinstance(cur_global, int) and cur_global == target_global
+
+    def _current_global_from_current_index(self, source_model):
+        """Map current proxy index to stable global index."""
+        try:
+            cur_idx = self.currentIndex()
+            if not cur_idx.isValid():
+                return None
+            src_idx = (
+                self.model().mapToSource(cur_idx)
+                if self.model() and hasattr(self.model(), 'mapToSource')
+                else cur_idx
+            )
+            if not src_idx.isValid() or not hasattr(source_model, 'get_global_index_for_row'):
+                return None
+            mapped = source_model.get_global_index_for_row(src_idx.row())
+            return int(mapped) if isinstance(mapped, int) and mapped >= 0 else None
+        except Exception:
+            return None
+
+    def _reanchor_keyboard_to_selected_global(self, source_model, target_global: int) -> bool:
+        """Rebind + center current selection to stable global index for keyboard nav."""
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0:
+            return False
+
+        total_items = int(getattr(source_model, '_total_count', 0) or 0)
+        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        target_page = (target_global // max(1, page_size)) if total_items > 0 else 0
+
+        # Load target page immediately when selection is outside loaded window.
+        try:
+            loaded_pages = getattr(source_model, '_pages', {})
+            if isinstance(loaded_pages, dict) and target_page not in loaded_pages:
+                if hasattr(source_model, '_load_page_sync'):
+                    source_model._load_page_sync(target_page)
+                    if hasattr(source_model, '_emit_pages_updated'):
+                        source_model._emit_pages_updated()
+        except Exception:
+            pass
+
+        loaded_row = -1
+        if hasattr(source_model, 'get_loaded_row_for_global_index'):
+            loaded_row = source_model.get_loaded_row_for_global_index(target_global)
+
+        # Fallback: request page load + steer masonry window to selected page.
+        if loaded_row < 0:
+            try:
+                if hasattr(source_model, 'ensure_pages_for_range'):
+                    source_model.ensure_pages_for_range(target_global, target_global + 1)
+                self._current_page = max(0, int(target_page))
+                self._restore_target_page = int(target_page)
+                self._restore_target_global_index = int(target_global)
+                import time as _t
+                self._restore_anchor_until = _t.time() + 4.0
+                if self._get_masonry_strategy(source_model) == 'windowed_strict':
+                    sb = self.verticalScrollBar()
+                    canonical = int(self._strict_canonical_domain_max(source_model))
+                    frac = (target_global / max(1, total_items - 1)) if total_items > 1 else 0.0
+                    target_scroll = max(0, min(int(round(frac * canonical)), canonical))
+                    prev_block = sb.blockSignals(True)
+                    try:
+                        sb.setRange(0, canonical)
+                        sb.setValue(target_scroll)
+                    finally:
+                        sb.blockSignals(prev_block)
+                self._last_masonry_window_signature = None
+                self._calculate_masonry_layout()
+            except Exception:
+                pass
+            return False
+
+        src_idx = source_model.index(loaded_row, 0)
+        proxy_model = self.model()
+        proxy_idx = (
+            proxy_model.mapFromSource(src_idx)
+            if proxy_model and hasattr(proxy_model, 'mapFromSource')
+            else src_idx
+        )
+        if not proxy_idx.isValid():
+            try:
+                if hasattr(source_model, 'ensure_pages_for_range'):
+                    source_model.ensure_pages_for_range(target_global, target_global + 1)
+                self._current_page = max(0, int(target_page))
+                self._restore_target_page = int(target_page)
+                self._restore_target_global_index = int(target_global)
+                import time as _t
+                self._restore_anchor_until = _t.time() + 4.0
+                self._last_masonry_window_signature = None
+                self._calculate_masonry_layout()
+            except Exception:
+                pass
+            return False
+
+        sel_model = self.selectionModel()
+        if sel_model:
+            sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        else:
+            self.setCurrentIndex(proxy_idx)
+        self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.viewport().update()
+        return True
 
 
     def _dev_diagnose_selection(self):
