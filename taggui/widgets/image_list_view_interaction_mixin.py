@@ -801,6 +801,208 @@ class ImageListViewInteractionMixin:
 
         self.viewport().update()
 
+    def show_go_to_page_dialog(self):
+        """Prompt user for page number and jump there."""
+        if getattr(self, "_jump_dialog_open", False):
+            return
+
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        if source_model is None:
+            return
+
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            total_items = int(self.model().rowCount()) if self.model() else 0
+        if total_items <= 0:
+            return
+
+        page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        total_pages = max(1, (total_items + max(1, page_size) - 1) // max(1, page_size))
+        current_page = max(1, min(total_pages, int(getattr(self, "_current_page", 0) or 0) + 1))
+
+        from PySide6.QtWidgets import QInputDialog
+
+        self._jump_dialog_open = True
+        try:
+            page, ok = QInputDialog.getInt(
+                self,
+                "Go To Page",
+                f"Page (1-{total_pages}):",
+                current_page,
+                1,
+                total_pages,
+                1,
+            )
+        finally:
+            self._jump_dialog_open = False
+
+        if ok:
+            self.go_to_page(page)
+
+    def show_go_to_image_index_dialog(self):
+        """Prompt user for image index and jump there."""
+        if getattr(self, "_jump_dialog_open", False):
+            return
+
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        if source_model is None:
+            return
+
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            total_items = int(self.model().rowCount()) if self.model() else 0
+        if total_items <= 0:
+            return
+
+        current_global = self._current_global_from_current_index(source_model)
+        if not (isinstance(current_global, int) and current_global >= 0):
+            current_global = int(getattr(self, "_selected_global_index", 0) or 0)
+        current_value = max(1, min(total_items, int(current_global) + 1))
+
+        from PySide6.QtWidgets import QInputDialog
+
+        self._jump_dialog_open = True
+        try:
+            index_1_based, ok = QInputDialog.getInt(
+                self,
+                "Go To Image Index",
+                f"Image index (1-{total_items}):",
+                current_value,
+                1,
+                total_items,
+                1,
+            )
+        finally:
+            self._jump_dialog_open = False
+
+        if ok:
+            self.go_to_global_index(index_1_based - 1)
+
+    def go_to_page(self, page_1_based: int) -> bool:
+        """Jump to first image on a 1-based page number."""
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        if source_model is None:
+            return False
+
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            total_items = int(self.model().rowCount()) if self.model() else 0
+        if total_items <= 0:
+            return False
+
+        page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        total_pages = max(1, (total_items + max(1, page_size) - 1) // max(1, page_size))
+        target_page = max(0, min(total_pages - 1, int(page_1_based) - 1))
+        target_global = max(0, min(total_items - 1, target_page * max(1, page_size)))
+        return self.go_to_global_index(target_global)
+
+    def go_to_global_index(self, target_global: int) -> bool:
+        """Jump to stable global index and select it."""
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        if source_model is None:
+            return False
+
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            total_items = int(self.model().rowCount()) if self.model() else 0
+        if total_items <= 0:
+            return False
+
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        target_global = max(0, min(total_items - 1, target_global))
+
+        # New explicit jump overrides drag/release edge and lock state.
+        self._selected_global_lock_until = 0.0
+        self._selected_global_lock_value = None
+        self._drag_release_anchor_active = False
+        self._drag_release_anchor_idx = None
+        self._drag_release_anchor_until = 0.0
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
+        self._pending_edge_snap = None
+        self._pending_edge_snap_until = 0.0
+        self._stick_to_edge = None
+
+        page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        target_page = target_global // max(1, page_size)
+
+        # Load target page eagerly when possible.
+        try:
+            pages = getattr(source_model, "_pages", {})
+            if isinstance(pages, dict) and target_page not in pages and hasattr(source_model, "_load_page_sync"):
+                source_model._load_page_sync(target_page)
+                if hasattr(source_model, "_emit_pages_updated"):
+                    source_model._emit_pages_updated()
+        except Exception:
+            pass
+
+        # Request window around target for buffered pagination.
+        try:
+            if hasattr(source_model, "ensure_pages_for_range"):
+                window = max(1, page_size)
+                start_idx = max(0, target_global - window)
+                end_idx = min(total_items, target_global + window)
+                source_model.ensure_pages_for_range(start_idx, end_idx)
+        except Exception:
+            pass
+
+        self._current_page = max(0, int(target_page))
+        self._restore_target_page = int(target_page)
+        self._restore_target_global_index = int(target_global)
+        import time as _t
+        self._restore_anchor_until = _t.time() + 4.0
+
+        loaded_row = -1
+        if hasattr(source_model, "get_loaded_row_for_global_index"):
+            loaded_row = source_model.get_loaded_row_for_global_index(target_global)
+        else:
+            loaded_row = target_global
+        if loaded_row < 0:
+            self._last_masonry_window_signature = None
+            self._calculate_masonry_layout()
+            return False
+
+        src_idx = source_model.index(loaded_row, 0)
+        proxy_model = self.model()
+        proxy_idx = (
+            proxy_model.mapFromSource(src_idx)
+            if proxy_model and hasattr(proxy_model, "mapFromSource")
+            else src_idx
+        )
+        if not proxy_idx.isValid():
+            self._last_masonry_window_signature = None
+            self._calculate_masonry_layout()
+            return False
+
+        sel_model = self.selectionModel()
+        if sel_model is not None:
+            sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        else:
+            self.setCurrentIndex(proxy_idx)
+        self._selected_global_index = int(target_global)
+        self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.viewport().update()
+        return True
+
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
