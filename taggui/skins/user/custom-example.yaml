@@ -1,0 +1,96 @@
+# Example custom skin for TagGUI video player
+# Copy this file and modify to create your own skin!
+#
+# IMPORTANT: Skins are applied LIVE - no restart needed.
+# Just switch skins in settings and see changes immediately.
+
+name: "Custom Example"
+author: "Your Name"
+version: "1.0"
+
+# Design tokens - define once, reuse everywhere using {tokens.path.to.value}
+tokens:
+  colors:
+    bg-primary: "#1A0033"       # Deep purple background
+    bg-secondary: "#2D1B4E"     # Lighter purple surface
+    bg-tertiary: "#3D2963"      # Control bar color
+    border: "#5C4A85"           # Border color
+    text-primary: "#F0E6FF"     # Text color
+    text-secondary: "#B8A3D9"   # Secondary text
+    primary: "#9D4EDD"          # Primary accent (purple)
+    primary-hover: "#7B2CBF"    # Hover state
+    accent: "#C77DFF"           # Secondary accent
+
+  spacing:
+    xs: 4
+    sm: 8
+    md: 16
+    lg: 24
+
+  opacity:
+    control-bar: 0.92
+
+# Video player configuration
+video_player:
+  layout:
+    control_bar_height: 65          # Height of control bar (pixels)
+    control_bar_position: "bottom"  # top, bottom, or overlay
+    button_alignment: "center"      # left, center, or right
+    timeline_position: "above"      # above, below, or integrated
+    button_spacing: "{tokens.spacing.sm}"      # Space between buttons
+    section_spacing: "{tokens.spacing.md}"     # Space between sections
+
+  styling:
+    # Backgrounds
+    background: "{tokens.colors.bg-primary}"
+    control_bar_color: "{tokens.colors.bg-tertiary}"
+    control_bar_opacity: "{tokens.opacity.control-bar}"
+
+    # Buttons
+    button_size: 34                               # Button size (pixels)
+    button_icon_color: "{tokens.colors.text-primary}"
+    button_bg_color: "{tokens.colors.bg-secondary}"
+    button_hover_color: "{tokens.colors.primary}"
+    button_border: "1px solid {tokens.colors.border}"
+    button_border_radius: 8                       # Corner radius
+
+    # Timeline slider
+    timeline_height: 10
+    timeline_color: "{tokens.colors.primary}"
+    timeline_bg_color: "{tokens.colors.bg-secondary}"
+    slider_handle_size: 18
+    slider_handle_color: "#FFFFFF"
+    slider_handle_border: "2px solid {tokens.colors.primary}"
+
+    # Loop markers (triangles on timeline)
+    loop_marker_start_color: "#FF1B8D"   # Pink start marker
+    loop_marker_end_color: "#FFB627"     # Orange end marker
+    loop_marker_outline: "#FFFFFF"
+    loop_marker_outline_width: 2
+
+    # Speed slider gradient (3 colors: start, middle, end)
+    speed_gradient_start: "#4A148C"      # Dark purple
+    speed_gradient_mid: "#7B2CBF"        # Medium purple
+    speed_gradient_end: "#C77DFF"        # Light purple
+
+    # Text
+    text_color: "{tokens.colors.text-primary}"
+    text_secondary_color: "{tokens.colors.text-secondary}"
+    label_font_size: 12
+
+  borders:
+    radius: 8                                      # Global border radius
+    control_bar_border: "1px solid {tokens.colors.border}"
+    button_border: "1px solid {tokens.colors.border}"
+
+  shadows:
+    control_bar: "0 6px 12px rgba(157,78,221,0.3)"   # Purple glow
+    button: "0 2px 4px rgba(0,0,0,0.3)"
+    overlay: "0 8px 16px rgba(0,0,0,0.4)"
+
+# Tips for creating skins:
+# 1. Use tokens for consistency - define colors once, reference everywhere
+# 2. Maintain spacing scale (4/8/16/24/32) for visual harmony
+# 3. Test readability - ensure text has good contrast
+# 4. Keep functional colors distinct (hover, active, disabled)
+# 5. Skins apply instantly - save and switch to see changes live!

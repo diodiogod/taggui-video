@@ -1,0 +1,74 @@
+name: "Ocean"
+author: "TagGUI"
+version: "1.0"
+
+tokens:
+  colors:
+    bg-primary: "#0A1628"
+    bg-secondary: "#0D1B2A"
+    bg-tertiary: "#1B263B"
+    border: "#2D3E5C"
+    text-primary: "#E0E1DD"
+    text-secondary: "#778DA9"
+    primary: "#00B4D8"
+    primary-hover: "#0096C7"
+    accent: "#48CAE4"
+
+  spacing:
+    xs: 4
+    sm: 8
+    md: 16
+    lg: 24
+
+  opacity:
+    control-bar: 0.90
+
+video_player:
+  layout:
+    control_bar_height: 60
+    control_bar_position: "bottom"
+    button_alignment: "center"
+    timeline_position: "above"
+    button_spacing: "{tokens.spacing.sm}"
+    section_spacing: 20
+
+  styling:
+    background: "{tokens.colors.bg-primary}"
+    control_bar_color: "{tokens.colors.bg-tertiary}"
+    control_bar_opacity: "{tokens.opacity.control-bar}"
+
+    button_size: 38
+    button_icon_color: "{tokens.colors.text-primary}"
+    button_bg_color: "{tokens.colors.bg-secondary}"
+    button_hover_color: "{tokens.colors.primary}"
+    button_border: "1px solid {tokens.colors.border}"
+    button_border_radius: 6
+
+    timeline_height: 8
+    timeline_color: "{tokens.colors.primary}"
+    timeline_bg_color: "{tokens.colors.bg-secondary}"
+    slider_handle_size: 16
+    slider_handle_color: "#FFFFFF"
+    slider_handle_border: "2px solid #0077B6"
+
+    loop_marker_start_color: "#FF006E"
+    loop_marker_end_color: "#FB5607"
+    loop_marker_outline: "#E0E1DD"
+    loop_marker_outline_width: 2
+
+    # Ocean gradient (deep blue to cyan)
+    speed_gradient_start: "#03045E"
+    speed_gradient_mid: "#0077B6"
+    speed_gradient_end: "#00B4D8"
+
+    text_color: "{tokens.colors.text-primary}"
+    text_secondary_color: "{tokens.colors.text-secondary}"
+    label_font_size: 12
+
+  borders:
+    radius: 6
+    control_bar_border: "1px solid {tokens.colors.border}"
+
+  shadows:
+    control_bar: "0 4px 12px rgba(0,180,216,0.2)"
+    button: "0 2px 4px rgba(0,0,0,0.3)"
