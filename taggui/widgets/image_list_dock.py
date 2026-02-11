@@ -1,6 +1,17 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_view import ImageListView
 
+class ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class ImageList(QDockWidget):
     deletion_marking_changed = Signal()
     directory_reload_requested = Signal()
@@ -43,8 +54,11 @@ class ImageList(QDockWidget):
                                        tag_separator, image_width)
 
         # Status bar with image index (left) and cache status (right) on same line
-        self.image_index_label = QLabel()
+        self.image_index_label = ClickableLabel()
         self.cache_status_label = QLabel()
+        self.image_index_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.image_index_label.setToolTip("Click to jump to image index")
+        self.image_index_label.clicked.connect(self._on_image_index_label_clicked)
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(5, 2, 5, 2)
         status_layout.addWidget(self.image_index_label)
@@ -116,6 +130,11 @@ class ImageList(QDockWidget):
         if image_count != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)
+
+    @Slot()
+    def _on_image_index_label_clicked(self):
+        """Open quick jump dialog for image index."""
+        self.list_view.show_go_to_image_index_dialog()
 
     # DISABLED: Cache warming causes UI blocking
     # def _update_cache_status(self, progress: int, total: int):

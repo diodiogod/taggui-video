@@ -188,6 +188,7 @@ class ImageListView(
         self._model_resetting = False
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
+        self._jump_dialog_open = False
         self._strict_domain_service = StrictScrollDomainService(self)
         self._masonry_lifecycle_service = MasonryLifecycleService(self)
         self._masonry_submission_service = MasonrySubmissionService(self)
@@ -235,6 +236,7 @@ class ImageListView(
         self.verticalScrollBar().sliderReleased.connect(self._on_scrollbar_released)
         self.verticalScrollBar().sliderMoved.connect(self._on_scrollbar_slider_moved)
         self.verticalScrollBar().rangeChanged.connect(self._on_scrollbar_range_changed)
+        self.verticalScrollBar().installEventFilter(self)
 
         invert_selection_action = self.addAction('Invert Selection')
         invert_selection_action.setShortcut('Ctrl+I')
@@ -335,6 +337,53 @@ class ImageListView(
             self._current_proxy_row_cache = current.row() if current.isValid() else -1
         except Exception:
             self._current_proxy_row_cache = -1
+
+    def eventFilter(self, obj, event):
+        """Intercept scrollbar track clicks to offer quick page jump popup."""
+        try:
+            sb = self.verticalScrollBar()
+            if obj is sb and event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton and self._should_prompt_page_jump_from_scroll_click(event):
+                    self.show_go_to_page_dialog()
+                    event.accept()
+                    return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _should_prompt_page_jump_from_scroll_click(self, event) -> bool:
+        """Return True when click is on scrollbar groove (not handle/buttons)."""
+        sb = self.verticalScrollBar()
+        if sb.maximum() <= 0:
+            return False
+
+        try:
+            pos = event.position().toPoint()
+        except Exception:
+            pos = event.pos()
+
+        from PySide6.QtWidgets import QStyleOptionSlider
+        opt = QStyleOptionSlider()
+        sb.initStyleOption(opt)
+        style = sb.style()
+
+        slider_rect = style.subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, sb)
+        if slider_rect.isValid() and slider_rect.contains(pos):
+            return False
+
+        add_line_rect = style.subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarAddLine, sb)
+        if add_line_rect.isValid() and add_line_rect.contains(pos):
+            return False
+
+        sub_line_rect = style.subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSubLine, sb)
+        if sub_line_rect.isValid() and sub_line_rect.contains(pos):
+            return False
+
+        # Ignore clicks while dragging/previewing to keep drag physics intact.
+        if getattr(self, "_scrollbar_dragging", False) or getattr(self, "_drag_preview_mode", False):
+            return False
+
+        return True
 
     @Slot()
     def _clear_selection_cache(self):
