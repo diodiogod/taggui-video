@@ -332,12 +332,16 @@ class ImageListViewScrollMixin:
                 )
             current_page = self._drag_target_page
         if stick_top:
-            current_page = 0
-            if scroll_offset > 0:
-                self.verticalScrollBar().setValue(0)
-                scroll_offset = 0
-        elif stick_bottom:
-            current_page = last_page
+            # User moved away from top: release lock instead of snapping back.
+            if scroll_offset > 6:
+                self._stick_to_edge = None
+                stick_top = False
+            else:
+                current_page = 0
+                if scroll_offset > 0:
+                    self.verticalScrollBar().setValue(0)
+                    scroll_offset = 0
+        if stick_bottom:
             target_bottom_scroll = max(0, min(scroll_offset, scroll_max))
             if strict_mode and self._masonry_items:
                 try:
@@ -354,9 +358,15 @@ class ImageListViewScrollMixin:
                             target_bottom_scroll = max(0, min(tail_bottom - max(1, self.viewport().height()), scroll_max))
                 except Exception:
                     target_bottom_scroll = max(0, min(scroll_offset, scroll_max))
-            if scroll_offset != target_bottom_scroll:
-                self.verticalScrollBar().setValue(target_bottom_scroll)
-                scroll_offset = target_bottom_scroll
+            # User moved upward away from tail: release lock immediately.
+            if scroll_offset < (target_bottom_scroll - 6):
+                self._stick_to_edge = None
+                stick_bottom = False
+            else:
+                current_page = last_page
+                if scroll_offset != target_bottom_scroll:
+                    self.verticalScrollBar().setValue(target_bottom_scroll)
+                    scroll_offset = target_bottom_scroll
         elif release_lock_active:
             current_page = max(0, min(last_page, int(self._release_page_lock_page)))
         elif anchor_active:
@@ -385,10 +395,20 @@ class ImageListViewScrollMixin:
                 indices = [int(it.get('index', -1)) for it in real_items]
                 if tail_idx >= 0 and tail_idx in indices:
                     current_page = last_page
-                    self._stick_to_edge = "bottom"
+                    near_bottom_hit = (
+                        scroll_max > 0
+                        and scroll_offset >= max(
+                            0,
+                            scroll_max - max(2, int(self.verticalScrollBar().singleStep()) + 8),
+                        )
+                    )
+                    if near_bottom_hit:
+                        self._stick_to_edge = "bottom"
                 elif head_idx in indices:
                     current_page = 0
-                    self._stick_to_edge = "top"
+                    near_top_hit = scroll_offset <= max(2, int(self.verticalScrollBar().singleStep()) + 8)
+                    if near_top_hit:
+                        self._stick_to_edge = "top"
                 else:
                     top_idx = min(real_items, key=lambda x: x['rect'].y())['index']
                     current_page = max(0, min(last_page, top_idx // source_model.PAGE_SIZE))
@@ -445,9 +465,12 @@ class ImageListViewScrollMixin:
                 current_page = estimated_item_idx // source_model.PAGE_SIZE
                 current_page = max(0, min(last_page, current_page))
         if strict_mode and (not dragging_mode):
-            if current_page >= last_page:
+            near_edge_tol = max(2, int(self.verticalScrollBar().singleStep()) + 8)
+            near_bottom_now = scroll_max > 0 and scroll_offset >= max(0, scroll_max - near_edge_tol)
+            near_top_now = scroll_offset <= near_edge_tol
+            if current_page >= last_page and near_bottom_now:
                 self._stick_to_edge = "bottom"
-            elif current_page <= 0 and scroll_offset <= 2:
+            elif current_page <= 0 and near_top_now:
                 self._stick_to_edge = "top"
         if prev_stick != getattr(self, '_stick_to_edge', None):
             self._log_flow(
