@@ -12,6 +12,9 @@ class ImageListViewStrategyMixin:
             return False
         if self._get_masonry_strategy(source_model) != "windowed_strict":
             return False
+        # Never override startup restore ownership.
+        if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
+            return False
 
         anchor_global = getattr(self, '_selected_global_index', None)
         if not (isinstance(anchor_global, int) and anchor_global >= 0):
@@ -37,9 +40,7 @@ class ImageListViewStrategyMixin:
         until = time.time() + max(0.2, float(hold_s))
         self._resize_anchor_page = anchor_page
         self._resize_anchor_until = until
-        self._restore_target_page = anchor_page
-        self._restore_target_global_index = anchor_global
-        self._restore_anchor_until = until
+        # Keep restore fields untouched; resize anchoring is independent.
         self._release_page_lock_page = anchor_page
         self._release_page_lock_until = time.time() + min(1.2, max(0.2, float(hold_s)))
         return True

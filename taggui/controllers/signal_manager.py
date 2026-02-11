@@ -105,6 +105,8 @@ class SignalManager:
             image_list.update_image_index_label)
         def safe_load_image(current, previous):
             try:
+                if self.main_window._should_suppress_transient_restore_index(current):
+                    return
                 if current.isValid():
                     image_viewer.load_image(current)
             except Exception as e:

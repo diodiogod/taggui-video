@@ -345,6 +345,10 @@ class ImageListViewGeometryMixin:
         """Recalculate masonry layout on resize (debounced)."""
         super().resizeEvent(event)
         if self.use_masonry:
+            import time
+            if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
+                # Startup restore in progress: skip resize-driven recalc churn.
+                return
             source_model = (
                 self.model().sourceModel()
                 if self.model() and hasattr(self.model(), 'sourceModel')
@@ -362,6 +366,8 @@ class ImageListViewGeometryMixin:
         """Called after resize stops (debounced)."""
         if self.use_masonry:
             import time
+            if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
+                return
             source_model = (
                 self.model().sourceModel()
                 if self.model() and hasattr(self.model(), 'sourceModel')

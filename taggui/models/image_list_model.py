@@ -279,20 +279,43 @@ class ImageListModel(QAbstractListModel):
              else:
                  # Paginated Mode: Query DB for rank
                  if self._db is None: return -1
+                 rel_candidates = []
+                 dir_path = Path(self._directory_path)
+                 for candidate_path in (path,):
+                     try:
+                         rel = str(candidate_path.relative_to(dir_path))
+                         rel_candidates.append(rel)
+                     except Exception:
+                         pass
                  try:
-                     rel_path = str(path.relative_to(self._directory_path))
-                 except ValueError:
-                     # Fallback if path is not in directory (e.g. symlink resolved differently)
-                     rel_path = path.name
-                 
-                 print(f"[RESTORE] Checking rank for rel_path: {rel_path}")
+                     rel = str(path.resolve().relative_to(dir_path.resolve()))
+                     rel_candidates.append(rel)
+                 except Exception:
+                     pass
+                 # Normalize separators and dedupe while preserving order.
+                 normalized = []
+                 seen = set()
+                 for rel in rel_candidates:
+                     for var in (rel, rel.replace('\\', '/'), rel.replace('/', '\\')):
+                         if var not in seen:
+                             seen.add(var)
+                             normalized.append(var)
+                 # Final fallback (least reliable): basename.
+                 if not normalized:
+                     normalized.append(path.name)
+
+                 print(f"[RESTORE] Checking rank for rel_path candidates: {normalized[:3]}")
                      
                  sort_field = getattr(self, '_sort_field', 'file_name')
                  sort_dir = getattr(self, '_sort_dir', 'ASC')
                  random_seed = getattr(self, '_random_seed', 1234567)
                  
-                 rank = self._db.get_rank_of_image(rel_path, sort_field, sort_dir, 
-                                                   random_seed=random_seed)
+                 rank = -1
+                 for rel_path in normalized:
+                     rank = self._db.get_rank_of_image(rel_path, sort_field, sort_dir,
+                                                       random_seed=random_seed)
+                     if rank != -1:
+                         break
                  print(f"[RESTORE] DB returned rank: {rank}")
                  
                  if rank == -1:

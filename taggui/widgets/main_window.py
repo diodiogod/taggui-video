@@ -1,7 +1,7 @@
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
+from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QIcon, QKeySequence, QShortcut, QMouseEvent)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
@@ -48,6 +48,8 @@ class MainWindow(QMainWindow):
         self.is_running = True
         self.post_deletion_index = None  # Track index to focus after deletion
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
+        self._restore_in_progress = False
+        self._restore_target_global_rank = -1
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -444,12 +446,15 @@ class MainWindow(QMainWindow):
 
         # Clear the current index first to make sure that the `currentChanged`
         # signal is emitted even if the image at the index is already selected.
+        self.image_list_selection_model.clearSelection()
         self.image_list_selection_model.clearCurrentIndex()
         selected_index = self.proxy_image_list_model.index(select_index, 0)
         view = self.image_list.list_view
         source_model = self.image_list_model
         _restore_global_rank = getattr(self, '_restore_global_rank', -1)
         view._selected_global_index = _restore_global_rank if _restore_global_rank >= 0 else None
+        view._resize_anchor_page = None
+        view._resize_anchor_until = 0.0
 
         def _fresh_view_index(index: QModelIndex) -> QModelIndex:
             """Re-resolve row against current model to avoid stale QModelIndex crashes."""
@@ -463,6 +468,25 @@ class MainWindow(QMainWindow):
                 return QModelIndex()
             return model.index(row, 0)
 
+        def _set_current_and_select(index: QModelIndex) -> QModelIndex:
+            """Keep current index and selected row synchronized."""
+            fresh = _fresh_view_index(index)
+            if not fresh.isValid():
+                sel_model = view.selectionModel()
+                if sel_model is not None:
+                    sel_model.clearSelection()
+                    sel_model.clearCurrentIndex()
+                return QModelIndex()
+            sel_model = view.selectionModel()
+            if sel_model is not None:
+                sel_model.setCurrentIndex(
+                    fresh,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                )
+            else:
+                view.setCurrentIndex(fresh)
+            return fresh
+
         is_paginated_strict = (
             getattr(source_model, '_paginated_mode', False)
             and hasattr(view, '_use_local_anchor_masonry')
@@ -473,12 +497,25 @@ class MainWindow(QMainWindow):
             view._restore_target_page = _restore_global_rank // page_size
             view._restore_target_global_index = _restore_global_rank
             view._restore_anchor_until = time.time() + 12.0
+            self._restore_in_progress = True
+            self._restore_target_global_rank = int(_restore_global_rank)
         else:
             view._restore_target_page = None
             view._restore_target_global_index = None
             view._restore_anchor_until = 0.0
+            self._restore_in_progress = False
+            self._restore_target_global_rank = -1
 
-        self.image_list.list_view.setCurrentIndex(selected_index)
+        if is_paginated_strict and _restore_global_rank >= 0:
+            # Avoid provisional row-based selection during startup restore.
+            # Row mappings can drift as pages are inserted, causing a brief
+            # wrong image flash before global-rank restore settles.
+            try:
+                self.image_viewer.view.clear_scene()
+            except Exception:
+                pass
+        else:
+            _set_current_and_select(selected_index)
         self.centralWidget().setCurrentWidget(self.image_viewer)
 
         # Scroll to selected image after layout is ready.
@@ -558,7 +595,7 @@ class MainWindow(QMainWindow):
                                 rebound_proxy_index = _fresh_view_index(rebound_proxy_index)
                                 if (rebound_proxy_index.isValid()
                                         and view.currentIndex() != rebound_proxy_index):
-                                    view.setCurrentIndex(rebound_proxy_index)
+                                    _set_current_and_select(rebound_proxy_index)
 
                         # Find item position directly in masonry items.
                         for item in (view._masonry_items or []):
@@ -573,6 +610,22 @@ class MainWindow(QMainWindow):
                                 viewport_h = view.viewport().height()
                                 scroll_to = max(0, item_center_y - viewport_h // 2)
                                 view.verticalScrollBar().setValue(scroll_to)
+                                # Ensure current index/viewer are synchronized with target.
+                                if not rebound_proxy_index.isValid() and hasattr(source_model, 'get_loaded_row_for_global_index'):
+                                    loaded_row = source_model.get_loaded_row_for_global_index(target_idx)
+                                    if loaded_row >= 0:
+                                        src_idx = source_model.index(loaded_row, 0)
+                                        proxy_model = view.model()
+                                        rebound_proxy_index = (
+                                            proxy_model.mapFromSource(src_idx)
+                                            if hasattr(proxy_model, 'mapFromSource')
+                                            else src_idx
+                                        )
+                                        rebound_proxy_index = _fresh_view_index(rebound_proxy_index)
+                                if rebound_proxy_index.isValid():
+                                    _set_current_and_select(rebound_proxy_index)
+                                    self._restore_in_progress = False
+                                    self._restore_target_global_rank = -1
                                 print(f"[RESTORE] Centered on global index "
                                       f"{target_idx} at y={item['y']}")
                                 return
@@ -595,10 +648,13 @@ class MainWindow(QMainWindow):
                         )
                         fallback_index = _fresh_view_index(fallback_index)
                         if fallback_index.isValid():
+                            _set_current_and_select(fallback_index)
                             view.scrollTo(
                                 fallback_index,
                                 QAbstractItemView.ScrollHint.PositionAtCenter,
                             )
+                        self._restore_in_progress = False
+                        self._restore_target_global_rank = -1
 
                     view.layout_ready.connect(do_final_scroll)
                     # Keep restore override alive through startup page-load/recalc bursts.
@@ -607,6 +663,8 @@ class MainWindow(QMainWindow):
                         view._restore_target_page = None
                         view._restore_target_global_index = None
                         view._restore_anchor_until = 0.0
+                        self._restore_in_progress = False
+                        self._restore_target_global_rank = -1
                     QTimer.singleShot(12000, _clear_restore)
                     QTimer.singleShot(2000, do_final_scroll)
                     return
@@ -820,6 +878,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index and path of the currently selected image."""
+        if self._should_suppress_transient_restore_index(proxy_image_index):
+            return
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None
                         else 'filtered_image_index')
@@ -847,6 +907,26 @@ class MainWindow(QMainWindow):
                     self._update_main_window_title()
             else:
                 self._update_main_window_title()
+
+    def _should_suppress_transient_restore_index(self, proxy_image_index: QModelIndex) -> bool:
+        """Ignore intermediate selection/current changes while startup restore is settling."""
+        if not getattr(self, '_restore_in_progress', False):
+            return False
+        target = int(getattr(self, '_restore_target_global_rank', -1) or -1)
+        if target < 0:
+            return False
+        if not proxy_image_index.isValid():
+            return True
+        try:
+            src_index = self.proxy_image_list_model.mapToSource(proxy_image_index)
+            if not src_index.isValid():
+                return True
+            mapped = self.image_list_model.get_global_index_for_row(src_index.row())
+            if isinstance(mapped, int) and mapped >= 0:
+                return mapped != target
+            return True
+        except Exception:
+            return True
 
 
     @Slot(float)
