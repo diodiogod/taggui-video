@@ -508,12 +508,17 @@ class ImageListViewInteractionMixin:
                 self._stick_to_edge = None
 
         if event.modifiers() == Qt.ControlModifier:
+            import time
             source_model = (
                 self.model().sourceModel()
                 if self.model() and hasattr(self.model(), 'sourceModel')
                 else self.model()
             )
-            if self.use_masonry and hasattr(self, '_activate_resize_anchor'):
+            if (
+                self.use_masonry
+                and hasattr(self, '_activate_resize_anchor')
+                and time.time() > float(getattr(self, '_restore_anchor_until', 0.0) or 0.0)
+            ):
                 self._activate_resize_anchor(source_model=source_model, hold_s=4.0)
             # Get scroll direction
             delta = event.angleDelta().y()

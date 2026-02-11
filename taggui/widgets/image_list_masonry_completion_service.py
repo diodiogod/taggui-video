@@ -1,6 +1,6 @@
 import time
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QItemSelectionModel, QTimer
 from PySide6.QtWidgets import QAbstractItemView
 
 
@@ -406,7 +406,14 @@ class MasonryCompletionService:
                                         else src_idx
                                     )
                                     if proxy_idx.isValid() and v.currentIndex() != proxy_idx:
-                                        v.setCurrentIndex(proxy_idx)
+                                        sel_model = v.selectionModel()
+                                        if sel_model is not None:
+                                            sel_model.setCurrentIndex(
+                                                proxy_idx,
+                                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                                            )
+                                        else:
+                                            v.setCurrentIndex(proxy_idx)
 
                             # Anchor viewport to actual masonry item position.
                             target_item = None
