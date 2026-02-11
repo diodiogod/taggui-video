@@ -309,10 +309,14 @@ class ImageListModel(QAbstractListModel):
                  sort_field = getattr(self, '_sort_field', 'file_name')
                  sort_dir = getattr(self, '_sort_dir', 'ASC')
                  random_seed = getattr(self, '_random_seed', 1234567)
+                 filter_sql = getattr(self, '_filter_sql', '') or ''
+                 filter_bindings = getattr(self, '_filter_bindings', ()) or ()
                  
                  rank = -1
                  for rel_path in normalized:
                      rank = self._db.get_rank_of_image(rel_path, sort_field, sort_dir,
+                                                       filter_sql=filter_sql,
+                                                       bindings=filter_bindings,
                                                        random_seed=random_seed)
                      if rank != -1:
                          break
