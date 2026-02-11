@@ -321,12 +321,8 @@ class VideoControlsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # Make it semi-transparent overlay
-        self.setAutoFillBackground(True)
-        palette = self.palette()
-        palette.setColor(self.backgroundRole(), Qt.GlobalColor.black)
-        self.setPalette(palette)
-        self.setWindowOpacity(0.8)
+        # Background styling is handled by SkinApplier via stylesheet
+        # (Don't use setWindowOpacity - it makes children transparent too)
 
         # Enable mouse tracking for cursor updates
         self.setMouseTracking(True)
@@ -778,8 +774,70 @@ class VideoControlsWidget(QWidget):
         marker_colors = applier.get_loop_marker_colors()
         self.timeline_slider.set_marker_colors(marker_colors)
 
+        # Apply designer position offsets (if any)
+        self.apply_designer_positions()
+
         # Force repaint
         self.update()
+
+    def apply_designer_positions(self):
+        """Apply designer position offsets to widgets from skin data.
+
+        This implements Option C (hybrid positioning):
+        - Layouts provide base positioning
+        - Designer offsets tweak individual widget positions
+        """
+        if not hasattr(self, 'skin_manager') or not self.skin_manager.current_skin:
+            return
+
+        designer_positions = self.skin_manager.current_skin.get('designer_positions', {})
+        if not designer_positions:
+            return
+
+        # Map property names to actual widgets
+        widget_map = {
+            'play_button': self.play_pause_btn,
+            'stop_button': self.stop_btn,
+            'mute_button': self.mute_btn,
+            'prev_frame_button': self.prev_frame_btn,
+            'next_frame_button': self.next_frame_btn,
+            'skip_back_button': self.skip_back_btn,
+            'skip_forward_button': self.skip_forward_btn,
+            'loop_start_button': self.loop_start_btn,
+            'loop_end_button': self.loop_end_btn,
+            'loop_reset_button': self.loop_reset_btn,
+            'loop_checkbox': self.loop_checkbox,
+            'frame_label': self.frame_label,
+            'time_label': self.time_label,
+            'fps_label': self.fps_label,
+            'frame_count_label': self.frame_count_label,
+        }
+
+        # Store custom positions to reapply on resize
+        self._designer_positions = designer_positions
+        self._positioned_widgets = widget_map
+
+        # Apply positions after a short delay to ensure layout has finished
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(50, self._apply_designer_positions_now)
+
+    def _apply_designer_positions_now(self):
+        """Internal method to apply designer positions to widgets."""
+        if not hasattr(self, '_designer_positions') or not self._designer_positions:
+            return
+
+        for prop_name, pos_data in self._designer_positions.items():
+            if prop_name in self._positioned_widgets:
+                widget = self._positioned_widgets[prop_name]
+                x = pos_data.get('x')
+                y = pos_data.get('y')
+
+                if x is not None and y is not None:
+                    # Use setGeometry to force absolute positioning
+                    # (stronger than move() for widgets in layouts)
+                    current_size = widget.size()
+                    widget.setGeometry(x, y, current_size.width(), current_size.height())
+                    widget.raise_()  # Ensure widget is visible above others
 
     def switch_skin(self, skin_name: str):
         """Switch to a different skin and apply it immediately.
@@ -925,6 +983,11 @@ class VideoControlsWidget(QWidget):
             return
 
         self._apply_scaling()
+
+        # Reapply designer positions after scaling
+        if hasattr(self, '_designer_positions') and self._designer_positions:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(10, self._apply_designer_positions_now)
 
     @Slot()
     def _prev_frame(self):

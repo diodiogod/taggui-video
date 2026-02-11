@@ -209,6 +209,38 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(max_pages_spin_box, 9, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        # Video player skin
+        grid_layout.addWidget(QLabel('Video player skin'), 10, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.video_skin_combo = SettingsComboBox(
+            key='video_player_skin',
+            default='Classic')
+
+        # Populate with available skins
+        from skins.engine import SkinManager
+        skin_manager = SkinManager()
+        available_skins = skin_manager.get_available_skins()
+        skin_names = [skin['name'] for skin in available_skins]
+        if skin_names:
+            self.video_skin_combo.addItems(skin_names)
+        else:
+            self.video_skin_combo.addItem('Modern Dark')  # Fallback
+
+        self.video_skin_combo.setToolTip(
+            'Choose visual theme for video player controls.\n\n'
+            'Skins change colors, spacing, and appearance of:\n'
+            '- Control bar and buttons\n'
+            '- Timeline slider and loop markers\n'
+            '- Speed slider gradient\n\n'
+            'Changes apply instantly when you switch skins.\n'
+            'Create custom skins in taggui/skins/user/ folder.')
+
+        # Apply skin changes immediately (no restart needed!)
+        self.video_skin_combo.currentTextChanged.connect(self._on_skin_changed)
+
+        grid_layout.addWidget(self.video_skin_combo, 10, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 
@@ -688,6 +720,33 @@ class SettingsDialog(QDialog):
     def show_restart_warning(self):
         self.warning_label.setText(self.restart_warning)
         self.warning_label.show()
+
+    @Slot(str)
+    def _on_skin_changed(self, skin_name: str):
+        """Handle video player skin change - applies immediately."""
+        # Get main window and apply skin to video controls
+        main_window = self.parent()
+        if hasattr(main_window, 'video_controls'):
+            video_controls = main_window.video_controls
+            if hasattr(video_controls, 'switch_skin'):
+                success = video_controls.switch_skin(skin_name)
+                if success:
+                    # Show success message in warning label temporarily
+                    self.warning_label.setText(f'✓ Skin "{skin_name}" applied (no restart needed)')
+                    self.warning_label.setStyleSheet('color: green;')
+                    self.warning_label.show()
+                    # Reset after 3 seconds
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(3000, self._reset_warning_label)
+                else:
+                    self.warning_label.setText(f'Failed to load skin: {skin_name}')
+                    self.warning_label.setStyleSheet('color: red;')
+                    self.warning_label.show()
+
+    def _reset_warning_label(self):
+        """Reset warning label to default state."""
+        self.warning_label.hide()
+        self.warning_label.setStyleSheet('color: red;')
 
     def disable_insert_space_after_tag_separator_check_box(self):
         self.insert_space_after_tag_separator_check_box.setEnabled(False)
