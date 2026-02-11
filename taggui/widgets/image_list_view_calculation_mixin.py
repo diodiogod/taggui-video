@@ -26,12 +26,10 @@ class ImageListViewCalculationMixin:
         column_width = self.current_thumbnail_size
         spacing = 2
         viewport_width = self.viewport().width()
-        # Use scrollbar-aware column count to match spacer/domain calculations.
-        # Always assume scrollbar is visible to avoid column count drift between
-        # masonry worker and spacer/domain (root cause of 1:1 grid bug on far pages).
-        sb = self.verticalScrollBar()
-        sb_width = sb.width() if sb.isVisible() else 15
-        avail_width = viewport_width - sb_width - 24
+        # viewport().width() is already the drawable area (excluding scrollbars),
+        # so only apply explicit masonry side padding here.
+        horizontal_padding = int(getattr(self, "_masonry_horizontal_padding", 0) or 0)
+        avail_width = viewport_width - horizontal_padding
         num_columns = max(1, avail_width // (column_width + spacing))
         return MasonryContext(
             source_model=source_model,
@@ -98,8 +96,8 @@ class ImageListViewCalculationMixin:
             if ctx.avg_h < 1:
                 ctx.avg_h = 100.0
 
-        scroll_bar_width = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 15
-        ctx.avail_width = ctx.viewport_width - scroll_bar_width - 24
+        horizontal_padding = int(getattr(self, "_masonry_horizontal_padding", 0) or 0)
+        ctx.avail_width = ctx.viewport_width - horizontal_padding
         ctx.num_cols_est = max(1, ctx.avail_width // (ctx.column_width + ctx.spacing))
 
         if ctx.strict_mode and (not ctx.full_layout_mode) and hasattr(source_model, "_pages"):

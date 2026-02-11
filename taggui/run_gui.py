@@ -149,10 +149,10 @@ def run_gui():
         settings.setValue('window_state', state)
         if hasattr(main_window, 'toolbar_manager'):
             settings.setValue('fixed_marker_size', main_window.toolbar_manager.fixed_marker_size_spinbox.value())
-        if hasattr(main_window, 'image_list_model'):
-            main_window.image_list_model._flush_db_cache_flags()
         settings.sync()  # Force write to disk
         print("[SHUTDOWN] Settings saved and synced")
+        if hasattr(main_window, 'shutdown_background_workers'):
+            main_window.shutdown_background_workers()
         # Now close and exit
         main_window.close()
         sys.exit(0)
@@ -184,10 +184,10 @@ def run_gui():
                 settings.setValue('window_state', state)
                 if hasattr(main_window, 'toolbar_manager'):
                     settings.setValue('fixed_marker_size', main_window.toolbar_manager.fixed_marker_size_spinbox.value())
-                if hasattr(main_window, 'image_list_model'):
-                    main_window.image_list_model._flush_db_cache_flags()
                 settings.sync()  # Force write to disk
                 print("[SHUTDOWN] Settings saved and synced")
+                if hasattr(main_window, 'shutdown_background_workers'):
+                    main_window.shutdown_background_workers()
                 main_window.close()
                 return True
             return False
@@ -197,7 +197,10 @@ def run_gui():
         except Exception as e:
             print(f"[WARNING] Could not install Windows console handler: {e}")
 
-    return int(app.exec())
+    exit_code = int(app.exec())
+    if hasattr(main_window, 'shutdown_background_workers'):
+        main_window.shutdown_background_workers()
+    return exit_code
 
 
 if __name__ == '__main__':

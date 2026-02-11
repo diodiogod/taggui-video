@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from PySide6.QtWidgets import QMenuBar, QPushButton, QWidgetAction
-from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QDesktopServices
 from PySide6.QtCore import QUrl
 
 from utils.settings import settings, DEFAULT_SETTINGS
@@ -24,6 +24,8 @@ class MenuManager:
         self.toggle_auto_captioner_action = None
         self.toggle_auto_markings_action = None
         self.recent_folders_menu = None
+        self.workspace_actions = {}
+        self.workspace_action_group = None
 
     def create_menus(self):
         """Create and setup menu bar."""
@@ -40,6 +42,9 @@ class MenuManager:
 
         # View menu
         self._create_view_menu(menu_bar)
+
+        # Workspaces menu
+        self._create_workspaces_menu(menu_bar)
 
         # Help menu
         self._create_help_menu(menu_bar)
@@ -62,6 +67,42 @@ class MenuManager:
         self.delete_marked_menu = None
         self.delete_marked_button = None
         self.delete_marked_widget_action = None
+
+    def _create_workspaces_menu(self, menu_bar):
+        """Create Workspaces menu."""
+        workspaces_menu = menu_bar.addMenu('Workspaces')
+
+        presets = self.main_window.get_workspace_presets()
+        self.workspace_action_group = QActionGroup(self.main_window)
+        self.workspace_action_group.setExclusive(True)
+        self.workspace_actions = {}
+
+        shortcut_map = {
+            'media_viewer': 'Alt+1',
+            'tagging': 'Alt+2',
+            'marking': 'Alt+3',
+            'video_prep': 'Alt+4',
+            'auto_captioning': 'Alt+5',
+        }
+
+        for preset in presets:
+            workspace_id = preset['id']
+            label = preset['label']
+            action = QAction(label, parent=self.main_window)
+            action.setCheckable(True)
+            if workspace_id in shortcut_map:
+                action.setShortcut(QKeySequence(shortcut_map[workspace_id]))
+            action.triggered.connect(
+                lambda checked=False, wid=workspace_id: self.main_window.apply_workspace_preset(wid)
+            )
+            self.workspace_action_group.addAction(action)
+            workspaces_menu.addAction(action)
+            self.workspace_actions[workspace_id] = action
+
+    def set_active_workspace(self, workspace_id: str):
+        """Update checked workspace action."""
+        if workspace_id in self.workspace_actions:
+            self.workspace_actions[workspace_id].setChecked(True)
 
     def _create_file_menu(self, menu_bar):
         """Create File menu."""

@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         self._workspace_apply_timer_active = False
         self._workspace_apply_retry_count = 0
         self._workspace_applying = False
+        self._background_workers_shutdown = False
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -367,14 +368,54 @@ class MainWindow(QMainWindow):
                  # Use the slot directly to save
                  self.save_image_index(idx)
 
-        # Flush any pending DB updates before closing
-        if hasattr(self, 'image_list_model'):
-            self.image_list_model._flush_db_cache_flags()
-            
         settings.sync()
         print("[SHUTDOWN] Settings synced")
+        self.shutdown_background_workers()
 
         super().closeEvent(event)
+
+    def shutdown_background_workers(self):
+        """Stop/cancel background workers so process exit is fast."""
+        if self._background_workers_shutdown:
+            return
+        self._background_workers_shutdown = True
+
+        # Stop UI timers that may still schedule work while closing.
+        for timer_name in ('_unfreeze_timer', '_filter_timer'):
+            timer = getattr(self, timer_name, None)
+            if timer is not None and hasattr(timer, 'stop'):
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        # Cancel model executors first (thumbnail/page/cache queues).
+        model = getattr(self, 'image_list_model', None)
+        if model is not None and hasattr(model, 'shutdown_background_workers'):
+            try:
+                model.shutdown_background_workers()
+            except Exception as e:
+                print(f"[SHUTDOWN] Model worker shutdown warning: {e}")
+
+        # Cancel masonry worker executor in list view.
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is not None:
+            for timer_name in ('_resize_timer', '_masonry_recalc_timer', '_idle_preload_timer', '_mouse_scroll_timer', '_cache_flush_timer'):
+                timer = getattr(list_view, timer_name, None)
+                if timer is not None and hasattr(timer, 'stop'):
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
+            executor = getattr(list_view, '_masonry_executor', None)
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
+                except Exception as e:
+                    print(f"[SHUTDOWN] Masonry executor shutdown warning: {e}")
+                setattr(list_view, '_masonry_executor', None)
 
     def set_font_size(self):
         font = self.app.font()
