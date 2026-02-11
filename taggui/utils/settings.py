@@ -5,7 +5,7 @@ DEFAULT_SETTINGS = {
     'font_size': 16,
     # Common image formats that are supported in PySide6, as well as JPEG XL and video formats.
     'image_list_file_formats': 'bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp, mp4, avi, mov, mkv, webm',
-    'image_list_image_width': 120,  # Default to masonry view (threshold is 150)
+    'image_list_image_width': 120,
     'tag_separator': ',',
     'insert_space_after_tag_separator': True,
     'autocomplete_tags': True,
@@ -43,6 +43,7 @@ DEFAULT_SETTINGS = {
     'max_pages_in_memory': 20,  # Max paginated pages held in RAM (higher = smoother revisits, higher RAM)
     'pagination_threshold': 0,  # Minimum images to enable pagination mode (0 = always paginate, higher = only for large datasets)
     'masonry_strategy': 'full_compat',  # full_compat (stable) or windowed_strict (experimental 1M+ path)
+    'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
 }
 
 

@@ -26,6 +26,15 @@ class MasonryCompletionService:
                     print("[MASONRY] Resumed enrichment (null result)")
                 return
 
+            # If view mode changed while this job was running, ignore stale results.
+            current_gen = int(getattr(v, "_masonry_mode_generation", 0))
+            calc_gen = int(getattr(v, "_masonry_calc_mode_generation", current_gen))
+            if (not v.use_masonry) or (calc_gen != current_gen):
+                source_model = v.model().sourceModel() if v.model() and hasattr(v.model(), 'sourceModel') else v.model()
+                if source_model and hasattr(source_model, '_enrichment_paused'):
+                    source_model._enrichment_paused.clear()
+                return
+
             # result is the dict returned by worker
             result_dict = result
         

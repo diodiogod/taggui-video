@@ -1,6 +1,19 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewInteractionMixin:
+    def _cancel_pending_zoom_anchor_on_user_click(self):
+        """User click should take ownership from pending zoom/resize anchoring."""
+        import time
+        # Stop delayed zoom-finished recalc if user already made a deliberate click.
+        if hasattr(self, '_resize_timer'):
+            self._resize_timer.stop()
+        # Clear recenter intent from prior mode/zoom transitions.
+        self._recenter_after_layout = False
+        # Drop resize anchor lock so completion handler won't snap to stale target.
+        if time.time() < float(getattr(self, '_resize_anchor_until', 0.0) or 0.0):
+            self._resize_anchor_page = None
+            self._resize_anchor_until = 0.0
+
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
         # DIAGNOSTIC LOG (Requested by user for deep page debugging)
@@ -33,6 +46,9 @@ class ImageListViewInteractionMixin:
             # Will resume after 500ms idle (see mouseReleaseEvent)
 
         if self.use_masonry and self._masonry_items:
+            # Prioritize user's explicit click over any pending zoom/resize anchor work.
+            self._cancel_pending_zoom_anchor_on_user_click()
+
             # Get the index at click position
             index = self.indexAt(event.pos())
 
@@ -120,8 +136,8 @@ class ImageListViewInteractionMixin:
                 # Accept the event to prevent further processing
                 event.accept()
             else:
-                # Click on empty space: clear selection
-                self.selectionModel().clearSelection()
+                # Transient layout/proxy churn can briefly make indexAt invalid.
+                # Keep current selection instead of clearing to avoid accidental remap.
                 event.accept()
         else:
             # Use default behavior in list mode
@@ -509,6 +525,8 @@ class ImageListViewInteractionMixin:
 
         if event.modifiers() == Qt.ControlModifier:
             import time
+            # Ctrl+wheel can arrive without keyboard focus; keep arrows working after zoom.
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
             source_model = (
                 self.model().sourceModel()
                 if self.model() and hasattr(self.model(), 'sourceModel')
