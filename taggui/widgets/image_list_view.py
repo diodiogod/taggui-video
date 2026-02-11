@@ -218,6 +218,9 @@ class ImageListView(
         self.current_thumbnail_size = max(self.min_thumbnail_size,
                                           min(self.max_thumbnail_size, self.current_thumbnail_size))
 
+        # Seed startup mode so hysteresis honors the mode that was active on close.
+        self._apply_startup_view_mode_seed()
+
         # If the actual height of the image is greater than 3 times the width,
         # the image will be scaled down to fit.
         self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))

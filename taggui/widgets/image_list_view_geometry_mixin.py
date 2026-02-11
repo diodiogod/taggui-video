@@ -283,6 +283,38 @@ class ImageListViewGeometryMixin:
             self._resize_timer.stop()
 
 
+    def _apply_startup_view_mode_seed(self):
+        """Seed startup mode before hysteresis logic runs."""
+        saved_mode = str(settings.value("image_list_view_mode", "", type=str) or "").strip().lower()
+        if saved_mode == "list":
+            self.setViewMode(QListView.ViewMode.ListMode)
+            return
+        if saved_mode == "icon":
+            self.setViewMode(QListView.ViewMode.IconMode)
+            return
+
+        threshold = int(getattr(self, "column_switch_threshold", 150) or 150)
+        if int(getattr(self, "current_thumbnail_size", 0) or 0) >= threshold:
+            self.setViewMode(QListView.ViewMode.ListMode)
+        else:
+            self.setViewMode(QListView.ViewMode.IconMode)
+
+
+    def _persist_current_view_mode(self):
+        """Persist active mode so startup hysteresis can use the right prior mode."""
+        mode_value = (
+            "list"
+            if self.viewMode() == QListView.ViewMode.ListMode
+            else "icon"
+        )
+        try:
+            existing = str(settings.value("image_list_view_mode", "", type=str) or "")
+            if existing != mode_value:
+                settings.setValue("image_list_view_mode", mode_value)
+        except Exception:
+            pass
+
+
     def _update_view_mode(self):
         """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
         import time
@@ -303,6 +335,7 @@ class ImageListViewGeometryMixin:
             if (now - float(getattr(self, "_last_view_mode_switch_time", 0.0) or 0.0)) < cooldown_s:
                 # Keep current mode during cooldown to avoid unsafe mode churn.
                 self.use_masonry = (previous_mode == QListView.ViewMode.IconMode)
+                self._persist_current_view_mode()
                 return
             self._last_view_mode_switch_time = now
 
@@ -341,6 +374,8 @@ class ImageListViewGeometryMixin:
             # Force item delegate to recalculate sizes and update viewport
             self.scheduleDelayedItemsLayout()
             self.viewport().update()
+
+        self._persist_current_view_mode()
 
 
     def startDrag(self, supportedActions: Qt.DropAction):
