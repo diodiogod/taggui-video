@@ -76,6 +76,9 @@ class ImageListView(
         # Only update items that actually changed, not entire viewport
         self.viewport().setUpdatesEnabled(True)  # Ensure updates are enabled
         self.setUniformItemSizes(False)  # We use masonry, sizes vary
+        # Horizontal safety padding used in masonry width math (both sides).
+        # Keep small to avoid a large dead strip near the splitter.
+        self._masonry_horizontal_padding = 0
 
         # Masonry layout for icon mode
         self.use_masonry = False

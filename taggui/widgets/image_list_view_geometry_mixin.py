@@ -414,7 +414,11 @@ class ImageListViewGeometryMixin:
         super().resizeEvent(event)
         if self.use_masonry:
             if getattr(self, '_skip_next_resize_recalc', False):
-                return
+                # This flag is meant to skip one stale *queued* recalc after a
+                # click/zoom anchor cancellation. If we keep returning here, all
+                # future resize-driven recalcs can be blocked until Ctrl+wheel
+                # clears the flag. Consume it and continue with this real resize.
+                self._skip_next_resize_recalc = False
             import time
             if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
                 # Startup restore in progress: skip resize-driven recalc churn.

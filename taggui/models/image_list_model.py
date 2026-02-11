@@ -583,6 +583,7 @@ class ImageListModel(QAbstractListModel):
         self._db_flush_timer.setSingleShot(True)
         self._db_flush_timer.timeout.connect(self._flush_db_cache_flags)
         self._db_flush_timer.setInterval(5000)  # 5 seconds idle before DB flush
+        self._shutdown_requested = False
 
         # Track background enrichment
         self._enrichment_cancelled = threading.Event()
@@ -1800,6 +1801,8 @@ class ImageListModel(QAbstractListModel):
 
     def _flush_pending_cache_saves(self, force=False):
         """Submit pending cache saves to background executor (fully async, zero main thread work)."""
+        if self._shutdown_requested or not self._save_executor:
+            return
         # Don't flush if actively scrolling (unless forced on app close)
         if not force and self._is_scrolling:
             return  # Wait until truly idle
@@ -1836,6 +1839,8 @@ class ImageListModel(QAbstractListModel):
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
+        if self._shutdown_requested:
+            return
         try:
             # Load QImage in background thread (thread-safe, I/O bound)
             qimage, was_cached, _ = load_thumbnail_data(path, crop, width, is_video)
@@ -1866,6 +1871,8 @@ class ImageListModel(QAbstractListModel):
         Accepts a QImage (thread-safe) instead of QIcon/QPixmap to avoid
         GIL contention that stalls the main thread.
         """
+        if self._shutdown_requested:
+            return
         import time
 
         # Small delay to prevent disk I/O saturation
@@ -1906,6 +1913,9 @@ class ImageListModel(QAbstractListModel):
         Writes in small chunks (50 rows) with short yields between commits
         so the _db_lock is never held long enough to block page loads.
         """
+        if self._shutdown_requested or not self._save_executor:
+            return
+
         with self._pending_db_cache_flags_lock:
             if not self._pending_db_cache_flags:
                 return
@@ -1943,6 +1953,52 @@ class ImageListModel(QAbstractListModel):
 
         # Submit to save executor (dedicated thread pool for I/O operations)
         self._save_executor.submit(db_flush_worker)
+
+    def shutdown_background_workers(self):
+        """Cancel pending background work so app shutdown does not stall."""
+        if self._shutdown_requested:
+            return
+        self._shutdown_requested = True
+
+        # Stop timers that can enqueue additional work while shutting down.
+        for timer_name in (
+            '_page_debouncer',
+            '_thumbnail_batch_timer',
+            '_db_flush_timer',
+            '_dimensions_update_timer',
+            '_page_load_debounce_timer',
+            '_post_bootstrap_debounce_timer',
+            '_final_recalc_timer',
+            '_cache_report_timer',
+            '_enrichment_timer',
+            '_qimage_timer',
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None and hasattr(timer, 'stop'):
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        # Drop pending queues; these are cache/perf hints, safe to rebuild later.
+        with self._pending_cache_saves_lock:
+            self._pending_cache_saves.clear()
+        with self._pending_db_cache_flags_lock:
+            self._pending_db_cache_flags.clear()
+
+        # Cancel queued jobs in all executors to prevent minute-long shutdown hangs.
+        for executor_name in ('_page_executor', '_load_executor', '_save_executor'):
+            executor = getattr(self, executor_name, None)
+            if executor is None:
+                continue
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                # Python fallback if cancel_futures isn't supported
+                executor.shutdown(wait=False)
+            except Exception as e:
+                print(f"[SHUTDOWN] Executor shutdown warning ({executor_name}): {e}")
+            setattr(self, executor_name, None)
 
     @Slot(int, int, int)
     def _notify_thumbnail_ready(self, idx: int, width: int = -1, height: int = -1):
