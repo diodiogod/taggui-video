@@ -246,7 +246,55 @@ class MasonryCompletionService:
                     sb = v.verticalScrollBar()
                     stable_max = v._strict_canonical_domain_max(source_model)
                     old_val = sb.value()
-                    old_max = max(1, sb.maximum())
+                    old_max_raw = int(sb.maximum())
+                    old_max = max(1, old_max_raw)
+                    was_at_top = int(old_val) <= 2
+                    was_at_bottom = old_max_raw > 0 and int(old_val) >= old_max_raw - 2
+                    def _strict_tail_scroll_target():
+                        try:
+                            total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
+                            if total_items_i <= 0 or not v._masonry_items:
+                                return None
+                            tail_idx = total_items_i - 1
+                            tail_item = None
+                            for _it in v._masonry_items:
+                                if int(_it.get('index', -1)) == tail_idx:
+                                    tail_item = _it
+                                    break
+                            if tail_item is None:
+                                return None
+                            tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
+                            return max(0, min(tail_bottom - max(1, viewport_height), stable_max))
+                        except Exception:
+                            return None
+                    bottom_intent = False
+                    top_intent = False
+                    try:
+                        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                        last_page = max(0, (int(total_items) - 1) // max(1, page_size))
+                        cur_page = getattr(v, '_current_page', None)
+                        release_lock_page = getattr(v, '_release_page_lock_page', None)
+                        bottom_intent = (
+                            was_at_bottom
+                            or getattr(v, '_stick_to_edge', None) == "bottom"
+                            or (
+                                isinstance(release_lock_page, int)
+                                and release_lock_page >= last_page
+                            )
+                            or (
+                                isinstance(cur_page, int)
+                                and cur_page >= last_page
+                                and old_max_raw > 0
+                                and int(old_val) >= int(old_max * 0.80)
+                            )
+                        )
+                        top_intent = (
+                            was_at_top
+                            or getattr(v, '_stick_to_edge', None) == "top"
+                        )
+                    except Exception:
+                        bottom_intent = was_at_bottom
+                        top_intent = was_at_top
                     _click_scroll_freeze = (
                         time.time()
                         < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0)
@@ -258,7 +306,16 @@ class MasonryCompletionService:
                         # value unchanged so the viewport doesn't jump.
                         prev_block = sb.blockSignals(True)
                         sb.setRange(0, stable_max)
-                        sb.setValue(max(0, min(old_val, stable_max)))
+                        if bottom_intent:
+                            _tail_target = _strict_tail_scroll_target()
+                            if _tail_target is not None:
+                                sb.setValue(_tail_target)
+                            else:
+                                sb.setValue(max(0, min(old_val, stable_max)))
+                        elif top_intent:
+                            sb.setValue(0)
+                        else:
+                            sb.setValue(max(0, min(old_val, stable_max)))
                         sb.blockSignals(prev_block)
                     else:
                         # Block signals so the range change doesn't corrupt
@@ -274,28 +331,44 @@ class MasonryCompletionService:
                             and time.time() < float(getattr(v, '_release_page_lock_until', 0.0) or 0.0)
                         )
                         if v._pending_edge_snap == "bottom":
-                            sb.setValue(stable_max)
+                            _tail_target = _strict_tail_scroll_target()
+                            if _tail_target is not None:
+                                sb.setValue(_tail_target)
+                            else:
+                                sb.setValue(max(0, min(old_val, stable_max)))
                             v._current_page = max(0, (total_items - 1) // source_model.PAGE_SIZE) if source_model else v._current_page
                         elif v._pending_edge_snap == "top":
                             sb.setValue(0)
                             v._current_page = 0
                         elif release_lock_live:
                             page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                            # Prefer actual masonry y-coordinate of the locked page's
-                            # first item so the viewport aligns with real content
-                            # (formula-based fraction drifts when real heights != avg_h).
-                            _lock_start_idx = int(release_lock_page) * page_size
-                            _lock_item = None
-                            for _it in v._masonry_items:
-                                if _it.get('index', -1) >= _lock_start_idx:
-                                    _lock_item = _it
-                                    break
-                            if _lock_item is not None:
-                                target_val = max(0, min(int(_lock_item['y']), stable_max))
+                            last_page = max(0, (int(total_items) - 1) // max(1, page_size))
+                            release_page_i = max(0, int(release_lock_page))
+                            # Bottom-intent drag release: keep true tail reachable.
+                            # Locking to first item of last page creates a fake end
+                            # above the real last item and causes pull-back behavior.
+                            if release_page_i >= last_page:
+                                _tail_target = _strict_tail_scroll_target()
+                                if _tail_target is not None:
+                                    target_val = int(_tail_target)
+                                else:
+                                    target_val = max(0, min(int(old_val), stable_max))
                             else:
-                                # Fallback: item-based fraction.
-                                page_frac = max(0.0, min(1.0, (_lock_start_idx) / max(1, total_items)))
-                                target_val = int(round(page_frac * stable_max))
+                                # Prefer actual masonry y-coordinate of the locked page's
+                                # first item so the viewport aligns with real content
+                                # (formula-based fraction drifts when real heights != avg_h).
+                                _lock_start_idx = release_page_i * page_size
+                                _lock_item = None
+                                for _it in v._masonry_items:
+                                    if _it.get('index', -1) >= _lock_start_idx:
+                                        _lock_item = _it
+                                        break
+                                if _lock_item is not None:
+                                    target_val = max(0, min(int(_lock_item['y']), stable_max))
+                                else:
+                                    # Fallback: item-based fraction.
+                                    page_frac = max(0.0, min(1.0, (_lock_start_idx) / max(1, total_items)))
+                                    target_val = int(round(page_frac * stable_max))
                             sb.setValue(max(0, min(target_val, stable_max)))
                             v._last_stable_scroll_value = sb.value()
                         else:
@@ -306,6 +379,14 @@ class MasonryCompletionService:
                             )
                             if restore_target is not None:
                                 sb.setValue(max(0, min(int(restore_target), stable_max)))
+                            elif bottom_intent:
+                                _tail_target = _strict_tail_scroll_target()
+                                if _tail_target is not None:
+                                    sb.setValue(_tail_target)
+                                else:
+                                    sb.setValue(max(0, min(old_val, stable_max)))
+                            elif top_intent:
+                                sb.setValue(0)
                             else:
                                 # Preserve absolute scroll value (clamped to new range).
                                 # Ratio-preserving caused runaway drift: after zoom the
@@ -424,6 +505,16 @@ class MasonryCompletionService:
                             if not (resize_anchor_live or restore_anchor_live):
                                 return
 
+                            # If user is intentionally at an edge, never pull the viewport
+                            # toward the selected item during resize-anchor hold.
+                            sb_local = v.verticalScrollBar()
+                            cur_scroll = int(sb_local.value())
+                            max_scroll = int(sb_local.maximum())
+                            at_top_edge = cur_scroll <= 2
+                            at_bottom_edge = max_scroll > 0 and cur_scroll >= max_scroll - 2
+                            if resize_anchor_live and (at_top_edge or at_bottom_edge):
+                                return
+
                             target_global = getattr(v, '_selected_global_index', None)
                             if not (isinstance(target_global, int) and target_global >= 0):
                                 target_global = getattr(v, '_restore_target_global_index', None)
@@ -471,7 +562,6 @@ class MasonryCompletionService:
                             if target_item is None:
                                 return
 
-                            sb_local = v.verticalScrollBar()
                             cur_scroll = sb_local.value()
                             vh = v.viewport().height()
                             item_top = int(target_item.get('y', 0))

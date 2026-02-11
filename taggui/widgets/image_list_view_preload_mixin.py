@@ -370,10 +370,10 @@ class ImageListViewPreloadMixin:
 
                 if bottom_intent:
                     self._drag_release_anchor_idx = total_items - 1
-                    self._stick_to_edge = None
+                    self._stick_to_edge = "bottom"
                 elif top_intent:
                     self._drag_release_anchor_idx = 0
-                    self._stick_to_edge = None
+                    self._stick_to_edge = "top"
                 elif self._drag_target_page is not None and hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
                     page_anchor = max(0, int(self._drag_target_page))
                     self._drag_release_anchor_idx = max(0, min(total_items - 1, page_anchor * source_model.PAGE_SIZE))
@@ -382,9 +382,15 @@ class ImageListViewPreloadMixin:
                     self._drag_release_anchor_idx = max(0, min(total_items - 1, int(release_fraction * (total_items - 1))))
                     self._stick_to_edge = None
                 if strategy == "windowed_strict":
-                    # Strict mode uses explicit page ownership from release fraction/target.
-                    # Edge stickiness here causes repeated snap-backs when domain changes.
-                    self._stick_to_edge = None
+                    # Preserve explicit edge intent in strict mode so zoom/domain
+                    # recalculations keep ownership at real dataset edges.
+                    # Only clear when release wasn't an edge-intent gesture.
+                    if bottom_intent:
+                        self._stick_to_edge = "bottom"
+                    elif top_intent:
+                        self._stick_to_edge = "top"
+                    else:
+                        self._stick_to_edge = None
                 self._drag_release_anchor_active = True
                 # Strict mode needs a longer lock to survive post-release relayout/page-load bursts.
                 self._drag_release_anchor_until = time.time() + (8.0 if self._use_local_anchor_masonry(source_model) else 8.0)

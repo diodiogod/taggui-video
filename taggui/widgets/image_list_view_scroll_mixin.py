@@ -113,6 +113,52 @@ class ImageListViewScrollMixin:
             sb = self.verticalScrollBar()
             canonical = self._strict_canonical_domain_max(source_model)
             if sb.maximum() != canonical:
+                old_pos = max(0, int(sb.sliderPosition()))
+                old_max_raw = int(sb.maximum())
+                old_max_v = max(1, old_max_raw)
+                was_at_top = old_pos <= 2
+                was_at_bottom = old_max_raw > 0 and old_pos >= old_max_raw - 2
+                tail_target = None
+                bottom_intent = False
+                top_intent = False
+                try:
+                    total_items = int(getattr(source_model, '_total_count', 0) or 0)
+                    page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                    last_page = max(0, (total_items - 1) // max(1, page_size))
+                    cur_page = getattr(self, '_current_page', None)
+                    release_lock_page = getattr(self, '_release_page_lock_page', None)
+                    bottom_intent = (
+                        was_at_bottom
+                        or getattr(self, '_stick_to_edge', None) == "bottom"
+                        or (
+                            isinstance(release_lock_page, int)
+                            and release_lock_page >= last_page
+                        )
+                        or (
+                            isinstance(cur_page, int)
+                            and cur_page >= last_page
+                            and old_max_raw > 0
+                            and old_pos >= int(old_max_v * 0.80)
+                        )
+                    )
+                    top_intent = (
+                        was_at_top
+                        or getattr(self, '_stick_to_edge', None) == "top"
+                    )
+                    if total_items > 0 and self._masonry_items:
+                        tail_idx = total_items - 1
+                        tail_item = None
+                        for it in self._masonry_items:
+                            if int(it.get('index', -1)) == tail_idx:
+                                tail_item = it
+                                break
+                        if tail_item is not None:
+                            tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
+                            tail_target = max(0, min(tail_bottom - max(1, self.viewport().height()), canonical))
+                except Exception:
+                    bottom_intent = was_at_bottom
+                    top_intent = was_at_top
+                    tail_target = None
                 restore_target = (
                     self._get_restore_anchor_scroll_value(source_model, canonical)
                     if hasattr(self, '_get_restore_anchor_scroll_value')
@@ -120,9 +166,16 @@ class ImageListViewScrollMixin:
                 )
                 if restore_target is not None:
                     new_pos = int(restore_target)
+                elif bottom_intent:
+                    # Don't force canonical max; it can be below/above real tail
+                    # during avg-height transitions and causes void-jumps.
+                    if tail_target is not None:
+                        new_pos = int(tail_target)
+                    else:
+                        new_pos = max(0, min(old_pos, canonical))
+                elif top_intent:
+                    new_pos = 0
                 else:
-                    old_pos = max(0, int(sb.sliderPosition()))
-                    old_max_v = max(1, int(sb.maximum()))
                     ratio = max(0.0, min(1.0, old_pos / old_max_v))
                     new_pos = int(round(ratio * canonical))
                 prev_block = sb.blockSignals(True)
@@ -139,6 +192,41 @@ class ImageListViewScrollMixin:
 
         total_pages = (source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE
         last_page = max(0, total_pages - 1)
+        prev_stick = getattr(self, '_stick_to_edge', None)
+        if strict_mode and (not self._scrollbar_dragging) and (not self._drag_preview_mode):
+            if scroll_max > 0 and scroll_offset >= scroll_max - 2:
+                self._stick_to_edge = "bottom"
+            elif scroll_offset <= 2:
+                self._stick_to_edge = "top"
+        # Strict tail clamp: when the real last item is materialized, avoid
+        # entering void below it (canonical domain can be larger than content).
+        if strict_mode and (not self._scrollbar_dragging) and (not self._drag_preview_mode):
+            try:
+                total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
+                if total_items_i > 0 and self._masonry_items:
+                    tail_idx = total_items_i - 1
+                    tail_item = None
+                    for it in self._masonry_items:
+                        if int(it.get('index', -1)) == tail_idx:
+                            tail_item = it
+                            break
+                    if tail_item is not None:
+                        tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
+                        tail_scroll = max(0, tail_bottom - max(1, self.viewport().height()))
+                        sb = self.verticalScrollBar()
+                        if scroll_offset > tail_scroll + 8 and getattr(self, '_stick_to_edge', None) != "bottom":
+                            prev_block = sb.blockSignals(True)
+                            try:
+                                sb.setValue(max(0, min(tail_scroll, sb.maximum())))
+                            finally:
+                                sb.blockSignals(prev_block)
+                            scroll_offset = sb.value()
+                            self._stick_to_edge = "bottom"
+                        if scroll_offset >= max(0, tail_scroll - 2):
+                            self._stick_to_edge = "bottom"
+                            self._current_page = last_page
+            except Exception:
+                pass
         edge_snap_active = (not strict_mode) and self._pending_edge_snap is not None and current_time < getattr(self, '_pending_edge_snap_until', 0.0)
         anchor_active = (
             getattr(self, '_drag_release_anchor_active', False)
@@ -192,18 +280,34 @@ class ImageListViewScrollMixin:
                     source_model._total_count, source_model.PAGE_SIZE, scroll_offset, scroll_max, use_slider=True
                 )
             current_page = self._drag_target_page
-        if release_lock_active:
-            current_page = max(0, min(last_page, int(self._release_page_lock_page)))
-        elif stick_top:
+        if stick_top:
             current_page = 0
             if scroll_offset > 0:
                 self.verticalScrollBar().setValue(0)
                 scroll_offset = 0
         elif stick_bottom:
             current_page = last_page
-            if scroll_max > 0 and scroll_offset < scroll_max:
-                self.verticalScrollBar().setValue(scroll_max)
-                scroll_offset = scroll_max
+            target_bottom_scroll = max(0, min(scroll_offset, scroll_max))
+            if strict_mode and self._masonry_items:
+                try:
+                    total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
+                    if total_items_i > 0:
+                        tail_idx = total_items_i - 1
+                        tail_item = None
+                        for it in self._masonry_items:
+                            if int(it.get('index', -1)) == tail_idx:
+                                tail_item = it
+                                break
+                        if tail_item is not None:
+                            tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
+                            target_bottom_scroll = max(0, min(tail_bottom - max(1, self.viewport().height()), scroll_max))
+                except Exception:
+                    target_bottom_scroll = max(0, min(scroll_offset, scroll_max))
+            if scroll_offset != target_bottom_scroll:
+                self.verticalScrollBar().setValue(target_bottom_scroll)
+                scroll_offset = target_bottom_scroll
+        elif release_lock_active:
+            current_page = max(0, min(last_page, int(self._release_page_lock_page)))
         elif anchor_active:
             current_page = max(0, min(last_page, int(self._drag_release_anchor_idx // source_model.PAGE_SIZE)))
         elif edge_snap_active and self._pending_edge_snap == "top":
@@ -216,9 +320,31 @@ class ImageListViewScrollMixin:
             if scroll_max > 0 and scroll_offset < scroll_max:
                 self.verticalScrollBar().setValue(scroll_max)
                 scroll_offset = scroll_max
+        # Prefer viewport-visible masonry ownership in both strict/non-strict modes.
+        # Scrollbar-ratio ownership drifts when canonical domain != real tail height.
+        if current_page is None and (not dragging_mode) and self.use_masonry and self._masonry_items:
+            viewport_h = self.viewport().height()
+            viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_h)
+            visible_items = self._get_masonry_visible_items(viewport_rect)
+            real_items = [it for it in visible_items if it.get('index', -1) >= 0]
+            if real_items:
+                total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
+                tail_idx = total_items_i - 1 if total_items_i > 0 else -1
+                head_idx = 0
+                indices = [int(it.get('index', -1)) for it in real_items]
+                if tail_idx >= 0 and tail_idx in indices:
+                    current_page = last_page
+                    self._stick_to_edge = "bottom"
+                elif head_idx in indices:
+                    current_page = 0
+                    self._stick_to_edge = "top"
+                else:
+                    top_idx = min(real_items, key=lambda x: x['rect'].y())['index']
+                    current_page = max(0, min(last_page, top_idx // source_model.PAGE_SIZE))
+
         if current_page is None and strict_mode:
             current_page = self._strict_page_from_position(scroll_offset, source_model)
-        # Local-anchor mode: page ownership comes from scrollbar fraction, not masonry visibility.
+        # Local-anchor mode fallback: page ownership from scrollbar fraction.
         if current_page is None and local_anchor_mode:
             if dragging_mode:
                 baseline_max = max(1, int(getattr(self, '_drag_scroll_max_baseline', scroll_max)))
@@ -227,14 +353,6 @@ class ImageListViewScrollMixin:
             else:
                 frac = max(0.0, min(1.0, (scroll_offset / scroll_max) if scroll_max > 0 else 0.0))
             current_page = max(0, min(last_page, int(round(frac * last_page))))
-        if (not strict_mode) and current_page is None and (not dragging_mode) and self.use_masonry and self._masonry_items:
-            viewport_h = self.viewport().height()
-            viewport_rect = QRect(0, scroll_offset, self.viewport().width(), viewport_h)
-            visible_items = self._get_masonry_visible_items(viewport_rect)
-            real_items = [it for it in visible_items if it.get('index', -1) >= 0]
-            if real_items:
-                top_idx = min(real_items, key=lambda x: x['rect'].y())['index']
-                current_page = max(0, min(last_page, top_idx // source_model.PAGE_SIZE))
 
         # Edge clamp must win at top/bottom only when NOT actively dragging.
         # During strict drag, transient scrollbar range changes can fake edge states.
@@ -275,6 +393,19 @@ class ImageListViewScrollMixin:
                 estimated_item_idx = int(scroll_fraction * source_model._total_count)
                 current_page = estimated_item_idx // source_model.PAGE_SIZE
                 current_page = max(0, min(last_page, current_page))
+        if strict_mode and (not dragging_mode):
+            if current_page >= last_page:
+                self._stick_to_edge = "bottom"
+            elif current_page <= 0 and scroll_offset <= 2:
+                self._stick_to_edge = "top"
+        if prev_stick != getattr(self, '_stick_to_edge', None):
+            self._log_flow(
+                "STRICT",
+                f"Edge lock {prev_stick} -> {getattr(self, '_stick_to_edge', None)} "
+                f"page={current_page} scroll={scroll_offset}/{scroll_max}",
+                throttle_key="strict_edge_lock_change",
+                every_s=0.1,
+            )
         prev_page = getattr(self, "_current_page", None)
         self._current_page = current_page
         if strict_mode and prev_page != current_page and (not dragging_mode):

@@ -117,11 +117,33 @@ class ImageListViewCalculationMixin:
                 )
                 wait_count = getattr(self, "_strict_wait_count", 0) + 1
                 self._strict_wait_count = wait_count
+                snapped_to_loaded_page = False
                 if wait_count > 20 and not resize_anchor_live:
                     loaded_list = sorted(loaded_pages_now) if loaded_pages_now else []
-                    if loaded_list:
+                    sb = self.verticalScrollBar()
+                    sb_val = int(sb.value())
+                    sb_max = int(sb.maximum())
+                    last_page = max(0, int(ctx.max_page) - 1)
+                    at_top_edge = (
+                        sb_val <= 2
+                        or int(ctx.current_page) <= 0
+                        or getattr(self, '_stick_to_edge', None) == "top"
+                    )
+                    at_bottom_edge = (
+                        (sb_max > 0 and sb_val >= sb_max - 2)
+                        or int(ctx.current_page) >= last_page
+                        or getattr(self, '_stick_to_edge', None) == "bottom"
+                    )
+                    release_lock_live = (
+                        getattr(self, '_release_page_lock_page', None) is not None
+                        and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
+                    )
+                    restore_lock_live = getattr(self, '_restore_target_page', None) is not None
+                    # Avoid snap-back teleports while user is intentionally at edges
+                    # or when restore/release lock is steering ownership.
+                    if loaded_list and not (at_top_edge or at_bottom_edge or release_lock_live or restore_lock_live):
                         old_page = int(ctx.current_page)
-                        ctx.current_page = loaded_list[len(loaded_list) // 2]
+                        ctx.current_page = min(loaded_list, key=lambda p: abs(int(p) - old_page))
                         ctx.window_start_page = max(0, ctx.current_page - ctx.window_buffer)
                         ctx.window_end_page = min(ctx.max_page - 1, ctx.current_page + ctx.window_buffer)
                         ctx.min_idx = ctx.window_start_page * ctx.page_size
@@ -132,7 +154,11 @@ class ImageListViewCalculationMixin:
                             f"loaded: {loaded_list[0]}-{loaded_list[-1]})"
                         )
                         self._strict_wait_count = 0
-                else:
+                        snapped_to_loaded_page = True
+                    else:
+                        # Keep retrying the target edge page instead of teleporting.
+                        self._strict_wait_count = min(wait_count, 80)
+                if not snapped_to_loaded_page:
                     if wait_count > 40:
                         # Keep waiting while resize anchor is active; avoid snapping
                         # to a different loaded page and losing viewport context.
