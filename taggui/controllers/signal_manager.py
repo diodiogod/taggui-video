@@ -107,6 +107,11 @@ class SignalManager:
             try:
                 if self.main_window._should_suppress_transient_restore_index(current):
                     return
+                # Post-click freeze: ignore recalc-driven selection mutations.
+                import time as _t
+                view = self.main_window.image_list.list_view
+                if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
+                    return
                 if current.isValid():
                     image_viewer.load_image(current)
             except Exception as e:
@@ -115,8 +120,13 @@ class SignalManager:
                 traceback.print_exc()
 
         image_list_selection_model.currentChanged.connect(safe_load_image)
-        image_list_selection_model.currentChanged.connect(
-            image_tags_editor.load_image_tags)
+        def safe_load_tags(current, previous):
+            import time as _t
+            view = self.main_window.image_list.list_view
+            if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
+                return
+            image_tags_editor.load_image_tags(current)
+        image_list_selection_model.currentChanged.connect(safe_load_tags)
         image_list_model.modelReset.connect(self._update_tag_counts)
         image_list_model.enrichment_complete.connect(self._update_tag_counts)
         image_list_model.dataChanged.connect(lambda *args: self._update_tag_counts())

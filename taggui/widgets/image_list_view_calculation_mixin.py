@@ -280,10 +280,13 @@ class ImageListViewCalculationMixin:
         self._masonry_calculating = True
         self._masonry_start_time = time.time()
 
-        # Full recalc invalidates incremental cache (will be rebuilt on completion).
-        if hasattr(self, '_get_masonry_incremental_service'):
-            signal = getattr(self, '_last_masonry_signal', 'unknown')
-            self._get_masonry_incremental_service().invalidate(f"full_recalc:{signal}")
+        # NOTE: Do NOT invalidate the incremental cache here.  The cache will
+        # be rebuilt from the full result on completion (completion_service line
+        # ~367).  Keeping the old cache valid during the async computation
+        # window allows _on_pages_updated to use the "no new pages → skip"
+        # fast path, preventing cascading recalcs that cause layout drift
+        # after zoom/resize.
+        # (Previous code called invalidate() here, which broke the fast path.)
 
         if source_model and hasattr(source_model, "_enrichment_paused"):
             source_model._enrichment_paused.set()

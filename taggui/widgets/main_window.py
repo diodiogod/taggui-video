@@ -589,6 +589,14 @@ class MainWindow(QMainWindow):
                             except Exception:
                                 pass
                             return
+                        # User clicked — restore is superseded.
+                        if not getattr(self, '_restore_in_progress', False):
+                            final_done[0] = True
+                            try:
+                                view.layout_ready.disconnect(do_final_scroll)
+                            except Exception:
+                                pass
+                            return
                         final_attempts[0] += 1
 
                         # Rebind current selection by GLOBAL rank (not stale local row).
@@ -893,6 +901,11 @@ class MainWindow(QMainWindow):
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index and path of the currently selected image."""
         if self._should_suppress_transient_restore_index(proxy_image_index):
+            return
+        # Post-click freeze: ignore recalc-driven selection mutations.
+        import time as _t
+        view = self.image_list.list_view
+        if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
             return
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None

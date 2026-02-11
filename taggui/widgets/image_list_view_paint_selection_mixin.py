@@ -132,8 +132,20 @@ class ImageListViewPaintSelectionMixin:
                     if strict_mode:
                         sb = self.verticalScrollBar()
                         keep_max = self._strict_canonical_domain_max(source_model)
+                        _click_freeze = (
+                            time.time()
+                            < float(getattr(self, '_user_click_selection_frozen_until', 0.0) or 0.0)
+                        )
                         if self._scrollbar_dragging or self._drag_preview_mode:
                             self._restore_strict_drag_domain(sb=sb, source_model=source_model)
+                        elif _click_freeze:
+                            # User recently clicked — update range but keep value.
+                            prev_block = sb.blockSignals(True)
+                            _saved = sb.value()
+                            if sb.maximum() != keep_max:
+                                sb.setRange(0, keep_max)
+                            sb.setValue(max(0, min(_saved, keep_max)))
+                            sb.blockSignals(prev_block)
                         else:
                             prev_block = sb.blockSignals(True)
                             _old_max = max(1, sb.maximum())
@@ -161,9 +173,8 @@ class ImageListViewPaintSelectionMixin:
                                     _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
                                     sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
                             elif _old_max != keep_max and keep_max > 0:
-                                # Ratio-preserving correction when domain changed.
-                                _ratio = _old_val / _old_max
-                                sb.setValue(max(0, min(int(round(_ratio * keep_max)), keep_max)))
+                                # Preserve absolute scroll value (clamped).
+                                sb.setValue(max(0, min(_old_val, keep_max)))
                             elif sb.value() > keep_max:
                                 sb.setValue(keep_max)
                             sb.blockSignals(prev_block)
@@ -172,7 +183,11 @@ class ImageListViewPaintSelectionMixin:
                         self.verticalScrollBar().setValue(max_allowed)
 
                 items_painted = 0
-                # Paint only visible items
+                # Snapshot painted geometry for click hit-testing.
+                # This prevents post-zoom recalc from making clicks map to
+                # wrong items (the click resolves against what was painted).
+                painted_hit_regions = {}
+
                 # Paint only visible items
                 source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
                 is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
@@ -319,7 +334,21 @@ class ImageListViewPaintSelectionMixin:
                         # Debug: show rect for selected items
                         # print(f"[DEBUG] Painted selected item row={item.index}, visual_rect={visual_rect}, original_rect={item.rect}")
 
+                    # Record absolute rect for click hit-testing
+                    painted_hit_regions[item['index']] = QRect(
+                        item['rect'].x(), item['rect'].y(),
+                        item['rect'].width(), item['rect'].height(),
+                    )
                     items_painted += 1
+
+                # Commit painted snapshot so click handler uses it.
+                # Also record the scroll offset used during this paint so the
+                # click handler can convert viewport coords correctly even if
+                # updateGeometries() changed the scroll value since this paint.
+                import time as _time_mod
+                self._painted_hit_regions = painted_hit_regions
+                self._painted_hit_regions_time = _time_mod.time()
+                self._painted_hit_regions_scroll_offset = scroll_offset
 
                 painter.end()
             except Exception as e:
