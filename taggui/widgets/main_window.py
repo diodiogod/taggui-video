@@ -902,6 +902,8 @@ class MainWindow(QMainWindow):
         """Save the index and path of the currently selected image."""
         if self._should_suppress_transient_restore_index(proxy_image_index):
             return
+        if self._should_suppress_transient_drag_selection(proxy_image_index):
+            return
         # Post-click freeze: ignore recalc-driven selection mutations.
         import time as _t
         view = self.image_list.list_view
@@ -954,6 +956,57 @@ class MainWindow(QMainWindow):
             return True
         except Exception:
             return True
+
+    def _proxy_index_to_global_rank(self, proxy_image_index: QModelIndex) -> int:
+        """Map proxy index to stable global rank; returns -1 on failure."""
+        if not proxy_image_index.isValid():
+            return -1
+        try:
+            src_index = self.proxy_image_list_model.mapToSource(proxy_image_index)
+            if not src_index.isValid():
+                return -1
+            mapped = self.image_list_model.get_global_index_for_row(src_index.row())
+            return int(mapped) if isinstance(mapped, int) and mapped >= 0 else -1
+        except Exception:
+            return -1
+
+    def _should_suppress_transient_drag_selection(self, proxy_image_index: QModelIndex) -> bool:
+        """Ignore selection churn caused by buffered page remaps during/after drag jumps."""
+        view = self.image_list.list_view
+        source_model = self.image_list_model
+        if not (
+            view.use_masonry
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+        ):
+            return False
+
+        now = time.time()
+        lock_until = float(getattr(view, '_selected_global_lock_until', 0.0) or 0.0)
+        selected_global = (
+            getattr(view, '_selected_global_lock_value', None)
+            if now < lock_until else
+            getattr(view, '_selected_global_index', None)
+        )
+        if not (isinstance(selected_global, int) and selected_global >= 0):
+            return False
+
+        # Live drag/preview: never treat current-index remaps as user selection changes.
+        if getattr(view, '_scrollbar_dragging', False) or getattr(view, '_drag_preview_mode', False):
+            return True
+
+        release_active = now < float(getattr(view, '_drag_release_anchor_until', 0.0) or 0.0)
+        loading_pages = bool(getattr(source_model, '_loading_pages', set()))
+        if not (release_active or loading_pages):
+            return False
+
+        mapped = self._proxy_index_to_global_rank(proxy_image_index)
+        if mapped < 0:
+            return True
+
+        # During drag-release stabilization, only accept current changes that still
+        # point to the stable selected global.
+        return int(mapped) != int(selected_global)
 
 
     @Slot(float)

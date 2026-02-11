@@ -250,6 +250,11 @@ class ImageListViewPreloadMixin:
         """Called when user starts dragging scrollbar."""
         import time
         self._scrollbar_dragging = True
+        # Drag-jump must not change selected identity unless user clicks.
+        locked = getattr(self, '_selected_global_index', None)
+        self._selected_global_lock_value = int(locked) if isinstance(locked, int) and locked >= 0 else None
+        # Keep lock long-lived; explicit click/keyboard re-anchor releases it.
+        self._selected_global_lock_until = time.time() + 120.0
         # Cancel any running enrichment so it restarts scoped to the new location
         source_model_pre = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
         if source_model_pre and hasattr(source_model_pre, '_enrichment_cancelled'):
@@ -318,6 +323,11 @@ class ImageListViewPreloadMixin:
         """Called when user releases scrollbar."""
         import time
         self._scrollbar_dragging = False
+        # Keep lock through post-release relayout/page-load bursts.
+        self._selected_global_lock_until = max(
+            float(getattr(self, '_selected_global_lock_until', 0.0) or 0.0),
+            time.time() + 120.0,
+        )
         self._last_stable_scroll_value = self.verticalScrollBar().value()
         sb = self.verticalScrollBar()
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()

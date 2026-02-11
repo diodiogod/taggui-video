@@ -178,6 +178,8 @@ class ImageListView(
         self._resize_anchor_until = 0.0
         self._skip_next_resize_recalc = False
         self._selected_global_index = None  # Stable identity across buffered row shifts
+        self._selected_global_lock_until = 0.0
+        self._selected_global_lock_value = None
         self._painted_hit_regions = {}  # Snapshot of painted geometry for click hit-testing
         self._painted_hit_regions_time = 0.0
         self._painted_hit_regions_scroll_offset = 0  # Scroll offset when snapshot was captured
@@ -363,6 +365,8 @@ class ImageListView(
         self._restore_target_page = None
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
+        self._selected_global_lock_until = 0.0
+        self._selected_global_lock_value = None
         self._resize_anchor_page = None
         self._resize_anchor_until = 0.0
         self._current_page = 0
@@ -410,6 +414,43 @@ class ImageListView(
                 if proxy_model and hasattr(proxy_model, "sourceModel")
                 else proxy_model
             )
+            # During/after drag-jump, keep stable selected global until a
+            # deliberate user action (click/keyboard navigation) releases it.
+            lock_until = float(getattr(self, '_selected_global_lock_until', 0.0) or 0.0)
+            if _t.time() < lock_until:
+                locked = getattr(self, '_selected_global_lock_value', None)
+                if isinstance(locked, int) and locked >= 0:
+                    self._selected_global_index = int(locked)
+                return
+
+            # While dragging/previewing, currentIndex can transiently point to
+            # stale proxy rows from a different loaded window; keep stable global.
+            if (
+                self.use_masonry
+                and (
+                    getattr(self, '_scrollbar_dragging', False)
+                    or getattr(self, '_drag_preview_mode', False)
+                )
+            ):
+                return
+
+            # If buffered pages are actively loading and the proxy row didn't
+            # actually change, this currentChanged is usually a remap churn signal.
+            loading_pages_nonempty = False
+            if source_model and hasattr(source_model, '_loading_pages'):
+                try:
+                    loading_pages_nonempty = bool(source_model._loading_pages)
+                except Exception:
+                    loading_pages_nonempty = False
+            if (
+                self.use_masonry
+                and loading_pages_nonempty
+                and previous.isValid()
+                and current.isValid()
+                and current.row() == previous.row()
+            ):
+                return
+
             src_idx = (
                 proxy_model.mapToSource(current)
                 if proxy_model and hasattr(proxy_model, "mapToSource")
@@ -422,6 +463,17 @@ class ImageListView(
             else:
                 global_idx = src_idx.row()
             if isinstance(global_idx, int) and global_idx >= 0:
+                # Buffered remap guard: while pages are still loading, ignore
+                # suspicious large jumps that are not explicit user intent.
+                if self.use_masonry and loading_pages_nonempty and source_model and hasattr(source_model, 'PAGE_SIZE'):
+                    try:
+                        prev_global = getattr(self, '_selected_global_index', None)
+                        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                        if isinstance(prev_global, int) and prev_global >= 0:
+                            if abs(int(global_idx) - int(prev_global)) > max(1000, page_size * 2):
+                                return
+                    except Exception:
+                        pass
                 self._selected_global_index = global_idx
         except Exception:
             pass

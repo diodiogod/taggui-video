@@ -268,6 +268,72 @@ class ImageListViewStrategyMixin:
         # Keep global target tracking, but avoid forcing current-index mutation here.
         return False
 
+    def _enforce_locked_selected_global(self, source_model=None) -> bool:
+        """While drag-jump lock is active, keep current index bound to locked global item."""
+        now = time.time()
+        lock_until = float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0)
+        if now >= lock_until:
+            return False
+        if getattr(self, "_scrollbar_dragging", False) or getattr(self, "_drag_preview_mode", False):
+            return False
+
+        target_global = getattr(self, "_selected_global_lock_value", None)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            target_global = getattr(self, "_selected_global_index", None)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            return False
+
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if not source_model or not hasattr(source_model, "get_loaded_row_for_global_index"):
+            return False
+
+        # Request the target page eagerly if not loaded yet.
+        try:
+            if hasattr(source_model, "ensure_pages_for_range"):
+                source_model.ensure_pages_for_range(int(target_global), int(target_global) + 1)
+        except Exception:
+            pass
+
+        loaded_row = source_model.get_loaded_row_for_global_index(int(target_global))
+        if loaded_row < 0:
+            return False
+
+        src_idx = source_model.index(loaded_row, 0)
+        proxy_model = self.model()
+        proxy_idx = (
+            proxy_model.mapFromSource(src_idx)
+            if proxy_model and hasattr(proxy_model, "mapFromSource")
+            else src_idx
+        )
+        if not proxy_idx.isValid():
+            return False
+
+        try:
+            cur = self.currentIndex()
+            if cur.isValid() and proxy_model and hasattr(proxy_model, "mapToSource"):
+                cur_src = proxy_model.mapToSource(cur)
+                if cur_src.isValid() and hasattr(source_model, "get_global_index_for_row"):
+                    cur_global = source_model.get_global_index_for_row(cur_src.row())
+                    if isinstance(cur_global, int) and int(cur_global) == int(target_global):
+                        self._selected_global_index = int(target_global)
+                        return False
+        except Exception:
+            pass
+
+        sel_model = self.selectionModel()
+        if sel_model is not None:
+            sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        else:
+            self.setCurrentIndex(proxy_idx)
+        try:
+            self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+        except Exception:
+            pass
+        self._selected_global_index = int(target_global)
+        return True
+
     def _schedule_rebind_current_index_to_selected_global(self):
         """Queue a single rebind attempt on the next event-loop tick."""
         return
@@ -769,6 +835,13 @@ class ImageListViewStrategyMixin:
             self._recalculate_masonry_if_needed("pages_updated")
             self.viewport().update()
             return
+
+        # During drag-jump lock, keep current selection identity pinned to the
+        # locked global item despite buffered row remaps.
+        try:
+            self._enforce_locked_selected_global(source_model)
+        except Exception:
+            pass
 
         # In buffered mode, source rows can shift when pages are inserted.
         # Queue rebind by global id to keep list/viewer aligned safely.
