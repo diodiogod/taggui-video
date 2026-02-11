@@ -518,6 +518,24 @@ class ImageListViewGeometryMixin:
             # print(f"[TEMP_DEBUG] UpdateGeom: CorrectMax={correct_max}, OldMax={old_max}")
 
             if strict_mode:
+                def _strict_tail_scroll_target():
+                    try:
+                        total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
+                        if total_items_i <= 0 or not self._masonry_items:
+                            return None
+                        tail_idx = total_items_i - 1
+                        tail_item = None
+                        for _it in self._masonry_items:
+                            if int(_it.get('index', -1)) == tail_idx:
+                                tail_item = _it
+                                break
+                        if tail_item is None:
+                            return None
+                        tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
+                        return max(0, tail_bottom - max(1, self.viewport().height()))
+                    except Exception:
+                        return None
+
                 # Block signals through the entire strict correction to prevent
                 # _on_scroll_value_changed from recording transient values.
                 saved_val = self.verticalScrollBar().value()
@@ -535,7 +553,16 @@ class ImageListViewGeometryMixin:
                     elif _click_scroll_freeze:
                         # User recently clicked — update range but keep value.
                         self.verticalScrollBar().setRange(0, keep_max)
-                        self.verticalScrollBar().setValue(max(0, min(saved_val, keep_max)))
+                        if getattr(self, '_stick_to_edge', None) == "bottom":
+                            _tail_target = _strict_tail_scroll_target()
+                            if _tail_target is not None:
+                                self.verticalScrollBar().setValue(max(0, min(_tail_target, keep_max)))
+                            else:
+                                self.verticalScrollBar().setValue(max(0, min(saved_val, keep_max)))
+                        elif getattr(self, '_stick_to_edge', None) == "top":
+                            self.verticalScrollBar().setValue(0)
+                        else:
+                            self.verticalScrollBar().setValue(max(0, min(saved_val, keep_max)))
                     else:
                         self.verticalScrollBar().setRange(0, keep_max)
                         # Re-anchor to locked page so thumb stays put when domain grows.
@@ -544,20 +571,30 @@ class ImageListViewGeometryMixin:
                             _rl_page is not None
                             and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
                         )
+                        _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                        _ti = int(getattr(source_model, '_total_count', 0) or 0)
+                        _last_page = max(0, (_ti - 1) // max(1, _ps)) if _ti > 0 else 0
                         if _rl_live and keep_max > 0:
-                            _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                            _lock_idx = int(_rl_page) * _ps
-                            _lock_it = None
-                            for _it in self._masonry_items:
-                                if _it.get('index', -1) >= _lock_idx:
-                                    _lock_it = _it
-                                    break
-                            if _lock_it is not None:
-                                restored_val = max(0, min(int(_lock_it['y']), keep_max))
+                            if getattr(self, '_stick_to_edge', None) == "bottom" or int(_rl_page) >= _last_page:
+                                _tail_target = _strict_tail_scroll_target()
+                                if _tail_target is not None:
+                                    restored_val = max(0, min(_tail_target, keep_max))
+                                else:
+                                    restored_val = keep_max
+                            elif getattr(self, '_stick_to_edge', None) == "top":
+                                restored_val = 0
                             else:
-                                _ti = int(getattr(source_model, '_total_count', 0) or 0)
-                                _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
-                                restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
+                                _lock_idx = int(_rl_page) * _ps
+                                _lock_it = None
+                                for _it in self._masonry_items:
+                                    if _it.get('index', -1) >= _lock_idx:
+                                        _lock_it = _it
+                                        break
+                                if _lock_it is not None:
+                                    restored_val = max(0, min(int(_lock_it['y']), keep_max))
+                                else:
+                                    _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
+                                    restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
                         else:
                             restore_target = (
                                 self._get_restore_anchor_scroll_value(source_model, keep_max)
@@ -566,6 +603,14 @@ class ImageListViewGeometryMixin:
                             )
                             if restore_target is not None:
                                 restored_val = max(0, min(int(restore_target), keep_max))
+                            elif getattr(self, '_stick_to_edge', None) == "bottom":
+                                _tail_target = _strict_tail_scroll_target()
+                                if _tail_target is not None:
+                                    restored_val = max(0, min(_tail_target, keep_max))
+                                else:
+                                    restored_val = keep_max
+                            elif getattr(self, '_stick_to_edge', None) == "top":
+                                restored_val = 0
                             else:
                                 # Preserve absolute scroll value (clamped).
                                 restored_val = max(0, min(saved_val, keep_max))
@@ -597,7 +642,28 @@ class ImageListViewGeometryMixin:
 
             # Enforce explicit edge lock even when range didn't change.
             if getattr(self, '_stick_to_edge', None) == "bottom":
-                self.verticalScrollBar().setValue(max(0, self.verticalScrollBar().maximum()))
+                if strict_mode:
+                    try:
+                        _tail_target = None
+                        _ti = int(getattr(source_model, '_total_count', 0) or 0)
+                        if _ti > 0 and self._masonry_items:
+                            _tail_idx = _ti - 1
+                            _tail_item = None
+                            for _it in self._masonry_items:
+                                if int(_it.get('index', -1)) == _tail_idx:
+                                    _tail_item = _it
+                                    break
+                            if _tail_item is not None:
+                                _tail_bottom = int(_tail_item.get('y', 0)) + int(_tail_item.get('height', 0))
+                                _tail_target = max(0, _tail_bottom - max(1, self.viewport().height()))
+                        if _tail_target is not None:
+                            self.verticalScrollBar().setValue(max(0, min(_tail_target, self.verticalScrollBar().maximum())))
+                        else:
+                            self.verticalScrollBar().setValue(max(0, self.verticalScrollBar().maximum()))
+                    except Exception:
+                        self.verticalScrollBar().setValue(max(0, self.verticalScrollBar().maximum()))
+                else:
+                    self.verticalScrollBar().setValue(max(0, self.verticalScrollBar().maximum()))
             elif getattr(self, '_stick_to_edge', None) == "top":
                 self.verticalScrollBar().setValue(0)
         else:

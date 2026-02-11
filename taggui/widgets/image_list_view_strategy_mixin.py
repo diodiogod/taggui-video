@@ -40,6 +40,22 @@ class ImageListViewStrategyMixin:
         until = time.time() + max(0.2, float(hold_s))
         self._resize_anchor_page = anchor_page
         self._resize_anchor_until = until
+        try:
+            total_items = int(getattr(source_model, '_total_count', 0) or 0)
+            last_page = max(0, (total_items - 1) // max(1, page_size))
+            sb = self.verticalScrollBar()
+            sb_val = int(sb.value())
+            sb_max = int(sb.maximum())
+            near_bottom = sb_max > 0 and sb_val >= int(sb_max * 0.80)
+            near_top = sb_val <= 2
+            current_page = int(getattr(self, '_current_page', 0) or 0)
+            # Preserve edge intent through zoom/resize relayout.
+            if anchor_page >= last_page and (near_bottom or current_page >= max(0, last_page - 1)):
+                self._stick_to_edge = "bottom"
+            elif anchor_page <= 0 and (near_top or current_page <= 1):
+                self._stick_to_edge = "top"
+        except Exception:
+            pass
         # Do NOT set _release_page_lock here.  That lock snaps scroll to the
         # first masonry item of the page (y≈0 for page 0), which destroys the
         # user's viewport position during zoom.  The resize anchor +
@@ -78,7 +94,14 @@ class ImageListViewStrategyMixin:
                 return
             self._flow_log_last[throttle_key] = now
         ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
-        print(f"[{ts}][TRACE][{component}][{level}] {message}")
+        line = f"[{ts}][TRACE][{component}][{level}] {message}"
+        print(line)
+        # Persist runtime trace for post-mortem without requiring console capture.
+        try:
+            with open("taggui_runtime_trace.log", "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
 
 
     def _use_local_anchor_masonry(self, source_model=None) -> bool:
@@ -323,16 +346,33 @@ class ImageListViewStrategyMixin:
             if getattr(self, '_resize_anchor_page', None) is not None:
                 self._resize_anchor_page = None
                 self._resize_anchor_until = 0.0
+            # User moved after drag-release: release temporary anchor so
+            # ownership follows current scroll immediately (prevents stale
+            # page lock from making tail items unreachable).
+            if getattr(self, '_drag_release_anchor_active', False):
+                self._drag_release_anchor_active = False
+                self._drag_release_anchor_idx = None
+                self._drag_release_anchor_until = 0.0
             # User moved again: clear temporary strict post-release ownership lock.
             if self._use_local_anchor_masonry(source_model):
                 self._release_page_lock_page = None
                 self._release_page_lock_until = 0.0
-            if self._stick_to_edge == "bottom":
-                if max_v > 0 and value < max_v - 200:
-                    self._stick_to_edge = None
-            elif self._stick_to_edge == "top":
-                if value > 200:
-                    self._stick_to_edge = None
+                # Persist explicit edge intent while user is actively scrolling.
+                # This prevents strict-domain recalcs from dropping ownership
+                # away from the dataset tail during zoom/resize bursts.
+                try:
+                    total_items = int(getattr(source_model, '_total_count', 0) or 0)
+                    page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                    if total_items > 0 and page_size > 0:
+                        last_page = max(0, (total_items - 1) // page_size)
+                        if max_v > 0 and value >= max_v - 2:
+                            self._stick_to_edge = "bottom"
+                            self._current_page = last_page
+                        elif value <= 2:
+                            self._stick_to_edge = "top"
+                            self._current_page = 0
+                except Exception:
+                    pass
 
         # Only record if scrollbar is "healthy" (not collapsed)
         # If internal height is huge (22M) but scrollbar max is tiny (195k), we are collapsed.

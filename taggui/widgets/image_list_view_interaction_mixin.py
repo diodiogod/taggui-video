@@ -599,14 +599,6 @@ class ImageListViewInteractionMixin:
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
-        # User intent override: if user wheels away from a sticky edge, release it.
-        if self.use_masonry:
-            delta_dir = event.angleDelta().y()
-            if delta_dir > 0 and getattr(self, "_stick_to_edge", None) == "bottom":
-                self._stick_to_edge = None
-            elif delta_dir < 0 and getattr(self, "_stick_to_edge", None) == "top":
-                self._stick_to_edge = None
-
         if event.modifiers() == Qt.ControlModifier:
             import time
             # Ctrl+wheel can arrive without keyboard focus; keep arrows working after zoom.
@@ -655,6 +647,14 @@ class ImageListViewInteractionMixin:
 
             event.accept()
             return
+
+        # Non-zoom wheel: if user wheels away from a sticky edge, release it.
+        if self.use_masonry:
+            delta_dir = event.angleDelta().y()
+            if delta_dir > 0 and getattr(self, "_stick_to_edge", None) == "bottom":
+                self._stick_to_edge = None
+            elif delta_dir < 0 and getattr(self, "_stick_to_edge", None) == "top":
+                self._stick_to_edge = None
 
         # Mark as mouse scrolling and restart timer (for pagination preloading)
         if not self._mouse_scrolling:
