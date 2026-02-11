@@ -1,4 +1,5 @@
 import time
+import hashlib
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
@@ -86,6 +87,10 @@ class MainWindow(QMainWindow):
 
         self.image_list = ImageList(self.proxy_image_list_model,
                                     tag_separator, image_list_image_width)
+        self.image_list.sort_combo_box.currentTextChanged.connect(
+            self._on_folder_sort_pref_changed)
+        self.image_list.media_type_combo_box.currentTextChanged.connect(
+            self._on_folder_media_pref_changed)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self.image_list)
 
@@ -391,6 +396,92 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(base_title)
 
+    def _folder_view_settings_prefix(self, path: Path | None = None) -> str:
+        """Stable per-folder key prefix for UI view preferences."""
+        folder_path = (path or self.directory_path)
+        if folder_path is None:
+            return ""
+        try:
+            normalized = str(folder_path.resolve()).replace("\\", "/").lower()
+        except Exception:
+            normalized = str(folder_path).replace("\\", "/").lower()
+        digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:20]
+        return f"folder_view_prefs/{digest}"
+
+    def _get_folder_view_preferences(self, path: Path) -> tuple[str, str]:
+        """Load folder-specific sort/media preferences."""
+        prefix = self._folder_view_settings_prefix(path)
+        if not prefix:
+            return "", ""
+        sort_value = str(settings.value(f"{prefix}/sort", "", type=str) or "").strip()
+        media_value = str(settings.value(f"{prefix}/media_type", "", type=str) or "").strip()
+        if media_value not in {"All", "Images", "Videos"}:
+            media_value = ""
+        return sort_value, media_value
+
+    def _save_folder_view_preferences(self, *,
+                                      sort_value: str | None = None,
+                                      media_value: str | None = None):
+        """Persist sort/media choices for the currently loaded folder."""
+        if self.directory_path is None:
+            return
+        prefix = self._folder_view_settings_prefix(self.directory_path)
+        if not prefix:
+            return
+        sort_text = str(sort_value if sort_value is not None else self.image_list.sort_combo_box.currentText())
+        media_text = str(media_value if media_value is not None else self.image_list.media_type_combo_box.currentText())
+        settings.setValue(f"{prefix}/sort", sort_text)
+        settings.setValue(f"{prefix}/media_type", media_text)
+        settings.setValue(f"{prefix}/path", str(self.directory_path))
+
+    def _save_folder_last_selected_path(self, image_path: Path):
+        """Persist last selected image path for current folder."""
+        if self.directory_path is None:
+            return
+        prefix = self._folder_view_settings_prefix(self.directory_path)
+        if not prefix:
+            return
+        settings.setValue(f"{prefix}/last_selected_path", str(image_path))
+
+    def _get_folder_last_selected_path(self, path: Path) -> str | None:
+        """Load folder-specific last selected image path if present."""
+        prefix = self._folder_view_settings_prefix(path)
+        if not prefix:
+            return None
+        value = str(settings.value(f"{prefix}/last_selected_path", "", type=str) or "").strip()
+        return value or None
+
+    def _apply_folder_view_preferences(self, path: Path):
+        """Apply folder-specific sort/media values to combo boxes."""
+        sort_pref, media_pref = self._get_folder_view_preferences(path)
+        sort_combo = self.image_list.sort_combo_box
+        media_combo = self.image_list.media_type_combo_box
+
+        if sort_pref:
+            valid_sorts = {sort_combo.itemText(i) for i in range(sort_combo.count())}
+            if sort_pref in valid_sorts and sort_combo.currentText() != sort_pref:
+                prev = sort_combo.blockSignals(True)
+                try:
+                    sort_combo.setCurrentText(sort_pref)
+                finally:
+                    sort_combo.blockSignals(prev)
+
+        if media_pref:
+            if media_pref in {"All", "Images", "Videos"} and media_combo.currentText() != media_pref:
+                prev = media_combo.blockSignals(True)
+                try:
+                    media_combo.setCurrentText(media_pref)
+                finally:
+                    media_combo.blockSignals(prev)
+
+    @Slot(str)
+    def _on_folder_sort_pref_changed(self, sort_text: str):
+        self._save_folder_view_preferences(sort_value=sort_text)
+
+    @Slot(str)
+    def _on_folder_media_pref_changed(self, media_text: str):
+        self._save_folder_view_preferences(media_value=media_text)
+
     @Slot()
     def zoom(self, factor):
         toolbar_mgr = self.toolbar_manager
@@ -418,6 +509,16 @@ class MainWindow(QMainWindow):
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
 
+        # Restore folder-specific sort/media preferences, if present.
+        self._apply_folder_view_preferences(self.directory_path)
+
+        # Restore folder-specific last selected image when caller did not
+        # explicitly request a selection.
+        if not select_path:
+            folder_saved_path = self._get_folder_last_selected_path(self.directory_path)
+            if folder_saved_path:
+                select_path = folder_saved_path
+
         # Track unfiltered total right after load to detect media-filter empty states.
         source_total_before_media_filter = (
             int(getattr(self.image_list_model, '_total_count', 0) or 0)
@@ -425,24 +526,25 @@ class MainWindow(QMainWindow):
             else int(self.image_list_model.rowCount())
         )
 
-        # Apply persisted media type filter (All/Images/Videos).
+        # Apply persisted media type filter (All/Images/Videos) for this folder.
         # Must call delayed_filter() directly — clear() above won't fire
         # textChanged if the field was already empty (e.g. on startup).
         media_type = self.image_list.media_type_combo_box.currentText()
-        if media_type != 'All':
-            self.proxy_image_list_model.set_media_type_filter(media_type)
-            self.delayed_filter()
-            # Folder-load fallback only: if persisted media filter empties results
-            # on a non-empty folder, reset to All to avoid "looks stuck" confusion.
-            if (source_total_before_media_filter > 0
-                    and self.proxy_image_list_model.rowCount() == 0):
-                print(f"[MEDIA] Persisted filter '{media_type}' returned 0 items on folder load; resetting to 'All'")
-                self.image_list.media_type_combo_box.setCurrentText('All')
+        self.proxy_image_list_model.set_media_type_filter(media_type)
+        self.delayed_filter()
+        # Folder-load fallback only: if persisted media filter empties results
+        # on a non-empty folder, reset to All to avoid "looks stuck" confusion.
+        if (media_type != 'All'
+                and source_total_before_media_filter > 0
+                and self.proxy_image_list_model.rowCount() == 0):
+            print(f"[MEDIA] Persisted filter '{media_type}' returned 0 items on folder load; resetting to 'All'")
+            self.image_list.media_type_combo_box.setCurrentText('All')
 
         # Apply saved sort order after loading
         saved_sort = self.image_list.sort_combo_box.currentText()
         if saved_sort:
             self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
+        self._save_folder_view_preferences()
             
         # Try to restore selection by path (more robust)
         self._restore_global_rank = -1
@@ -927,6 +1029,7 @@ class MainWindow(QMainWindow):
                     # Access helper method for path (works for Normal & Paginated)
                     img = self.image_list_model.get_image_at_row(source_index.row())
                     if img:
+                        self._save_folder_last_selected_path(img.path)
                         settings.setValue('last_selected_path', str(img.path))
                         print(f"[SAVE] Selected path: {img.path.name}")
                         self._update_main_window_title(img.path.name)
@@ -1100,16 +1203,16 @@ class MainWindow(QMainWindow):
             image_index = settings.value('image_index', type=int)
         else:
             image_index = 0
-            
-        select_path = None
-        if settings.contains('last_selected_path'):
-            select_path = settings.value('last_selected_path', type=str)
 
         # Load the last loaded directory.
         if settings.contains('directory_path'):
             directory_path = Path(settings.value('directory_path',
                                                       type=str))
             if directory_path.is_dir():
+                # Prefer folder-specific selection; fallback to legacy global key.
+                select_path = self._get_folder_last_selected_path(directory_path)
+                if not select_path and settings.contains('last_selected_path'):
+                    select_path = settings.value('last_selected_path', type=str)
                 self.load_directory(directory_path, select_index=image_index, select_path=select_path)
 
     def _add_to_recent_directories(self, dir_path: str):
