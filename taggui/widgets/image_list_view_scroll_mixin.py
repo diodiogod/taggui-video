@@ -194,7 +194,18 @@ class ImageListViewScrollMixin:
         last_page = max(0, total_pages - 1)
         prev_stick = getattr(self, '_stick_to_edge', None)
         if strict_mode and (not self._scrollbar_dragging) and (not self._drag_preview_mode):
-            if scroll_max > 0 and scroll_offset >= scroll_max - 2:
+            # Use a soft threshold near the tail; strict domain/range can move
+            # during relayout and users may hover just below hard max forever.
+            near_bottom_tol = max(
+                2,
+                int(scroll_max * 0.01) if scroll_max > 0 else 2,
+                int(self.verticalScrollBar().singleStep()) + 4,
+            )
+            near_bottom_soft = scroll_max > 0 and scroll_offset >= max(0, scroll_max - near_bottom_tol)
+            cur_page_guess = int(getattr(self, '_current_page', 0) or 0)
+            if (scroll_max > 0 and scroll_offset >= scroll_max - 2) or (
+                near_bottom_soft and cur_page_guess >= max(0, last_page - 2)
+            ):
                 self._stick_to_edge = "bottom"
             elif scroll_offset <= 2:
                 self._stick_to_edge = "top"
@@ -210,6 +221,12 @@ class ImageListViewScrollMixin:
                         if int(it.get('index', -1)) == tail_idx:
                             tail_item = it
                             break
+                    near_bottom_tol = max(
+                        2,
+                        int(scroll_max * 0.01) if scroll_max > 0 else 2,
+                        int(self.verticalScrollBar().singleStep()) + 4,
+                    )
+                    near_bottom_bar = scroll_max > 0 and scroll_offset >= max(0, scroll_max - near_bottom_tol)
                     if tail_item is not None:
                         tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
                         tail_scroll = max(0, tail_bottom - max(1, self.viewport().height()))
@@ -225,6 +242,40 @@ class ImageListViewScrollMixin:
                         if scroll_offset >= max(0, tail_scroll - 2):
                             self._stick_to_edge = "bottom"
                             self._current_page = last_page
+                    elif near_bottom_bar or getattr(self, '_stick_to_edge', None) == "bottom":
+                        # Dense grids can underestimate strict virtual height before
+                        # the real tail item is materialized. When user is at the
+                        # bottom but last item is still absent, gently grow strict
+                        # avg/domain so tail becomes reachable without zooming.
+                        self._stick_to_edge = "bottom"
+                        self._current_page = last_page
+                        now = time.time()
+                        last_boost = float(getattr(self, '_strict_tail_domain_boost_ts', 0.0) or 0.0)
+                        if now - last_boost >= 0.35:
+                            current_avg = float(getattr(self, '_strict_virtual_avg_height', 0.0) or 0.0)
+                            if current_avg <= 1.0:
+                                current_avg = max(32.0, float(self.current_thumbnail_size) + 2.0)
+                            boosted_avg = min(5000.0, (current_avg * 1.08) + 1.0)
+                            if boosted_avg > current_avg + 0.25:
+                                self._strict_virtual_avg_height = boosted_avg
+                                if boosted_avg > float(getattr(self, '_strict_masonry_avg_h', 0.0) or 0.0):
+                                    self._strict_masonry_avg_h = boosted_avg
+                                try:
+                                    canonical_boosted = int(self._strict_canonical_domain_max(source_model))
+                                    self._strict_scroll_max_floor = max(
+                                        int(getattr(self, '_strict_scroll_max_floor', 0) or 0),
+                                        canonical_boosted,
+                                    )
+                                except Exception:
+                                    pass
+                                self._strict_tail_domain_boost_ts = now
+                                self._log_flow(
+                                    "STRICT",
+                                    f"Tail domain boost avg={current_avg:.1f}->{boosted_avg:.1f} "
+                                    f"scroll={scroll_offset}/{scroll_max}",
+                                    throttle_key="strict_tail_domain_boost",
+                                    every_s=0.25,
+                                )
             except Exception:
                 pass
         edge_snap_active = (not strict_mode) and self._pending_edge_snap is not None and current_time < getattr(self, '_pending_edge_snap_until', 0.0)
