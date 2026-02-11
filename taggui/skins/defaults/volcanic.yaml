@@ -1,0 +1,74 @@
+name: "Volcanic"
+author: "TagGUI"
+version: "1.0"
+
+tokens:
+  colors:
+    bg-primary: "#0D0D0D"
+    bg-secondary: "#1A1A1A"
+    bg-tertiary: "#242424"
+    border: "#333333"
+    text-primary: "#FFFFFF"
+    text-secondary: "#B0B0B0"
+    primary: "#32CD32"
+    primary-hover: "#28A428"
+    accent: "#6B8E23"
+
+  spacing:
+    xs: 4
+    sm: 8
+    md: 16
+    lg: 24
+
+  opacity:
+    control-bar: 0.95
+
+video_player:
+  layout:
+    control_bar_height: 60
+    control_bar_position: "bottom"
+    button_alignment: "center"
+    timeline_position: "above"
+    button_spacing: "{tokens.spacing.sm}"
+    section_spacing: 20
+
+  styling:
+    background: "{tokens.colors.bg-primary}"
+    control_bar_color: "{tokens.colors.bg-tertiary}"
+    control_bar_opacity: "{tokens.opacity.control-bar}"
+
+    button_size: 38
+    button_icon_color: "{tokens.colors.text-primary}"
+    button_bg_color: "{tokens.colors.bg-secondary}"
+    button_hover_color: "{tokens.colors.primary}"
+    button_border: "1px solid {tokens.colors.border}"
+    button_border_radius: 6
+
+    timeline_height: 8
+    timeline_color: "{tokens.colors.primary}"
+    timeline_bg_color: "{tokens.colors.bg-secondary}"
+    slider_handle_size: 16
+    slider_handle_color: "#FFFFFF"
+    slider_handle_border: "2px solid #333333"
+
+    loop_marker_start_color: "#FF0080"
+    loop_marker_end_color: "#FF8C00"
+    loop_marker_outline: "#FFFFFF"
+    loop_marker_outline_width: 2
+
+    # Volcanic gradient (original from video_controls.py)
+    speed_gradient_start: "#2D5A2D"
+    speed_gradient_mid: "#6B8E23"
+    speed_gradient_end: "#32CD32"
+
+    text_color: "{tokens.colors.text-primary}"
+    text_secondary_color: "{tokens.colors.text-secondary}"
+    label_font_size: 12
+
+  borders:
+    radius: 6
+    control_bar_border: "1px solid {tokens.colors.border}"
+
+  shadows:
+    control_bar: "0 4px 8px rgba(0,0,0,0.3)"
+    button: "0 2px 4px rgba(0,0,0,0.2)"

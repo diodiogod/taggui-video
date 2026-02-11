@@ -51,6 +51,10 @@ class MainWindow(QMainWindow):
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
         self._restore_in_progress = False
         self._restore_target_global_rank = -1
+        self._workspace_apply_pending_id = None
+        self._workspace_apply_timer_active = False
+        self._workspace_apply_retry_count = 0
+        self._workspace_applying = False
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -231,6 +235,7 @@ class MainWindow(QMainWindow):
         jump_to_first_untagged_image_shortcut.activated.connect(
             self.image_list.jump_to_first_untagged_image)
         self.restore()
+        self._apply_saved_workspace_preset()
         self.image_tags_editor.tag_input_box.setFocus()
 
         self._filter_timer = QTimer()
@@ -248,6 +253,18 @@ class MainWindow(QMainWindow):
         self._unfreeze_timer.timeout.connect(self._refreeze_after_interaction)
         settings.change.connect(self._on_setting_changed)
 
+    def _set_list_view_updates_enabled(self, enabled: bool):
+        """Keep list view and viewport update flags in sync."""
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is None:
+            return
+        list_view.setUpdatesEnabled(enabled)
+        viewport = list_view.viewport() if hasattr(list_view, 'viewport') else None
+        if viewport is not None:
+            viewport.setUpdatesEnabled(enabled)
+            if enabled:
+                viewport.update()
+
     def _freeze_list_view(self):
         """Called when video playback starts."""
         self._video_is_playing = True
@@ -258,7 +275,7 @@ class MainWindow(QMainWindow):
         """Actually freeze the list view if no interaction is happening."""
         if self._video_is_playing and not self._unfreeze_timer.isActive():
             if not self._list_view_frozen:
-                self.image_list.list_view.setUpdatesEnabled(False)
+                self._set_list_view_updates_enabled(False)
                 self._list_view_frozen = True
                 # print("[VIDEO] List view frozen for playback")
 
@@ -268,45 +285,71 @@ class MainWindow(QMainWindow):
         # Don't unfreeze automatically - let user interaction handle it
         # Static list doesn't need repaints whether video is playing or not
 
-    def _unfreeze_for_interaction(self):
-        """Temporarily unfreeze during user interaction, then re-freeze after idle."""
+    def _unfreeze_for_interaction(self, *args, hold_ms: int = 200, **kwargs):
+        """Temporarily unfreeze during user interaction, then re-freeze after idle.
+
+        Args:
+            *args: Ignored (signals pass various argument types like QModelIndex, int, str)
+            hold_ms: How long to keep unfrozen (milliseconds) before re-freezing
+            **kwargs: Ignored (signals pass various keyword arguments)
+        """
         # Safety check - might be called before initialization completes
         if not hasattr(self, '_list_view_frozen'):
             return
 
         # Unfreeze if currently frozen
         if self._list_view_frozen:
-            self.image_list.list_view.setUpdatesEnabled(True)
+            self._set_list_view_updates_enabled(True)
             self._list_view_frozen = False
             # print("[VIDEO] List view unfrozen (user interaction)")
 
-        # Restart timer - will re-freeze after 200ms of no interaction
+        # Restart timer - will re-freeze after hold_ms of no interaction
         self._unfreeze_timer.stop()
-        self._unfreeze_timer.start(200)
+        self._unfreeze_timer.start(max(50, hold_ms))
 
     def _refreeze_after_interaction(self):
         """Re-freeze list view after interaction has stopped."""
         # Only re-freeze if video is playing (otherwise keep unfrozen for responsiveness)
         if self._video_is_playing and not self._list_view_frozen:
-            self.image_list.list_view.setUpdatesEnabled(False)
+            list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+            if list_view is not None:
+                masonry_busy = bool(getattr(list_view, '_masonry_calculating', False))
+                resize_busy = bool(hasattr(list_view, '_resize_timer') and list_view._resize_timer.isActive())
+                recalc_busy = bool(hasattr(list_view, '_masonry_recalc_timer') and list_view._masonry_recalc_timer.isActive())
+                # Don't freeze during decisive geometry/recalc work; this causes
+                # stale masonry paint until another manual interaction.
+                if masonry_busy or resize_busy or recalc_busy:
+                    self._unfreeze_timer.start(250)
+                    return
+            self._set_list_view_updates_enabled(False)
             self._list_view_frozen = True
             # print("[VIDEO] List view re-frozen (interaction ended)")
         elif not self._video_is_playing and self._list_view_frozen:
             # Video stopped while frozen - unfreeze for normal use
-            self.image_list.list_view.setUpdatesEnabled(True)
+            self._set_list_view_updates_enabled(True)
             self._list_view_frozen = False
             # print("[VIDEO] List view unfrozen (no video playing)")
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
         if obj == self.image_list.list_view and event.type() == event.Type.Resize:
-            self._unfreeze_for_interaction()
+            # Resizing/splitter movement is a decisive user action: keep updates
+            # enabled long enough for masonry to recalc and repaint live.
+            self._unfreeze_for_interaction(hold_ms=900)
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event):
         """Handle window resize - unfreeze list to allow layout update."""
         super().resizeEvent(event)
-        self._unfreeze_for_interaction()
+        # Window resize should visibly relayout masonry even during playback.
+        self._unfreeze_for_interaction(hold_ms=900)
+
+    def showEvent(self, event):
+        """Apply any deferred workspace preset once window is visible."""
+        super().showEvent(event)
+        if self._workspace_apply_pending_id:
+            # Let startup restore/layout settle before touching docks.
+            self._schedule_workspace_apply(700)
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
@@ -1261,3 +1304,200 @@ class MainWindow(QMainWindow):
             # Warming active, show progress
             percent = int((progress / total) * 100) if total > 0 else 0
             self._cache_status_label.setText(f"🔥 Building cache: {progress:,} / {total:,} ({percent}%)")
+
+    def get_workspace_presets(self) -> list[dict[str, str]]:
+        """Return available workspace presets."""
+        return [
+            {"id": "media_viewer", "label": "Media Viewer"},
+            {"id": "tagging", "label": "Tagging"},
+            {"id": "marking", "label": "Image Marking"},
+            {"id": "video_prep", "label": "Video Prep"},
+            {"id": "auto_captioning", "label": "Auto Captioning"},
+        ]
+
+    def _apply_saved_workspace_preset(self):
+        """Restore active workspace label without resetting user's custom layout."""
+        saved = str(
+            settings.value('workspace_preset', 'media_viewer', type=str)
+            or 'media_viewer'
+        ).strip()
+        presets = {p["id"] for p in self.get_workspace_presets()}
+        if saved not in presets:
+            saved = 'media_viewer'
+
+        # Do not auto-apply dock layout on startup; restoreState already keeps
+        # the user's customized dock positions/sizes. Workspace defaults should
+        # only be applied when user explicitly clicks a workspace action.
+        self._workspace_apply_pending_id = None
+        self._workspace_apply_retry_count = 0
+        if hasattr(self, 'menu_manager') and self.menu_manager is not None:
+            self.menu_manager.set_active_workspace(saved)
+
+    def _schedule_workspace_apply(self, delay_ms: int = 250):
+        """Schedule a deferred workspace apply to avoid startup dock races."""
+        if self._workspace_apply_timer_active:
+            return
+        self._workspace_apply_timer_active = True
+
+        def _run():
+            self._workspace_apply_timer_active = False
+            pending = self._workspace_apply_pending_id
+            if not pending:
+                return
+            source_model = getattr(self, 'image_list_model', None)
+            loading_pages = bool(getattr(source_model, '_loading_pages', set())) if source_model is not None else False
+            # Startup can still be restoring selection/layout; defer until stable.
+            startup_unstable = (
+                not self.isVisible()
+                or getattr(self, '_restore_in_progress', False)
+                or loading_pages
+            )
+            if startup_unstable and self._workspace_apply_retry_count < 20:
+                self._workspace_apply_retry_count += 1
+                self._schedule_workspace_apply(450)
+                return
+            self._workspace_apply_pending_id = None
+            self._workspace_apply_retry_count = 0
+            self.apply_workspace_preset(pending, save_to_settings=False)
+
+        QTimer.singleShot(max(0, int(delay_ms)), _run)
+
+    def apply_workspace_preset(self, workspace_id: str, *, save_to_settings: bool = True):
+        """Apply a named workspace by showing/hiding and arranging dock widgets."""
+        if self._workspace_applying:
+            return
+        presets = {p["id"] for p in self.get_workspace_presets()}
+        if workspace_id not in presets:
+            workspace_id = 'media_viewer'
+        loading_pages = bool(getattr(self.image_list_model, '_loading_pages', set()))
+        if not save_to_settings and (
+            not self.isVisible()
+            or getattr(self, '_restore_in_progress', False)
+            or loading_pages
+        ):
+            self._workspace_apply_pending_id = workspace_id
+            self._schedule_workspace_apply(450)
+            return
+        self._workspace_applying = True
+
+        try:
+            left_dock = self.image_list
+            right_docks = [
+                self.image_tags_editor,
+                self.all_tags_editor,
+                self.auto_captioner,
+                self.auto_markings,
+            ]
+
+            # Keep docking areas deterministic before visibility changes.
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
+            for dock in right_docks:
+                self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+            # Keep right-side tools grouped as tabs for easy switching.
+            self.tabifyDockWidget(self.image_tags_editor, self.all_tags_editor)
+            self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
+            self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
+
+            visibility = {
+            "media_viewer": {
+                "toolbar": False,
+                "image_list": True,
+                "image_tags_editor": False,
+                "all_tags_editor": False,
+                "auto_captioner": False,
+                "auto_markings": False,
+            },
+            "tagging": {
+                "toolbar": True,
+                "image_list": True,
+                "image_tags_editor": True,
+                "all_tags_editor": True,
+                "auto_captioner": False,
+                "auto_markings": False,
+            },
+            "marking": {
+                "toolbar": True,
+                "image_list": True,
+                "image_tags_editor": False,
+                "all_tags_editor": False,
+                "auto_captioner": False,
+                "auto_markings": True,
+            },
+            "video_prep": {
+                "toolbar": True,
+                "image_list": True,
+                "image_tags_editor": False,
+                "all_tags_editor": False,
+                "auto_captioner": True,
+                "auto_markings": False,
+            },
+            "auto_captioning": {
+                "toolbar": True,
+                "image_list": True,
+                "image_tags_editor": True,
+                "all_tags_editor": False,
+                "auto_captioner": True,
+                "auto_markings": False,
+            },
+            }[workspace_id]
+
+            toolbar = getattr(self.toolbar_manager, 'toolbar', None)
+            if toolbar is not None:
+                toolbar.setVisible(visibility["toolbar"])
+
+            self.image_list.setVisible(visibility["image_list"])
+            self.image_tags_editor.setVisible(visibility["image_tags_editor"])
+            self.all_tags_editor.setVisible(visibility["all_tags_editor"])
+            self.auto_captioner.setVisible(visibility["auto_captioner"])
+            self.auto_markings.setVisible(visibility["auto_markings"])
+
+            base_w = max(180, int(getattr(self.image_list_model, 'image_list_image_width', 200)))
+
+            # Set focus/active tab for the primary tool of each workspace.
+            if workspace_id == "media_viewer":
+                self.image_list.raise_()
+                list_target = max(300, int(self.width() * 0.60))
+                self.resizeDocks([self.image_list], [list_target], Qt.Orientation.Horizontal)
+            elif workspace_id == "tagging":
+                self.image_tags_editor.raise_()
+                self.resizeDocks(
+                    [self.image_list, self.image_tags_editor],
+                    [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
+                    Qt.Orientation.Horizontal,
+                )
+            elif workspace_id == "marking":
+                self.auto_markings.raise_()
+                self.resizeDocks(
+                    [self.image_list, self.auto_markings],
+                    [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
+                    Qt.Orientation.Horizontal,
+                )
+            elif workspace_id == "video_prep":
+                self.auto_captioner.raise_()
+                self.resizeDocks(
+                    [self.image_list, self.auto_captioner],
+                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
+                    Qt.Orientation.Horizontal,
+                )
+            elif workspace_id == "auto_captioning":
+                self.auto_captioner.raise_()
+                self.resizeDocks(
+                    [self.image_list, self.auto_captioner],
+                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
+                    Qt.Orientation.Horizontal,
+                )
+
+            if self.directory_path is not None:
+                self.centralWidget().setCurrentWidget(self.image_viewer)
+
+            if save_to_settings:
+                settings.setValue('workspace_preset', workspace_id)
+
+            if hasattr(self, 'menu_manager') and self.menu_manager is not None:
+                self.menu_manager.set_active_workspace(workspace_id)
+                action = getattr(self.menu_manager, 'toggle_toolbar_action', None)
+                if action is not None:
+                    action.setChecked(visibility["toolbar"])
+        finally:
+            self._workspace_applying = False

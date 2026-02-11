@@ -3,6 +3,7 @@ from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
                                QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider)
 from utils.settings import settings, DEFAULT_SETTINGS
+from skins.engine import SkinManager
 
 
 class LoopSlider(QSlider):
@@ -22,6 +23,12 @@ class LoopSlider(QSlider):
         self._marker_size = 20  # Click detection radius
         self._marker_gap = 0  # Distance between markers when dragging both
         self._drag_anchor = None  # 'start' or 'end' - which marker was originally clicked for 'both' drag
+
+        # Marker colors (can be set by skin system)
+        self._marker_start_color = QColor(255, 0, 128)  # Default pink/magenta
+        self._marker_end_color = QColor(255, 140, 0)   # Default orange
+        self._marker_outline_color = QColor(255, 255, 255)  # Default white
+        self._marker_outline_width = 2
 
         # Set minimum height to show markers above slider
         self.setMinimumHeight(30)
@@ -43,6 +50,25 @@ class LoopSlider(QSlider):
         """Clear loop markers."""
         self.loop_start = None
         self.loop_end = None
+        self.update()
+
+    def set_marker_colors(self, colors: dict):
+        """Set loop marker colors from skin.
+
+        Args:
+            colors: Dict with 'start_color', 'end_color', 'outline_color', 'outline_width'
+        """
+        start_hex = colors.get('start_color', '#FF0080')
+        end_hex = colors.get('end_color', '#FF8C00')
+        outline_hex = colors.get('outline_color', '#FFFFFF')
+
+        # Convert hex to QColor
+        self._marker_start_color = QColor(start_hex)
+        self._marker_end_color = QColor(end_hex)
+        self._marker_outline_color = QColor(outline_hex)
+        self._marker_outline_width = colors.get('outline_width', 2)
+
+        # Trigger repaint
         self.update()
 
     def paintEvent(self, event):
@@ -68,27 +94,27 @@ class LoopSlider(QSlider):
         marker_height = 14  # Height of triangle
 
         if self.loop_start is not None:
-            # Start marker (pink/magenta triangle pointing UP to groove)
+            # Start marker (triangle pointing UP to groove)
             pos = self._value_to_position(self.loop_start, groove)
             triangle = QPolygonF([
                 QPointF(pos, groove.top() - 2),  # Point at bottom (touching groove top)
                 QPointF(pos - marker_width / 2, groove.top() - marker_height - 2),  # Left corner
                 QPointF(pos + marker_width / 2, groove.top() - marker_height - 2)   # Right corner
             ])
-            painter.setPen(QPen(QColor(255, 255, 255), 2))  # White outline
-            painter.setBrush(QColor(255, 0, 128))  # Pink/Magenta
+            painter.setPen(QPen(self._marker_outline_color, self._marker_outline_width))
+            painter.setBrush(self._marker_start_color)
             painter.drawPolygon(triangle)
 
         if self.loop_end is not None:
-            # End marker (orange triangle pointing UP to groove)
+            # End marker (triangle pointing UP to groove)
             pos = self._value_to_position(self.loop_end, groove)
             triangle = QPolygonF([
                 QPointF(pos, groove.top() - 2),  # Point at bottom (touching groove top)
                 QPointF(pos - marker_width / 2, groove.top() - marker_height - 2),  # Left corner
                 QPointF(pos + marker_width / 2, groove.top() - marker_height - 2)   # Right corner
             ])
-            painter.setPen(QPen(QColor(255, 255, 255), 2))  # White outline
-            painter.setBrush(QColor(255, 140, 0))  # Orange
+            painter.setPen(QPen(self._marker_outline_color, self._marker_outline_width))
+            painter.setBrush(self._marker_end_color)
             painter.drawPolygon(triangle)
 
     def _value_to_position(self, value, groove_rect):
@@ -581,13 +607,13 @@ class VideoControlsWidget(QWidget):
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
         self.loop_start_btn.setToolTip('Set Loop Start at current frame (Pink marker)')
         self.loop_start_btn.setMaximumWidth(30)
-        self.loop_start_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
+        # Style will be applied by apply_current_skin() after skin_manager is initialized
         self.loop_start_btn.clicked.connect(self._set_loop_start)
 
         self.loop_end_btn = QPushButton('▶')  # Triangle pointing right/down
         self.loop_end_btn.setToolTip('Set Loop End at current frame (Orange marker)')
         self.loop_end_btn.setMaximumWidth(30)
-        self.loop_end_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
+        # Style will be applied by apply_current_skin() after skin_manager is initialized
         self.loop_end_btn.clicked.connect(self._set_loop_end)
 
         self.loop_checkbox = QPushButton('LOOP')
@@ -673,6 +699,16 @@ class VideoControlsWidget(QWidget):
         # Initialize mute button appearance
         self._update_mute_button()
 
+        # Initialize skin system
+        self.skin_manager = SkinManager()
+        # Load saved skin or default
+        saved_skin = settings.value('video_player_skin', defaultValue='Classic', type=str)
+        if not self.skin_manager.load_skin(saved_skin):
+            # Fallback to first available skin
+            self.skin_manager.load_default_skin()
+        # Apply skin to all widgets
+        self.apply_current_skin()
+
         # Hide by default
         self.hide()
 
@@ -686,6 +722,124 @@ class VideoControlsWidget(QWidget):
         self.loop_checkbox.blockSignals(False)
         # Set internal state (signal will be emitted when video loads)
         self.is_looping = loop_enabled
+
+    def apply_current_skin(self):
+        """Apply current skin to all video control widgets.
+
+        This method is called:
+        - On initialization
+        - When user switches skins (live update, no restart needed)
+        """
+        applier = self.skin_manager.get_current_applier()
+        if not applier:
+            return
+
+        # Apply to control bar container (this widget)
+        applier.apply_to_control_bar(self)
+
+        # Apply to all buttons
+        buttons = [
+            self.play_pause_btn,
+            self.stop_btn,
+            self.mute_btn,
+            self.prev_frame_btn,
+            self.next_frame_btn,
+            self.skip_back_btn,
+            self.skip_forward_btn,
+            self.loop_start_btn,
+            self.loop_end_btn,
+            self.loop_reset_btn
+        ]
+        for button in buttons:
+            applier.apply_to_button(button)
+
+        # Apply to timeline slider
+        applier.apply_to_timeline_slider(self.timeline_slider)
+
+        # Apply to speed slider
+        applier.apply_to_speed_slider(self.speed_slider)
+
+        # Apply to labels
+        labels = [
+            self.frame_label,
+            self.frame_total_label,
+            self.time_label,
+            self.fps_label,
+            self.frame_count_label,
+            self.speed_label
+        ]
+        for label in labels:
+            applier.apply_to_label(label)
+
+        # Apply special styling to speed value label
+        applier.apply_to_label(self.speed_value_label, is_secondary=False)
+
+        # Update loop marker colors
+        marker_colors = applier.get_loop_marker_colors()
+        self.timeline_slider.set_marker_colors(marker_colors)
+
+        # Force repaint
+        self.update()
+
+    def switch_skin(self, skin_name: str):
+        """Switch to a different skin and apply it immediately.
+
+        Args:
+            skin_name: Name of skin to switch to
+
+        Returns:
+            True if skin loaded successfully, False otherwise
+        """
+        if self.skin_manager.load_skin(skin_name):
+            # Save to settings
+            settings.setValue('video_player_skin', skin_name)
+            # Apply immediately (live update!)
+            self.apply_current_skin()
+            return True
+        return False
+
+    def get_available_skins(self):
+        """Get list of available skins.
+
+        Returns:
+            List of skin dicts with 'name', 'author', 'version' keys
+        """
+        return self.skin_manager.get_available_skins()
+
+    def _set_loop_button_style(self, button, is_set=False):
+        """Set loop button style based on state, using skin colors.
+
+        Args:
+            button: Loop button (start/end)
+            is_set: Whether the loop point is set (True) or unset (False)
+        """
+        applier = self.skin_manager.get_current_applier()
+        if not applier:
+            return
+
+        styling = applier.styling
+
+        # Determine which color to use based on button
+        if button == self.loop_start_btn:
+            active_color = styling.get('loop_marker_start_color', '#FF0080')
+        elif button == self.loop_end_btn:
+            active_color = styling.get('loop_marker_end_color', '#FF8C00')
+        else:
+            active_color = styling.get('button_bg_color', '#2b2b2b')
+
+        if is_set:
+            # Active state - use marker color
+            button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {active_color};
+                    color: white;
+                    font-size: 18px;
+                    padding: 2px;
+                }}
+            """)
+        else:
+            # Inactive state - use default button styling
+            applier.apply_to_button(button)
 
     def _apply_scaling(self):
         """Apply scaling to internal elements based on current width."""
@@ -703,52 +857,18 @@ class VideoControlsWidget(QWidget):
             btn.setMaximumWidth(button_size)
             btn.setMaximumHeight(button_size)
 
-        # Update mute button font size
-        self.mute_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #2b2b2b;
-                border: 2px solid #555;
-                border-radius: 4px;
-                font-size: {button_font_size}px;
-            }}
-            QPushButton:hover {{
-                background-color: #3a3a3a;
-                border-color: #666;
-            }}
-        """)
+        # Note: Don't override skin colors - skin system handles styling
+        # Only scaling needs to happen here
 
-        # Update skip button font sizes
-        skip_font_size = int(16 * scale)
-        for btn in [self.skip_back_btn, self.skip_forward_btn]:
-            btn.setStyleSheet(f"QPushButton {{ font-size: {skip_font_size}px; }}")
-
-        # Scale loop control buttons
+        # Scale loop control buttons (sizes only, skin handles colors)
         loop_btn_size = int(30 * scale)
         for btn in [self.loop_start_btn, self.loop_end_btn, self.loop_reset_btn]:
             btn.setMaximumWidth(loop_btn_size)
             btn.setMaximumHeight(loop_btn_size)
-            font_size = int(18 * scale)
-            btn.setStyleSheet(f"QPushButton {{ font-size: {font_size}px; padding: 2px; }}")
 
-        # Scale loop checkbox
+        # Scale loop checkbox (size only, skin handles colors)
         loop_checkbox_width = int(50 * scale)
-        font_size_loop = int(10 * scale)
         self.loop_checkbox.setMaximumWidth(loop_checkbox_width)
-        self.loop_checkbox.setStyleSheet(f"""
-            QPushButton {{
-                font-weight: bold;
-                font-size: {font_size_loop}px;
-                padding: 2px 4px;
-                border: 2px solid #666;
-                background-color: #333;
-                color: #999;
-            }}
-            QPushButton:checked {{
-                background-color: #4CAF50;
-                color: white;
-                border: 2px solid #45a049;
-            }}
-        """)
 
         # Scale frame spinbox
         spinbox_width = int(80 * scale)
@@ -792,6 +912,9 @@ class VideoControlsWidget(QWidget):
         spacing = int(8 * scale)
         self.layout().setContentsMargins(margin, int(4 * scale), margin, int(4 * scale))
         self.layout().setSpacing(spacing)
+
+        # Reapply skin to restore colors after scaling (scaling only adjusts sizes)
+        self.apply_current_skin()
 
     def resizeEvent(self, event):
         """Scale all controls based on available width."""
@@ -1471,12 +1594,12 @@ class VideoControlsWidget(QWidget):
             max_frame = self.frame_spinbox.maximum()
             self.loop_end_frame = min(self.loop_start_frame + self.fixed_marker_size - 1, max_frame)
             # Update end button color too
-            self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
+            self._set_loop_button_style(self.loop_end_btn, is_set=True)
             self.loop_end_set.emit()
 
         self.loop_start_set.emit()
         # Update button color to match pink marker
-        self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
+        self._set_loop_button_style(self.loop_start_btn, is_set=True)
         # Update timeline markers
         self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
         # Update range display
@@ -1493,12 +1616,12 @@ class VideoControlsWidget(QWidget):
         if self.fixed_marker_size > 0:
             self.loop_start_frame = max(0, self.loop_end_frame - self.fixed_marker_size + 1)
             # Update start button color too
-            self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
+            self._set_loop_button_style(self.loop_start_btn, is_set=True)
             self.loop_start_set.emit()
 
         self.loop_end_set.emit()
         # Update button color to match orange marker
-        self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
+        self._set_loop_button_style(self.loop_end_btn, is_set=True)
         # Update timeline markers
         self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
         # Update range display
@@ -1522,8 +1645,8 @@ class VideoControlsWidget(QWidget):
         # Don't change is_looping or loop_checkbox state
         self.loop_reset.emit()
         # Clear button styling
-        self.loop_start_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
-        self.loop_end_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 2px; }")
+        self._set_loop_button_style(self.loop_start_btn, is_set=False)
+        self._set_loop_button_style(self.loop_end_btn, is_set=False)
         # Clear timeline markers
         self.timeline_slider.clear_loop_markers()
         # Clear range display
@@ -1555,7 +1678,7 @@ class VideoControlsWidget(QWidget):
     def _on_loop_start_dragged(self, frame):
         """Handle loop start marker being dragged."""
         self.loop_start_frame = frame
-        self.loop_start_btn.setStyleSheet("QPushButton { background-color: #FF0080; color: white; font-size: 18px; padding: 2px; }")
+        self._set_loop_button_style(self.loop_start_btn, is_set=True)
         self.loop_start_set.emit()
         # Update range display
         self._update_marker_range_display()
@@ -1566,7 +1689,7 @@ class VideoControlsWidget(QWidget):
     def _on_loop_end_dragged(self, frame):
         """Handle loop end marker being dragged."""
         self.loop_end_frame = frame
-        self.loop_end_btn.setStyleSheet("QPushButton { background-color: #FF8C00; color: white; font-size: 18px; padding: 2px; }")
+        self._set_loop_button_style(self.loop_end_btn, is_set=True)
         self.loop_end_set.emit()
         # Update range display
         self._update_marker_range_display()
@@ -1788,3 +1911,87 @@ class VideoControlsWidget(QWidget):
                         settings.setValue('video_controls_y_percent', y_percent)
                         settings.setValue('video_controls_width_percent', width_percent)
             event.accept()
+
+    def contextMenuEvent(self, event):
+        """Show skin selection context menu on right-click."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2D2D2D;
+                color: #FFFFFF;
+                border: 1px solid #555;
+            }
+            QMenu::item:selected {
+                background-color: #2196F3;
+            }
+        """)
+
+        # Add skin submenu
+        skin_menu = menu.addMenu("🎨 Change Skin")
+        skin_menu.setStyleSheet(menu.styleSheet())
+
+        # Get available skins
+        available_skins = self.get_available_skins()
+        current_skin = self.skin_manager.get_current_skin_name()
+
+        # Add skin options
+        for skin_info in available_skins:
+            skin_name = skin_info['name']
+            action = QAction(skin_name, self)
+
+            # Mark current skin with checkmark
+            if skin_name == current_skin:
+                action.setText(f"✓ {skin_name}")
+                action.setEnabled(False)  # Can't select current skin
+
+            # Connect to switch function
+            action.triggered.connect(
+                lambda checked, name=skin_name: self.switch_skin(name)
+            )
+            skin_menu.addAction(action)
+
+        # Add separator
+        menu.addSeparator()
+
+        # Add "Open Skins Folder" option
+        open_skins_action = QAction("📁 Open Skins Folder", self)
+        open_skins_action.triggered.connect(self._open_skins_folder)
+        menu.addAction(open_skins_action)
+
+        # Add separator
+        menu.addSeparator()
+
+        # Add "Design Skin" option
+        designer_action = QAction("🎨 Design Custom Skin...", self)
+        designer_action.triggered.connect(self._open_skin_designer)
+        menu.addAction(designer_action)
+
+        # Show menu at cursor position
+        menu.exec(event.globalPos())
+
+    def _open_skins_folder(self):
+        """Open the skins user folder in file explorer."""
+        from pathlib import Path
+        import subprocess
+        import sys
+
+        skins_folder = Path(__file__).parent.parent / 'skins' / 'user'
+        skins_folder.mkdir(parents=True, exist_ok=True)
+
+        # Open folder in OS file explorer
+        if sys.platform == 'win32':
+            subprocess.run(['explorer', str(skins_folder)])
+        elif sys.platform == 'darwin':
+            subprocess.run(['open', str(skins_folder)])
+        else:
+            subprocess.run(['xdg-open', str(skins_folder)])
+
+    def _open_skin_designer(self):
+        """Open the interactive skin designer dialog."""
+        from dialogs.skin_designer_interactive import SkinDesignerInteractive
+
+        designer = SkinDesignerInteractive(self, video_controls=self)
+        designer.exec()
