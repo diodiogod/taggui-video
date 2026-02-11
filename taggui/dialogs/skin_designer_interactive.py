@@ -60,10 +60,11 @@ class ResizeHandle(QGraphicsEllipseItem):
 class InteractiveElement(QGraphicsRectItem):
     """Fully interactive UI element - drag to move, drag corners to resize."""
 
-    def __init__(self, x, y, w, h, element_type, label_text, designer):
+    def __init__(self, x, y, w, h, element_type, label_text, designer, property_name=None):
         super().__init__(0, 0, w, h)
         self.element_type = element_type
         self.label_text = label_text
+        self.property_name = property_name or label_text  # For tooltip and saving
         self.designer = designer
         self.bg_color = QColor("#2b2b2b")
         self.hover_color = QColor("#3a3a3a")
@@ -74,6 +75,9 @@ class InteractiveElement(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+
+        # Tooltip showing property name (1s delay is default)
+        self.setToolTip(f"Property: {self.property_name}")
 
         # Visual styling
         self.default_pen = QPen(QColor("#555555"), 2)
@@ -132,7 +136,7 @@ class InteractiveElement(QGraphicsRectItem):
         self._updating = False
 
     def itemChange(self, change, value):
-        """Handle selection."""
+        """Handle selection and position changes."""
         if change == QGraphicsRectItem.GraphicsItemChange.ItemSelectedHasChanged:
             if self.isSelected():
                 self.setPen(self.selected_pen)
@@ -154,6 +158,12 @@ class InteractiveElement(QGraphicsRectItem):
                     self.resize_handle.hide()
                 self._remove_glow()
 
+        elif change == QGraphicsRectItem.GraphicsItemChange.ItemPositionHasChanged:
+            # Save position when moved
+            if not self._updating:
+                pos = self.pos()
+                self.designer.update_element_position(self, pos.x(), pos.y())
+
         return super().itemChange(change, value)
 
     def _add_glow(self):
@@ -167,7 +177,7 @@ class InteractiveElement(QGraphicsRectItem):
 
     def contextMenuEvent(self, event):
         """Right-click for color/font picker."""
-        from PySide6.QtWidgets import QMenu
+        from PySide6.QtWidgets import QMenu, QWidgetAction
         from PySide6.QtGui import QAction
 
         # Prevent menu on invalid events
@@ -175,25 +185,76 @@ class InteractiveElement(QGraphicsRectItem):
             return
 
         menu = QMenu()
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2D2D2D;
+                color: white;
+                padding: 5px;
+            }
+            QMenu::item {
+                padding: 5px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #2196F3;
+            }
+        """)
 
-        # Color picker action
-        color_action = QAction("🎨 Change Color", menu)
-        color_action.triggered.connect(self._pick_color)
+        # Color picker action - opens QColorDialog directly
+        color_action = QAction("🎨 Pick Color...", menu)
+        color_action.triggered.connect(self._pick_color_direct)
         menu.addAction(color_action)
 
-        # Opacity action
-        opacity_action = QAction("🔆 Adjust Opacity", menu)
-        opacity_action.triggered.connect(self._pick_opacity)
+        # Opacity slider widget directly in menu
+        opacity_widget = QWidget()
+        opacity_layout = QHBoxLayout(opacity_widget)
+        opacity_layout.setContentsMargins(10, 5, 10, 5)
+
+        opacity_label = QLabel("Opacity:")
+        opacity_label.setStyleSheet("color: white;")
+        opacity_layout.addWidget(opacity_label)
+
+        opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        opacity_slider.setRange(0, 100)
+        opacity_slider.setValue(int(self.opacity_value * 100))
+        opacity_slider.setFixedWidth(150)
+        opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+        opacity_layout.addWidget(opacity_slider)
+
+        opacity_value_label = QLabel(f"{int(self.opacity_value * 100)}%")
+        opacity_value_label.setStyleSheet("color: white; min-width: 35px;")
+        opacity_value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        opacity_slider.valueChanged.connect(lambda v: opacity_value_label.setText(f"{v}%"))
+        opacity_layout.addWidget(opacity_value_label)
+
+        opacity_action = QWidgetAction(menu)
+        opacity_action.setDefaultWidget(opacity_widget)
         menu.addAction(opacity_action)
 
-        if self.element_type == "label":
-            # Font picker for labels
-            font_action = QAction("🔤 Change Font", menu)
+        # Font picker for labels AND text buttons (like LOOP, loop markers, etc.)
+        if self.element_type in ["label", "button"]:
+            menu.addSeparator()
+            font_action = QAction("🔤 Change Font...", menu)
             font_action.triggered.connect(self._pick_font)
             menu.addAction(font_action)
 
         menu.exec(event.screenPos())
         event.accept()
+
+    def _on_opacity_slider_changed(self, value):
+        """Handle opacity slider change in context menu."""
+        self.opacity_value = value / 100.0
+        self.setOpacity(self.opacity_value)
+        self.designer.update_element_color(self, self.bg_color, self.opacity_value)
+        self.designer._apply_live()
+
+    def _pick_color_direct(self):
+        """Open color picker directly."""
+        color = QColorDialog.getColor(self.bg_color, self.designer, "Pick Color")
+        if color.isValid():
+            self.bg_color = color
+            self.setBrush(QBrush(color))
+            self.designer.update_element_color(self, color, self.opacity_value)
+            self.designer._apply_live()
 
     def _pick_color(self):
         """Color picker with opacity."""
@@ -330,7 +391,23 @@ class SkinDesignerInteractive(QDialog):
 
         self.video_controls = video_controls
         self.selected_element = None
-        self.skin_data = self._get_default_skin_data()
+        self.current_skin_name = None
+        self.current_skin_path = None
+
+        # Load current active skin from video_controls, or default
+        if video_controls and hasattr(video_controls, 'skin_manager'):
+            current_applier = video_controls.skin_manager.get_current_applier()
+            if current_applier and current_applier.skin:
+                self.skin_data = current_applier.skin.copy()
+                self.current_skin_name = self.skin_data.get('name', 'Custom Skin')
+                # Get the skin file path for saving
+                skin_manager = video_controls.skin_manager
+                if hasattr(skin_manager, 'current_skin_path') and skin_manager.current_skin_path:
+                    self.current_skin_path = skin_manager.current_skin_path
+            else:
+                self.skin_data = self._get_default_skin_data()
+        else:
+            self.skin_data = self._get_default_skin_data()
 
         layout = QVBoxLayout(self)
 
@@ -342,7 +419,14 @@ class SkinDesignerInteractive(QDialog):
         # Canvas
         self.scene = QGraphicsScene()
         self.scene.setSceneRect(0, 0, 900, 200)
-        self.scene.setBackgroundBrush(QBrush(QColor("#0D0D0D")))
+
+        # Gradient background to show opacity changes
+        from PySide6.QtGui import QLinearGradient
+        gradient = QLinearGradient(0, 0, 900, 200)
+        gradient.setColorAt(0.0, QColor("#1A1A1A"))
+        gradient.setColorAt(0.5, QColor("#2D2D2D"))
+        gradient.setColorAt(1.0, QColor("#1A1A1A"))
+        self.scene.setBackgroundBrush(QBrush(gradient))
 
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -353,13 +437,26 @@ class SkinDesignerInteractive(QDialog):
 
         # Bottom buttons
         btn_layout = QHBoxLayout()
+
+        # Left side - Reset button
+        reset_btn = QPushButton("🔄 Reset to Default")
+        reset_btn.clicked.connect(self._reset_to_default)
+        btn_layout.addWidget(reset_btn)
+
         btn_layout.addStretch()
 
-        load_btn = QPushButton("📁 Load Skin")
+        # Right side - Load, Save, Export, Apply
+        load_btn = QPushButton("📁 Load Skin...")
         load_btn.clicked.connect(self._load_skin)
         btn_layout.addWidget(load_btn)
 
-        export_btn = QPushButton("💾 Export Skin")
+        save_btn = QPushButton("💾 Save")
+        save_btn.setToolTip("Save changes to current skin file")
+        save_btn.clicked.connect(self._save_skin)
+        btn_layout.addWidget(save_btn)
+
+        export_btn = QPushButton("💾 Export As...")
+        export_btn.setToolTip("Save as a new skin file")
         export_btn.clicked.connect(self._export_skin)
         btn_layout.addWidget(export_btn)
 
@@ -394,71 +491,230 @@ class SkinDesignerInteractive(QDialog):
             }
         }
 
-    def _build_realistic_mockup(self):
-        """Build realistic-looking control mockup."""
-        # Control bar background (semi-transparent black)
-        control_bar = QGraphicsRectItem(0, 0, 900, 80)
-        control_bar.setBrush(QBrush(QColor("#000000")))
-        control_bar.setOpacity(0.8)
-        self.scene.addItem(control_bar)
+    def _apply_element_font(self, element, styling):
+        """Apply custom font to element if defined in skin."""
+        font_family = styling.get(f'{element.property_name}_font_family', 'Arial')
+        font_size = styling.get(f'{element.property_name}_font_size', 12)
+        font_weight = styling.get(f'{element.property_name}_font_weight', 'normal')
 
-        # Top row: Buttons
-        y_pos = 10
-        button_size = 40
+        font = QFont(font_family, font_size)
+        if font_weight == 'bold':
+            font.setWeight(QFont.Weight.Bold)
+
+        element.label.setFont(font)
+
+    def _build_realistic_mockup(self):
+        """Build realistic-looking control mockup matching exact video_controls.py 3-row layout."""
+        styling = self.skin_data.get('video_player', {}).get('styling', {})
+        layout_data = self.skin_data.get('video_player', {}).get('layout', {})
+        positions = self.skin_data.get('designer_positions', {})
+
+        control_bar_color = styling.get('control_bar_color', '#242424')
+        control_bar_opacity = styling.get('control_bar_opacity', 0.95)
+        button_size = styling.get('button_size', 40)
+        button_bg_color = styling.get('button_bg_color', '#2b2b2b')
+        button_spacing = layout_data.get('button_spacing', 8)
+        section_spacing = layout_data.get('section_spacing', 20)
+        timeline_color = styling.get('timeline_color', '#2196F3')
+        timeline_bg_color = styling.get('timeline_bg_color', '#1A1A1A')
+        timeline_height = styling.get('timeline_height', 8)
+        loop_start_color = styling.get('loop_marker_start_color', '#FF0080')
+        loop_end_color = styling.get('loop_marker_end_color', '#FF8C00')
+        text_color = styling.get('text_color', '#FFFFFF')
+
+        # Control bar background - INTERACTIVE
+        self.control_bar = InteractiveElement(0, 0, 900, 140, "control_bar", "Background", self, "control_bar_color")
+        self.control_bar.setBrush(QBrush(QColor(control_bar_color)))
+        self.control_bar.setOpacity(control_bar_opacity)
+        self.control_bar.bg_color = QColor(control_bar_color)
+        self.control_bar.opacity_value = control_bar_opacity
+        self.control_bar.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.control_bar.setZValue(-1)
+        self.scene.addItem(self.control_bar)
+
+        self.elements = [self.control_bar]
+
+        # ROW 1: Playback controls + navigation + frame controls + speed slider
+        y_row1 = 10
         x = 20
 
         # Playback buttons
-        buttons = [
-            ("▶", "Play"),
-            ("■", "Stop"),
-            ("🔇", "Mute"),
-        ]
+        for icon, display_name, prop_name in [("▶", "Play", "play_button"), ("■", "Stop", "stop_button"), ("🔇", "Mute", "mute_button")]:
+            saved_pos = positions.get(prop_name, {})
+            btn_x = saved_pos.get('x', x)
+            btn_y = saved_pos.get('y', y_row1)
+            btn_color = styling.get(f"{prop_name}_color", button_bg_color)
+            btn_opacity = styling.get(f"{prop_name}_opacity", 1.0)
 
-        self.elements = []
-        for icon, name in buttons:
-            btn = InteractiveElement(x, y_pos, button_size, button_size, "button", icon, self)
+            btn = InteractiveElement(btn_x, btn_y, button_size, button_size, "button", icon, self, prop_name)
+            btn.setBrush(QBrush(QColor(btn_color)))
+            btn.setOpacity(btn_opacity)
+            btn.bg_color = QColor(btn_color)
+            btn.opacity_value = btn_opacity
+            self._apply_element_font(btn, styling)
             self.scene.addItem(btn)
             self.elements.append(btn)
-            x += button_size + 8
+            x += button_size + button_spacing
 
-        x += 12  # Section gap
+        x += section_spacing
 
-        # Navigation buttons
-        nav = [("<<", "Skip Back"), ("<", "Prev"), (">", "Next"), (">>", "Skip Fwd")]
-        for icon, name in nav:
-            btn = InteractiveElement(x, y_pos, button_size, button_size, "button", icon, self)
+        # Navigation/skip buttons
+        for icon, display_name, prop_name in [("<<", "Skip Back", "skip_back_button"), ("<", "Prev", "prev_frame_button"),
+                                                (">", "Next", "next_frame_button"), (">>", "Skip Fwd", "skip_forward_button")]:
+            saved_pos = positions.get(prop_name, {})
+            btn_x = saved_pos.get('x', x)
+            btn_y = saved_pos.get('y', y_row1)
+            btn_color = styling.get(f"{prop_name}_color", button_bg_color)
+            btn_opacity = styling.get(f"{prop_name}_opacity", 1.0)
+
+            btn = InteractiveElement(btn_x, btn_y, button_size, button_size, "button", icon, self, prop_name)
+            btn.setBrush(QBrush(QColor(btn_color)))
+            btn.setOpacity(btn_opacity)
+            btn.bg_color = QColor(btn_color)
+            btn.opacity_value = btn_opacity
+            self._apply_element_font(btn, styling)
             self.scene.addItem(btn)
             self.elements.append(btn)
-            x += button_size + 8
+            x += button_size + button_spacing
 
-        x += 12
+        x += section_spacing
 
-        # Labels
-        frame_label = InteractiveElement(x, y_pos + 10, 80, 20, "label", "Frame: 0", self)
-        frame_label.label.setDefaultTextColor(QColor("#FFFFFF"))
+        # Frame label + spinbox (combined as one element)
+        saved_pos = positions.get('frame_label', {})
+        label_x = saved_pos.get('x', x)
+        label_y = saved_pos.get('y', y_row1 + 10)
+        frame_label = InteractiveElement(label_x, label_y, 120, 20, "label", "Frame: 0 / 0", self, "frame_label")
+        frame_label.label.setDefaultTextColor(QColor(text_color))
+        self._apply_element_font(frame_label, styling)
         self.scene.addItem(frame_label)
         self.elements.append(frame_label)
+        x += 120 + section_spacing
 
-        # Timeline slider (below buttons)
-        timeline_y = 65
-        timeline = InteractiveElement(20, timeline_y, 860, 8, "slider", "", self)
-        timeline.setBrush(QBrush(QColor("#2196F3")))
-        timeline.label.hide()  # No label for slider
-        self.scene.addItem(timeline)
-        self.elements.append(timeline)
+        # Speed slider (stretched to fill remaining space)
+        saved_pos = positions.get('speed_slider', {})
+        slider_x = saved_pos.get('x', x)
+        slider_y = saved_pos.get('y', y_row1 + 15)
+        speed_slider = InteractiveElement(slider_x, slider_y, 200, 10, "slider", "Speed", self, "speed_slider")
+        speed_slider.setBrush(QBrush(QColor("#6B8E23")))  # Green gradient mid-tone
+        speed_slider.label.setPos(slider_x + 210, slider_y - 5)
+        speed_slider.label.setPlainText("1.00x")
+        speed_slider.label.setDefaultTextColor(QColor("#32CD32"))
+        self.scene.addItem(speed_slider)
+        self.elements.append(speed_slider)
 
-        # Loop markers (visual only)
-        start_marker = QGraphicsTextItem("▼")
-        start_marker.setDefaultTextColor(QColor("#FF0080"))
-        start_marker.setPos(150, timeline_y + 10)
-        start_marker.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        self.scene.addItem(start_marker)
+        # ROW 2: Timeline slider with loop markers
+        y_row2 = 65
+        timeline_width = 860
 
-        end_marker = QGraphicsTextItem("▼")
-        end_marker.setDefaultTextColor(QColor("#FF8C00"))
-        end_marker.setPos(700, timeline_y + 10)
-        end_marker.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        self.scene.addItem(end_marker)
+        # Timeline background track
+        saved_pos = positions.get('timeline_bg', {})
+        track_x = saved_pos.get('x', 20)
+        track_y = saved_pos.get('y', y_row2)
+        self.timeline_bg = InteractiveElement(track_x, track_y, timeline_width, timeline_height, "timeline_bg", "Track", self, "timeline_bg_color")
+        self.timeline_bg.setBrush(QBrush(QColor(timeline_bg_color)))
+        self.timeline_bg.label.hide()
+        self.timeline_bg.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.scene.addItem(self.timeline_bg)
+        self.elements.append(self.timeline_bg)
+
+        # Timeline progress bar
+        saved_pos = positions.get('timeline', {})
+        timeline_x = saved_pos.get('x', 20)
+        timeline_y_pos = saved_pos.get('y', y_row2)
+        self.timeline = InteractiveElement(timeline_x, timeline_y_pos, timeline_width, timeline_height, "slider", "Progress", self, "timeline_color")
+        self.timeline.setBrush(QBrush(QColor(timeline_color)))
+        self.timeline.label.hide()
+        self.timeline.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.scene.addItem(self.timeline)
+        self.elements.append(self.timeline)
+
+        # Loop markers (above timeline)
+        self.start_marker = QGraphicsTextItem("▼")
+        self.start_marker.setDefaultTextColor(QColor(loop_start_color))
+        self.start_marker.setPos(150, y_row2 - 18)
+        self.start_marker.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.scene.addItem(self.start_marker)
+
+        self.end_marker = QGraphicsTextItem("▼")
+        self.end_marker.setDefaultTextColor(QColor(loop_end_color))
+        self.end_marker.setPos(700, y_row2 - 18)
+        self.end_marker.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.scene.addItem(self.end_marker)
+
+        # ROW 3: Info labels (left) + loop controls (right)
+        y_row3 = 90
+        x = 20
+
+        # Time label
+        saved_pos = positions.get('time_label', {})
+        label_x = saved_pos.get('x', x)
+        label_y = saved_pos.get('y', y_row3)
+        time_label = InteractiveElement(label_x, label_y, 150, 20, "label", "00:00.000 / 00:00.000", self, "time_label")
+        time_label.label.setDefaultTextColor(QColor(text_color))
+        self._apply_element_font(time_label, styling)
+        self.scene.addItem(time_label)
+        self.elements.append(time_label)
+        x += 150 + 10
+
+        # FPS label
+        saved_pos = positions.get('fps_label', {})
+        label_x = saved_pos.get('x', x)
+        label_y = saved_pos.get('y', y_row3)
+        fps_label = InteractiveElement(label_x, label_y, 80, 20, "label", "0.00 fps", self, "fps_label")
+        fps_label.label.setDefaultTextColor(QColor(text_color))
+        self._apply_element_font(fps_label, styling)
+        self.scene.addItem(fps_label)
+        self.elements.append(fps_label)
+        x += 80 + 10
+
+        # Frame count label
+        saved_pos = positions.get('frame_count_label', {})
+        label_x = saved_pos.get('x', x)
+        label_y = saved_pos.get('y', y_row3)
+        frame_count_label = InteractiveElement(label_x, label_y, 80, 20, "label", "0 frames", self, "frame_count_label")
+        frame_count_label.label.setDefaultTextColor(QColor(text_color))
+        self._apply_element_font(frame_count_label, styling)
+        self.scene.addItem(frame_count_label)
+        self.elements.append(frame_count_label)
+
+        # Loop controls (right side of row 3)
+        x = 620  # Right side positioning
+
+        # Loop buttons
+        for icon, display_name, prop_name in [("◀", "Loop Start", "loop_start_button"),
+                                                ("▶", "Loop End", "loop_end_button"),
+                                                ("✕", "Loop Reset", "loop_reset_button")]:
+            saved_pos = positions.get(prop_name, {})
+            btn_x = saved_pos.get('x', x)
+            btn_y = saved_pos.get('y', y_row3 - 5)
+            btn_color = styling.get(f"{prop_name}_color", button_bg_color)
+            btn_opacity = styling.get(f"{prop_name}_opacity", 1.0)
+
+            btn = InteractiveElement(btn_x, btn_y, 30, 30, "button", icon, self, prop_name)
+            btn.setBrush(QBrush(QColor(btn_color)))
+            btn.setOpacity(btn_opacity)
+            btn.bg_color = QColor(btn_color)
+            btn.opacity_value = btn_opacity
+            self._apply_element_font(btn, styling)
+            self.scene.addItem(btn)
+            self.elements.append(btn)
+            x += 30 + button_spacing
+
+        # Loop checkbox
+        saved_pos = positions.get('loop_checkbox', {})
+        chk_x = saved_pos.get('x', x)
+        chk_y = saved_pos.get('y', y_row3 - 5)
+        btn_color = styling.get("loop_checkbox_color", button_bg_color)
+        btn_opacity = styling.get("loop_checkbox_opacity", 1.0)
+
+        loop_chk = InteractiveElement(chk_x, chk_y, 50, 30, "button", "LOOP", self, "loop_checkbox")
+        loop_chk.setBrush(QBrush(QColor(btn_color)))
+        loop_chk.setOpacity(btn_opacity)
+        loop_chk.bg_color = QColor(btn_color)
+        loop_chk.opacity_value = btn_opacity
+        self._apply_element_font(loop_chk, styling)
+        self.scene.addItem(loop_chk)
+        self.elements.append(loop_chk)
 
     def element_selected(self, element):
         """Handle element selection."""
@@ -476,64 +732,212 @@ class SkinDesignerInteractive(QDialog):
         except Exception as e:
             print(f"Error updating size: {e}")
 
+    def update_element_position(self, element, x, y):
+        """Update skin data when element moved."""
+        try:
+            # Store positions in a custom section of skin data
+            if 'designer_positions' not in self.skin_data:
+                self.skin_data['designer_positions'] = {}
+
+            self.skin_data['designer_positions'][element.property_name] = {
+                'x': int(x),
+                'y': int(y)
+            }
+            # Don't apply live for position changes (just save for next load)
+        except Exception as e:
+            print(f"Error updating position: {e}")
+
     def update_element_color(self, element, color, opacity):
-        """Update color in skin data."""
+        """Update color in skin data and visual mockup."""
         try:
             if element.element_type == "button":
-                self.skin_data['video_player']['styling']['button_bg_color'] = color.name()
+                # Save color for this specific button using its property_name
+                button_color_key = f"{element.property_name}_color"
+                self.skin_data['video_player']['styling'][button_color_key] = color.name()
+
+                # Also save opacity if specified
+                if opacity is not None:
+                    button_opacity_key = f"{element.property_name}_opacity"
+                    self.skin_data['video_player']['styling'][button_opacity_key] = opacity
+
+                # Update this button in mockup
+                element.setBrush(QBrush(color))
+                if opacity is not None:
+                    element.setOpacity(opacity)
+
             elif element.element_type == "slider":
-                self.skin_data['video_player']['styling']['timeline_color'] = color.name()
+                # Use property_name to determine which slider property to update
+                color_key = f"{element.property_name}_color"
+                self.skin_data['video_player']['styling'][color_key] = color.name()
+                # Update element in mockup
+                element.setBrush(QBrush(color))
+
+            elif element.element_type == "timeline_bg":
+                self.skin_data['video_player']['styling']['timeline_bg_color'] = color.name()
+                # Update timeline background in mockup
+                if hasattr(self, 'timeline_bg'):
+                    self.timeline_bg.setBrush(QBrush(color))
+
+            elif element.element_type == "control_bar":
+                self.skin_data['video_player']['styling']['control_bar_color'] = color.name()
+                # Update control bar in mockup
+                if hasattr(self, 'control_bar'):
+                    self.control_bar.setBrush(QBrush(color))
+
+            # Update opacity for control bar or any element that has it
+            if opacity is not None and element.element_type == "control_bar":
+                self.skin_data['video_player']['styling']['control_bar_opacity'] = opacity
+                if hasattr(self, 'control_bar'):
+                    self.control_bar.setOpacity(opacity)
 
             self._apply_live()
         except Exception as e:
             print(f"Error updating color: {e}")
 
     def update_element_opacity(self, element, opacity):
-        """Update opacity."""
+        """Update opacity in skin data and visual mockup."""
         try:
-            if element.element_type == "button":
-                # Could add button_opacity property
-                pass
+            # Update control bar opacity
+            self.skin_data['video_player']['styling']['control_bar_opacity'] = opacity
+            if hasattr(self, 'control_bar_rect'):
+                self.control_bar_rect.setOpacity(opacity)
+
             self._apply_live()
         except Exception as e:
             print(f"Error updating opacity: {e}")
 
     def update_element_font(self, element, font):
-        """Update font."""
+        """Update font with per-element settings."""
         try:
-            self.skin_data['video_player']['styling']['label_font_size'] = font.pointSize()
+            # Save font properties specific to this element
+            font_family_key = f"{element.property_name}_font_family"
+            font_size_key = f"{element.property_name}_font_size"
+            font_weight_key = f"{element.property_name}_font_weight"
+
+            self.skin_data['video_player']['styling'][font_family_key] = font.family()
+            self.skin_data['video_player']['styling'][font_size_key] = font.pointSize()
+
+            # Save weight as 'bold' or 'normal'
+            if font.weight() >= QFont.Weight.Bold.value:
+                self.skin_data['video_player']['styling'][font_weight_key] = 'bold'
+            else:
+                self.skin_data['video_player']['styling'][font_weight_key] = 'normal'
+
+            # Update the visual element
+            element.label.setFont(font)
+            element._center_label()
+
             self._apply_live()
         except Exception as e:
             print(f"Error updating font: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _apply_live(self):
-        """Apply current skin live."""
+        """Apply current skin live to video controls."""
         try:
-            if self.video_controls:
-                applier = SkinApplier(self.skin_data)
-                self.video_controls.current_applier = applier
+            if self.video_controls and hasattr(self.video_controls, 'skin_manager'):
+                # Update skin manager with new data
+                self.video_controls.skin_manager.current_skin = self.skin_data
+                self.video_controls.skin_manager.current_applier = SkinApplier(self.skin_data)
+                # Apply to video controls
                 self.video_controls.apply_current_skin()
         except Exception as e:
             print(f"Error applying skin live: {e}")
             import traceback
             traceback.print_exc()
 
+    def _save_skin(self):
+        """Save changes to current skin file."""
+        if not self.current_skin_path:
+            # No current file, ask user to export instead
+            reply = QMessageBox.question(
+                self, "Save As New?",
+                "No skin file is currently loaded. Would you like to export as a new skin?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._export_skin()
+            return
+
+        # Check if it's a default skin (read-only)
+        if 'defaults' in str(self.current_skin_path):
+            QMessageBox.warning(
+                self, "Cannot Save",
+                "Default skins are read-only. Use 'Export As...' to save as a new custom skin."
+            )
+            return
+
+        # Save to current file
+        try:
+            with open(self.current_skin_path, 'w') as f:
+                yaml.dump(self.skin_data, f, default_flow_style=False, sort_keys=False)
+
+            # Refresh skin manager and reload
+            if self.video_controls and hasattr(self.video_controls, 'skin_manager'):
+                self.video_controls.skin_manager.refresh_available_skins()
+                skin_name = self.skin_data.get('name', 'Custom Skin')
+                self.video_controls.switch_skin(skin_name)
+                # Refresh context menu
+                self._refresh_context_menu()
+
+            QMessageBox.information(self, "Saved", f"Skin updated:\n{self.current_skin_path.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Save failed:\n{e}")
+
     def _export_skin(self):
-        """Export to YAML."""
+        """Export as new skin file."""
         skins_dir = Path(__file__).parent.parent / 'skins' / 'user'
         skins_dir.mkdir(parents=True, exist_ok=True)
 
+        default_name = self.skin_data.get('name', 'Custom Skin').lower().replace(' ', '-') + '.yaml'
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Skin", str(skins_dir / "custom.yaml"), "YAML (*.yaml)"
+            self, "Export As New Skin", str(skins_dir / default_name), "YAML (*.yaml)"
         )
 
         if file_path:
             try:
                 with open(file_path, 'w') as f:
-                    yaml.dump(self.skin_data, f, default_flow_style=False)
+                    yaml.dump(self.skin_data, f, default_flow_style=False, sort_keys=False)
+
+                # Update current path to new file
+                self.current_skin_path = Path(file_path)
+
+                # Refresh skin manager and switch to new skin
+                if self.video_controls and hasattr(self.video_controls, 'skin_manager'):
+                    self.video_controls.skin_manager.refresh_available_skins()
+                    skin_name = self.skin_data.get('name', 'Custom Skin')
+                    self.video_controls.switch_skin(skin_name)
+                    # Refresh context menu
+                    self._refresh_context_menu()
+
                 QMessageBox.information(self, "Exported", f"Saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+
+    def _reset_to_default(self):
+        """Reset to default skin values."""
+        reply = QMessageBox.question(
+            self, "Reset to Default?",
+            "This will reset all values to the default Classic skin. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.skin_data = self._get_default_skin_data()
+            self.current_skin_name = self.skin_data.get('name', 'Custom Skin')
+            self.current_skin_path = None
+
+            # Rebuild mockup with default values
+            self._rebuild_mockup()
+
+            self._apply_live()
+            QMessageBox.information(self, "Reset", "Skin reset to default values")
+
+    def _refresh_context_menu(self):
+        """Refresh video controls context menu with updated skins."""
+        # Context menu is rebuilt each time it's shown, so just ensure skin_manager is refreshed
+        # (already done in _save_skin and _export_skin via refresh_available_skins)
 
     def _load_skin(self):
         """Load skin from file."""
@@ -546,7 +950,22 @@ class SkinDesignerInteractive(QDialog):
             try:
                 with open(file_path) as f:
                     self.skin_data = yaml.safe_load(f)
+                self.current_skin_path = Path(file_path)
+                self.current_skin_name = self.skin_data.get('name', 'Custom Skin')
+
+                # Rebuild mockup with new skin values
+                self._rebuild_mockup()
+
                 self._apply_live()
-                QMessageBox.information(self, "Loaded", "Skin loaded successfully")
+                QMessageBox.information(self, "Loaded", f"Skin loaded: {self.current_skin_name}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+
+    def _rebuild_mockup(self):
+        """Rebuild the visual mockup with current skin values."""
+        # Clear existing elements
+        for item in self.scene.items():
+            self.scene.removeItem(item)
+
+        # Rebuild with current skin data
+        self._build_realistic_mockup()

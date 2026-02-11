@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import traceback
+import time
 import warnings
 import io
 import threading
@@ -200,6 +201,24 @@ def run_gui():
     exit_code = int(app.exec())
     if hasattr(main_window, 'shutdown_background_workers'):
         main_window.shutdown_background_workers()
+    # Some third-party/background worker threads can linger and delay process
+    # termination for minutes. Give them a short grace window, then hard-exit.
+    deadline = time.time() + 1.2
+    while time.time() < deadline:
+        alive_workers = [
+            t for t in threading.enumerate()
+            if t is not threading.main_thread() and t.is_alive() and not t.daemon
+        ]
+        if not alive_workers:
+            return exit_code
+        time.sleep(0.05)
+    alive_workers = [
+        t for t in threading.enumerate()
+        if t is not threading.main_thread() and t.is_alive() and not t.daemon
+    ]
+    if alive_workers:
+        print(f"[SHUTDOWN] Forcing fast exit; lingering threads: {len(alive_workers)}")
+        os._exit(exit_code)
     return exit_code
 
 

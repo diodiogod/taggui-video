@@ -27,6 +27,7 @@ class SkinManager:
         self.loader = SkinLoader()
         self.current_skin: Optional[Dict[str, Any]] = None
         self.current_applier: Optional[SkinApplier] = None
+        self.current_skin_path: Optional[Path] = None  # Track current skin file path
         self.available_skins: List[Dict[str, Any]] = []
 
         # Load available skins
@@ -67,6 +68,7 @@ class SkinManager:
         # Load skin data (cached in loader)
         self.current_skin = skin_info['data']
         self.current_applier = SkinApplier(self.current_skin)
+        self.current_skin_path = Path(skin_info['path'])  # Store path for editing
         return True
 
     def load_skin_from_path(self, skin_path: Path) -> bool:

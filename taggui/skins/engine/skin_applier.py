@@ -67,24 +67,29 @@ class SkinApplier:
             except ValueError:
                 opacity = 0.95
 
-        # EXACT original method: use QPalette + setWindowOpacity, NOT stylesheet alpha
+        # Create QColor with alpha channel
+        bg_qcolor = QColor(bg_color)
+        bg_qcolor.setAlphaF(opacity)  # Set opacity (0.0 - 1.0)
+
+        # Use QPalette to set background with alpha
+        # This approach properly supports transparency without affecting children
         control_bar.setAutoFillBackground(True)
         palette = control_bar.palette()
-        palette.setColor(control_bar.backgroundRole(), QColor(bg_color))
+        palette.setColor(QPalette.ColorRole.Window, bg_qcolor)
         control_bar.setPalette(palette)
-        control_bar.setWindowOpacity(opacity)
 
-        # Only set border/radius if specified (Classic has none)
+        # Apply border/radius via stylesheet (palette doesn't support borders)
         if border != 'none':
             stylesheet = f"""
-                QWidget {{
+                VideoControlsWidget {{
                     border: {border};
                     border-radius: {self.borders.get('radius', 0)}px;
                 }}
             """
             control_bar.setStyleSheet(stylesheet)
         else:
-            control_bar.setStyleSheet("")  # Clear any previous stylesheet
+            # Clear any existing stylesheet
+            control_bar.setStyleSheet("")
 
         # Don't use setFixedHeight - let the control bar size itself based on content
         # This matches original behavior where height was determined by layout

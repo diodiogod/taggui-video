@@ -10,12 +10,19 @@ video_player:
   shadows: {}
   styling:
     background: '#000000'
-    button_bg_color: '#2b0809'
+    button_bg_color: '#55ff00'
     button_hover_color: '#3a3a3a'
     button_size: 40
-    control_bar_color: '#000000'
-    control_bar_opacity: 0.8
+    control_bar_color: '#ffe419'
+    control_bar_opacity: 0.09
     loop_marker_end_color: '#FF8C00'
     loop_marker_start_color: '#FF0080'
     timeline_color: '#2196F3'
     timeline_height: 8
+designer_positions:
+  frame_label:
+    x: 557
+    y: 30
+  skip_forward_button:
+    x: 328
+    y: 11
