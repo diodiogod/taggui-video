@@ -345,17 +345,47 @@ class ImageListViewGeometryMixin:
         """Recalculate masonry layout on resize (debounced)."""
         super().resizeEvent(event)
         if self.use_masonry:
-            # Debounce: recalculate 50ms after last resize event
-            # Fast enough to feel live, but prevents recalc on every pixel
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), 'sourceModel')
+                else self.model()
+            )
+            if hasattr(self, '_activate_resize_anchor'):
+                self._activate_resize_anchor(source_model=source_model, hold_s=3.0)
+            # Debounce resize-triggered masonry recalcs enough to avoid
+            # repeated strict-window ownership churn while dragging.
             self._resize_timer.stop()
-            self._resize_timer.start(50)
+            self._resize_timer.start(140)
 
 
     def _on_resize_finished(self):
         """Called after resize stops (debounced)."""
         if self.use_masonry:
+            import time
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), 'sourceModel')
+                else self.model()
+            )
+            strategy = self._get_masonry_strategy(source_model) if source_model else "full_compat"
+            strict_paginated = bool(
+                source_model
+                and hasattr(source_model, '_paginated_mode')
+                and source_model._paginated_mode
+                and strategy == "windowed_strict"
+            )
+
+            if strict_paginated:
+                if hasattr(self, '_activate_resize_anchor'):
+                    self._activate_resize_anchor(source_model=source_model, hold_s=2.0)
+            else:
+                self._resize_anchor_page = None
+                self._resize_anchor_until = 0.0
+
             print("[RESIZE] Window resize finished, recalculating masonry...")
-            self._recenter_after_layout = True
+            # In strict paginated mode, explicit page/global anchoring above is
+            # more stable than recentering via possibly stale proxy row index.
+            self._recenter_after_layout = not strict_paginated
             self._last_masonry_window_signature = None
             self._last_masonry_signal = "resize"
             self._calculate_masonry_layout()

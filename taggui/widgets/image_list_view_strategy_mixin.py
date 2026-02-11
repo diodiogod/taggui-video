@@ -3,6 +3,47 @@ from widgets.image_list_strict_domain_service import StrictScrollDomainService
 from widgets.image_list_masonry_incremental_service import MasonryIncrementalService
 
 class ImageListViewStrategyMixin:
+    def _activate_resize_anchor(self, source_model=None, hold_s: float = 2.0) -> bool:
+        """Anchor strict paginated resize/zoom around current selected global item."""
+        import time
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            return False
+        if self._get_masonry_strategy(source_model) != "windowed_strict":
+            return False
+
+        anchor_global = getattr(self, '_selected_global_index', None)
+        if not (isinstance(anchor_global, int) and anchor_global >= 0):
+            cur = self.currentIndex()
+            if cur.isValid():
+                try:
+                    src_idx = (
+                        self.model().mapToSource(cur)
+                        if self.model() and hasattr(self.model(), 'mapToSource')
+                        else cur
+                    )
+                    if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
+                        mapped = source_model.get_global_index_for_row(src_idx.row())
+                        if isinstance(mapped, int) and mapped >= 0:
+                            anchor_global = mapped
+                except Exception:
+                    anchor_global = None
+        if not (isinstance(anchor_global, int) and anchor_global >= 0):
+            return False
+
+        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        anchor_page = max(0, int(anchor_global // max(1, page_size)))
+        until = time.time() + max(0.2, float(hold_s))
+        self._resize_anchor_page = anchor_page
+        self._resize_anchor_until = until
+        self._restore_target_page = anchor_page
+        self._restore_target_global_index = anchor_global
+        self._restore_anchor_until = until
+        self._release_page_lock_page = anchor_page
+        self._release_page_lock_until = time.time() + min(1.2, max(0.2, float(hold_s)))
+        return True
+
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
         """Timestamped, optionally throttled flow logging for masonry/pagination diagnostics."""
@@ -277,6 +318,9 @@ class ImageListViewStrategyMixin:
                 self._restore_target_page = None
                 self._restore_target_global_index = None
                 self._restore_anchor_until = 0.0
+            if getattr(self, '_resize_anchor_page', None) is not None:
+                self._resize_anchor_page = None
+                self._resize_anchor_until = 0.0
             # User moved again: clear temporary strict post-release ownership lock.
             if self._use_local_anchor_masonry(source_model):
                 self._release_page_lock_page = None

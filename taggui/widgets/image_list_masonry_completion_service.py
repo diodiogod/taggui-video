@@ -367,6 +367,70 @@ class MasonryCompletionService:
                 try:
                     v._apply_layout_to_ui(timestamp)
                     v.layout_ready.emit()
+
+                    def _ensure_selected_anchor_if_needed():
+                        """Keep selected image anchored during resize/zoom relayout bursts."""
+                        try:
+                            now = time.time()
+                            resize_anchor_live = (
+                                getattr(v, '_resize_anchor_page', None) is not None
+                                and now <= float(getattr(v, '_resize_anchor_until', 0.0) or 0.0)
+                            )
+                            restore_anchor_live = now <= float(getattr(v, '_restore_anchor_until', 0.0) or 0.0)
+                            if not (resize_anchor_live or restore_anchor_live):
+                                return
+
+                            target_global = getattr(v, '_selected_global_index', None)
+                            if not (isinstance(target_global, int) and target_global >= 0):
+                                target_global = getattr(v, '_restore_target_global_index', None)
+                            if not (isinstance(target_global, int) and target_global >= 0):
+                                return
+
+                            source_model_local = (
+                                v.model().sourceModel()
+                                if v.model() and hasattr(v.model(), 'sourceModel')
+                                else v.model()
+                            )
+                            if not source_model_local:
+                                return
+
+                            # Rebind current index safely so image viewer stays synced.
+                            if hasattr(source_model_local, 'get_loaded_row_for_global_index'):
+                                loaded_row = source_model_local.get_loaded_row_for_global_index(target_global)
+                                if loaded_row >= 0:
+                                    src_idx = source_model_local.index(loaded_row, 0)
+                                    proxy_model_local = v.model()
+                                    proxy_idx = (
+                                        proxy_model_local.mapFromSource(src_idx)
+                                        if proxy_model_local and hasattr(proxy_model_local, 'mapFromSource')
+                                        else src_idx
+                                    )
+                                    if proxy_idx.isValid() and v.currentIndex() != proxy_idx:
+                                        v.setCurrentIndex(proxy_idx)
+
+                            # Anchor viewport to actual masonry item position.
+                            target_item = None
+                            for it in (v._masonry_items or []):
+                                if int(it.get('index', -1)) == int(target_global):
+                                    target_item = it
+                                    break
+                            if target_item is None:
+                                return
+
+                            sb_local = v.verticalScrollBar()
+                            target_y = int(target_item.get('y', 0)) + int(target_item.get('height', 0)) // 2 - (v.viewport().height() // 2)
+                            target_y = max(0, min(target_y, int(sb_local.maximum())))
+                            prev_block = sb_local.blockSignals(True)
+                            try:
+                                if sb_local.value() != target_y:
+                                    sb_local.setValue(target_y)
+                            finally:
+                                sb_local.blockSignals(prev_block)
+                            v._last_stable_scroll_value = target_y
+                        except Exception:
+                            pass
+
+                    _ensure_selected_anchor_if_needed()
                 
                     if v._recenter_after_layout:
                         v._recenter_after_layout = False

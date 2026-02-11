@@ -43,6 +43,16 @@ class MasonryWindowPlannerService:
         if restore_page is not None and not dragging_mode:
             return max(0, min(max(0, (total_items - 1) // page_size) if total_items > 0 else 0, int(restore_page)))
 
+        # Resize/zoom anchor override: keep strict ownership stable while the
+        # viewport geometry changes and scrollbar domains are re-derived.
+        resize_page = getattr(self._view, '_resize_anchor_page', None)
+        resize_until = float(getattr(self._view, '_resize_anchor_until', 0.0) or 0.0)
+        if resize_page is not None and (not dragging_mode):
+            if time.time() <= resize_until:
+                return max(0, min(max(0, (total_items - 1) // page_size) if total_items > 0 else 0, int(resize_page)))
+            self._view._resize_anchor_page = None
+            self._view._resize_anchor_until = 0.0
+
         if stick_bottom and total_items > 0:
             source_idx = total_items - 1
         elif stick_top:
