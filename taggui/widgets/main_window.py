@@ -2,7 +2,7 @@ import time
 import hashlib
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QUrl, Qt, QTimer, Slot
+from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPoint, QUrl, Qt, QTimer, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QIcon, QKeySequence, QShortcut, QMouseEvent)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
@@ -37,6 +37,7 @@ from widgets.auto_markings import AutoMarkings
 from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.image_viewer import ImageViewer
+from widgets.floating_viewer_window import FloatingViewerWindow
 
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
 
@@ -82,6 +83,14 @@ class MainWindow(QMainWindow):
         self.setPalette(self.app.style().standardPalette())
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model)
+        self.image_viewer.video_controls.set_loop_persistence_scope('main')
+        self._floating_viewers = []
+        self._floating_viewer_spawn_count = 0
+        self._active_viewer = self.image_viewer
+        self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
+        self.image_viewer.view.customContextMenuRequested.connect(
+            self._on_main_viewer_context_menu_spawn
+        )
         self.create_central_widget()
         self._update_main_window_title()
 
@@ -355,6 +364,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
+        self.close_all_floating_viewers()
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
         # Save marker size setting
@@ -566,9 +576,322 @@ class MainWindow(QMainWindow):
     def _on_folder_media_pref_changed(self, media_text: str):
         self._save_folder_view_preferences(media_value=media_text)
 
+    def get_active_viewer(self) -> ImageViewer:
+        """Return the viewer targeted by selection/toolbar actions."""
+        viewer = getattr(self, '_active_viewer', None)
+        if viewer is None:
+            return self.image_viewer
+        try:
+            _ = viewer.view
+        except RuntimeError:
+            return self.image_viewer
+        return viewer
+
+    def set_active_viewer(self, viewer: ImageViewer | None):
+        """Set active viewer target used for image-list selection loading."""
+        target = viewer or self.image_viewer
+        try:
+            _ = target.view
+        except RuntimeError:
+            target = self.image_viewer
+        self._active_viewer = target
+
+        active_zoom = -1 if getattr(target, 'is_zoom_to_fit', False) else target.view.transform().m11()
+        self.zoom(active_zoom)
+
+        live_windows = []
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                window.set_active(window.viewer is target)
+                live_windows.append(window)
+            except RuntimeError:
+                pass
+        self._floating_viewers = live_windows
+
+    def _connect_floating_viewer(self, viewer: ImageViewer):
+        """Bind floating viewer signals to existing main-window slots."""
+        viewer.activated.connect(lambda: self.set_active_viewer(viewer))
+        viewer.zoom.connect(self.zoom)
+        viewer.rating_changed.connect(self.set_rating)
+        viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
+        viewer.directory_reload_requested.connect(self.reload_directory)
+        viewer.video_player.playback_started.connect(self._freeze_list_view)
+        viewer.video_player.playback_paused.connect(self._unfreeze_list_view)
+        self._connect_viewer_video_controls(viewer)
+
+    def _connect_viewer_video_controls(self, viewer: ImageViewer):
+        """Connect one viewer's controls to its own video player."""
+        video_player = viewer.video_player
+        video_controls = viewer.video_controls
+
+        def on_play_pause_requested():
+            video_player.toggle_play_pause()
+            video_controls.set_playing(video_player.is_playing, update_auto_play=True)
+
+        video_controls.play_pause_requested.connect(on_play_pause_requested)
+        video_controls.stop_requested.connect(video_player.stop)
+        video_controls.frame_changed.connect(video_player.seek_to_frame)
+        video_controls.marker_preview_requested.connect(video_player.seek_to_frame)
+        video_controls.skip_backward_requested.connect(
+            lambda: self._skip_viewer_video(viewer, backward=True)
+        )
+        video_controls.skip_forward_requested.connect(
+            lambda: self._skip_viewer_video(viewer, backward=False)
+        )
+        video_player.frame_changed.connect(video_controls.update_position)
+        video_player.frame_changed.connect(
+            lambda frame, time_ms: video_controls.set_playing(video_player.is_playing)
+        )
+        video_controls.loop_toggled.connect(
+            lambda enabled: self._apply_loop_state_to_viewer_player(viewer)
+        )
+        video_controls.loop_start_set.connect(
+            lambda: self._apply_loop_state_to_viewer_player(viewer)
+        )
+        video_controls.loop_end_set.connect(
+            lambda: self._apply_loop_state_to_viewer_player(viewer)
+        )
+        video_controls.loop_reset.connect(
+            lambda: video_player.set_loop(False, None, None)
+        )
+        video_controls.speed_changed.connect(video_player.set_playback_speed)
+        video_controls.mute_toggled.connect(video_player.set_muted)
+        video_controls.fixed_marker_size = self.toolbar_manager.fixed_marker_size_spinbox.value()
+
+    def _skip_viewer_video(self, viewer: ImageViewer, backward: bool):
+        """Skip one second on a specific viewer's video."""
+        player = viewer.video_player
+        fps = player.get_fps()
+        if fps <= 0:
+            return
+
+        frame_offset = int(fps)
+        current_frame = player.get_current_frame_number()
+        total_frames = max(1, int(player.get_total_frames()))
+
+        if backward:
+            new_frame = max(0, current_frame - frame_offset)
+        else:
+            new_frame = min(total_frames - 1, current_frame + frame_offset)
+        player.seek_to_frame(new_frame)
+
+    def _capture_viewer_video_state(self, viewer: ImageViewer) -> dict | None:
+        """Capture speed/loop state from an already-loaded video viewer."""
+        try:
+            if not getattr(viewer, '_is_video_loaded', False):
+                return None
+            video_path = getattr(viewer.video_player, 'video_path', None)
+            if video_path is None:
+                return None
+            loop_state = viewer.video_controls.get_loop_state()
+            return {
+                'video_path': Path(video_path),
+                'speed': viewer.video_controls.get_speed_value(),
+                'loop_start': loop_state.get('start_frame'),
+                'loop_end': loop_state.get('end_frame'),
+                'loop_enabled': bool(loop_state.get('enabled', False)),
+            }
+        except Exception:
+            return None
+
+    def _apply_inherited_video_state(self, viewer: ImageViewer, source_state: dict | None):
+        """Apply source viewer speed/loop state to a spawned viewer when paths match."""
+        if not source_state:
+            return
+        try:
+            if not getattr(viewer, '_is_video_loaded', False):
+                return
+            target_path = getattr(viewer.video_player, 'video_path', None)
+            if target_path is None:
+                return
+            if Path(target_path) != source_state.get('video_path'):
+                return
+            viewer.video_controls.set_speed_value(source_state.get('speed', 1.0), emit_signal=True)
+            viewer.video_controls.apply_loop_state(
+                source_state.get('loop_start'),
+                source_state.get('loop_end'),
+                source_state.get('loop_enabled', False),
+                save=False,
+                emit_signals=True,
+            )
+        except Exception as e:
+            print(f"[VIEWER] Inheritance warning: {e}")
+
+    @Slot(object)
+    def _on_main_viewer_context_menu_spawn(self, pos):
+        """Spawn a floating viewer on right-click in the main viewer area."""
+        try:
+            view = self.image_viewer.view
+            scene_pos = view.mapToScene(pos)
+            item = view.scene().itemAt(scene_pos, view.transform())
+        except Exception:
+            self.spawn_floating_viewer()
+            return
+
+        from widgets.marking import MarkingItem, MarkingLabel
+
+        current = item
+        while current is not None:
+            if isinstance(current, (MarkingItem, MarkingLabel)):
+                return
+            current = current.parentItem()
+
+        self.spawn_floating_viewer()
+
+    def _iter_all_viewers(self) -> list[ImageViewer]:
+        """Return main viewer plus currently alive floating viewers."""
+        viewers = [self.image_viewer]
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                viewers.append(window.viewer)
+            except RuntimeError:
+                continue
+        return viewers
+
+    def _apply_loop_state_to_viewer_player(self, viewer: ImageViewer):
+        """Mirror loop settings from controls to the backing video player."""
+        controls = getattr(viewer, 'video_controls', None)
+        player = getattr(viewer, 'video_player', None)
+        if controls is None or player is None:
+            return
+
+        if not bool(getattr(controls, 'is_looping', False)):
+            player.set_loop(False, None, None)
+            return
+
+        loop_range = controls.get_loop_range() if hasattr(controls, 'get_loop_range') else None
+        if loop_range:
+            player.set_loop(True, int(loop_range[0]), int(loop_range[1]))
+            return
+
+        total_frames = int(player.get_total_frames() or 0)
+        if total_frames > 0:
+            player.set_loop(True, 0, total_frames - 1)
+        else:
+            player.set_loop(False, None, None)
+
+    @Slot()
+    def sync_video_playback(self):
+        """Synchronize loaded videos to loop start and play them together."""
+        loaded_video_viewers = []
+        for viewer in self._iter_all_viewers():
+            try:
+                if getattr(viewer, '_is_video_loaded', False) and getattr(viewer.video_player, 'video_path', None):
+                    loaded_video_viewers.append(viewer)
+            except RuntimeError:
+                continue
+
+        if not loaded_video_viewers:
+            return
+
+        for viewer in loaded_video_viewers:
+            try:
+                self._apply_loop_state_to_viewer_player(viewer)
+            except Exception as e:
+                print(f"[SYNC] Loop state apply warning: {e}")
+
+        playing_now = [v for v in loaded_video_viewers if bool(getattr(v.video_player, 'is_playing', False))]
+        targets = playing_now if playing_now else loaded_video_viewers
+
+        for viewer in targets:
+            try:
+                viewer.video_player.pause()
+            except Exception as e:
+                print(f"[SYNC] Pause warning: {e}")
+
+        for viewer in targets:
+            try:
+                start_frame = 0
+                controls = viewer.video_controls
+                if bool(getattr(controls, 'is_looping', False)):
+                    loop_range = controls.get_loop_range()
+                    if loop_range:
+                        start_frame = max(0, int(loop_range[0]))
+                viewer.video_player.seek_to_frame(start_frame)
+            except Exception as e:
+                print(f"[SYNC] Seek warning: {e}")
+
+        def _start_all():
+            for viewer in targets:
+                try:
+                    viewer.video_player.play()
+                except Exception as e:
+                    print(f"[SYNC] Play warning: {e}")
+
+        QTimer.singleShot(0, _start_all)
+
+    @Slot()
+    def spawn_floating_viewer(self):
+        """Create a new floating viewer that can receive list selection loads."""
+        source_viewer = self.get_active_viewer()
+        source_video_state = self._capture_viewer_video_state(source_viewer)
+
+        viewer = ImageViewer(self.proxy_image_list_model)
+        self._connect_floating_viewer(viewer)
+
+        self._floating_viewer_spawn_count += 1
+        spawn_id = self._floating_viewer_spawn_count
+        viewer.video_controls.set_loop_persistence_scope(f"floating_{spawn_id}")
+        title = f"Viewer {spawn_id}"
+        window = FloatingViewerWindow(viewer, title, parent=self)
+        window.activated.connect(self.set_active_viewer)
+        window.closing.connect(self._on_floating_viewer_closed)
+        window.sync_video_requested.connect(self.sync_video_playback)
+
+        self._floating_viewers.append(window)
+
+        current = self.image_list_selection_model.currentIndex()
+        if current.isValid():
+            viewer.load_image(current)
+            self._apply_inherited_video_state(viewer, source_video_state)
+
+        base_w = max(420, int(self.width() * 0.45))
+        base_h = max(280, int(self.height() * 0.45))
+        window.resize(base_w, base_h)
+
+        offset = 32 * ((self._floating_viewer_spawn_count - 1) % 8)
+        top_left = self.mapToGlobal(self.rect().topLeft())
+        window.move(top_left + QPoint(120 + offset, 90 + offset))
+
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.set_active_viewer(viewer)
+
+    @Slot()
+    def close_all_floating_viewers(self):
+        """Close all spawned floating viewers."""
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                window.close()
+            except RuntimeError:
+                pass
+
+    def _on_floating_viewer_closed(self, viewer: ImageViewer):
+        """Cleanup when one floating viewer is closed."""
+        remaining = []
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                if window.viewer is viewer:
+                    continue
+                remaining.append(window)
+            except RuntimeError:
+                continue
+        self._floating_viewers = remaining
+
+        try:
+            viewer.video_player.cleanup()
+        except Exception as e:
+            print(f"[VIEWER] Floating viewer cleanup warning: {e}")
+
+        if getattr(self, '_active_viewer', None) is viewer:
+            self.set_active_viewer(self.image_viewer)
+
     @Slot()
     def zoom(self, factor):
         toolbar_mgr = self.toolbar_manager
+        if toolbar_mgr.zoom_fit_best_action is None:
+            return
         if factor < 0:
             toolbar_mgr.zoom_fit_best_action.setChecked(True)
             toolbar_mgr.zoom_original_action.setChecked(False)
@@ -1219,7 +1542,7 @@ class MainWindow(QMainWindow):
         if interactive:
             self.image_list_model.add_to_undo_stack(
                 action_name='Change rating', should_ask_for_confirmation=False)
-            self.image_viewer.rating_change(rating)
+            self.get_active_viewer().rating_change(rating)
             self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
 
 
