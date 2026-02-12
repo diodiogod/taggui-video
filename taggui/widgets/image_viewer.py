@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
 from PIL import Image as pilimage
-from utils.settings import settings
+from utils.settings import settings, DEFAULT_SETTINGS
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image, ImageMarking, Marking
 from utils.rect import RectPosition
@@ -50,6 +50,7 @@ class ImageViewer(QWidget):
         self.show_marking_latent_state = True
         self.marking_to_add = ImageMarking.NONE
         self.scene = QGraphicsScene()
+        self._scene_padding_px = 0
 
         self.view = ImageGraphicsView(self.scene, self)
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
@@ -70,6 +71,7 @@ class ImageViewer(QWidget):
         # Video player and controls
         self.video_player = VideoPlayerWidget()
         self.current_video_item = None
+        self.current_image_item = None
         self.video_controls = VideoControlsWidget(self)
         self.video_controls.setVisible(False)
         # Load auto-hide setting (inverted from always_show setting)
@@ -77,6 +79,8 @@ class ImageViewer(QWidget):
         self.video_controls_auto_hide = not always_show
         self._controls_visible = False
         self._is_video_loaded = False
+        self._floating_double_click_return_scale = None
+        self._floating_last_auto_double_click_zoom_scale = None
 
         # Timer for auto-hiding controls
         self._controls_hide_timer = QTimer(self)
@@ -116,6 +120,246 @@ class ImageViewer(QWidget):
         self.video_controls.installEventFilter(self)
         self.view.installEventFilter(self)
         self.view.viewport().installEventFilter(self)
+
+    def set_scene_padding(self, padding_px: int):
+        """Set scene padding around media for this viewer."""
+        self._scene_padding_px = max(0, int(padding_px))
+
+        current_item = None
+        if self.current_video_item is not None:
+            current_item = self.current_video_item
+        elif self.current_image_item is not None:
+            current_item = self.current_image_item
+        if current_item is not None:
+            self._set_scene_rect_for_item(current_item)
+
+    def _set_scene_rect_for_item(self, item):
+        """Fit scene rect to one media item with optional padding."""
+        if item is None:
+            return
+        padding = int(getattr(self, '_scene_padding_px', 0))
+        rect = item.boundingRect().adjusted(-padding, -padding, padding, padding)
+        self.scene.setSceneRect(rect)
+
+    def get_content_aspect_ratio(self) -> float | None:
+        """Return current loaded media ratio from actual rendered pixmap."""
+        try:
+            if self.current_video_item is not None:
+                pixmap = self.current_video_item.pixmap()
+                if pixmap and not pixmap.isNull() and pixmap.height() > 0:
+                    return float(pixmap.width()) / float(pixmap.height())
+            if self.current_image_item is not None:
+                pixmap = self.current_image_item.pixmap()
+                if pixmap and not pixmap.isNull() and pixmap.height() > 0:
+                    return float(pixmap.width()) / float(pixmap.height())
+        except Exception:
+            pass
+        return None
+
+    def is_content_pannable(self) -> bool:
+        """Return True when media is larger than viewport at current zoom."""
+        try:
+            # Ignore tiny fit overscan so adaptive floating-window drag mode
+            # does not switch just because of seam-compensation scaling.
+            if bool(getattr(self, 'is_zoom_to_fit', False)):
+                return False
+
+            scene_rect = self.scene.sceneRect()
+            viewport_rect = self.view.viewport().rect()
+            if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+                return False
+            if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+                return False
+
+            transform = self.view.transform()
+            scale_x = abs(float(transform.m11()))
+            scale_y = abs(float(transform.m22()))
+            if scale_x <= 0 or scale_y <= 0:
+                return False
+
+            scaled_w = scene_rect.width() * scale_x
+            scaled_h = scene_rect.height() * scale_y
+            return (scaled_w > (viewport_rect.width() + 1.0)
+                    or scaled_h > (viewport_rect.height() + 1.0))
+        except Exception:
+            return False
+
+    def _apply_uniform_zoom_scale(
+        self,
+        scale: float,
+        zoom_to_fit_state: bool,
+        focus_scene_pos=None,
+        anchor_view_pos=None,
+    ):
+        """Apply one uniform zoom scale around current scene center."""
+        if scale <= 0:
+            return
+        scene_rect = self.scene.sceneRect()
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return
+        self.view.resetTransform()
+        self.view.scale(scale, scale)
+
+        # Cursor-anchored zoom (wheel-like): keep clicked detail under same
+        # viewport position after scale change.
+        anchored = False
+        try:
+            if (
+                focus_scene_pos is not None
+                and anchor_view_pos is not None
+                and hasattr(focus_scene_pos, "x")
+                and hasattr(focus_scene_pos, "y")
+                and hasattr(anchor_view_pos, "x")
+                and hasattr(anchor_view_pos, "y")
+            ):
+                new_scene_at_anchor = self.view.mapToScene(anchor_view_pos)
+                delta = new_scene_at_anchor - focus_scene_pos
+                self.view.translate(delta.x(), delta.y())
+                anchored = True
+        except Exception:
+            anchored = False
+
+        if not anchored:
+            focus_point = scene_rect.center()
+            try:
+                if focus_scene_pos is not None and hasattr(focus_scene_pos, 'x') and hasattr(focus_scene_pos, 'y'):
+                    focus_point = focus_scene_pos
+            except Exception:
+                focus_point = scene_rect.center()
+            self.view.centerOn(focus_point)
+
+        MarkingItem.zoom_factor = scale
+        self.is_zoom_to_fit = bool(zoom_to_fit_state)
+        self.zoom_emit()
+
+    def apply_floating_double_click_zoom(self, scene_anchor_pos=None, view_anchor_pos=None) -> bool:
+        """Adaptive double-click zoom behavior for spawned floating viewers."""
+        try:
+            scene_rect = self.scene.sceneRect()
+            viewport_rect = self.view.viewport().rect()
+            if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+                return False
+            if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+                return False
+
+            fit_w = viewport_rect.width() / scene_rect.width()
+            fit_h = viewport_rect.height() / scene_rect.height()
+            if fit_w <= 0 or fit_h <= 0:
+                return False
+
+            current_scale = abs(float(self.view.transform().m11()))
+            if current_scale <= 0:
+                current_scale = abs(float(MarkingItem.zoom_factor or 0))
+            if current_scale <= 0:
+                current_scale = min(fit_w, fit_h)
+
+            scaled_w = scene_rect.width() * current_scale
+            scaled_h = scene_rect.height() * current_scale
+
+            # Positive values mean visible empty bands ("black borders") on that axis.
+            gap_x = viewport_rect.width() - scaled_w
+            gap_y = viewport_rect.height() - scaled_h
+            # Treat only meaningful gaps as bars; ignore tiny rounding/overscan seams.
+            bar_threshold_x = max(4.0, viewport_rect.width() * 0.015)
+            bar_threshold_y = max(4.0, viewport_rect.height() * 0.015)
+            has_side_bars = gap_x > bar_threshold_x and gap_y <= bar_threshold_y
+            has_top_bottom_bars = gap_y > bar_threshold_y and gap_x <= bar_threshold_x
+            click_inside_media = True
+            try:
+                if (
+                    scene_anchor_pos is not None
+                    and hasattr(scene_anchor_pos, "x")
+                    and hasattr(scene_anchor_pos, "y")
+                ):
+                    click_inside_media = scene_rect.contains(scene_anchor_pos)
+            except Exception:
+                click_inside_media = True
+
+            # Priority toggle: if we previously stored a zoom scale for this
+            # floating viewer, restore it first when current view is unpannable.
+            # This keeps double-click acting as a zoom in/out toggle, even when
+            # fit mode currently has bars due window aspect ratio.
+            stored_scale = self._floating_double_click_return_scale
+            if (
+                click_inside_media
+                and
+                not self.is_content_pannable()
+                and isinstance(stored_scale, (int, float))
+                and float(stored_scale) > (current_scale + 1e-6)
+            ):
+                target_scale = min(16.0, float(stored_scale))
+                self._apply_uniform_zoom_scale(
+                    target_scale,
+                    zoom_to_fit_state=False,
+                    focus_scene_pos=scene_anchor_pos,
+                    anchor_view_pos=view_anchor_pos,
+                )
+                self._floating_last_auto_double_click_zoom_scale = target_scale
+                return True
+
+            fill_overscan = 1.0004
+            if has_side_bars:
+                target_scale = fit_w * fill_overscan
+                self._apply_uniform_zoom_scale(
+                    target_scale,
+                    zoom_to_fit_state=False,
+                    focus_scene_pos=scene_anchor_pos,
+                    anchor_view_pos=view_anchor_pos,
+                )
+                self._floating_last_auto_double_click_zoom_scale = target_scale
+                return True
+            if has_top_bottom_bars:
+                target_scale = fit_h * fill_overscan
+                self._apply_uniform_zoom_scale(
+                    target_scale,
+                    zoom_to_fit_state=False,
+                    focus_scene_pos=scene_anchor_pos,
+                    anchor_view_pos=view_anchor_pos,
+                )
+                self._floating_last_auto_double_click_zoom_scale = target_scale
+                return True
+
+            # If no visible bars and content is pannable (zoomed/cropped), restore fit.
+            if self.is_content_pannable():
+                # Save return scale only if user intentionally changed zoom away
+                # from the last auto double-click zoom-in scale.
+                auto_scale = self._floating_last_auto_double_click_zoom_scale
+                should_store_return_scale = True
+                if isinstance(auto_scale, (int, float)):
+                    auto_scale = float(auto_scale)
+                    scale_delta = abs(current_scale - auto_scale)
+                    tolerance = max(1e-4, auto_scale * 1e-3)
+                    should_store_return_scale = scale_delta > tolerance
+                if should_store_return_scale:
+                    self._floating_double_click_return_scale = current_scale
+                self.zoom_fit()
+                return True
+
+            # If still unpannable/no-op, do a local configurable detail zoom at click anchor.
+            if not self.is_content_pannable():
+                zoom_percent = settings.value(
+                    'floating_double_click_detail_zoom_percent',
+                    defaultValue=DEFAULT_SETTINGS.get(
+                        'floating_double_click_detail_zoom_percent', 400
+                    ),
+                    type=int,
+                )
+                zoom_percent = max(110, min(1600, int(zoom_percent)))
+                zoom_step = zoom_percent / 100.0
+                max_zoom = 16.0
+                target_scale = min(max_zoom, current_scale * zoom_step)
+                if target_scale > (current_scale + 1e-6):
+                    self._apply_uniform_zoom_scale(
+                        target_scale,
+                        zoom_to_fit_state=False,
+                        focus_scene_pos=scene_anchor_pos,
+                        anchor_view_pos=view_anchor_pos,
+                    )
+                    self._floating_last_auto_double_click_zoom_scale = target_scale
+                    return True
+            return False
+        except Exception:
+            return False
 
     @Slot()
     def _on_proxy_model_about_to_reset(self):
@@ -345,6 +589,8 @@ class ImageViewer(QWidget):
             return
 
         self.proxy_image_index = QPersistentModelIndex(proxy_index)
+        self._floating_double_click_return_scale = None
+        self._floating_last_auto_double_click_zoom_scale = None
 
         image: Image = self._safe_get_image(proxy_index)
         if image is None:
@@ -365,20 +611,30 @@ class ImageViewer(QWidget):
                 image_item.setZValue(0)
                 self.scene.addItem(image_item)
                 self.current_video_item = image_item
+                self.current_image_item = None
 
                 # Now load video and display first frame
                 if self.video_player.load_video(image.path, image_item):
                     # Update scene rect after video loads
                     if image_item.pixmap() and not image_item.pixmap().isNull():
-                        self.scene.setSceneRect(image_item.boundingRect()
-                                              .adjusted(-1, -1, 1, 1))
+                        self._set_scene_rect_for_item(image_item)
                         MarkingItem.image_size = image_item.boundingRect().toRect()
 
                         # Show video controls
                         self._is_video_loaded = True
-                        if image.video_metadata:
+                        effective_video_metadata = dict(image.video_metadata or {})
+                        live_frame_count = int(self.video_player.get_total_frames() or 0)
+                        live_fps = float(self.video_player.get_fps() or 0.0)
+                        if live_frame_count > 0:
+                            effective_video_metadata['frame_count'] = live_frame_count
+                        if live_fps > 0:
+                            effective_video_metadata['fps'] = live_fps
+                        if live_frame_count > 0 and live_fps > 0:
+                            effective_video_metadata['duration'] = live_frame_count / live_fps
+
+                        if effective_video_metadata:
                             self.video_controls.set_video_info(
-                                image.video_metadata,
+                                effective_video_metadata,
                                 image=image,
                                 proxy_model=self.proxy_image_list_model
                             )
@@ -427,10 +683,10 @@ class ImageViewer(QWidget):
                 image_item = QGraphicsPixmapItem(pixmap)
                 image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
                 image_item.setZValue(0)
-                self.scene.setSceneRect(image_item.boundingRect()
-                                        .adjusted(-1, -1, 1, 1)) # space for rect border
+                self._set_scene_rect_for_item(image_item)
                 self.scene.addItem(image_item)
                 self.current_image_item = image_item  # Keep reference to prevent garbage collection!
+                self.current_video_item = None
                 MarkingItem.image_size = image_item.boundingRect().toRect()
 
             self.zoom_fit()
@@ -508,8 +764,28 @@ class ImageViewer(QWidget):
 
     @Slot()
     def zoom_fit(self):
-        self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
-        MarkingItem.zoom_factor = self.view.transform().m11()
+        scene_rect = self.scene.sceneRect()
+        viewport_rect = self.view.viewport().rect()
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return
+
+        # Manual fit avoids the internal fitInView margin that can leave a
+        # persistent 1-2px edge around media.
+        scale_x = viewport_rect.width() / scene_rect.width()
+        scale_y = viewport_rect.height() / scene_rect.height()
+        scale = min(scale_x, scale_y)
+        if scale <= 0:
+            return
+
+        # Tiny overscan hides occasional 1px sampling seams on edges.
+        scale *= 1.0008
+
+        self.view.resetTransform()
+        self.view.scale(scale, scale)
+        self.view.centerOn(scene_rect.center())
+        MarkingItem.zoom_factor = scale
         self.is_zoom_to_fit = True
         self.zoom_emit()
 

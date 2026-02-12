@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QSize, Qt, QRect
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QMouseEvent, QPainter
-from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem, QMenu
+from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from utils.image import ImageMarking
@@ -23,6 +23,9 @@ class ImageGraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setLineWidth(0)
+        self.setMidLineWidth(0)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         # Don't steal focus when clicked - prevents image list selection changes
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

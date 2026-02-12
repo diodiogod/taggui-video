@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     'pagination_threshold': 0,  # Minimum images to enable pagination mode (0 = always paginate, higher = only for large datasets)
     'masonry_strategy': 'full_compat',  # full_compat (stable) or windowed_strict (experimental 1M+ path)
     'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
+    'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
 }
 
 

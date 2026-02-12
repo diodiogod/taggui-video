@@ -192,6 +192,9 @@ class ImageListView(
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
         self._jump_dialog_open = False
+        self._spawn_drag_start_pos = None
+        self._spawn_drag_index = QPersistentModelIndex()
+        self._active_drag_preview_animations = []
         self._strict_domain_service = StrictScrollDomainService(self)
         self._masonry_lifecycle_service = MasonryLifecycleService(self)
         self._masonry_submission_service = MasonrySubmissionService(self)
