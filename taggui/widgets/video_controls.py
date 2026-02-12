@@ -893,6 +893,8 @@ class VideoControlsWidget(QWidget):
         """Apply layout-related skin values to runtime Qt layouts."""
         designer_layout = self.skin_manager.current_skin.get('video_player', {}).get('designer_layout', {})
         controls_row = designer_layout.get('controls_row', {}) if isinstance(designer_layout, dict) else {}
+        timeline_row = designer_layout.get('timeline_row', {}) if isinstance(designer_layout, dict) else {}
+        info_row = designer_layout.get('info_row', {}) if isinstance(designer_layout, dict) else {}
 
         button_spacing = max(0, int(applier.get_button_spacing()))
         section_spacing = max(0, int(applier.get_section_spacing()))
@@ -911,9 +913,20 @@ class VideoControlsWidget(QWidget):
                 timeline_position = controls_row.get('timeline_position', timeline_position)
             self._apply_top_row_button_order(controls_row.get('button_order'))
         offset_x = 0
+        offset_y = 0
         if isinstance(controls_row, dict):
             offset_x = int(controls_row.get('offset_x', 0))
+            offset_y = int(controls_row.get('offset_y', 0))
         offset_x = max(-500, min(500, offset_x))
+        offset_y = max(-200, min(200, offset_y))
+        timeline_offset_x = int(timeline_row.get('offset_x', 0)) if isinstance(timeline_row, dict) else 0
+        timeline_offset_y = int(timeline_row.get('offset_y', 0)) if isinstance(timeline_row, dict) else 0
+        info_offset_x = int(info_row.get('offset_x', 0)) if isinstance(info_row, dict) else 0
+        info_offset_y = int(info_row.get('offset_y', 0)) if isinstance(info_row, dict) else 0
+        timeline_offset_x = max(-500, min(500, timeline_offset_x))
+        timeline_offset_y = max(-200, min(200, timeline_offset_y))
+        info_offset_x = max(-500, min(500, info_offset_x))
+        info_offset_y = max(-200, min(200, info_offset_y))
 
         # Intra-section spacing
         for layout in (
@@ -944,9 +957,21 @@ class VideoControlsWidget(QWidget):
         # Explicit row offset from designer (positive -> move right, negative -> move left).
         self.controls_layout.setContentsMargins(
             max(0, offset_x),
-            0,
+            max(0, offset_y),
             max(0, -offset_x),
-            0,
+            max(0, -offset_y),
+        )
+        self.slider_layout.setContentsMargins(
+            max(0, timeline_offset_x),
+            max(0, timeline_offset_y),
+            max(0, -timeline_offset_x),
+            max(0, -timeline_offset_y),
+        )
+        self.info_layout.setContentsMargins(
+            max(0, info_offset_x),
+            max(0, info_offset_y),
+            max(0, -info_offset_x),
+            max(0, -info_offset_y),
         )
 
         # Timeline position (supported: above/below, integrated falls back to above)
@@ -1170,14 +1195,26 @@ class VideoControlsWidget(QWidget):
     def _apply_scaling(self):
         """Apply scaling to internal elements based on current width."""
         width = self.width()
+        applier = self.skin_manager.get_current_applier() if hasattr(self, 'skin_manager') else None
+        designer_layout = {}
+        if hasattr(self, 'skin_manager') and self.skin_manager.current_skin:
+            designer_layout = self.skin_manager.current_skin.get('video_player', {}).get('designer_layout', {})
+        scaling_cfg = designer_layout.get('scaling', {}) if isinstance(designer_layout, dict) else {}
 
         # Ideal size is 800px - only scale DOWN when smaller, never scale up
-        ideal_width = 800
-        scale = min(1.0, max(0.5, width / ideal_width))
+        ideal_width = int(scaling_cfg.get('ideal_width', 800)) if isinstance(scaling_cfg, dict) else 800
+        ideal_width = max(200, ideal_width)
+        min_scale = float(scaling_cfg.get('min_scale', 0.5)) if isinstance(scaling_cfg, dict) else 0.5
+        max_scale = float(scaling_cfg.get('max_scale', 1.0)) if isinstance(scaling_cfg, dict) else 1.0
+        min_scale = max(0.1, min(2.0, min_scale))
+        max_scale = max(min_scale, min(3.0, max_scale))
+        scale = min(max_scale, max(min_scale, width / ideal_width))
 
         # Scale button sizes and fonts
-        button_size = int(40 * scale)
-        button_font_size = int(18 * scale)
+        base_button_size = 40
+        if applier:
+            base_button_size = int(applier.styling.get('button_size', 40))
+        button_size = int(base_button_size * scale)
         for btn in [self.play_pause_btn, self.stop_btn, self.mute_btn, self.prev_frame_btn,
                     self.next_frame_btn, self.skip_back_btn, self.skip_forward_btn]:
             btn.setMaximumWidth(button_size)
@@ -1187,13 +1224,13 @@ class VideoControlsWidget(QWidget):
         # Only scaling needs to happen here
 
         # Scale loop control buttons (sizes only, skin handles colors)
-        loop_btn_size = int(30 * scale)
+        loop_btn_size = int(max(24, base_button_size - 10) * scale)
         for btn in [self.loop_start_btn, self.loop_end_btn, self.loop_reset_btn]:
             btn.setMaximumWidth(loop_btn_size)
             btn.setMaximumHeight(loop_btn_size)
 
         # Scale loop checkbox (size only, skin handles colors)
-        loop_checkbox_width = int(50 * scale)
+        loop_checkbox_width = int((base_button_size + 10) * scale)
         self.loop_checkbox.setMaximumWidth(loop_checkbox_width)
 
         # Scale frame spinbox
@@ -2422,7 +2459,7 @@ class VideoControlsWidget(QWidget):
 
     def _open_skin_designer(self):
         """Open the interactive skin designer dialog."""
-        from dialogs.skin_designer_interactive import SkinDesignerInteractive
+        from dialogs.skin_designer_live import SkinDesignerLive
 
-        designer = SkinDesignerInteractive(self, video_controls=self)
+        designer = SkinDesignerLive(self, video_controls=self)
         designer.exec()

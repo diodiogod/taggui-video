@@ -151,7 +151,11 @@ class SkinApplier:
         hover_color = self._resolve_component_style(component_id, 'button_hover_color', '#2196F3')
         border = self._resolve_component_style(component_id, 'button_border', '1px solid #333333')
         radius = self._resolve_component_style(component_id, 'button_border_radius', 6)
+        opacity = float(self._resolve_component_style(component_id, 'opacity', 1.0))
         shadow = self.shadows.get('button', '0 2px 4px rgba(0,0,0,0.2)')
+        opacity = max(0.0, min(1.0, opacity))
+        bg_color = self._with_alpha(bg_color, opacity)
+        hover_color = self._with_alpha(hover_color, opacity)
 
         # Note: Don't set any size constraints here - let _apply_scaling() handle all sizing
         # This way the scaling system (40 * scale) works correctly
@@ -194,6 +198,10 @@ class SkinApplier:
         handle_size = self._resolve_component_style(component_id, 'slider_handle_size', 16)
         handle_color = self._resolve_component_style(component_id, 'slider_handle_color', '#FFFFFF')
         handle_border = self._resolve_component_style(component_id, 'slider_handle_border', '2px solid #333333')
+        opacity = float(self._resolve_component_style(component_id, 'opacity', 1.0))
+        opacity = max(0.0, min(1.0, opacity))
+        color = self._with_alpha(color, opacity)
+        bg_color = self._with_alpha(bg_color, opacity)
 
         stylesheet = f"""
             QSlider::groove:horizontal {{
@@ -233,6 +241,11 @@ class SkinApplier:
         handle_color = self._resolve_component_style(component_id, 'slider_handle_color', '#FFFFFF')
         handle_border = self._resolve_component_style(component_id, 'slider_handle_border', '2px solid #333333')
         handle_size = self._resolve_component_style(component_id, 'slider_handle_size', 16)
+        opacity = float(self._resolve_component_style(component_id, 'opacity', 1.0))
+        opacity = max(0.0, min(1.0, opacity))
+        start = self._with_alpha(start, opacity)
+        mid = self._with_alpha(mid, opacity)
+        end = self._with_alpha(end, opacity)
 
         stylesheet = f"""
             QSlider::groove:horizontal {{
@@ -277,6 +290,9 @@ class SkinApplier:
                       if is_secondary else
                       self._resolve_component_style(component_id, 'text_color', '#FFFFFF'))
         font_size = self._resolve_component_style(component_id, 'label_font_size', 12)
+        opacity = float(self._resolve_component_style(component_id, 'opacity', 1.0))
+        opacity = max(0.0, min(1.0, opacity))
+        text_color = self._with_alpha(text_color, opacity)
 
         stylesheet = f"""
             QLabel {{
@@ -367,3 +383,14 @@ class SkinApplier:
         b = min(255, int(b * factor))
 
         return f"#{r:02X}{g:02X}{b:02X}"
+
+    def _with_alpha(self, color: str, opacity: float) -> str:
+        """Convert hex color to rgba string with opacity."""
+        if not isinstance(color, str) or not color.startswith('#'):
+            return color
+        hex_color = color.lstrip('#')
+        if len(hex_color) != 6:
+            return color
+        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        a = int(max(0.0, min(1.0, opacity)) * 255)
+        return f"rgba({r}, {g}, {b}, {a})"
