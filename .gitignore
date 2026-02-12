@@ -174,3 +174,6 @@ AGENTS.md
 taggui_setup.log
 # Test data for 1M images
 test-1m-images/
+
+# Private documentation
+docs/private/
