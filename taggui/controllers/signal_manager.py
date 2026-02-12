@@ -123,7 +123,7 @@ class SignalManager:
                 if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
                     return
                 if current.isValid():
-                    self.main_window.get_active_viewer().load_image(current)
+                    self.main_window.get_selection_target_viewer().load_image(current)
             except Exception as e:
                 print(f"[SIGNAL] ERROR in currentChanged->load_image: {e}")
                 import traceback
@@ -147,10 +147,10 @@ class SignalManager:
         def refresh_viewer_on_data_change(start: QModelIndex, end: QModelIndex, roles):
             """Reload viewer only for the live current selection to avoid stale-index crashes."""
             try:
-                active_viewer = self.main_window.get_active_viewer()
-                if active_viewer is None:
+                target_viewer = self.main_window.get_selection_target_viewer()
+                if target_viewer is None:
                     return
-                if getattr(active_viewer, "_viewer_model_resetting", False):
+                if getattr(target_viewer, "_viewer_model_resetting", False):
                     return
                 current = image_list_selection_model.currentIndex()
                 if not current.isValid():
@@ -159,7 +159,7 @@ class SignalManager:
                     return
                 current_row = current.row()
                 if start.isValid() and end.isValid() and start.row() <= current_row <= end.row():
-                    active_viewer.load_image(current, False)
+                    target_viewer.load_image(current, False)
             except Exception as e:
                 print(f"[SIGNAL] ERROR in dataChanged->load_image: {e}")
 

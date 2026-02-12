@@ -18,6 +18,7 @@ class MenuManager:
         self.redo_action = None
         self.reload_directory_action = None
         self.toggle_toolbar_action = None
+        self.toggle_main_viewer_action = None
         self.toggle_image_list_action = None
         self.toggle_image_tags_editor_action = None
         self.toggle_all_tags_editor_action = None
@@ -61,6 +62,7 @@ class MenuManager:
         self.undo_action = QAction('Undo', parent=self.main_window)
         self.redo_action = QAction('Redo', parent=self.main_window)
         self.toggle_toolbar_action = QAction('Toolbar', parent=self.main_window)
+        self.toggle_main_viewer_action = QAction('Main Viewer', parent=self.main_window)
         self.toggle_image_list_action = QAction('Images', parent=self.main_window)
         self.toggle_image_tags_editor_action = QAction('Image Tags', parent=self.main_window)
         self.toggle_all_tags_editor_action = QAction('All Tags', parent=self.main_window)
@@ -87,6 +89,7 @@ class MenuManager:
             'marking': 'Alt+3',
             'video_prep': 'Alt+4',
             'auto_captioning': 'Alt+5',
+            'full_masonry': 'Alt+6',
         }
 
         for preset in presets:
@@ -203,6 +206,7 @@ class MenuManager:
         view_menu = menu_bar.addMenu('View')
 
         self.toggle_toolbar_action.setCheckable(True)
+        self.toggle_main_viewer_action.setCheckable(True)
         self.toggle_image_list_action.setCheckable(True)
         self.toggle_image_tags_editor_action.setCheckable(True)
         self.toggle_all_tags_editor_action.setCheckable(True)
@@ -213,6 +217,9 @@ class MenuManager:
         toolbar_manager = self.main_window.toolbar_manager
         self.toggle_toolbar_action.triggered.connect(
             lambda is_checked: toolbar_manager.toolbar.setVisible(is_checked))
+        self.toggle_main_viewer_action.triggered.connect(
+            self.main_window.set_main_viewer_visible
+        )
         self.toggle_image_list_action.triggered.connect(
             lambda is_checked: self.main_window.image_list.setVisible(is_checked))
         self.toggle_image_tags_editor_action.triggered.connect(
@@ -225,6 +232,7 @@ class MenuManager:
             lambda is_checked: self.main_window.auto_markings.setVisible(is_checked))
 
         view_menu.addAction(self.toggle_toolbar_action)
+        view_menu.addAction(self.toggle_main_viewer_action)
         view_menu.addAction(self.toggle_image_list_action)
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)

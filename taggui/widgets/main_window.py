@@ -2,7 +2,7 @@ import time
 import hashlib
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPoint, QUrl, Qt, QTimer, Slot
+from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QIcon, QKeySequence, QShortcut, QMouseEvent)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self._workspace_apply_retry_count = 0
         self._workspace_applying = False
         self._background_workers_shutdown = False
+        self._main_viewer_visible = True
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -148,6 +149,8 @@ class MainWindow(QMainWindow):
 
         # Create menus
         self.menu_manager.create_menus()
+        self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
+        self.set_main_viewer_visible(self._main_viewer_visible, save=False)
 
         # Setup image list selection model
         self.image_list_selection_model = self.image_list.list_view.selectionModel()
@@ -475,9 +478,44 @@ class MainWindow(QMainWindow):
         load_directory_button.clicked.connect(self.select_and_load_directory)
         QVBoxLayout(load_directory_widget).addWidget(
             load_directory_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._load_directory_widget = load_directory_widget
+        self._hidden_main_viewer_widget = QWidget()
+        hidden_layout = QVBoxLayout(self._hidden_main_viewer_widget)
+        hidden_layout.setContentsMargins(0, 0, 0, 0)
         central_widget.addWidget(load_directory_widget)
         central_widget.addWidget(self.image_viewer)
+        central_widget.addWidget(self._hidden_main_viewer_widget)
         self.setCentralWidget(central_widget)
+
+    def _set_central_content_page(self):
+        """Route central stack to main viewer, hidden placeholder, or load page."""
+        central = self.centralWidget()
+        if central is None:
+            return
+        if self.directory_path is None:
+            central.setVisible(True)
+            central.setCurrentWidget(self._load_directory_widget)
+            return
+        if self._main_viewer_visible:
+            central.setVisible(True)
+            central.setCurrentWidget(self.image_viewer)
+        else:
+            # Fully collapse main-viewer area so docks (image list) can occupy
+            # the full window width when viewer is hidden.
+            central.setCurrentWidget(self._hidden_main_viewer_widget)
+            central.setVisible(False)
+
+    def set_main_viewer_visible(self, visible: bool, *, save: bool = True):
+        """Show/hide anchored main viewer without detaching it."""
+        self._main_viewer_visible = bool(visible)
+        self._set_central_content_page()
+        action = getattr(getattr(self, 'menu_manager', None), 'toggle_main_viewer_action', None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(self._main_viewer_visible)
+            action.blockSignals(False)
+        if save:
+            settings.setValue('main_viewer_visible', self._main_viewer_visible)
 
     def _update_main_window_title(self, selected_file_name: str | None = None):
         """Show folder and selected file name in the main window title."""
@@ -586,6 +624,12 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             return self.image_viewer
         return viewer
+
+    def get_selection_target_viewer(self) -> ImageViewer:
+        """Return viewer that should receive image-list selection loads."""
+        if not bool(getattr(self, '_main_viewer_visible', True)):
+            return self.image_viewer
+        return self.get_active_viewer()
 
     def set_active_viewer(self, viewer: ImageViewer | None):
         """Set active viewer target used for image-list selection loading."""
@@ -1162,7 +1206,7 @@ class MainWindow(QMainWindow):
                 pass
         else:
             _set_current_and_select(selected_index)
-        self.centralWidget().setCurrentWidget(self.image_viewer)
+        self._set_central_content_page()
 
         # Scroll to selected image after layout is ready.
         # In windowed_strict paginated mode, the masonry window may not include
@@ -1792,6 +1836,66 @@ class MainWindow(QMainWindow):
             percent = int((progress / total) * 100) if total > 0 else 0
             self._cache_status_label.setText(f"🔥 Building cache: {progress:,} / {total:,} ({percent}%)")
 
+    def _set_image_list_thumbnail_size(self, target_size: int, *, persist: bool = False):
+        """Apply list thumbnail size programmatically, matching Ctrl+wheel behavior."""
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is None:
+            return
+        min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
+        max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
+        size = max(min_size, min(max_size, int(target_size)))
+        if int(getattr(list_view, 'current_thumbnail_size', size)) == size:
+            return
+        list_view.current_thumbnail_size = size
+        list_view.setIconSize(QSize(size, size * 3))
+        list_view._update_view_mode()
+        if bool(getattr(list_view, 'use_masonry', False)) and hasattr(list_view, '_resize_timer'):
+            list_view._resize_timer.stop()
+            list_view._resize_timer.start(180)
+        else:
+            list_view.viewport().update()
+        if persist:
+            settings.setValue('image_list_thumbnail_size', size)
+
+    def _compute_full_masonry_initial_size(self) -> int:
+        """Pick a medium-density masonry size that also minimizes right-side slack."""
+        list_view = self.image_list.list_view
+        min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
+        max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
+        threshold = int(getattr(list_view, 'column_switch_threshold', 150) or 150)
+        viewport_w = int(list_view.viewport().width() or self.width() or 1200)
+        spacing = 2
+
+        # Keep masonry mode and avoid over-dense look.
+        max_allowed = max(min_size, min(max_size, threshold - 12))
+        desired_size = max(min_size, min(max_allowed, 122))
+        min_cols = 4
+        max_cols = 12
+
+        best_size = desired_size
+        best_score = float("inf")
+        for cols in range(min_cols, max_cols + 1):
+            usable = viewport_w - ((cols - 1) * spacing)
+            if usable <= 0:
+                continue
+            size = usable // cols
+            if size < min_size or size > max_allowed:
+                continue
+
+            used_w = (cols * size) + ((cols - 1) * spacing)
+            slack = max(0, viewport_w - used_w)
+            # Prefer medium thumbnail size, low right slack, and avoid too many columns.
+            score = (
+                abs(size - desired_size) * 1.6
+                + (slack * 0.8)
+                + (max(0, cols - 8) ** 2) * 3.0
+            )
+            if score < best_score:
+                best_score = score
+                best_size = size
+
+        return max(min_size, min(max_allowed, int(best_size)))
+
     def get_workspace_presets(self) -> list[dict[str, str]]:
         """Return available workspace presets."""
         return [
@@ -1800,6 +1904,7 @@ class MainWindow(QMainWindow):
             {"id": "marking", "label": "Image Marking"},
             {"id": "video_prep", "label": "Video Prep"},
             {"id": "auto_captioning", "label": "Auto Captioning"},
+            {"id": "full_masonry", "label": "Full Masonry"},
         ]
 
     def _apply_saved_workspace_preset(self):
@@ -1927,6 +2032,14 @@ class MainWindow(QMainWindow):
                 "auto_captioner": True,
                 "auto_markings": False,
             },
+            "full_masonry": {
+                "toolbar": False,
+                "image_list": True,
+                "image_tags_editor": False,
+                "all_tags_editor": False,
+                "auto_captioner": False,
+                "auto_markings": False,
+            },
             }[workspace_id]
 
             toolbar = getattr(self.toolbar_manager, 'toolbar', None)
@@ -1938,6 +2051,15 @@ class MainWindow(QMainWindow):
             self.all_tags_editor.setVisible(visibility["all_tags_editor"])
             self.auto_captioner.setVisible(visibility["auto_captioner"])
             self.auto_markings.setVisible(visibility["auto_markings"])
+
+            # Workspace-level main viewer behavior:
+            # - Media Viewer always restores anchored viewer.
+            # - Full Masonry intentionally hides it for list-only focus.
+            if workspace_id == "full_masonry":
+                self.set_main_viewer_visible(False, save=True)
+            else:
+                # All standard workspaces are built around the anchored main viewer.
+                self.set_main_viewer_visible(True, save=True)
 
             base_w = max(180, int(getattr(self.image_list_model, 'image_list_image_width', 200)))
 
@@ -1974,9 +2096,13 @@ class MainWindow(QMainWindow):
                     [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
                     Qt.Orientation.Horizontal,
                 )
+            elif workspace_id == "full_masonry":
+                self.image_list.raise_()
+                fitted_size = self._compute_full_masonry_initial_size()
+                self._set_image_list_thumbnail_size(fitted_size, persist=False)
 
             if self.directory_path is not None:
-                self.centralWidget().setCurrentWidget(self.image_viewer)
+                self._set_central_content_page()
 
             if save_to_settings:
                 settings.setValue('workspace_preset', workspace_id)
@@ -1986,5 +2112,8 @@ class MainWindow(QMainWindow):
                 action = getattr(self.menu_manager, 'toggle_toolbar_action', None)
                 if action is not None:
                     action.setChecked(visibility["toolbar"])
+                main_viewer_action = getattr(self.menu_manager, 'toggle_main_viewer_action', None)
+                if main_viewer_action is not None:
+                    main_viewer_action.setChecked(bool(self._main_viewer_visible))
         finally:
             self._workspace_applying = False
