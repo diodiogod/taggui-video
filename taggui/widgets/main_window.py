@@ -707,15 +707,37 @@ class MainWindow(QMainWindow):
             if Path(target_path) != source_state.get('video_path'):
                 return
             viewer.video_controls.set_speed_value(source_state.get('speed', 1.0), emit_signal=True)
-            viewer.video_controls.apply_loop_state(
-                source_state.get('loop_start'),
-                source_state.get('loop_end'),
-                source_state.get('loop_enabled', False),
-                save=False,
-                emit_signals=True,
-            )
+
+            # Keep persisted floating-scope loop markers when present.
+            if viewer.video_controls.get_loop_range() is None:
+                viewer.video_controls.apply_loop_state(
+                    source_state.get('loop_start'),
+                    source_state.get('loop_end'),
+                    source_state.get('loop_enabled', False),
+                    save=False,
+                    emit_signals=True,
+                )
         except Exception as e:
             print(f"[VIEWER] Inheritance warning: {e}")
+
+    def _next_floating_slot_id(self) -> int:
+        """Return the lowest available floating viewer slot id (1-based)."""
+        used_ids = set()
+        live_windows = []
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                slot_id = getattr(window, 'slot_id', None)
+                if isinstance(slot_id, int) and slot_id > 0:
+                    used_ids.add(slot_id)
+                live_windows.append(window)
+            except RuntimeError:
+                continue
+        self._floating_viewers = live_windows
+
+        slot_id = 1
+        while slot_id in used_ids:
+            slot_id += 1
+        return slot_id
 
     @Slot(object)
     def _on_main_viewer_context_menu_spawn(self, pos):
@@ -829,14 +851,16 @@ class MainWindow(QMainWindow):
         viewer = ImageViewer(self.proxy_image_list_model)
         self._connect_floating_viewer(viewer)
 
+        slot_id = self._next_floating_slot_id()
         self._floating_viewer_spawn_count += 1
-        spawn_id = self._floating_viewer_spawn_count
-        viewer.video_controls.set_loop_persistence_scope(f"floating_{spawn_id}")
-        title = f"Viewer {spawn_id}"
+        viewer.video_controls.set_loop_persistence_scope(f"floating_{slot_id}")
+        title = f"Viewer {slot_id}"
         window = FloatingViewerWindow(viewer, title, parent=self)
+        window.slot_id = slot_id
         window.activated.connect(self.set_active_viewer)
         window.closing.connect(self._on_floating_viewer_closed)
         window.sync_video_requested.connect(self.sync_video_playback)
+        window.close_all_requested.connect(self.close_all_floating_viewers)
 
         self._floating_viewers.append(window)
 
