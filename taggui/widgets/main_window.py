@@ -739,6 +739,89 @@ class MainWindow(QMainWindow):
             slot_id += 1
         return slot_id
 
+    def _normalize_spawn_proxy_index(self, index_like) -> QModelIndex:
+        """Return a fresh proxy index for floating-spawn operations."""
+        if index_like is None:
+            return QModelIndex()
+        try:
+            if not hasattr(index_like, 'isValid') or not index_like.isValid():
+                return QModelIndex()
+
+            model = index_like.model()
+            row = index_like.row()
+            col = index_like.column()
+
+            if model is self.proxy_image_list_model:
+                if 0 <= row < self.proxy_image_list_model.rowCount():
+                    return self.proxy_image_list_model.index(row, col)
+                return QModelIndex()
+
+            if model is self.image_list_model:
+                source_index = self.image_list_model.index(row, col)
+                mapped = self.proxy_image_list_model.mapFromSource(source_index)
+                if mapped.isValid():
+                    return mapped
+            return QModelIndex()
+        except Exception:
+            return QModelIndex()
+
+    def _get_image_aspect_ratio_for_index(self, proxy_index: QModelIndex) -> float | None:
+        """Resolve media aspect ratio for a proxy index."""
+        if not proxy_index.isValid():
+            return None
+        try:
+            image = proxy_index.data(Qt.ItemDataRole.UserRole)
+            dims = getattr(image, 'dimensions', None)
+            if not dims or len(dims) < 2:
+                return None
+            width, height = dims[0], dims[1]
+            width = float(width or 0)
+            height = float(height or 0)
+            if width <= 0 or height <= 0:
+                return None
+
+            # For videos, apply sample aspect ratio when present.
+            video_meta = getattr(image, 'video_metadata', None)
+            if isinstance(video_meta, dict):
+                sar_num = float(video_meta.get('sar_num') or 1.0)
+                sar_den = float(video_meta.get('sar_den') or 1.0)
+                if sar_num > 0 and sar_den > 0:
+                    width *= sar_num / sar_den
+
+            return width / height
+        except Exception:
+            return None
+
+    def _get_initial_floating_size(
+        self,
+        proxy_index: QModelIndex,
+        aspect_ratio_override: float | None = None,
+    ) -> tuple[int, int]:
+        """Calculate initial spawned-window size preserving media ratio."""
+        base_w = max(420, int(self.width() * 0.45))
+        base_h = max(280, int(self.height() * 0.45))
+
+        aspect_ratio = aspect_ratio_override
+        if not aspect_ratio or aspect_ratio <= 0:
+            aspect_ratio = self._get_image_aspect_ratio_for_index(proxy_index)
+        if not aspect_ratio or aspect_ratio <= 0:
+            return (base_w, base_h)
+
+        target_area = max(1, base_w * base_h)
+        width = int((target_area * aspect_ratio) ** 0.5)
+        height = int(width / aspect_ratio)
+
+        max_w = max(120, int(self.width() * 0.9))
+        max_h = max(120, int(self.height() * 0.9))
+        if width > max_w or height > max_h:
+            scale = min(max_w / max(1, width), max_h / max(1, height))
+            width = int(width * scale)
+            height = int(height * scale)
+
+        width = max(24, width)
+        height = max(24, height)
+        return (width, height)
+
     @Slot(object)
     def _on_main_viewer_context_menu_spawn(self, pos):
         """Spawn a floating viewer on right-click in the main viewer area."""
@@ -842,13 +925,18 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, _start_all)
 
-    @Slot()
-    def spawn_floating_viewer(self):
-        """Create a new floating viewer that can receive list selection loads."""
+    def spawn_floating_viewer_at(self, target_index=None, spawn_global_pos: QPoint | None = None):
+        """Create a floating viewer for a specific index and optional global position."""
         source_viewer = self.get_active_viewer()
         source_video_state = self._capture_viewer_video_state(source_viewer)
 
+        target_proxy_index = self._normalize_spawn_proxy_index(target_index)
+        if not target_proxy_index.isValid():
+            target_proxy_index = self.image_list_selection_model.currentIndex()
+        target_proxy_index = self._normalize_spawn_proxy_index(target_proxy_index)
+
         viewer = ImageViewer(self.proxy_image_list_model)
+        viewer.set_scene_padding(0)
         self._connect_floating_viewer(viewer)
 
         slot_id = self._next_floating_slot_id()
@@ -864,23 +952,34 @@ class MainWindow(QMainWindow):
 
         self._floating_viewers.append(window)
 
-        current = self.image_list_selection_model.currentIndex()
-        if current.isValid():
-            viewer.load_image(current)
+        loaded_ratio = None
+        if target_proxy_index.isValid():
+            viewer.load_image(target_proxy_index)
             self._apply_inherited_video_state(viewer, source_video_state)
+            loaded_ratio = viewer.get_content_aspect_ratio()
 
-        base_w = max(420, int(self.width() * 0.45))
-        base_h = max(280, int(self.height() * 0.45))
-        window.resize(base_w, base_h)
+        spawn_w, spawn_h = self._get_initial_floating_size(
+            target_proxy_index,
+            aspect_ratio_override=loaded_ratio,
+        )
+        window.resize(spawn_w, spawn_h)
 
-        offset = 32 * ((self._floating_viewer_spawn_count - 1) % 8)
-        top_left = self.mapToGlobal(self.rect().topLeft())
-        window.move(top_left + QPoint(120 + offset, 90 + offset))
+        if spawn_global_pos is not None:
+            window.move(spawn_global_pos - QPoint(spawn_w // 2, spawn_h // 2))
+        else:
+            offset = 32 * ((self._floating_viewer_spawn_count - 1) % 8)
+            top_left = self.mapToGlobal(self.rect().topLeft())
+            window.move(top_left + QPoint(120 + offset, 90 + offset))
 
         window.show()
         window.raise_()
         window.activateWindow()
         self.set_active_viewer(viewer)
+
+    @Slot()
+    def spawn_floating_viewer(self):
+        """Create a new floating viewer for the current list selection."""
+        self.spawn_floating_viewer_at()
 
     @Slot()
     def close_all_floating_viewers(self):

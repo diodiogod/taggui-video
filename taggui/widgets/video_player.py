@@ -167,6 +167,18 @@ class VideoPlayerWidget(QWidget):
         if not self.video_path or self.is_playing:
             return
 
+        # When loop markers are active, entering playback from outside the loop
+        # should jump to loop-in (or loop-out for reverse playback).
+        if self.loop_enabled and self.loop_start is not None and self.loop_end is not None:
+            start_frame = max(0, min(int(self.loop_start), self.total_frames - 1))
+            end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
+            if start_frame > end_frame:
+                start_frame, end_frame = end_frame, start_frame
+
+            if self.current_frame < start_frame or self.current_frame > end_frame:
+                target_frame = end_frame if self.playback_speed < 0 else start_frame
+                self.seek_to_frame(target_frame)
+
         self.is_playing = True
         self.playback_started.emit()  # Notify that playback started
 
@@ -420,6 +432,8 @@ class VideoPlayerWidget(QWidget):
             if self.loop_enabled:
                 end_frame = self.loop_end if self.loop_end is not None else self.total_frames - 1
                 start_frame = self.loop_start if self.loop_start is not None else 0
+                if start_frame > end_frame:
+                    start_frame, end_frame = end_frame, start_frame
 
                 if frame_number >= end_frame:
                     # Loop back to start

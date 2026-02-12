@@ -28,6 +28,18 @@ class ImageListViewInteractionMixin:
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            start_index = self.indexAt(event.pos())
+            if start_index.isValid():
+                self._spawn_drag_start_pos = event.pos()
+                self._spawn_drag_index = QPersistentModelIndex(start_index)
+            else:
+                self._spawn_drag_start_pos = None
+                self._spawn_drag_index = QPersistentModelIndex()
+        else:
+            self._spawn_drag_start_pos = None
+            self._spawn_drag_index = QPersistentModelIndex()
     
         # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
@@ -230,7 +242,30 @@ class ImageListViewInteractionMixin:
 
 
     def mouseMoveEvent(self, event):
-        """Prevent Qt's rubber-band selection in masonry mode."""
+        """Handle thumbnail drag gestures and prevent rubber-band in masonry mode."""
+        if (
+            self._spawn_drag_start_pos is not None
+            and self._spawn_drag_index.isValid()
+            and (event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            drag_distance = (event.pos() - self._spawn_drag_start_pos).manhattanLength()
+            if drag_distance >= QApplication.startDragDistance():
+                self._spawn_drag_start_pos = None
+                drag_index = self.model().index(
+                    self._spawn_drag_index.row(),
+                    self._spawn_drag_index.column(),
+                )
+                if drag_index.isValid():
+                    sel_model = self.selectionModel()
+                    if sel_model and not sel_model.isSelected(drag_index):
+                        sel_model.setCurrentIndex(
+                            drag_index,
+                            QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                        )
+                    self.startDrag(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+                    event.accept()
+                    return
+
         if self.use_masonry and self._masonry_items:
             # Don't call super() - it triggers rubber-band selection
             # Just accept the event to prevent default behavior
@@ -316,6 +351,9 @@ class ImageListViewInteractionMixin:
 
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
+        self._spawn_drag_start_pos = None
+        self._spawn_drag_index = QPersistentModelIndex()
+
         # Resume enrichment after 500ms idle
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:

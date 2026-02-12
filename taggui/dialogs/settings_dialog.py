@@ -553,6 +553,20 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(masonry_switch_threshold_spin_box, 1, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        # Floating viewer detail zoom fallback
+        grid_layout.addWidget(QLabel('Floating double-click detail zoom (%)'), 2, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        floating_detail_zoom_spin_box = SettingsSpinBox(
+            key='floating_double_click_detail_zoom_percent',
+            minimum=110, maximum=1600, default=400)
+        floating_detail_zoom_spin_box.setToolTip(
+            'Fallback zoom amount used in spawned/floating viewers when\n'
+            'double-click cannot apply width/height auto-fill and media is not pannable.\n'
+            '100 = 1x (no change), 400 = 4x.\n'
+            'Applied live (no restart).')
+        grid_layout.addWidget(floating_detail_zoom_spin_box, 2, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 

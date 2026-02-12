@@ -734,8 +734,8 @@ class VideoControlsWidget(QWidget):
             return (
                 isinstance(start, int)
                 and isinstance(end, int)
-                and 0 <= start <= max_frame
-                and 0 <= end <= max_frame
+                and start >= 0
+                and end >= 0
             )
 
         scope = getattr(self, '_loop_persistence_scope', 'main')
@@ -755,6 +755,15 @@ class VideoControlsWidget(QWidget):
                 if _valid_pair(scoped_start, scoped_end):
                     return (scoped_start, scoped_end)
 
+        # Floating viewers fallback to the last floating markers saved for this media.
+        if scope != 'main' and isinstance(viewer_markers, dict):
+            floating_last = viewer_markers.get('floating_last')
+            if isinstance(floating_last, dict):
+                last_start = floating_last.get('loop_start_frame')
+                last_end = floating_last.get('loop_end_frame')
+                if _valid_pair(last_start, last_end):
+                    return (last_start, last_end)
+
         if _valid_pair(legacy_start, legacy_end):
             return (legacy_start, legacy_end)
 
@@ -765,6 +774,18 @@ class VideoControlsWidget(QWidget):
                 main_end = main_scoped.get('loop_end_frame')
                 if _valid_pair(main_start, main_end):
                     return (main_start, main_end)
+
+            # Last-resort: if only one floating scope exists, use it.
+            floating_ranges = []
+            for key, values in viewer_markers.items():
+                if key in ('main', 'floating_last') or not isinstance(values, dict):
+                    continue
+                range_start = values.get('loop_start_frame')
+                range_end = values.get('loop_end_frame')
+                if _valid_pair(range_start, range_end):
+                    floating_ranges.append((range_start, range_end))
+            if len(floating_ranges) == 1:
+                return floating_ranges[0]
 
         return (None, None)
 
@@ -1512,8 +1533,12 @@ class VideoControlsWidget(QWidget):
         max_frame = frame_count - 1 if frame_count > 0 else 0
         resolved_start, resolved_end = self._resolve_loop_markers_for_scope(image, max_frame)
         if resolved_start is not None and resolved_end is not None:
-            self.loop_start_frame = resolved_start
-            self.loop_end_frame = resolved_end
+            normalized_start = max(0, min(int(resolved_start), max_frame))
+            normalized_end = max(0, min(int(resolved_end), max_frame))
+            if normalized_start > normalized_end:
+                normalized_start, normalized_end = normalized_end, normalized_start
+            self.loop_start_frame = normalized_start
+            self.loop_end_frame = normalized_end
             self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
             self._set_loop_button_style(self.loop_start_btn, is_set=True)
             self._set_loop_button_style(self.loop_end_btn, is_set=True)
@@ -1555,6 +1580,10 @@ class VideoControlsWidget(QWidget):
         # Restore loop state after video loads
         if self.is_looping:
             self.loop_toggled.emit(True)
+            # If loop markers are defined, start playback/view from loop-in frame.
+            if self.loop_start_frame is not None and self.loop_end_frame is not None:
+                start_frame = max(0, min(int(self.loop_start_frame), self.frame_spinbox.maximum()))
+                self.frame_changed.emit(start_frame)
 
         # Restore mute state after video loads (emit to sync with video player)
         self.mute_toggled.emit(self.is_muted)
@@ -1573,11 +1602,18 @@ class VideoControlsWidget(QWidget):
 
             if self.loop_start_frame is None and self.loop_end_frame is None:
                 viewer_markers.pop(scope, None)
+                if scope != 'main':
+                    viewer_markers.pop('floating_last', None)
             else:
                 viewer_markers[scope] = {
                     'loop_start_frame': self.loop_start_frame,
                     'loop_end_frame': self.loop_end_frame,
                 }
+                if scope != 'main':
+                    viewer_markers['floating_last'] = {
+                        'loop_start_frame': self.loop_start_frame,
+                        'loop_end_frame': self.loop_end_frame,
+                    }
 
             if scope == 'main':
                 self.current_image.loop_start_frame = self.loop_start_frame

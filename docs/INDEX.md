@@ -269,6 +269,7 @@ cd /mnt/j/Aitools/MyTagGUI/taggui_working
 ## Documentation Files
 
 - `docs/INDEX.md`: This file
+- `docs/FLOATING_VIEWERS_USER_GUIDE.md`: User guide for spawned/floating viewer behavior
 - `docs/PLAN1_1M_images_architecture.md`: Original 1M images plan
 - `docs/PLAN2_windowed_strict.md`: Windowed strict masonry design
 - `docs/DISABLED_FEATURES.md`: Features temporarily disabled

@@ -382,31 +382,149 @@ class ImageListViewGeometryMixin:
         indices = self.selectedIndexes()
         if not indices:
             return
+        dragged_index = QPersistentModelIndex(indices[0])
 
         # Use mimeData from the model.
         mime_data = self.model().mimeData(indices)
         if not mime_data:
             return
 
-        # The pixmap is just the icon of the first selected item.
-        # This avoids including the text.
+        # Build a reliable visual preview pixmap.
+        source_pixmap = QPixmap()
         icon = indices[0].data(Qt.ItemDataRole.DecorationRole)
-        pixmap = icon.pixmap(self.iconSize())
+        if icon is not None:
+            try:
+                source_pixmap = icon.pixmap(self.iconSize())
+            except Exception:
+                source_pixmap = QPixmap()
+        if source_pixmap.isNull():
+            try:
+                item_rect = self.visualRect(indices[0])
+                if item_rect.isValid() and item_rect.width() > 0 and item_rect.height() > 0:
+                    source_pixmap = self.viewport().grab(item_rect)
+            except Exception:
+                source_pixmap = QPixmap()
+        if source_pixmap.isNull():
+            fallback_side = max(48, int(self.iconSize().width() or 96))
+            source_pixmap = QPixmap(fallback_side, fallback_side)
+            source_pixmap.fill(Qt.GlobalColor.transparent)
 
-        # Create a new pixmap with transparency for the drag image.
-        drag_pixmap = QPixmap(pixmap.size())
+        # Drag pixmap is slightly translucent for ghosting.
+        drag_pixmap = QPixmap(source_pixmap.size())
         drag_pixmap.fill(Qt.GlobalColor.transparent)
-
         painter = QPainter(drag_pixmap)
-        painter.setOpacity(0.7)
-        painter.drawPixmap(0, 0, pixmap)
+        painter.setOpacity(0.86)
+        painter.drawPixmap(0, 0, source_pixmap)
         painter.end()
 
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.setPixmap(drag_pixmap)
         drag.setHotSpot(drag_pixmap.rect().center())
-        drag.exec(supportedActions)
+        drop_action = drag.exec(supportedActions)
+
+        # If dropped onto no external target, spawn a floating viewer at cursor.
+        if drop_action == Qt.DropAction.IgnoreAction and dragged_index.isValid():
+            try:
+                live_index = self.model().index(dragged_index.row(), dragged_index.column())
+            except Exception:
+                live_index = QModelIndex()
+            if live_index.isValid():
+                try:
+                    self._flash_drag_drop_preview(source_pixmap)
+                except Exception:
+                    pass
+                main_window = self.window()
+                if main_window and hasattr(main_window, 'spawn_floating_viewer_at'):
+                    try:
+                        main_window.spawn_floating_viewer_at(
+                            target_index=live_index,
+                            spawn_global_pos=QCursor.pos(),
+                        )
+                    except Exception as e:
+                        print(f"[DRAG-SPAWN] Spawn warning: {e}")
+
+    def _flash_drag_drop_preview(self, pixmap: QPixmap):
+        """Show a short glow/fade animation at drop position using drag ghost."""
+        if pixmap is None or pixmap.isNull():
+            return
+
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup
+        from PySide6.QtWidgets import QLabel, QGraphicsOpacityEffect
+
+        framed_pixmap = QPixmap(pixmap.width() + 4, pixmap.height() + 4)
+        framed_pixmap.fill(Qt.GlobalColor.transparent)
+        framed_painter = QPainter(framed_pixmap)
+        framed_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        framed_painter.drawPixmap(2, 2, pixmap)
+        framed_painter.setPen(QPen(QColor(255, 255, 255, 180), 1))
+        framed_painter.drawRect(framed_pixmap.rect().adjusted(0, 0, -1, -1))
+        framed_painter.end()
+
+        overlay = QLabel(
+            None,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        overlay.setPixmap(framed_pixmap)
+        overlay.resize(framed_pixmap.size())
+
+        center_pos = QCursor.pos()
+        start_rect = QRect(
+            center_pos.x() - framed_pixmap.width() // 2,
+            center_pos.y() - framed_pixmap.height() // 2,
+            framed_pixmap.width(),
+            framed_pixmap.height(),
+        )
+        grow_w = int(framed_pixmap.width() * 1.12)
+        grow_h = int(framed_pixmap.height() * 1.12)
+        grown_rect = QRect(
+            center_pos.x() - grow_w // 2,
+            center_pos.y() - grow_h // 2,
+            grow_w,
+            grow_h,
+        )
+        overlay.setGeometry(start_rect)
+        overlay.show()
+
+        opacity_effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(opacity_effect)
+
+        animation_group = QParallelAnimationGroup(self)
+
+        fade_animation = QPropertyAnimation(opacity_effect, b"opacity")
+        fade_animation.setDuration(220)
+        fade_animation.setStartValue(1.0)
+        fade_animation.setEndValue(0.0)
+        fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        scale_animation = QPropertyAnimation(overlay, b"geometry")
+        scale_animation.setDuration(220)
+        scale_animation.setStartValue(start_rect)
+        scale_animation.setKeyValueAt(0.45, grown_rect)
+        scale_animation.setEndValue(start_rect)
+        scale_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        animation_group.addAnimation(fade_animation)
+        animation_group.addAnimation(scale_animation)
+        if not hasattr(self, "_active_drag_preview_animations"):
+            self._active_drag_preview_animations = []
+        self._active_drag_preview_animations.append(animation_group)
+
+        def _cleanup():
+            try:
+                if animation_group in self._active_drag_preview_animations:
+                    self._active_drag_preview_animations.remove(animation_group)
+            except Exception:
+                pass
+            overlay.deleteLater()
+
+        animation_group.finished.connect(_cleanup)
+        animation_group.start()
 
 
     def resizeEvent(self, event):

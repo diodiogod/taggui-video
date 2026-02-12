@@ -313,6 +313,28 @@ class ImageListModel(QAbstractListModel):
             }
         return serialized
 
+    def _apply_loop_metadata_from_meta(self, image: Image, meta: dict):
+        """Apply loop-related metadata from parsed JSON meta dict."""
+        loop_start = meta.get('loop_start_frame')
+        image.loop_start_frame = loop_start if isinstance(loop_start, int) else None
+        loop_end = meta.get('loop_end_frame')
+        image.loop_end_frame = loop_end if isinstance(loop_end, int) else None
+        image.viewer_loop_markers = self._parse_viewer_loop_markers(
+            meta.get('viewer_loop_markers')
+        )
+        floating_last_start = meta.get('floating_last_loop_start_frame')
+        floating_last_end = meta.get('floating_last_loop_end_frame')
+        if isinstance(floating_last_start, int) and isinstance(floating_last_end, int):
+            if not isinstance(image.viewer_loop_markers, dict):
+                image.viewer_loop_markers = {}
+            image.viewer_loop_markers.setdefault(
+                'floating_last',
+                {
+                    'loop_start_frame': floating_last_start,
+                    'loop_end_frame': floating_last_end,
+                },
+            )
+
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
@@ -1070,6 +1092,18 @@ class ImageListModel(QAbstractListModel):
                     'duration': row.get('video_duration'),
                     'frame_count': row.get('video_frame_count')
                 }
+
+            # In paginated mode we still need sidecar loop metadata for playback loop markers.
+            json_file_path = file_path.with_suffix('.json')
+            if json_file_path.exists() and json_file_path.stat().st_size > 0:
+                with json_file_path.open(encoding='UTF-8') as source:
+                    try:
+                        meta = json.load(source)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        pass
+                    else:
+                        if meta.get('version') == 1:
+                            self._apply_loop_metadata_from_meta(image, meta)
 
             images.append(image)
 
@@ -2963,13 +2997,7 @@ class ImageListModel(QAbstractListModel):
                                                   rect=QRect(*marking.get('rect')),
                                                   confidence=marking.get('confidence', 1.0))
                                 image.markings.append(marking)
-                        loop_start = meta.get('loop_start_frame')
-                        image.loop_start_frame = loop_start if isinstance(loop_start, int) else None
-                        loop_end = meta.get('loop_end_frame')
-                        image.loop_end_frame = loop_end if isinstance(loop_end, int) else None
-                        image.viewer_loop_markers = self._parse_viewer_loop_markers(
-                            meta.get('viewer_loop_markers')
-                        )
+                        self._apply_loop_metadata_from_meta(image, meta)
                     # Silently ignore unsupported JSON versions (like ComfyUI workflow files)
             new_images.append(image)
 
@@ -3378,6 +3406,10 @@ class ImageListModel(QAbstractListModel):
         viewer_loop_markers = self._serialize_viewer_loop_markers(image)
         if viewer_loop_markers:
             meta['viewer_loop_markers'] = viewer_loop_markers
+            floating_last = viewer_loop_markers.get('floating_last')
+            if isinstance(floating_last, dict):
+                meta['floating_last_loop_start_frame'] = floating_last.get('loop_start_frame')
+                meta['floating_last_loop_end_frame'] = floating_last.get('loop_end_frame')
         if does_exist or len(meta.keys()) > 1:
             try:
                 with image.path.with_suffix('.json').open('w', encoding='UTF-8') as meta_file:
@@ -4057,15 +4089,7 @@ class ImageListModel(QAbstractListModel):
                                                   rect=QRect(*marking.get('rect')),
                                                   confidence=marking.get('confidence', 1.0))
                                 image.markings.append(marking)
-                        loop_start = meta.get('loop_start_frame')
-                        if loop_start is not None and isinstance(loop_start, int):
-                            image.loop_start_frame = loop_start
-                        loop_end = meta.get('loop_end_frame')
-                        if loop_end is not None and isinstance(loop_end, int):
-                            image.loop_end_frame = loop_end
-                        image.viewer_loop_markers = self._parse_viewer_loop_markers(
-                            meta.get('viewer_loop_markers')
-                        )
+                        self._apply_loop_metadata_from_meta(image, meta)
 
         # Insert the image in the correct sorted position
         # Use natural sort key for insertion
