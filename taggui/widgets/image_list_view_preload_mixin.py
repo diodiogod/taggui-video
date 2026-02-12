@@ -433,7 +433,22 @@ class ImageListViewPreloadMixin:
                         # Item-based fraction to match masonry spacer positions.
                         page_fraction = max(0.0, min(1.0, (self._current_page * source_model.PAGE_SIZE) / max(1, total_items)))
                         if bottom_intent:
-                            target_slider = baseline_max
+                            tail_target = self._strict_tail_scroll_target(
+                                source_model=source_model,
+                                domain_max=baseline_max,
+                            )
+                            target_slider = int(tail_target) if tail_target is not None else baseline_max
+                            if tail_target is not None and abs(int(target_slider) - int(baseline_max)) > 2:
+                                self._log_diag(
+                                    "release.tail_target",
+                                    source_model=source_model,
+                                    throttle_key="diag_release_tail_target",
+                                    every_s=0.1,
+                                    extra=(
+                                        f"slider={slider_pos}/{baseline_max} "
+                                        f"target={int(target_slider)}"
+                                    ),
+                                )
                         elif top_intent:
                             target_slider = 0
                         else:

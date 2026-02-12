@@ -89,6 +89,48 @@ class ImageListViewScrollMixin:
                 self._idle_preload_timer.stop()
                 self._idle_preload_timer.start(500)  # 500ms after scrolling stops
 
+    def _enforce_strict_tail_hard_stop(self, source_model=None, *, reason: str) -> bool:
+        """Clamp strict scroll to real tail when the last masonry item is known."""
+        if self._scrollbar_dragging or self._drag_preview_mode:
+            return False
+        if source_model is None:
+            source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        tail_target = self._strict_tail_scroll_target(
+            source_model=source_model,
+            domain_max=self.verticalScrollBar().maximum(),
+        )
+        if tail_target is None:
+            return False
+
+        sb = self.verticalScrollBar()
+        old_val = int(sb.value())
+        new_val = max(0, min(int(tail_target), int(sb.maximum())))
+        if old_val <= new_val + 2:
+            return False
+
+        prev_block = sb.blockSignals(True)
+        try:
+            sb.setValue(new_val)
+        finally:
+            sb.blockSignals(prev_block)
+        self._last_stable_scroll_value = int(sb.value())
+        self._stick_to_edge = "bottom"
+        try:
+            total_items = int(getattr(source_model, '_total_count', 0) or 0)
+            page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+            if total_items > 0 and page_size > 0:
+                self._current_page = max(0, (total_items - 1) // page_size)
+        except Exception:
+            pass
+        self._log_diag(
+            "tail.hard_stop",
+            source_model=source_model,
+            throttle_key="diag_tail_hard_stop",
+            every_s=0.2,
+            extra=f"from={old_val} to={int(sb.value())} reason={reason}",
+        )
+        return True
+
 
     def _check_and_load_pages(self):
         """Update current page tracking and trigger page loading based on scroll position."""
@@ -100,6 +142,12 @@ class ImageListViewScrollMixin:
 
         if not hasattr(source_model, '_total_count') or source_model._total_count == 0:
             return
+
+        strategy = self._get_masonry_strategy(source_model)
+        strict_mode = strategy == "windowed_strict"
+        if strict_mode:
+            # Keep this outside throttle so wheel bursts cannot enter void.
+            self._enforce_strict_tail_hard_stop(source_model=source_model, reason="precheck")
 
         # Throttle: Don't spam page loads on every pixel of scroll
         import time
@@ -113,8 +161,6 @@ class ImageListViewScrollMixin:
         scroll_offset = self.verticalScrollBar().value()
         scroll_max = self.verticalScrollBar().maximum()
         # print(f"[LOAD_CHECK] Offset={scroll_offset}, Max={scroll_max}, Page={self._current_page if hasattr(self, '_current_page') else '?'}, Total={source_model._total_count if hasattr(source_model, '_total_count') else '?'}")
-        strategy = self._get_masonry_strategy(source_model)
-        strict_mode = strategy == "windowed_strict"
         if strict_mode:
             # Enforce canonical domain to prevent strict owner collapse.
             sb = self.verticalScrollBar()
@@ -153,15 +199,10 @@ class ImageListViewScrollMixin:
                         or getattr(self, '_stick_to_edge', None) == "top"
                     )
                     if total_items > 0 and self._masonry_items:
-                        tail_idx = total_items - 1
-                        tail_item = None
-                        for it in self._masonry_items:
-                            if int(it.get('index', -1)) == tail_idx:
-                                tail_item = it
-                                break
-                        if tail_item is not None:
-                            tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
-                            tail_target = max(0, min(tail_bottom - max(1, self.viewport().height()), canonical))
+                        tail_target = self._strict_tail_scroll_target(
+                            source_model=source_model,
+                            domain_max=canonical,
+                        )
                 except Exception:
                     bottom_intent = was_at_bottom
                     top_intent = was_at_top
@@ -248,15 +289,12 @@ class ImageListViewScrollMixin:
                     if tail_item is not None:
                         tail_bottom = int(tail_item.get('y', 0)) + int(tail_item.get('height', 0))
                         tail_scroll = max(0, tail_bottom - max(1, self.viewport().height()))
-                        sb = self.verticalScrollBar()
-                        if scroll_offset > tail_scroll + 8 and getattr(self, '_stick_to_edge', None) != "bottom":
-                            prev_block = sb.blockSignals(True)
-                            try:
-                                sb.setValue(max(0, min(tail_scroll, sb.maximum())))
-                            finally:
-                                sb.blockSignals(prev_block)
-                            scroll_offset = sb.value()
-                            self._stick_to_edge = "bottom"
+                        if scroll_offset > tail_scroll + 2:
+                            if self._enforce_strict_tail_hard_stop(
+                                source_model=source_model,
+                                reason="pagecheck",
+                            ):
+                                scroll_offset = int(self.verticalScrollBar().value())
                         if scroll_offset >= max(0, tail_scroll - 2):
                             self._stick_to_edge = "bottom"
                             self._current_page = last_page

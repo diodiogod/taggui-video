@@ -251,6 +251,36 @@ class ImageListViewStrategyMixin:
         return self._get_strict_domain_service().strict_page_from_position(scroll_value, source_model)
     # ────────────────────────────────────────────────────────────────────
 
+    def _strict_tail_scroll_target(self, source_model=None, *, domain_max=None):
+        """Return scroll value that aligns the real last item with viewport bottom."""
+        try:
+            if source_model is None:
+                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), "sourceModel") else self.model()
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+            if total_items <= 0:
+                return None
+
+            tail_idx = total_items - 1
+            tail_item = None
+            masonry_map = getattr(self, "_masonry_index_map", None)
+            if isinstance(masonry_map, dict):
+                tail_item = masonry_map.get(tail_idx)
+            if tail_item is None:
+                for item in (self._masonry_items or []):
+                    if int(item.get("index", -1)) == tail_idx:
+                        tail_item = item
+                        break
+            if tail_item is None:
+                return None
+
+            tail_bottom = int(tail_item.get("y", 0)) + int(tail_item.get("height", 0))
+            target = max(0, tail_bottom - max(1, self.viewport().height()))
+            if domain_max is None:
+                return int(target)
+            return max(0, min(int(target), int(domain_max)))
+        except Exception:
+            return None
+
     def _get_masonry_incremental_service(self) -> MasonryIncrementalService:
         service = getattr(self, "_masonry_incremental_service", None)
         if service is None:
@@ -494,7 +524,16 @@ class ImageListViewStrategyMixin:
                     page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
                     if total_items > 0 and page_size > 0:
                         last_page = max(0, (total_items - 1) // page_size)
-                        if max_v > 0 and value >= max_v - 2:
+                        tail_target = self._strict_tail_scroll_target(
+                            source_model=source_model,
+                            domain_max=max_v,
+                        )
+                        near_bottom = (
+                            value >= max(0, int(tail_target) - 2)
+                            if tail_target is not None
+                            else (max_v > 0 and value >= max_v - 2)
+                        )
+                        if near_bottom:
                             self._stick_to_edge = "bottom"
                             self._current_page = last_page
                         elif value <= 2:
