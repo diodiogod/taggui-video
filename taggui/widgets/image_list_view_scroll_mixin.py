@@ -10,6 +10,13 @@ class ImageListViewScrollMixin:
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if source_model and hasattr(source_model, 'set_scrolling_state'):
             source_model.set_scrolling_state(False)
+        if source_model and self._get_masonry_strategy(source_model) == "windowed_strict":
+            self._log_diag(
+                "scroll.idle_stop",
+                source_model=source_model,
+                throttle_key="diag_scroll_idle_stop",
+                every_s=0.3,
+            )
 
         # DON'T flush cache saves immediately - still might be scrolling
         # Just mark that scroll detection stopped (200ms is too short for flush)
@@ -184,6 +191,17 @@ class ImageListViewScrollMixin:
                     sb.setValue(max(0, min(new_pos, canonical)))
                 finally:
                     sb.blockSignals(prev_block)
+                if (not self._mouse_scrolling) and (not self._scrollbar_dragging):
+                    self._log_diag(
+                        "pagecheck.canonical_sync",
+                        source_model=source_model,
+                        throttle_key="diag_pagecheck_canonical_sync",
+                        every_s=0.2,
+                        extra=(
+                            f"old_pos={old_pos} old_max={old_max_raw} "
+                            f"canonical={canonical} new_pos={max(0, min(new_pos, canonical))}"
+                        ),
+                    )
             scroll_offset = sb.value()
             scroll_max = sb.maximum()
         if scroll_max <= 0 and not strict_mode:
@@ -483,9 +501,14 @@ class ImageListViewScrollMixin:
         prev_page = getattr(self, "_current_page", None)
         self._current_page = current_page
         if strict_mode and prev_page != current_page and (not dragging_mode):
+            prev_label = str(prev_page) if isinstance(prev_page, int) else "None"
             self._log_flow(
                 "STRICT",
-                f"Owner page={current_page} scroll={scroll_offset}/{scroll_max} drag={dragging_mode} anchor={anchor_active}",
+                (
+                    f"Owner remap(internal) {prev_label}->{current_page} "
+                    f"scroll={scroll_offset}/{scroll_max} "
+                    f"drag={dragging_mode} anchor={anchor_active}"
+                ),
                 throttle_key="strict_owner_page",
                 every_s=0.5,
             )
@@ -515,6 +538,14 @@ class ImageListViewScrollMixin:
             for page_num in range(start_page, end_page + 1):
                 if page_num not in source_model._pages and page_num not in source_model._loading_pages:
                     source_model._request_page_load(page_num)
+        if strict_mode and (not self._mouse_scrolling) and (not self._scrollbar_dragging):
+            self._log_diag(
+                "pagecheck.ensure_range",
+                source_model=source_model,
+                throttle_key="diag_pagecheck_ensure_range",
+                every_s=0.25,
+                extra=f"range_pages={start_page}-{end_page} owner_page={current_page}",
+            )
 
         # Strict release lock persists for its full duration (4s) to prevent
         # thumb drift from canonical domain growth during post-release masonry

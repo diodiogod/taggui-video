@@ -586,6 +586,18 @@ class MasonryCompletionService:
                             pass
 
                     _ensure_selected_anchor_if_needed()
+                    if strict_mode and hasattr(v, "_log_diag"):
+                        sb_local = v.verticalScrollBar()
+                        v._log_diag(
+                            "complete.applied",
+                            source_model=source_model,
+                            throttle_key="diag_complete_applied",
+                            every_s=0.2,
+                            extra=(
+                                f"scroll={int(sb_local.value())}/{int(sb_local.maximum())} "
+                                f"total_h={int(getattr(v, '_masonry_total_height', 0) or 0)}"
+                            ),
+                        )
                 
                     if v._recenter_after_layout:
                         v._recenter_after_layout = False

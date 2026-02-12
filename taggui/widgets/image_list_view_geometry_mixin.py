@@ -522,6 +522,7 @@ class ImageListViewGeometryMixin:
             # print(f"[TEMP_DEBUG] UpdateGeom: CorrectMax={correct_max}, OldMax={old_max}")
 
             if strict_mode:
+                _log_idle_strict = (not self._mouse_scrolling) and (not self._scrollbar_dragging)
                 def _strict_tail_scroll_target():
                     try:
                         total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
@@ -622,6 +623,22 @@ class ImageListViewGeometryMixin:
                             self.verticalScrollBar().setValue(restored_val)
                 finally:
                     self.verticalScrollBar().blockSignals(False)
+                if _log_idle_strict and hasattr(self, "_log_diag"):
+                    _sb = self.verticalScrollBar()
+                    new_val = int(_sb.value())
+                    new_max = int(_sb.maximum())
+                    if abs(new_val - int(old_value)) > 1 or abs(new_max - int(old_max)) > 1:
+                        self._log_diag(
+                            "geom.strict_adjust",
+                            source_model=source_model,
+                            throttle_key="diag_geom_strict_adjust",
+                            every_s=0.15,
+                            extra=(
+                                f"old={int(old_value)}/{int(old_max)} "
+                                f"new={new_val}/{new_max} "
+                                f"correct_max={int(correct_max)}"
+                            ),
+                        )
             else:
                 super().updateGeometries()
                 new_max = self.verticalScrollBar().maximum()
