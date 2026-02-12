@@ -11,5 +11,14 @@ from .skin_manager import SkinManager
 from .skin_loader import SkinLoader
 from .skin_applier import SkinApplier
 from .schema import SkinSchema
+from .player_components import COMPONENTS, PlayerComponent, get_component
 
-__all__ = ['SkinManager', 'SkinLoader', 'SkinApplier', 'SkinSchema']
+__all__ = [
+    'SkinManager',
+    'SkinLoader',
+    'SkinApplier',
+    'SkinSchema',
+    'COMPONENTS',
+    'PlayerComponent',
+    'get_component',
+]

@@ -5,6 +5,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from .schema import SkinSchema
+from .migration import migrate_skin_to_v2
 
 
 class SkinLoader:
@@ -38,6 +39,7 @@ class SkinLoader:
 
             # Resolve token references
             resolved_skin = self._resolve_tokens(skin_data)
+            resolved_skin = migrate_skin_to_v2(resolved_skin)
 
             # Cache loaded skin
             self.loaded_skins[skin_path.stem] = resolved_skin

@@ -349,7 +349,8 @@ class VideoControlsWidget(QWidget):
         main_layout.setSpacing(8)
 
         # Top row: Playback controls + Frame navigation
-        controls_layout = QHBoxLayout()
+        self.controls_layout = QHBoxLayout()
+        self.controls_layout.setContentsMargins(0, 0, 0, 0)
 
         # Playback buttons with icons
         self.play_pause_btn = QPushButton()
@@ -525,25 +526,56 @@ class VideoControlsWidget(QWidget):
         # Speed label for theme cycling (clicking "Speed:" text)
         self.speed_label.mousePressEvent = self._cycle_speed_theme
 
-        controls_layout.addWidget(self.play_pause_btn)
-        controls_layout.addWidget(self.stop_btn)
-        controls_layout.addWidget(self.mute_btn)
-        controls_layout.addSpacing(20)
-        controls_layout.addWidget(self.skip_back_btn)
-        controls_layout.addWidget(self.prev_frame_btn)
-        controls_layout.addWidget(self.next_frame_btn)
-        controls_layout.addWidget(self.skip_forward_btn)
-        controls_layout.addSpacing(20)
-        controls_layout.addWidget(self.frame_label)
-        controls_layout.addWidget(self.frame_spinbox)
-        controls_layout.addWidget(self.frame_total_label)
-        controls_layout.addSpacing(20)
-        controls_layout.addWidget(self.speed_label)
-        controls_layout.addWidget(self.speed_slider, 1)  # Stretch factor 1 - expands to fill space
-        controls_layout.addWidget(self.speed_value_label)
+        # Section layouts (lets skins control spacing/alignment without detaching widgets)
+        self.playback_layout = QHBoxLayout()
+        self.navigation_layout = QHBoxLayout()
+        self.frame_meta_layout = QHBoxLayout()
+        self.speed_group_layout = QHBoxLayout()
+
+        self.playback_layout.setContentsMargins(0, 0, 0, 0)
+        self.navigation_layout.setContentsMargins(0, 0, 0, 0)
+        self.frame_meta_layout.setContentsMargins(0, 0, 0, 0)
+        self.speed_group_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.playback_layout.addWidget(self.play_pause_btn)
+        self.playback_layout.addWidget(self.stop_btn)
+        self.playback_layout.addWidget(self.mute_btn)
+
+        self.navigation_layout.addWidget(self.skip_back_btn)
+        self.navigation_layout.addWidget(self.prev_frame_btn)
+        self.navigation_layout.addWidget(self.next_frame_btn)
+        self.navigation_layout.addWidget(self.skip_forward_btn)
+
+        self.frame_meta_layout.addWidget(self.frame_label)
+        self.frame_meta_layout.addWidget(self.frame_spinbox)
+        self.frame_meta_layout.addWidget(self.frame_total_label)
+
+        self.speed_group_layout.addWidget(self.speed_label)
+        self.speed_group_layout.addWidget(self.speed_slider, 1)  # Expand to fill available section width
+        self.speed_group_layout.addWidget(self.speed_value_label)
+
+        self._top_row_button_map = {
+            'play_button': self.play_pause_btn,
+            'stop_button': self.stop_btn,
+            'mute_button': self.mute_btn,
+            'skip_back_button': self.skip_back_btn,
+            'prev_frame_button': self.prev_frame_btn,
+            'next_frame_button': self.next_frame_btn,
+            'skip_forward_button': self.skip_forward_btn,
+        }
+
+        # Alignment spacers around grouped sections
+        self.controls_layout.addStretch(1)
+        self.controls_left_spacer_index = self.controls_layout.count() - 1
+        self.controls_layout.addLayout(self.playback_layout)
+        self.controls_layout.addLayout(self.navigation_layout)
+        self.controls_layout.addLayout(self.frame_meta_layout)
+        self.controls_layout.addLayout(self.speed_group_layout)
+        self.controls_layout.addStretch(1)
+        self.controls_right_spacer_index = self.controls_layout.count() - 1
 
         # Timeline slider with loop markers
-        slider_layout = QHBoxLayout()
+        self.slider_layout = QHBoxLayout()
         self.timeline_slider = LoopSlider(Qt.Orientation.Horizontal)
         self.timeline_slider.setMinimum(0)
         self.timeline_slider.setMaximum(0)
@@ -555,10 +587,10 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.marker_drag_started.connect(self._on_marker_drag_started)
         self.timeline_slider.marker_drag_ended.connect(self._on_marker_drag_ended)
         self.timeline_slider.marker_preview_frame.connect(self._on_marker_preview_frame)
-        slider_layout.addWidget(self.timeline_slider)
+        self.slider_layout.addWidget(self.timeline_slider)
 
         # Bottom row: Info display + Loop controls
-        info_layout = QHBoxLayout()
+        self.info_layout = QHBoxLayout()
 
         # Time display
         self.time_label = QLabel('00:00.000 / 00:00.000')
@@ -639,22 +671,23 @@ class VideoControlsWidget(QWidget):
         self.loop_reset_btn.setStyleSheet("QPushButton { font-size: 16px; padding: 2px; }")
         self.loop_reset_btn.clicked.connect(self._reset_loop)
 
-        info_layout.addWidget(self.time_label)
-        info_layout.addWidget(self.fps_label)
-        info_layout.addWidget(self.frame_count_label)
-        info_layout.addStretch(1)
-        info_layout.addWidget(self.preview_container)
-        info_layout.addStretch(1)
-        info_layout.addWidget(self.sar_warning_label)
-        info_layout.addWidget(self.loop_reset_btn)
-        info_layout.addWidget(self.loop_start_btn)
-        info_layout.addWidget(self.loop_end_btn)
-        info_layout.addWidget(self.loop_checkbox)
+        self.info_layout.addWidget(self.time_label)
+        self.info_layout.addWidget(self.fps_label)
+        self.info_layout.addWidget(self.frame_count_label)
+        self.info_layout.addStretch(1)
+        self.info_layout.addWidget(self.preview_container)
+        self.info_layout.addStretch(1)
+        self.info_layout.addWidget(self.sar_warning_label)
+        self.info_layout.addWidget(self.loop_reset_btn)
+        self.info_layout.addWidget(self.loop_start_btn)
+        self.info_layout.addWidget(self.loop_end_btn)
+        self.info_layout.addWidget(self.loop_checkbox)
 
         # Add all layouts to main
-        main_layout.addLayout(controls_layout)
-        main_layout.addLayout(slider_layout)
-        main_layout.addLayout(info_layout)
+        self.main_layout = main_layout
+        self.main_layout.addLayout(self.controls_layout)
+        self.main_layout.addLayout(self.slider_layout)
+        self.main_layout.addLayout(self.info_layout)
 
         # Track current state
         self.is_playing = False
@@ -802,43 +835,49 @@ class VideoControlsWidget(QWidget):
 
         # Apply to control bar container (this widget)
         applier.apply_to_control_bar(self)
+        self._apply_skin_layout_properties(applier)
 
-        # Apply to all buttons
-        buttons = [
-            self.play_pause_btn,
-            self.stop_btn,
-            self.mute_btn,
-            self.prev_frame_btn,
-            self.next_frame_btn,
-            self.skip_back_btn,
-            self.skip_forward_btn,
-            self.loop_start_btn,
-            self.loop_end_btn,
-            self.loop_reset_btn
-        ]
-        for button in buttons:
-            applier.apply_to_button(button)
+        # Apply to all buttons (with canonical component ids)
+        button_map = {
+            'play_button': self.play_pause_btn,
+            'stop_button': self.stop_btn,
+            'mute_button': self.mute_btn,
+            'prev_frame_button': self.prev_frame_btn,
+            'next_frame_button': self.next_frame_btn,
+            'skip_back_button': self.skip_back_btn,
+            'skip_forward_button': self.skip_forward_btn,
+            'loop_start_button': self.loop_start_btn,
+            'loop_end_button': self.loop_end_btn,
+            'loop_reset_button': self.loop_reset_btn,
+            'loop_checkbox': self.loop_checkbox,
+        }
+        for component_id, button in button_map.items():
+            applier.apply_to_button(button, component_id=component_id)
 
         # Apply to timeline slider
-        applier.apply_to_timeline_slider(self.timeline_slider)
+        applier.apply_to_timeline_slider(self.timeline_slider, component_id='timeline_slider')
 
         # Apply to speed slider
-        applier.apply_to_speed_slider(self.speed_slider)
+        applier.apply_to_speed_slider(self.speed_slider, component_id='speed_slider')
 
         # Apply to labels
-        labels = [
-            self.frame_label,
-            self.frame_total_label,
-            self.time_label,
-            self.fps_label,
-            self.frame_count_label,
-            self.speed_label
-        ]
-        for label in labels:
-            applier.apply_to_label(label)
+        label_map = {
+            'frame_label': self.frame_label,
+            'frame_total_label': self.frame_total_label,
+            'time_label': self.time_label,
+            'fps_label': self.fps_label,
+            'frame_count_label': self.frame_count_label,
+            'speed_label': self.speed_label,
+        }
+        for component_id, label in label_map.items():
+            applier.apply_to_label(label, component_id=component_id)
 
         # Apply special styling to speed value label
-        applier.apply_to_label(self.speed_value_label, is_secondary=False)
+        applier.apply_to_label(
+            self.speed_value_label,
+            component_id='speed_value_label',
+            is_secondary=False
+        )
 
         # Update loop marker colors
         marker_colors = applier.get_loop_marker_colors()
@@ -850,12 +889,134 @@ class VideoControlsWidget(QWidget):
         # Force repaint
         self.update()
 
+    def _apply_skin_layout_properties(self, applier):
+        """Apply layout-related skin values to runtime Qt layouts."""
+        designer_layout = self.skin_manager.current_skin.get('video_player', {}).get('designer_layout', {})
+        controls_row = designer_layout.get('controls_row', {}) if isinstance(designer_layout, dict) else {}
+
+        button_spacing = max(0, int(applier.get_button_spacing()))
+        section_spacing = max(0, int(applier.get_section_spacing()))
+        button_alignment = applier.layout.get('button_alignment', 'center')
+        timeline_position = applier.layout.get('timeline_position', 'above')
+        control_bar_height = max(40, int(applier.get_control_bar_height()))
+
+        if isinstance(controls_row, dict):
+            if 'button_spacing' in controls_row:
+                button_spacing = max(0, int(controls_row.get('button_spacing', button_spacing)))
+            if 'section_spacing' in controls_row:
+                section_spacing = max(0, int(controls_row.get('section_spacing', section_spacing)))
+            if 'button_alignment' in controls_row:
+                button_alignment = controls_row.get('button_alignment', button_alignment)
+            if 'timeline_position' in controls_row:
+                timeline_position = controls_row.get('timeline_position', timeline_position)
+            self._apply_top_row_button_order(controls_row.get('button_order'))
+        offset_x = 0
+        if isinstance(controls_row, dict):
+            offset_x = int(controls_row.get('offset_x', 0))
+        offset_x = max(-500, min(500, offset_x))
+
+        # Intra-section spacing
+        for layout in (
+            self.playback_layout,
+            self.navigation_layout,
+            self.frame_meta_layout,
+            self.speed_group_layout,
+        ):
+            layout.setSpacing(button_spacing)
+
+        # Inter-section spacing
+        self.controls_layout.setSpacing(section_spacing)
+
+        # Section alignment in controls row
+        # left: [content...............]
+        # center: [....content....]
+        # right: [...............content]
+        if button_alignment == 'left':
+            self.controls_layout.setStretch(self.controls_left_spacer_index, 0)
+            self.controls_layout.setStretch(self.controls_right_spacer_index, 100)
+        elif button_alignment == 'right':
+            self.controls_layout.setStretch(self.controls_left_spacer_index, 100)
+            self.controls_layout.setStretch(self.controls_right_spacer_index, 0)
+        else:
+            self.controls_layout.setStretch(self.controls_left_spacer_index, 1)
+            self.controls_layout.setStretch(self.controls_right_spacer_index, 1)
+
+        # Explicit row offset from designer (positive -> move right, negative -> move left).
+        self.controls_layout.setContentsMargins(
+            max(0, offset_x),
+            0,
+            max(0, -offset_x),
+            0,
+        )
+
+        # Timeline position (supported: above/below, integrated falls back to above)
+        if timeline_position == 'below':
+            self._set_main_row_order('controls_info_timeline')
+        else:
+            self._set_main_row_order('controls_timeline_info')
+
+        # Keep the bar comfortably sized without hard-fixing height.
+        self.setMinimumHeight(control_bar_height)
+
+    def _clear_layout(self, layout):
+        """Detach all widgets/items from a layout."""
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if child_layout is not None:
+                self._clear_layout(child_layout)
+            if widget is not None:
+                widget.setParent(self)
+
+    def _apply_top_row_button_order(self, requested_order):
+        """Apply deterministic ordering for the top-row transport buttons."""
+        default_order = [
+            'play_button',
+            'stop_button',
+            'mute_button',
+            'skip_back_button',
+            'prev_frame_button',
+            'next_frame_button',
+            'skip_forward_button',
+        ]
+        if not isinstance(requested_order, list):
+            requested_order = list(default_order)
+        normalized = [name for name in requested_order if name in self._top_row_button_map]
+        for name in default_order:
+            if name not in normalized:
+                normalized.append(name)
+
+        self._clear_layout(self.playback_layout)
+        self._clear_layout(self.navigation_layout)
+        for name in normalized:
+            self.playback_layout.addWidget(self._top_row_button_map[name])
+
+    def _set_main_row_order(self, mode: str):
+        """Reorder main rows safely when timeline position changes."""
+        if getattr(self, '_main_row_mode', None) == mode:
+            return
+
+        while self.main_layout.count():
+            self.main_layout.takeAt(0)
+
+        if mode == 'controls_info_timeline':
+            self.main_layout.addLayout(self.controls_layout)
+            self.main_layout.addLayout(self.info_layout)
+            self.main_layout.addLayout(self.slider_layout)
+        else:
+            self.main_layout.addLayout(self.controls_layout)
+            self.main_layout.addLayout(self.slider_layout)
+            self.main_layout.addLayout(self.info_layout)
+
+        self._main_row_mode = mode
+
     def apply_designer_positions(self):
         """Apply designer position offsets to widgets from skin data.
 
-        This implements Option C (hybrid positioning):
-        - Layouts provide base positioning
-        - Designer offsets tweak individual widget positions
+        Legacy absolute positioning is now non-destructive:
+        - Layout-owned widgets are not detached from Qt layouts.
+        - Absolute positions are only applied to free widgets (if any).
         """
         if not hasattr(self, 'skin_manager') or not self.skin_manager.current_skin:
             return
@@ -887,12 +1048,12 @@ class VideoControlsWidget(QWidget):
         self._designer_positions = designer_positions
         self._positioned_widgets = widget_map
 
-        # Apply positions after a short delay to ensure layout has finished
+        # Apply after layout settles
         from PySide6.QtCore import QTimer
         QTimer.singleShot(50, self._apply_designer_positions_now)
 
     def _apply_designer_positions_now(self):
-        """Internal method to apply designer positions to widgets."""
+        """Internal method to apply legacy designer positions safely."""
         if not hasattr(self, '_designer_positions') or not self._designer_positions:
             return
 
@@ -903,21 +1064,20 @@ class VideoControlsWidget(QWidget):
                 y = pos_data.get('y')
 
                 if x is not None and y is not None:
-                    # Detach from layout if necessary to allow absolute positioning
-                    if widget.parentWidget() and widget.parentWidget().layout():
-                         idx = widget.parentWidget().layout().indexOf(widget)
-                         if idx >= 0:
-                             widget.parentWidget().layout().takeAt(idx)
-                    
-                    # Ensure parent is self
-                    if widget.parent() != self:
-                        widget.setParent(self)
+                    # If managed by a layout, skip absolute position (preserve fit/responsive behavior).
+                    managed_by_layout = False
+                    parent_widget = widget.parentWidget()
+                    if parent_widget and parent_widget.layout():
+                        managed_by_layout = parent_widget.layout().indexOf(widget) >= 0
+                    if managed_by_layout:
+                        continue
 
-                    # Use setGeometry to force absolute positioning
-                    current_size = widget.size()
-                    widget.setGeometry(int(x), int(y), current_size.width(), current_size.height())
-                    widget.show()
-                    widget.raise_()
+                    # Absolute positioning only for free widgets.
+                    if widget.parent() == self:
+                        current_size = widget.size()
+                        widget.setGeometry(int(x), int(y), current_size.width(), current_size.height())
+                        widget.show()
+                        widget.raise_()
 
     def switch_skin(self, skin_name: str):
         """Switch to a different skin and apply it immediately.
@@ -959,6 +1119,8 @@ class VideoControlsWidget(QWidget):
         Returns:
             List of skin dicts with 'name', 'author', 'version' keys
         """
+        # Refresh to pick up newly added preset files immediately.
+        self.skin_manager.refresh_available_skins()
         return self.skin_manager.get_available_skins()
 
     def _set_loop_button_style(self, button, is_set=False):
@@ -994,7 +1156,16 @@ class VideoControlsWidget(QWidget):
             """)
         else:
             # Inactive state - use default button styling
-            applier.apply_to_button(button)
+            component_id = None
+            if button == self.loop_start_btn:
+                component_id = 'loop_start_button'
+            elif button == self.loop_end_btn:
+                component_id = 'loop_end_button'
+            elif button == self.loop_reset_btn:
+                component_id = 'loop_reset_button'
+            elif button == self.loop_checkbox:
+                component_id = 'loop_checkbox'
+            applier.apply_to_button(button, component_id=component_id)
 
     def _apply_scaling(self):
         """Apply scaling to internal elements based on current width."""
