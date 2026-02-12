@@ -67,7 +67,7 @@ class MenuManager:
         self.toggle_auto_captioner_action = QAction('Auto-Captioner', parent=self.main_window)
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
-        self.close_all_floating_viewers_action = QAction('Close Floating Viewers', parent=self.main_window)
+        self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
         self.delete_marked_menu = None
         self.delete_marked_button = None
         self.delete_marked_widget_action = None
