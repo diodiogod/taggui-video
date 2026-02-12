@@ -1,5 +1,112 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
+
+class _SpawnDragArrowOverlay(QWidget):
+    """Top-level transparent overlay that draws a directional drag arrow."""
+
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._start_global = QPoint()
+        self._end_global = QPoint()
+        self._local_start = QPoint()
+        self._local_end = QPoint()
+
+    def set_points(self, start_global: QPoint, end_global: QPoint):
+        self._start_global = QPoint(start_global)
+        self._end_global = QPoint(end_global)
+
+        margin = 24
+        min_x = min(self._start_global.x(), self._end_global.x()) - margin
+        min_y = min(self._start_global.y(), self._end_global.y()) - margin
+        max_x = max(self._start_global.x(), self._end_global.x()) + margin
+        max_y = max(self._start_global.y(), self._end_global.y()) + margin
+        width = max(1, max_x - min_x)
+        height = max(1, max_y - min_y)
+        self.setGeometry(min_x, min_y, width, height)
+
+        self._local_start = QPoint(self._start_global.x() - min_x, self._start_global.y() - min_y)
+        self._local_end = QPoint(self._end_global.x() - min_x, self._end_global.y() - min_y)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        line_color = QColor(255, 92, 92, 230)
+        glow_color = QColor(255, 60, 60, 120)
+
+        # Soft glow under stroke
+        glow_pen = QPen(glow_color, 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(glow_pen)
+        painter.drawLine(self._local_start, self._local_end)
+
+        # Main stroke
+        pen = QPen(line_color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(self._local_start, self._local_end)
+
+        # Arrow head at current cursor side
+        dx = float(self._local_end.x() - self._local_start.x())
+        dy = float(self._local_end.y() - self._local_start.y())
+        length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+        ux = dx / length
+        uy = dy / length
+        px = -uy
+        py = ux
+
+        head_len = 14.0
+        head_half = 6.0
+        tip = QPoint(int(self._local_end.x()), int(self._local_end.y()))
+        back = QPoint(
+            int(round(tip.x() - (ux * head_len))),
+            int(round(tip.y() - (uy * head_len))),
+        )
+        left = QPoint(
+            int(round(back.x() + (px * head_half))),
+            int(round(back.y() + (py * head_half))),
+        )
+        right = QPoint(
+            int(round(back.x() - (px * head_half))),
+            int(round(back.y() - (py * head_half))),
+        )
+
+        painter.setBrush(line_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPolygon(QPolygon([tip, left, right]))
+        super().paintEvent(event)
+
+
+class _DragIndicatorWidget(QWidget):
+    """Drag indicator styled like hidden window markers, sized to match thumbnail."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Semi-transparent dark background
+        painter.setBrush(QColor(40, 40, 40, 200))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(self.rect(), 6, 6)
+
+        # Bright border
+        painter.setPen(QPen(QColor(100, 180, 255), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 5, 5)
+
+        # Inner glow
+        painter.setPen(QPen(QColor(150, 200, 255, 100), 1))
+        painter.drawRoundedRect(self.rect().adjusted(3, 3, -3, -3), 3, 3)
+
+
 class ImageListViewGeometryMixin:
     def _build_queues_async(self):
         """Build priority queues asynchronously (runs on next event loop to avoid blocking UI)."""
@@ -378,11 +485,166 @@ class ImageListViewGeometryMixin:
         self._persist_current_view_mode()
 
 
-    def startDrag(self, supportedActions: Qt.DropAction):
-        indices = self.selectedIndexes()
-        if not indices:
+    def _resolve_live_spawn_index(self, dragged_index: QPersistentModelIndex, dragged_path) -> QModelIndex:
+        """Resolve a live proxy index after drag, with path fallback for churn."""
+        try:
+            live_index = self.model().index(dragged_index.row(), dragged_index.column())
+        except Exception:
+            live_index = QModelIndex()
+
+        if (not live_index.isValid()) and dragged_path is not None:
+            try:
+                proxy_model = self.model()
+                source_model = proxy_model.sourceModel() if hasattr(proxy_model, "sourceModel") else None
+                if source_model is not None and hasattr(source_model, "get_index_for_path"):
+                    src_row = source_model.get_index_for_path(dragged_path)
+                    if isinstance(src_row, int) and src_row >= 0:
+                        src_idx = source_model.index(src_row, 0)
+                        if src_idx.isValid() and hasattr(proxy_model, "mapFromSource"):
+                            live_index = proxy_model.mapFromSource(src_idx)
+            except Exception:
+                live_index = QModelIndex()
+        return live_index
+
+    def _spawn_floating_from_drag_index(
+        self,
+        live_index: QModelIndex,
+        source_pixmap: QPixmap,
+        spawn_global_pos: QPoint | None = None,
+    ):
+        """Spawn one floating viewer from resolved proxy index."""
+        if not live_index.isValid():
             return
-        dragged_index = QPersistentModelIndex(indices[0])
+        try:
+            self._flash_drag_drop_preview(source_pixmap)
+        except Exception:
+            pass
+        main_window = self.window()
+        if main_window and hasattr(main_window, 'spawn_floating_viewer_at'):
+            try:
+                main_window.spawn_floating_viewer_at(
+                    target_index=live_index,
+                    spawn_global_pos=spawn_global_pos if spawn_global_pos is not None else QCursor.pos(),
+                )
+            except Exception as e:
+                print(f"[DRAG-SPAWN] Spawn warning: {e}")
+
+    def _build_spawn_drag_source_pixmap(self, model_index: QModelIndex) -> QPixmap:
+        """Build a best-effort thumbnail pixmap for drag ghost/preview."""
+        source_pixmap = QPixmap()
+        try:
+            icon = model_index.data(Qt.ItemDataRole.DecorationRole)
+            if icon is not None:
+                source_pixmap = icon.pixmap(self.iconSize())
+        except Exception:
+            source_pixmap = QPixmap()
+        if source_pixmap.isNull():
+            try:
+                item_rect = self.visualRect(model_index)
+                if item_rect.isValid() and item_rect.width() > 0 and item_rect.height() > 0:
+                    source_pixmap = self.viewport().grab(item_rect)
+            except Exception:
+                source_pixmap = QPixmap()
+        if source_pixmap.isNull():
+            fallback_side = max(48, int(self.iconSize().width() or 96))
+            source_pixmap = QPixmap(fallback_side, fallback_side)
+            source_pixmap.fill(Qt.GlobalColor.transparent)
+        return source_pixmap
+
+    def _show_spawn_drag_ghost(self, model_index: QModelIndex):
+        """Show drag indicator sized to match thumbnail."""
+        if not model_index.isValid():
+            return
+        source_pixmap = self._build_spawn_drag_source_pixmap(model_index)
+        if source_pixmap.isNull():
+            return
+
+        ghost = getattr(self, "_spawn_drag_ghost_widget", None)
+        if ghost is None:
+            ghost = _DragIndicatorWidget(self.viewport())
+            ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._spawn_drag_ghost_widget = ghost
+
+        # Size to match the thumbnail
+        ghost.resize(source_pixmap.size())
+        self._spawn_drag_ghost_size = source_pixmap.size()
+        ghost.show()
+        ghost.raise_()
+        self._update_spawn_drag_ghost_pos()
+
+    def _update_spawn_drag_ghost_pos(self, global_pos: QPoint | None = None):
+        ghost = getattr(self, "_spawn_drag_ghost_widget", None)
+        if ghost is None:
+            return
+        cursor_global = global_pos if global_pos is not None else QCursor.pos()
+        cursor_local = self.viewport().mapFromGlobal(cursor_global)
+
+        # Center the indicator on cursor
+        size = getattr(self, '_spawn_drag_ghost_size', QSize(40, 40))
+        ghost.move(cursor_local.x() - size.width() // 2, cursor_local.y() - size.height() // 2)
+
+        try:
+            self._spawn_drag_last_global_pos = QPoint(cursor_global)
+        except Exception:
+            pass
+
+    def _hide_spawn_drag_ghost(self):
+        ghost = getattr(self, "_spawn_drag_ghost_widget", None)
+        if ghost is not None:
+            ghost.hide()
+
+    def _show_spawn_drag_arrow(self, start_global: QPoint, end_global: QPoint):
+        overlay = getattr(self, "_spawn_drag_arrow_overlay", None)
+        if overlay is None:
+            overlay = _SpawnDragArrowOverlay()
+            self._spawn_drag_arrow_overlay = overlay
+        overlay.set_points(start_global, end_global)
+        overlay.show()
+
+    def _update_spawn_drag_arrow(self, start_global: QPoint, end_global: QPoint):
+        overlay = getattr(self, "_spawn_drag_arrow_overlay", None)
+        if overlay is None:
+            return
+        overlay.set_points(start_global, end_global)
+
+    def _hide_spawn_drag_arrow(self):
+        overlay = getattr(self, "_spawn_drag_arrow_overlay", None)
+        if overlay is not None:
+            overlay.hide()
+
+    def _spawn_floating_for_index_at_cursor(
+        self,
+        model_index: QModelIndex,
+        spawn_global_pos: QPoint | None = None,
+    ):
+        """Spawn directly at cursor from one explicit index (no Qt drag loop)."""
+        if not model_index.isValid():
+            return
+        dragged_index = QPersistentModelIndex(model_index)
+        dragged_path = None
+        try:
+            image = model_index.data(Qt.ItemDataRole.UserRole)
+            dragged_path = getattr(image, "path", None)
+        except Exception:
+            dragged_path = None
+
+        source_pixmap = self._build_spawn_drag_source_pixmap(model_index)
+
+        live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
+        self._spawn_floating_from_drag_index(live_index, source_pixmap, spawn_global_pos=spawn_global_pos)
+
+    def _start_spawn_drag_for_index(self, model_index: QModelIndex, supportedActions: Qt.DropAction):
+        """Start drag/spawn flow from one explicit index (selection-independent)."""
+        if not model_index.isValid():
+            return
+        indices = [model_index]
+        dragged_index = QPersistentModelIndex(model_index)
+        dragged_path = None
+        try:
+            image = model_index.data(Qt.ItemDataRole.UserRole)
+            dragged_path = getattr(image, "path", None)
+        except Exception:
+            dragged_path = None
 
         # Use mimeData from the model.
         mime_data = self.model().mimeData(indices)
@@ -391,7 +653,7 @@ class ImageListViewGeometryMixin:
 
         # Build a reliable visual preview pixmap.
         source_pixmap = QPixmap()
-        icon = indices[0].data(Qt.ItemDataRole.DecorationRole)
+        icon = model_index.data(Qt.ItemDataRole.DecorationRole)
         if icon is not None:
             try:
                 source_pixmap = icon.pixmap(self.iconSize())
@@ -417,6 +679,13 @@ class ImageListViewGeometryMixin:
         painter.drawPixmap(0, 0, source_pixmap)
         painter.end()
 
+        # Ultra-fast drag/release race: if button is already up by the time we
+        # reach drag start, skip QDrag.exec() and spawn immediately.
+        if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
+            self._spawn_floating_from_drag_index(live_index, source_pixmap)
+            return
+
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.setPixmap(drag_pixmap)
@@ -425,24 +694,15 @@ class ImageListViewGeometryMixin:
 
         # If dropped onto no external target, spawn a floating viewer at cursor.
         if drop_action == Qt.DropAction.IgnoreAction and dragged_index.isValid():
-            try:
-                live_index = self.model().index(dragged_index.row(), dragged_index.column())
-            except Exception:
-                live_index = QModelIndex()
-            if live_index.isValid():
-                try:
-                    self._flash_drag_drop_preview(source_pixmap)
-                except Exception:
-                    pass
-                main_window = self.window()
-                if main_window and hasattr(main_window, 'spawn_floating_viewer_at'):
-                    try:
-                        main_window.spawn_floating_viewer_at(
-                            target_index=live_index,
-                            spawn_global_pos=QCursor.pos(),
-                        )
-                    except Exception as e:
-                        print(f"[DRAG-SPAWN] Spawn warning: {e}")
+            live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
+            self._spawn_floating_from_drag_index(live_index, source_pixmap)
+
+    def startDrag(self, supportedActions: Qt.DropAction):
+        indices = self.selectedIndexes()
+        if not indices:
+            return
+        # Keep Qt override behavior, but route through explicit-index path.
+        self._start_spawn_drag_for_index(indices[0], supportedActions)
 
     def _flash_drag_drop_preview(self, pixmap: QPixmap):
         """Show a short glow/fade animation at drop position using drag ghost."""
