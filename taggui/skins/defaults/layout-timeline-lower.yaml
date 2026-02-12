@@ -1,0 +1,46 @@
+name: "Layout Timeline Lower"
+author: "TagGUI"
+version: "1.0"
+
+video_player:
+  layout:
+    control_bar_height: 60
+    control_bar_position: "bottom"
+    button_alignment: "center"
+    timeline_position: "below"
+    button_spacing: 8
+    section_spacing: 20
+
+  designer_layout:
+    controls_row:
+      button_alignment: "center"
+      offset_x: 0
+      timeline_position: "below"
+    snap_mode: "zones"
+
+  styling:
+    background: "#000000"
+    control_bar_color: "#000000"
+    control_bar_opacity: 0.80
+    button_size: 40
+    button_icon_color: "#FFFFFF"
+    button_bg_color: "#2b2b2b"
+    button_hover_color: "#3a3a3a"
+    button_border: "2px solid #555555"
+    button_border_radius: 4
+    timeline_height: 8
+    timeline_color: "#2196F3"
+    timeline_bg_color: "#1A1A1A"
+    slider_handle_size: 16
+    slider_handle_color: "#FFFFFF"
+    slider_handle_border: "2px solid #333333"
+    loop_marker_start_color: "#FF0080"
+    loop_marker_end_color: "#FF8C00"
+    loop_marker_outline: "#FFFFFF"
+    loop_marker_outline_width: 2
+    speed_gradient_start: "#2D5A2D"
+    speed_gradient_mid: "#6B8E23"
+    speed_gradient_end: "#32CD32"
+    text_color: "#FFFFFF"
+    text_secondary_color: "#B0B0B0"
+    label_font_size: 12

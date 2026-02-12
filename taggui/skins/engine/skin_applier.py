@@ -18,8 +18,47 @@ class SkinApplier:
         self.vp = skin_data.get('video_player', {})
         self.layout = self.vp.get('layout', {})
         self.styling = self.vp.get('styling', {})
+        self.component_styles = self.vp.get('component_styles', {})
         self.borders = self.vp.get('borders', {})
         self.shadows = self.vp.get('shadows', {})
+
+    def _resolve_component_style(
+        self,
+        component_id: Optional[str],
+        key: str,
+        default: Any = None,
+        state: str = 'default'
+    ) -> Any:
+        """Resolve style with fallback: component state -> component default -> legacy -> global."""
+        if not component_id:
+            return self.styling.get(key, default)
+
+        # v2: component_styles.<component_id>.<state>.<key>
+        component_block = self.component_styles.get(component_id, {})
+        if isinstance(component_block, dict):
+            state_block = component_block.get(state, {})
+            if isinstance(state_block, dict) and key in state_block:
+                return state_block[key]
+            default_block = component_block.get('default', {})
+            if isinstance(default_block, dict) and key in default_block:
+                return default_block[key]
+
+        # Legacy per-element keys from early designer implementation.
+        # Example: play_button_color -> button_bg_color
+        legacy_key_map = {
+            'button_bg_color': f'{component_id}_color',
+            'button_icon_color': f'{component_id}_icon_color',
+            'button_hover_color': f'{component_id}_hover_color',
+            'button_border': f'{component_id}_border',
+            'button_border_radius': f'{component_id}_border_radius',
+            'text_color': f'{component_id}_text_color',
+            'label_font_size': f'{component_id}_font_size',
+        }
+        legacy_key = legacy_key_map.get(key)
+        if legacy_key and legacy_key in self.styling:
+            return self.styling.get(legacy_key, default)
+
+        return self.styling.get(key, default)
 
     def get_control_bar_height(self) -> int:
         """Get control bar height from skin."""
@@ -94,19 +133,24 @@ class SkinApplier:
         # Don't use setFixedHeight - let the control bar size itself based on content
         # This matches original behavior where height was determined by layout
 
-    def apply_to_button(self, button: QPushButton, is_primary: bool = False):
+    def apply_to_button(
+        self,
+        button: QPushButton,
+        component_id: Optional[str] = None,
+        is_primary: bool = False
+    ):
         """Apply skin to button.
 
         Args:
             button: QPushButton to style
             is_primary: Whether this is a primary action button
         """
-        size = self.styling.get('button_size', 32)
-        bg_color = self.styling.get('button_bg_color', '#1A1A1A')
-        icon_color = self.styling.get('button_icon_color', '#FFFFFF')
-        hover_color = self.styling.get('button_hover_color', '#2196F3')
-        border = self.styling.get('button_border', '1px solid #333333')
-        radius = self.styling.get('button_border_radius', 6)
+        size = self._resolve_component_style(component_id, 'button_size', 32)
+        bg_color = self._resolve_component_style(component_id, 'button_bg_color', '#1A1A1A')
+        icon_color = self._resolve_component_style(component_id, 'button_icon_color', '#FFFFFF')
+        hover_color = self._resolve_component_style(component_id, 'button_hover_color', '#2196F3')
+        border = self._resolve_component_style(component_id, 'button_border', '1px solid #333333')
+        radius = self._resolve_component_style(component_id, 'button_border_radius', 6)
         shadow = self.shadows.get('button', '0 2px 4px rgba(0,0,0,0.2)')
 
         # Note: Don't set any size constraints here - let _apply_scaling() handle all sizing
@@ -138,18 +182,18 @@ class SkinApplier:
 
         button.setStyleSheet(stylesheet)
 
-    def apply_to_timeline_slider(self, slider: QSlider):
+    def apply_to_timeline_slider(self, slider: QSlider, component_id: Optional[str] = None):
         """Apply skin to timeline slider.
 
         Args:
             slider: QSlider timeline widget
         """
-        height = self.styling.get('timeline_height', 8)
-        color = self.styling.get('timeline_color', '#2196F3')
-        bg_color = self.styling.get('timeline_bg_color', '#1A1A1A')
-        handle_size = self.styling.get('slider_handle_size', 16)
-        handle_color = self.styling.get('slider_handle_color', '#FFFFFF')
-        handle_border = self.styling.get('slider_handle_border', '2px solid #333333')
+        height = self._resolve_component_style(component_id, 'timeline_height', 8)
+        color = self._resolve_component_style(component_id, 'timeline_color', '#2196F3')
+        bg_color = self._resolve_component_style(component_id, 'timeline_bg_color', '#1A1A1A')
+        handle_size = self._resolve_component_style(component_id, 'slider_handle_size', 16)
+        handle_color = self._resolve_component_style(component_id, 'slider_handle_color', '#FFFFFF')
+        handle_border = self._resolve_component_style(component_id, 'slider_handle_border', '2px solid #333333')
 
         stylesheet = f"""
             QSlider::groove:horizontal {{
@@ -177,18 +221,18 @@ class SkinApplier:
 
         slider.setStyleSheet(stylesheet)
 
-    def apply_to_speed_slider(self, slider: QSlider):
+    def apply_to_speed_slider(self, slider: QSlider, component_id: Optional[str] = None):
         """Apply skin to speed slider with gradient.
 
         Args:
             slider: QSlider speed control widget
         """
-        start = self.styling.get('speed_gradient_start', '#2D5A2D')
-        mid = self.styling.get('speed_gradient_mid', '#6B8E23')
-        end = self.styling.get('speed_gradient_end', '#32CD32')
-        handle_color = self.styling.get('slider_handle_color', '#FFFFFF')
-        handle_border = self.styling.get('slider_handle_border', '2px solid #333333')
-        handle_size = self.styling.get('slider_handle_size', 16)
+        start = self._resolve_component_style(component_id, 'speed_gradient_start', '#2D5A2D')
+        mid = self._resolve_component_style(component_id, 'speed_gradient_mid', '#6B8E23')
+        end = self._resolve_component_style(component_id, 'speed_gradient_end', '#32CD32')
+        handle_color = self._resolve_component_style(component_id, 'slider_handle_color', '#FFFFFF')
+        handle_border = self._resolve_component_style(component_id, 'slider_handle_border', '2px solid #333333')
+        handle_size = self._resolve_component_style(component_id, 'slider_handle_size', 16)
 
         stylesheet = f"""
             QSlider::groove:horizontal {{
@@ -217,17 +261,22 @@ class SkinApplier:
 
         slider.setStyleSheet(stylesheet)
 
-    def apply_to_label(self, label: QLabel, is_secondary: bool = False):
+    def apply_to_label(
+        self,
+        label: QLabel,
+        component_id: Optional[str] = None,
+        is_secondary: bool = False
+    ):
         """Apply skin to label.
 
         Args:
             label: QLabel to style
             is_secondary: Whether to use secondary text color
         """
-        text_color = (self.styling.get('text_secondary_color', '#B0B0B0')
+        text_color = (self._resolve_component_style(component_id, 'text_secondary_color', '#B0B0B0')
                       if is_secondary else
-                      self.styling.get('text_color', '#FFFFFF'))
-        font_size = self.styling.get('label_font_size', 12)
+                      self._resolve_component_style(component_id, 'text_color', '#FFFFFF'))
+        font_size = self._resolve_component_style(component_id, 'label_font_size', 12)
 
         stylesheet = f"""
             QLabel {{

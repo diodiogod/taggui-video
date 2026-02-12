@@ -137,6 +137,12 @@ class SkinSchema:
         if 'video_player' in data:
             vp = data['video_player']
 
+            if 'component_styles' in vp and not isinstance(vp['component_styles'], dict):
+                return False, "video_player.component_styles must be a mapping"
+
+            if 'designer_layout' in vp and not isinstance(vp['designer_layout'], dict):
+                return False, "video_player.designer_layout must be a mapping"
+
             # Validate layout position values
             if 'layout' in vp:
                 layout = vp['layout']
