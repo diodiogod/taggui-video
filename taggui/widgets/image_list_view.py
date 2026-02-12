@@ -194,6 +194,16 @@ class ImageListView(
         self._jump_dialog_open = False
         self._spawn_drag_start_pos = None
         self._spawn_drag_index = QPersistentModelIndex()
+        self._spawn_drag_active = False
+        self._spawn_drag_active_index = QPersistentModelIndex()
+        self._spawn_drag_last_global_pos = QPoint()
+        self._spawn_drag_origin_global_pos = QPoint()
+        self._spawn_drag_poll_timer = QTimer(self)
+        self._spawn_drag_poll_timer.setInterval(16)
+        self._spawn_drag_poll_timer.timeout.connect(self._poll_spawn_drag_release)
+        self._spawn_drag_ghost_label = None
+        self._spawn_drag_ghost_size = QSize(0, 0)
+        self._spawn_drag_arrow_overlay = None
         self._active_drag_preview_animations = []
         self._strict_domain_service = StrictScrollDomainService(self)
         self._masonry_lifecycle_service = MasonryLifecycleService(self)

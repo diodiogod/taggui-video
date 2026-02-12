@@ -1,3 +1,64 @@
+designer_positions:
+  background:
+    x: 0
+    y: 0
+  fps_label:
+    x: 58
+    y: 103
+  frame_label:
+    x: 557
+    y: 30
+  frame_spinbox:
+    x: 440
+    y: 20
+  loop_checkbox:
+    x: 755
+    y: 110
+  loop_end_button:
+    x: 720
+    y: 110
+  loop_reset_button:
+    x: 503
+    y: 108
+  loop_start_button:
+    x: 685
+    y: 110
+  mute_button:
+    x: 120
+    y: 20
+  next_frame_button:
+    x: 280
+    y: 20
+  play_button:
+    x: 20
+    y: 20
+  prev_frame_button:
+    x: 230
+    y: 20
+  skip_back_button:
+    x: 180
+    y: 20
+  skip_forward_button:
+    x: 376
+    y: 18
+  speed_label:
+    x: 530
+    y: 30
+  speed_slider:
+    x: 640
+    y: 25
+  speed_value_label:
+    x: 580
+    y: 30
+  stop_button:
+    x: 70
+    y: 20
+  time_label:
+    x: 264
+    y: 122
+  timeline:
+    x: 20
+    y: 70
 name: Custom Skin
 version: '1.0'
 video_player:
@@ -13,16 +74,13 @@ video_player:
     button_bg_color: '#55ff00'
     button_hover_color: '#3a3a3a'
     button_size: 40
-    control_bar_color: '#ffe419'
-    control_bar_opacity: 0.09
+    control_bar_color: '#79994f'
+    control_bar_opacity: 0.49
+    label_font_size: 9
     loop_marker_end_color: '#FF8C00'
     loop_marker_start_color: '#FF0080'
+    speed_label_font_family: Segoe UI
+    speed_label_font_weight: normal
+    speed_label_opacity: 1.0
     timeline_color: '#2196F3'
     timeline_height: 8
-designer_positions:
-  frame_label:
-    x: 557
-    y: 30
-  skip_forward_button:
-    x: 328
-    y: 11

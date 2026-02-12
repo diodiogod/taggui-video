@@ -1,8 +1,9 @@
 """Frameless floating host window for spawned image viewers."""
 
 from PySide6.QtCore import QPoint, QRect, QEvent, Qt, Signal
-from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QFrame, QMenu, QPushButton, QSizeGrip, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QCursor
+from PySide6.QtWidgets import (QFrame, QGraphicsColorizeEffect, QMenu, QPushButton,
+                               QSizeGrip, QVBoxLayout, QWidget)
 
 
 class FloatingViewerWindow(QWidget):
@@ -40,8 +41,19 @@ class FloatingViewerWindow(QWidget):
         self._resize_start_geometry = QRect()
         self._resize_start_global_pos = QPoint()
         self._video_controls_widget = None
+        self._frozen_passthrough_mode = False
+        self._colorize_effect = QGraphicsColorizeEffect(self.viewer)
+        self._colorize_effect.setColor(QColor(128, 128, 128))
+        self._colorize_effect.setStrength(0.0)
+        self.viewer.setGraphicsEffect(self._colorize_effect)
+        self._frozen_outline = QWidget(self)
+        self._frozen_outline.setObjectName("floatingViewerFrozenOutline")
+        self._frozen_outline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._frozen_outline.hide()
+        self._frozen_outline.raise_()
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setObjectName("floatingViewerWindow")
         self.setWindowTitle(title)
         self.setMinimumSize(24, 24)
         self.setMouseTracking(True)
@@ -287,6 +299,35 @@ class FloatingViewerWindow(QWidget):
     def _emit_activated(self):
         self.activated.emit(self.viewer)
 
+    def set_frozen_passthrough_mode(self, enabled: bool):
+        """Gray out and make this floating window input-transparent."""
+        enabled = bool(enabled)
+        if self._frozen_passthrough_mode == enabled:
+            return
+        self._frozen_passthrough_mode = enabled
+
+        opacity = 0.46 if enabled else 1.0
+        self.setWindowOpacity(opacity)
+        if self._colorize_effect is not None:
+            self._colorize_effect.setStrength(0.55 if enabled else 0.0)
+
+        transparent_flag = getattr(Qt.WindowType, "WindowTransparentForInput", None)
+        if transparent_flag is not None:
+            self.setWindowFlag(transparent_flag, enabled)
+            self.show()
+        else:
+            # Fallback for builds without WindowTransparentForInput.
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
+
+        if enabled:
+            self._show_close_button(False)
+            self._hide_all_drag_handles()
+            self._frozen_outline.show()
+            self._frozen_outline.raise_()
+        else:
+            self._frozen_outline.hide()
+        self._apply_style()
+
     def set_active(self, active: bool):
         self._active = bool(active)
         self._apply_style()
@@ -316,11 +357,16 @@ class FloatingViewerWindow(QWidget):
                 border-radius: 2px;
                 background: rgba(255, 255, 255, {border_alpha});
             }}
+            #floatingViewerFrozenOutline {{
+                border: 3px solid rgba(28, 112, 255, 255);
+                background: transparent;
+            }}
             """
         )
 
     def _reposition_overlay_controls(self):
         margin = 6
+        self._frozen_outline.setGeometry(0, 0, self.width(), self.height())
         close_x = max(0, self.width() - self._close_button.width() - margin)
         close_y = min(margin, max(0, self.height() - self._close_button.height()))
         self._close_button.move(close_x, close_y)

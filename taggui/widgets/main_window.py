@@ -8,7 +8,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
-                               QLabel, QPushButton)
+                               QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit)
 
 from transformers import AutoTokenizer
 
@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self._workspace_applying = False
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
+        self._floating_hold_mode = False
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -158,6 +159,7 @@ class MainWindow(QMainWindow):
 
         # Connect all signals
         self.signal_manager.connect_all_signals()
+        self.app.installEventFilter(self)
 
         # TEMP: Disable status bar to test if it fixes gray space
         # status_bar = self.statusBar()
@@ -243,6 +245,9 @@ class MainWindow(QMainWindow):
         go_to_next_image_shortcut = QShortcut(QKeySequence('Ctrl+Down'), self)
         go_to_next_image_shortcut.activated.connect(
             self.image_list.go_to_next_image)
+        self.toggle_floating_hold_shortcut = QShortcut(QKeySequence('H'), self)
+        self.toggle_floating_hold_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.toggle_floating_hold_shortcut.activated.connect(self._toggle_floating_hold_shortcut)
         jump_to_first_untagged_image_shortcut = QShortcut(
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
@@ -345,6 +350,33 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
+        if event.type() == event.Type.MouseButtonPress:
+            try:
+                if event.button() == Qt.MouseButton.MiddleButton:
+                    focus_widget = QApplication.focusWidget()
+                    if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                        return super().eventFilter(obj, event)
+
+                    widget = obj if isinstance(obj, QWidget) else None
+                    if widget is not None:
+                        # Ignore floating tool windows (they use middle-drag to move).
+                        if widget.window() is self:
+                            in_list = (
+                                widget is self.image_list.list_view
+                                or self.image_list.list_view.isAncestorOf(widget)
+                            )
+                            central = self.centralWidget()
+                            in_central = (
+                                widget is central
+                                or (central is not None and central.isAncestorOf(widget))
+                            )
+                            if in_list or in_central:
+                                self.toggle_floating_hold_mode()
+                                event.accept()
+                                return True
+            except Exception:
+                pass
+
         if obj == self.image_list.list_view and event.type() == event.Type.Resize:
             # Resizing/splitter movement is a decisive user action: keep updates
             # enabled long enough for masonry to recalc and repaint live.
@@ -504,6 +536,42 @@ class MainWindow(QMainWindow):
             # the full window width when viewer is hidden.
             central.setCurrentWidget(self._hidden_main_viewer_widget)
             central.setVisible(False)
+
+    def _toggle_floating_hold_shortcut(self):
+        """Toggle hold mode unless user is typing in a text field."""
+        focus_widget = QApplication.focusWidget()
+        if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        self.toggle_floating_hold_mode()
+
+    def set_floating_hold_mode(self, enabled: bool):
+        """Freeze/unfreeze existing spawned viewers as gray click-through overlays."""
+        enabled = bool(enabled)
+        if self._floating_hold_mode == enabled:
+            return
+        self._floating_hold_mode = enabled
+
+        live_windows = []
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                window.set_frozen_passthrough_mode(enabled)
+                live_windows.append(window)
+            except RuntimeError:
+                continue
+        self._floating_viewers = live_windows
+
+        if enabled:
+            self.set_active_viewer(self.image_viewer)
+
+        action = getattr(getattr(self, 'menu_manager', None), 'toggle_floating_hold_action', None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(enabled)
+            action.blockSignals(False)
+
+    def toggle_floating_hold_mode(self):
+        """Invert spawned-viewer hold mode."""
+        self.set_floating_hold_mode(not self._floating_hold_mode)
 
     def set_main_viewer_visible(self, visible: bool, *, save: bool = True):
         """Show/hide anchored main viewer without detaching it."""

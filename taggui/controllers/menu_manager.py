@@ -29,6 +29,7 @@ class MenuManager:
         self.workspace_action_group = None
         self.spawn_floating_viewer_action = None
         self.close_all_floating_viewers_action = None
+        self.toggle_floating_hold_action = None
 
     def create_menus(self):
         """Create and setup menu bar."""
@@ -70,6 +71,7 @@ class MenuManager:
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
         self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
+        self.toggle_floating_hold_action = QAction('Hold Existing Spawned Viewers', parent=self.main_window)
         self.delete_marked_menu = None
         self.delete_marked_button = None
         self.delete_marked_widget_action = None
@@ -245,8 +247,13 @@ class MenuManager:
         self.close_all_floating_viewers_action.setShortcut(QKeySequence('Ctrl+Shift+W'))
         self.close_all_floating_viewers_action.triggered.connect(
             self.main_window.close_all_floating_viewers)
+        self.toggle_floating_hold_action.setCheckable(True)
+        self.toggle_floating_hold_action.triggered.connect(
+            lambda checked: self.main_window.set_floating_hold_mode(checked)
+        )
 
         view_menu.addSeparator()
+        view_menu.addAction(self.toggle_floating_hold_action)
         view_menu.addAction(self.spawn_floating_viewer_action)
         view_menu.addAction(self.close_all_floating_viewers_action)
 

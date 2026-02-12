@@ -1,6 +1,74 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewInteractionMixin:
+    def _event_global_point(self, event) -> QPoint:
+        """Get reliable global mouse point from event."""
+        try:
+            if hasattr(event, "globalPosition"):
+                return event.globalPosition().toPoint()
+            if hasattr(event, "globalPos"):
+                return event.globalPos()
+        except Exception:
+            pass
+        return QCursor.pos()
+
+    def _clear_spawn_drag_tracking(self):
+        """Reset pending spawn-drag gesture tracking."""
+        self._spawn_drag_start_pos = None
+        self._spawn_drag_index = QPersistentModelIndex()
+        self._spawn_drag_origin_global_pos = QPoint()
+
+    def _begin_spawn_drag_active(self, index: QPersistentModelIndex, global_pos: QPoint | None = None):
+        """Arm internal spawn-drag mode until left button release."""
+        self._spawn_drag_active = True
+        self._spawn_drag_active_index = QPersistentModelIndex(index)
+        self._spawn_drag_last_global_pos = QPoint(global_pos) if global_pos is not None else QCursor.pos()
+        try:
+            live_index = self.model().index(index.row(), index.column())
+        except Exception:
+            live_index = QModelIndex()
+        show_ghost = getattr(self, "_show_spawn_drag_ghost", None)
+        if callable(show_ghost) and live_index.isValid():
+            show_ghost(live_index)
+        update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
+        if callable(update_ghost):
+            update_ghost(self._spawn_drag_last_global_pos)
+        if hasattr(self, "_spawn_drag_poll_timer"):
+            self._spawn_drag_poll_timer.start()
+
+    def _finish_spawn_drag_active(self, *, should_spawn: bool):
+        """Disarm internal spawn-drag mode and optionally spawn one viewer."""
+        if hasattr(self, "_spawn_drag_poll_timer"):
+            self._spawn_drag_poll_timer.stop()
+        hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
+        if callable(hide_ghost):
+            hide_ghost()
+        active_index = QPersistentModelIndex(getattr(self, "_spawn_drag_active_index", QPersistentModelIndex()))
+        self._spawn_drag_active = False
+        self._spawn_drag_active_index = QPersistentModelIndex()
+        if should_spawn and active_index.isValid():
+            try:
+                live_index = self.model().index(active_index.row(), active_index.column())
+            except Exception:
+                live_index = QModelIndex()
+            if live_index.isValid():
+                spawn_direct = getattr(self, "_spawn_floating_for_index_at_cursor", None)
+                if callable(spawn_direct):
+                    spawn_direct(live_index, spawn_global_pos=self._spawn_drag_last_global_pos)
+
+    def _poll_spawn_drag_release(self):
+        """Release detector for ultra-fast drags that miss widget release events."""
+        if not bool(getattr(self, "_spawn_drag_active", False)):
+            if hasattr(self, "_spawn_drag_poll_timer"):
+                self._spawn_drag_poll_timer.stop()
+            return
+        self._spawn_drag_last_global_pos = QCursor.pos()
+        update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
+        if callable(update_ghost):
+            update_ghost(self._spawn_drag_last_global_pos)
+        if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            self._finish_spawn_drag_active(should_spawn=True)
+
     def _cancel_pending_zoom_anchor_on_user_click(self):
         """User click should take ownership from pending zoom/resize anchoring."""
         import time
@@ -34,12 +102,15 @@ class ImageListViewInteractionMixin:
             if start_index.isValid():
                 self._spawn_drag_start_pos = event.pos()
                 self._spawn_drag_index = QPersistentModelIndex(start_index)
+                self._spawn_drag_origin_global_pos = self._event_global_point(event)
             else:
                 self._spawn_drag_start_pos = None
                 self._spawn_drag_index = QPersistentModelIndex()
+                self._spawn_drag_origin_global_pos = QPoint()
         else:
             self._spawn_drag_start_pos = None
             self._spawn_drag_index = QPersistentModelIndex()
+            self._spawn_drag_origin_global_pos = QPoint()
     
         # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
@@ -243,6 +314,15 @@ class ImageListViewInteractionMixin:
 
     def mouseMoveEvent(self, event):
         """Handle thumbnail drag gestures and prevent rubber-band in masonry mode."""
+        if bool(getattr(self, "_spawn_drag_active", False)):
+            # Internal spawn-drag is armed; wait for release (event or poll timer).
+            self._spawn_drag_last_global_pos = self._event_global_point(event)
+            update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
+            if callable(update_ghost):
+                update_ghost(self._spawn_drag_last_global_pos)
+            event.accept()
+            return
+
         if (
             self._spawn_drag_start_pos is not None
             and self._spawn_drag_index.isValid()
@@ -250,21 +330,24 @@ class ImageListViewInteractionMixin:
         ):
             drag_distance = (event.pos() - self._spawn_drag_start_pos).manhattanLength()
             if drag_distance >= QApplication.startDragDistance():
+                spawn_drag_index = QPersistentModelIndex(self._spawn_drag_index)
                 self._spawn_drag_start_pos = None
+                self._spawn_drag_index = QPersistentModelIndex()
                 drag_index = self.model().index(
-                    self._spawn_drag_index.row(),
-                    self._spawn_drag_index.column(),
+                    spawn_drag_index.row() if spawn_drag_index.isValid() else -1,
+                    spawn_drag_index.column() if spawn_drag_index.isValid() else 0,
                 )
                 if drag_index.isValid():
-                    sel_model = self.selectionModel()
-                    if sel_model and not sel_model.isSelected(drag_index):
-                        sel_model.setCurrentIndex(
-                            drag_index,
-                            QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                        )
-                    self.startDrag(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+                    self._begin_spawn_drag_active(
+                        QPersistentModelIndex(drag_index),
+                        global_pos=self._event_global_point(event),
+                    )
                     event.accept()
                     return
+        elif self._spawn_drag_start_pos is not None and not (event.buttons() & Qt.MouseButton.LeftButton):
+            # Lost-release fallback: if left is no longer down but no release
+            # event arrived to this widget, forcibly clear drag tracking.
+            self._clear_spawn_drag_tracking()
 
         if self.use_masonry and self._masonry_items:
             # Don't call super() - it triggers rubber-band selection
@@ -351,8 +434,11 @@ class ImageListViewInteractionMixin:
 
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
-        self._spawn_drag_start_pos = None
-        self._spawn_drag_index = QPersistentModelIndex()
+        self._clear_spawn_drag_tracking()
+        if bool(getattr(self, "_spawn_drag_active", False)):
+            self._finish_spawn_drag_active(should_spawn=(event.button() == Qt.MouseButton.LeftButton))
+            event.accept()
+            return
 
         # Resume enrichment after 500ms idle
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
@@ -364,6 +450,20 @@ class ImageListViewInteractionMixin:
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        # If pointer exits during a fast drag/release, ensure no stale spawn
+        # gesture remains armed.
+        if not bool(getattr(self, "_spawn_drag_active", False)):
+            self._clear_spawn_drag_tracking()
+        super().leaveEvent(event)
+
+    def focusOutEvent(self, event):
+        # Losing focus while dragging can drop release events; keep armed state
+        # and let poll timer detect button release globally.
+        if not bool(getattr(self, "_spawn_drag_active", False)):
+            self._clear_spawn_drag_tracking()
+        super().focusOutEvent(event)
 
 
     def keyPressEvent(self, event):
