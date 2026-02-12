@@ -26,6 +26,8 @@ class FloatingViewerWindow(QWidget):
         self._window_drag_button = Qt.MouseButton.NoButton
         self._window_drag_offset = QPoint()
         self._active_drag_handle = None
+        self._close_button_margin_px = 8
+        self._close_button_clearance_px = 4
         self._active = False
         self._close_hover_zone_px = 56
         self._drag_hover_padding_px = 10
@@ -68,9 +70,9 @@ class FloatingViewerWindow(QWidget):
             self.viewer.view.setLineWidth(0)
             self.viewer.view.setMidLineWidth(0)
 
-        self._close_button = QPushButton("x", self)
+        self._close_button = QPushButton("X", self)
         self._close_button.setObjectName("floatingViewerClose")
-        self._close_button.setFixedSize(20, 20)
+        self._close_button.setFixedSize(24, 24)
         self._close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_button.setToolTip("Close floating viewer")
         self._close_button.clicked.connect(self.close)
@@ -337,17 +339,32 @@ class FloatingViewerWindow(QWidget):
         self.setStyleSheet(
             f"""
             #floatingViewerClose {{
-                border: 1px solid rgba(255, 255, 255, 90);
-                border-radius: 4px;
-                background: rgba(8, 10, 14, {border_alpha});
-                color: rgba(240, 246, 252, 230);
-                font-size: 12px;
-                font-weight: 700;
+                border: 1px solid rgba(255, 255, 255, 110);
+                border-radius: 5px;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 rgba(44, 51, 61, {border_alpha}),
+                    stop: 1 rgba(22, 28, 36, {border_alpha})
+                );
+                color: rgba(248, 250, 252, 245);
+                font-size: 13px;
+                font-weight: 800;
                 padding: 0px;
+                text-align: center;
             }}
             #floatingViewerClose:hover {{
-                background: rgba(26, 32, 40, 220);
-                border: 1px solid rgba(255, 255, 255, 160);
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 rgba(255, 110, 110, 245),
+                    stop: 1 rgba(214, 42, 42, 245)
+                );
+                border: 1px solid rgba(255, 190, 190, 235);
+                color: rgba(255, 255, 255, 255);
+            }}
+            #floatingViewerClose:pressed {{
+                background: rgba(168, 24, 24, 245);
+                border: 1px solid rgba(255, 170, 170, 220);
+                color: rgba(255, 245, 245, 255);
             }}
             #floatingViewerDragZone {{
                 background: transparent;
@@ -365,10 +382,29 @@ class FloatingViewerWindow(QWidget):
         )
 
     def _reposition_overlay_controls(self):
-        margin = 6
+        margin = self._close_button_margin_px
         self._frozen_outline.setGeometry(0, 0, self.width(), self.height())
-        close_x = max(0, self.width() - self._close_button.width() - margin)
-        close_y = min(margin, max(0, self.height() - self._close_button.height()))
+        corner_size = 18
+        corner_gap = self._close_button_clearance_px
+        # Keep close near top-right, but slightly inset from borders.
+        close_x = max(
+            0,
+            self.width() - self._close_button.width() - margin - max(2, corner_size // 3),
+        )
+        close_y = max(0, min(self.height() - self._close_button.height(), margin + max(4, corner_size // 3)))
+        # If still colliding with the top-right corner resizer, nudge down just enough.
+        corner_block_rect = QRect(
+            max(0, self.width() - corner_size - corner_gap),
+            0,
+            corner_size + corner_gap,
+            corner_size + corner_gap,
+        )
+        close_rect = QRect(close_x, close_y, self._close_button.width(), self._close_button.height())
+        if close_rect.intersects(corner_block_rect):
+            close_y = min(
+                max(0, self.height() - self._close_button.height()),
+                corner_block_rect.bottom() + 1,
+            )
         self._close_button.move(close_x, close_y)
 
         available_w = max(4, self.width() - (2 * margin))
@@ -441,12 +477,13 @@ class FloatingViewerWindow(QWidget):
 
         edge_thickness = 5
         top_w = max(0, self.width() - (2 * corner_size))
+        bottom_w = top_w
         side_h = max(0, self.height() - (2 * corner_size))
         self._edge_resize_widgets["top"].setGeometry(corner_size, 0, top_w, edge_thickness)
         self._edge_resize_widgets["bottom"].setGeometry(
             corner_size,
             max(0, self.height() - edge_thickness),
-            top_w,
+            bottom_w,
             edge_thickness,
         )
         self._edge_resize_widgets["left"].setGeometry(0, corner_size, edge_thickness, side_h)
@@ -462,6 +499,7 @@ class FloatingViewerWindow(QWidget):
             corner_size,
             corner_size,
         )
+        self._close_button.raise_()
 
     def _show_close_button(self, visible: bool):
         if visible:
