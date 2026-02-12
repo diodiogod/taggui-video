@@ -109,6 +109,8 @@ class ImageListViewCalculationMixin:
                 except Exception:
                     target_ready = False
             if not target_ready:
+                self._strict_waiting_target_page = int(ctx.current_page)
+                self._strict_waiting_window_pages = (int(ctx.window_start_page), int(ctx.window_end_page))
                 resize_anchor_live = (
                     getattr(self, '_resize_anchor_page', None) is not None
                     and time.time() <= float(getattr(self, '_resize_anchor_until', 0.0) or 0.0)
@@ -183,6 +185,11 @@ class ImageListViewCalculationMixin:
                     return False
             else:
                 self._strict_wait_count = 0
+                self._strict_waiting_target_page = None
+                self._strict_waiting_window_pages = None
+        elif getattr(self, "_strict_waiting_target_page", None) is not None:
+            self._strict_waiting_target_page = None
+            self._strict_waiting_window_pages = None
 
         loaded_pages_sig = tuple(sorted(source_model._pages.keys())) if hasattr(source_model, "_pages") else ()
         window_signature = (
@@ -303,6 +310,16 @@ class ImageListViewCalculationMixin:
         self._get_masonry_submission_service().prepare_executor()
         self._masonry_calculating = True
         self._masonry_start_time = time.time()
+        self._log_diag(
+            "calc.begin",
+            source_model=source_model,
+            throttle_key="diag_calc_begin",
+            every_s=0.25,
+            extra=(
+                f"signal={getattr(self, '_last_masonry_signal', None)} "
+                f"strict={ctx.strict_mode}"
+            ),
+        )
 
         # NOTE: Do NOT invalidate the incremental cache here.  The cache will
         # be rebuilt from the full result on completion (completion_service line

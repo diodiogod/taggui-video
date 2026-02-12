@@ -103,6 +103,69 @@ class ImageListViewStrategyMixin:
         except Exception:
             pass
 
+    def _diag_snapshot(self, source_model=None) -> str:
+        """Return a compact state snapshot for strict masonry diagnostics."""
+        try:
+            if source_model is None:
+                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), "sourceModel") else self.model()
+
+            sb = self.verticalScrollBar()
+            scroll_val = int(sb.value())
+            scroll_max = int(sb.maximum())
+            slider_pos = int(sb.sliderPosition())
+            current_page = getattr(self, "_current_page", None)
+            stick = getattr(self, "_stick_to_edge", None)
+            calc = bool(getattr(self, "_masonry_calculating", False))
+            pending = bool(getattr(self, "_masonry_recalc_pending", False))
+            timer_active = bool(getattr(self, "_masonry_recalc_timer", None) and self._masonry_recalc_timer.isActive())
+            signal = getattr(self, "_last_masonry_signal", None)
+            items = len(getattr(self, "_masonry_items", []) or [])
+            loaded_pages = len(getattr(source_model, "_pages", {}) or {})
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+            page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+            last_page = max(0, (total_items - 1) // max(1, page_size)) if total_items > 0 else 0
+            return (
+                f"scroll={scroll_val}/{scroll_max} slider={slider_pos} "
+                f"page={current_page}/{last_page} stick={stick} "
+                f"drag={self._scrollbar_dragging} preview={self._drag_preview_mode} "
+                f"calc={calc} pending={pending} timer={timer_active} signal={signal} "
+                f"items={items} loaded_pages={loaded_pages} total={total_items}"
+            )
+        except Exception:
+            return "snapshot=unavailable"
+
+    def _log_diag(
+        self,
+        label: str,
+        *,
+        source_model=None,
+        throttle_key: str | None = None,
+        every_s: float | None = None,
+        extra: str | None = None,
+        level: str = "INFO",
+        dedupe: bool = True,
+    ):
+        """Emit a compact strict-mode diagnostic line."""
+        message = f"{label} | {self._diag_snapshot(source_model)}"
+        if extra:
+            message = f"{message} | {extra}"
+        if dedupe:
+            key = throttle_key or f"diag:{label}"
+            cache = getattr(self, "_diag_last_message", None)
+            if cache is None:
+                cache = {}
+                self._diag_last_message = cache
+            if cache.get(key) == message:
+                return
+            cache[key] = message
+        self._log_flow(
+            "STRICT",
+            message,
+            level=level,
+            throttle_key=throttle_key,
+            every_s=every_s,
+        )
+
 
     def _use_local_anchor_masonry(self, source_model=None) -> bool:
         """Enable local-anchor/windowed masonry when strict strategy is requested."""
@@ -828,6 +891,8 @@ class ImageListViewStrategyMixin:
             and hasattr(source_model, '_paginated_mode')
             and source_model._paginated_mode
         )
+        strategy = self._get_masonry_strategy(source_model) if source_model else "full_compat"
+        strict_mode = strategy == "windowed_strict"
 
         if not is_paginated:
             # Non-paginated: always full recalc
@@ -847,6 +912,21 @@ class ImageListViewStrategyMixin:
         # Queue rebind by global id to keep list/viewer aligned safely.
         self._schedule_rebind_current_index_to_selected_global()
 
+        if strict_mode and getattr(self, "_masonry_calculating", False):
+            self._masonry_recalc_pending = True
+            self._log_diag(
+                "pages.defer_calc_active",
+                source_model=source_model,
+                throttle_key="diag_pages_defer_calc_active",
+                every_s=0.2,
+                extra=(
+                    f"signal={getattr(self, '_last_masonry_signal', None)} "
+                    f"loaded={len(loaded_pages)}"
+                ),
+            )
+            self._check_and_enrich_loaded_pages()
+            return
+
         incremental = self._get_masonry_incremental_service()
         loaded_set = set(loaded_pages)
         cached_pages = incremental.get_cached_pages()
@@ -859,6 +939,32 @@ class ImageListViewStrategyMixin:
                 self.viewport().update()
                 self._check_and_enrich_loaded_pages()
                 return
+
+            extendable_pages = {
+                p for p in new_pages
+                if incremental.can_extend_down(p) or incremental.can_extend_up(p)
+            }
+            if strict_mode and not extendable_pages:
+                try:
+                    cur_page = int(getattr(self, "_current_page", 0) or 0)
+                except Exception:
+                    cur_page = 0
+                cached_min = min(cached_pages)
+                cached_max = max(cached_pages)
+                in_cached_band = (cached_min - 1) <= cur_page <= (cached_max + 1)
+                if in_cached_band:
+                    self._log_diag(
+                        "pages.skip_far_new",
+                        source_model=source_model,
+                        throttle_key="diag_pages_skip_far_new",
+                        every_s=0.2,
+                        extra=(
+                            f"current={cur_page} cached={cached_min}-{cached_max} "
+                            f"new={min(new_pages)}-{max(new_pages)} count={len(new_pages)}"
+                        ),
+                    )
+                    self._check_and_enrich_loaded_pages()
+                    return
 
             # Try incremental extend for each new page
             extended = []
@@ -887,11 +993,49 @@ class ImageListViewStrategyMixin:
         if self._last_masonry_signal == "enrichment_complete":
             incremental.invalidate("enrichment")
 
+        if strict_mode:
+            waiting_target = getattr(self, "_strict_waiting_target_page", None)
+            if isinstance(waiting_target, int) and waiting_target >= 0:
+                try:
+                    target_items = source_model._pages.get(int(waiting_target), [])
+                except Exception:
+                    target_items = []
+                if not target_items:
+                    waiting_window = getattr(self, "_strict_waiting_window_pages", None)
+                    if isinstance(waiting_window, tuple) and len(waiting_window) == 2:
+                        wait_window_str = f"{int(waiting_window[0])}-{int(waiting_window[1])}"
+                    else:
+                        wait_window_str = "?"
+                    self._log_diag(
+                        "pages.defer_wait_target",
+                        source_model=source_model,
+                        throttle_key="diag_pages_defer_wait_target",
+                        every_s=0.2,
+                        extra=(
+                            f"signal={getattr(self, '_last_masonry_signal', None)} "
+                            f"target={int(waiting_target)} window={wait_window_str} "
+                            f"loaded={len(loaded_pages)}"
+                        ),
+                    )
+                    self._check_and_enrich_loaded_pages()
+                    return
+
         self._log_flow("PAGES", f"Pages updated ({len(loaded_pages)} loaded); full masonry recalc",
                        throttle_key="pages_updated", every_s=0.3)
+        self._log_diag(
+            "pages.full_recalc",
+            source_model=source_model,
+            throttle_key="diag_pages_full_recalc",
+            every_s=0.2,
+            extra=(
+                f"signal={getattr(self, '_last_masonry_signal', None)} "
+                f"loaded={len(loaded_pages)}"
+            ),
+        )
         self._last_masonry_window_signature = None
         self._recalculate_masonry_if_needed("pages_updated")
-        self.viewport().update()
+        if not strict_mode:
+            self.viewport().update()
         self._check_and_enrich_loaded_pages()
 
     def _try_incremental_extend(self, page_num, source_model, *, direction="down"):
@@ -1015,6 +1159,7 @@ class ImageListViewStrategyMixin:
 
         # Store signal name for _do_recalculate_masonry to check
         self._last_masonry_signal = signal_name
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
 
         # Low-priority signals: don't pile up timers when a recalc is already
         # queued/running.  For pages_updated, set the pending flag so the
@@ -1050,6 +1195,7 @@ class ImageListViewStrategyMixin:
             # print(f"[{timestamp}]   -> Previous calculation still running (will be ignored)")
 
         # Restart debounce timer
+        restarted = self._masonry_recalc_timer.isActive()
         if self._masonry_recalc_timer.isActive():
             self._masonry_recalc_timer.stop()
             # print(f"[{timestamp}]   -> Restarting {self._masonry_recalc_delay}ms countdown")
@@ -1057,3 +1203,13 @@ class ImageListViewStrategyMixin:
             pass
             # print(f"[{timestamp}]   -> Starting {self._masonry_recalc_delay}ms countdown")
         self._masonry_recalc_timer.start(self._masonry_recalc_delay)
+        self._log_diag(
+            "recalc.timer_start",
+            source_model=source_model,
+            throttle_key="diag_recalc_timer_start",
+            every_s=0.2,
+            extra=(
+                f"signal={signal_name} delay_ms={int(self._masonry_recalc_delay)} "
+                f"restarted={restarted}"
+            ),
+        )
