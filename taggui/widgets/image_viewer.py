@@ -1,5 +1,5 @@
 import re
-from PySide6.QtCore import (QModelIndex, QPersistentModelIndex, QPoint,
+from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
 from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (QGraphicsPixmapItem, QGraphicsRectItem,
@@ -36,6 +36,7 @@ class ImageViewer(QWidget):
     crop_changed = Signal(object, name='cropChanged')  # Grid type
     rating_changed = Signal(float, name='ratingChanged')
     directory_reload_requested = Signal(name='directoryReloadRequested')
+    activated = Signal(name='viewerActivated')
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel):
         super().__init__()
@@ -112,6 +113,9 @@ class ImageViewer(QWidget):
         self.setMouseTracking(True)
         self.view.setMouseTracking(True)
         self.view.viewport().setMouseTracking(True)
+        self.video_controls.installEventFilter(self)
+        self.view.installEventFilter(self)
+        self.view.viewport().installEventFilter(self)
 
     @Slot()
     def _on_proxy_model_about_to_reset(self):
@@ -224,6 +228,16 @@ class ImageViewer(QWidget):
             if detection_rect.contains(event.pos()):
                 self._show_controls_temporarily()
         super().mouseMoveEvent(event)
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+        if event_type in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.FocusIn,
+            QEvent.Type.WindowActivate,
+        ):
+            self.activated.emit()
+        return super().eventFilter(watched, event)
 
     def _show_controls_temporarily(self):
         """Show controls and start hide timer."""

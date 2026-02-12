@@ -37,6 +37,7 @@ class Image:
     video_metadata: dict | None = None  # fps, duration, frame_count, current_frame
     loop_start_frame: int | None = None
     loop_end_frame: int | None = None
+    viewer_loop_markers: dict[str, dict[str, int | None]] = field(default_factory=dict)
     marked_for_deletion: bool = False
     file_size: int | None = None
     file_type: str | None = None

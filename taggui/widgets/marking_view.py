@@ -21,6 +21,8 @@ class ImageGraphicsView(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setRenderHint(QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         # Don't steal focus when clicked - prevents image list selection changes
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -31,7 +33,32 @@ class ImageGraphicsView(QGraphicsView):
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.last_pos = None
+        self._space_pan_active = False
+        self._manual_pan_active = False
+        self._manual_pan_last_global_pos = None
         self.clear_scene()
+
+    def _should_start_manual_pan(self, event: QMouseEvent) -> bool:
+        """Check pan gestures that should move viewport instead of editing marks."""
+        if self.insertion_mode or MarkingItem.handle_selected != RectPosition.NONE:
+            return False
+        if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            return False
+
+        scene_pos = self.mapToScene(event.pos())
+        item = self.scene().itemAt(scene_pos, self.transform())
+        while item is not None:
+            if isinstance(item, MarkingItem):
+                return False
+            item = item.parentItem()
+
+        return True
+
+    def _pan_viewport_by(self, delta):
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() - int(delta.x()))
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() - int(delta.y()))
 
     def showContextMenu(self, pos):
         scene_pos = self.mapToScene(pos)
@@ -120,7 +147,13 @@ class ImageGraphicsView(QGraphicsView):
                                        self.last_pos.x(), view_rect.bottom())
 
     def mousePressEvent(self, event: QMouseEvent):
-        from PySide6.QtWidgets import QGraphicsPixmapItem
+        if self._should_start_manual_pan(event):
+            self._manual_pan_active = True
+            self._manual_pan_last_global_pos = event.globalPosition().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
         # Check if clicking on an existing marking item first
         scene_pos = self.mapToScene(event.pos())
         item_at_pos = self.scene().itemAt(scene_pos, self.transform())
@@ -155,6 +188,15 @@ class ImageGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._manual_pan_active:
+            current_global = event.globalPosition().toPoint()
+            if self._manual_pan_last_global_pos is not None:
+                delta = current_global - self._manual_pan_last_global_pos
+                self._pan_viewport_by(delta)
+            self._manual_pan_last_global_pos = current_global
+            event.accept()
+            return
+
         # Notify parent to show video controls if hovering near them
         if self.image_viewer._is_video_loaded and self.image_viewer.video_controls_auto_hide:
             # Map event position to parent widget coordinates
@@ -197,7 +239,28 @@ class ImageGraphicsView(QGraphicsView):
         else:
             super().mouseMoveEvent(event)
 
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._manual_pan_active and event.button() in (
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.MiddleButton,
+        ):
+            self._manual_pan_active = False
+            self._manual_pan_last_global_pos = None
+            if self._space_pan_active:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self._space_pan_active = True
+            if not self._manual_pan_active:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Delete:
             edited_item = self.scene().focusItem()
             if not (isinstance(edited_item, MarkingLabel) and
@@ -267,6 +330,12 @@ class ImageGraphicsView(QGraphicsView):
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self._space_pan_active = False
+            if not self._manual_pan_active:
+                self.unsetCursor()
+            event.accept()
+            return
         if MarkingItem.handle_selected == RectPosition.NONE:
             # Reset mode when Ctrl is released or any marking key (C) is released
             if event.key() in [Qt.Key.Key_Control, Qt.Key.Key_C]:

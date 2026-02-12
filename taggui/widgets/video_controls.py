@@ -663,6 +663,7 @@ class VideoControlsWidget(QWidget):
         # Current image and model reference for persistence
         self.current_image = None
         self.proxy_image_list_model = None
+        self._loop_persistence_scope = 'main'
 
         # Loop state
         self.loop_start_frame = None
@@ -718,6 +719,54 @@ class VideoControlsWidget(QWidget):
         self.loop_checkbox.blockSignals(False)
         # Set internal state (signal will be emitted when video loads)
         self.is_looping = loop_enabled
+
+    def set_loop_persistence_scope(self, scope: str | None):
+        """Set metadata scope key used for loop marker persistence."""
+        normalized_scope = str(scope).strip() if scope else 'main'
+        self._loop_persistence_scope = normalized_scope or 'main'
+
+    def _resolve_loop_markers_for_scope(self, image, max_frame: int) -> tuple[int | None, int | None]:
+        """Resolve loop markers for current scope with backward-compatible fallback."""
+        if image is None:
+            return (None, None)
+
+        def _valid_pair(start, end):
+            return (
+                isinstance(start, int)
+                and isinstance(end, int)
+                and 0 <= start <= max_frame
+                and 0 <= end <= max_frame
+            )
+
+        scope = getattr(self, '_loop_persistence_scope', 'main')
+        viewer_markers = getattr(image, 'viewer_loop_markers', {})
+
+        # Main viewer keeps legacy fields as authoritative for compatibility.
+        legacy_start = getattr(image, 'loop_start_frame', None)
+        legacy_end = getattr(image, 'loop_end_frame', None)
+        if scope == 'main' and _valid_pair(legacy_start, legacy_end):
+            return (legacy_start, legacy_end)
+
+        if isinstance(viewer_markers, dict):
+            scoped = viewer_markers.get(scope)
+            if isinstance(scoped, dict):
+                scoped_start = scoped.get('loop_start_frame')
+                scoped_end = scoped.get('loop_end_frame')
+                if _valid_pair(scoped_start, scoped_end):
+                    return (scoped_start, scoped_end)
+
+        if _valid_pair(legacy_start, legacy_end):
+            return (legacy_start, legacy_end)
+
+        if scope != 'main' and isinstance(viewer_markers, dict):
+            main_scoped = viewer_markers.get('main')
+            if isinstance(main_scoped, dict):
+                main_start = main_scoped.get('loop_start_frame')
+                main_end = main_scoped.get('loop_end_frame')
+                if _valid_pair(main_start, main_end):
+                    return (main_start, main_end)
+
+        return (None, None)
 
     def apply_current_skin(self):
         """Apply current skin to all video control widgets.
@@ -833,11 +882,21 @@ class VideoControlsWidget(QWidget):
                 y = pos_data.get('y')
 
                 if x is not None and y is not None:
+                    # Detach from layout if necessary to allow absolute positioning
+                    if widget.parentWidget() and widget.parentWidget().layout():
+                         idx = widget.parentWidget().layout().indexOf(widget)
+                         if idx >= 0:
+                             widget.parentWidget().layout().takeAt(idx)
+                    
+                    # Ensure parent is self
+                    if widget.parent() != self:
+                        widget.setParent(self)
+
                     # Use setGeometry to force absolute positioning
-                    # (stronger than move() for widgets in layouts)
                     current_size = widget.size()
-                    widget.setGeometry(x, y, current_size.width(), current_size.height())
-                    widget.raise_()  # Ensure widget is visible above others
+                    widget.setGeometry(int(x), int(y), current_size.width(), current_size.height())
+                    widget.show()
+                    widget.raise_()
 
     def switch_skin(self, skin_name: str):
         """Switch to a different skin and apply it immediately.
@@ -855,6 +914,23 @@ class VideoControlsWidget(QWidget):
             self.apply_current_skin()
             return True
         return False
+
+    def apply_skin_data(self, skin_data: dict):
+        """Apply a skin dictionary directly.
+
+        Args:
+            skin_data: The skin configuration dictionary.
+        """
+        if not hasattr(self, 'skin_manager'):
+            return
+
+        # Update manager state
+        from skins.engine.skin_applier import SkinApplier
+        self.skin_manager.current_skin = skin_data
+        self.skin_manager.current_applier = SkinApplier(skin_data)
+        
+        # Apply
+        self.apply_current_skin()
 
     def get_available_skins(self):
         """Get list of available skins.
@@ -1221,19 +1297,35 @@ class VideoControlsWidget(QWidget):
             self._update_speed_preview()
             self._update_marker_range_display()
 
-    def _reset_speed(self, event):
-        """Reset playback speed to 1.0x when speed value label is clicked."""
-        self._extended_speed = 1.0
-        # Convert 1.0x to correct slider position using non-linear mapping
-        position_ratio = self._speed_to_position_ratio(1.0)
-        slider_pos = int(self.speed_slider.minimum() + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum()))
+    def get_speed_value(self) -> float:
+        """Return current playback speed value from controls."""
+        return float(self._extended_speed)
+
+    def set_speed_value(self, speed: float, emit_signal: bool = True):
+        """Set playback speed value and keep slider/labels synchronized."""
+        try:
+            parsed_speed = float(speed)
+        except (TypeError, ValueError):
+            parsed_speed = 1.0
+
+        self._extended_speed = max(-12.0, min(12.0, parsed_speed))
+        position_ratio = self._speed_to_position_ratio(self._extended_speed)
+        slider_pos = int(
+            self.speed_slider.minimum()
+            + position_ratio * (self.speed_slider.maximum() - self.speed_slider.minimum())
+        )
         self.speed_slider.blockSignals(True)
         self.speed_slider.setValue(slider_pos)
         self.speed_slider.blockSignals(False)
-        self.speed_value_label.setText('1.00x')
-        self.speed_changed.emit(1.0)
+        self.speed_value_label.setText(f'{self._extended_speed:.2f}x')
+        if emit_signal:
+            self.speed_changed.emit(self._extended_speed)
         self._update_speed_preview()
         self._update_marker_range_display()
+
+    def _reset_speed(self, event):
+        """Reset playback speed to 1.0x when speed value label is clicked."""
+        self.set_speed_value(1.0, emit_signal=True)
 
     def _apply_speed_theme(self):
         """Apply the current theme to the speed slider stylesheet."""
@@ -1416,27 +1508,17 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.setMaximum(frame_count - 1 if frame_count > 0 else 0)
         self.frame_total_label.setText(f'/ {frame_count}')
 
-        # Load loop markers from image if available
+        # Load loop markers for current viewer scope.
         max_frame = frame_count - 1 if frame_count > 0 else 0
-        if image and hasattr(image, 'loop_start_frame') and hasattr(image, 'loop_end_frame'):
-            # Validate markers are within range
-            if (image.loop_start_frame is not None and
-                image.loop_end_frame is not None and
-                0 <= image.loop_start_frame <= max_frame and
-                0 <= image.loop_end_frame <= max_frame):
-                self.loop_start_frame = image.loop_start_frame
-                self.loop_end_frame = image.loop_end_frame
-                self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
-            else:
-                # Clear invalid markers (don't save - let user decide)
-                self._reset_loop(save=False)
+        resolved_start, resolved_end = self._resolve_loop_markers_for_scope(image, max_frame)
+        if resolved_start is not None and resolved_end is not None:
+            self.loop_start_frame = resolved_start
+            self.loop_end_frame = resolved_end
+            self.timeline_slider.set_loop_markers(self.loop_start_frame, self.loop_end_frame)
+            self._set_loop_button_style(self.loop_start_btn, is_set=True)
+            self._set_loop_button_style(self.loop_end_btn, is_set=True)
         else:
-            # Clear loop markers if they're out of range for the new video
-            # This prevents looping issues after video edits that change frame count
-            if self.loop_start_frame is not None and self.loop_start_frame > max_frame:
-                self._reset_loop(save=False)
-            elif self.loop_end_frame is not None and self.loop_end_frame > max_frame:
-                self._reset_loop(save=False)
+            self._reset_loop(save=False)
 
         # Update info labels
         self.fps_label.setText(f'{fps:.2f} fps')
@@ -1483,8 +1565,32 @@ class VideoControlsWidget(QWidget):
     def _save_loop_markers(self):
         """Save current loop markers to image metadata."""
         if self.current_image and self.proxy_image_list_model:
-            self.current_image.loop_start_frame = self.loop_start_frame
-            self.current_image.loop_end_frame = self.loop_end_frame
+            scope = getattr(self, '_loop_persistence_scope', 'main') or 'main'
+
+            viewer_markers = getattr(self.current_image, 'viewer_loop_markers', None)
+            if not isinstance(viewer_markers, dict):
+                viewer_markers = {}
+
+            if self.loop_start_frame is None and self.loop_end_frame is None:
+                viewer_markers.pop(scope, None)
+            else:
+                viewer_markers[scope] = {
+                    'loop_start_frame': self.loop_start_frame,
+                    'loop_end_frame': self.loop_end_frame,
+                }
+
+            if scope == 'main':
+                self.current_image.loop_start_frame = self.loop_start_frame
+                self.current_image.loop_end_frame = self.loop_end_frame
+                if self.loop_start_frame is None and self.loop_end_frame is None:
+                    viewer_markers.pop('main', None)
+                else:
+                    viewer_markers['main'] = {
+                        'loop_start_frame': self.loop_start_frame,
+                        'loop_end_frame': self.loop_end_frame,
+                    }
+
+            self.current_image.viewer_loop_markers = viewer_markers
             # Write to disk through the source model
             self.proxy_image_list_model.sourceModel().write_meta_to_disk(self.current_image)
 
@@ -1723,6 +1829,61 @@ class VideoControlsWidget(QWidget):
         if self.loop_start_frame is not None and self.loop_end_frame is not None:
             return (self.loop_start_frame, self.loop_end_frame)
         return None
+
+    def get_loop_state(self) -> dict[str, int | bool | None]:
+        """Get loop markers and enabled state."""
+        return {
+            'start_frame': self.loop_start_frame,
+            'end_frame': self.loop_end_frame,
+            'enabled': bool(self.is_looping),
+        }
+
+    def apply_loop_state(
+        self,
+        start_frame: int | None,
+        end_frame: int | None,
+        enabled: bool,
+        save: bool = False,
+        emit_signals: bool = True,
+    ):
+        """Apply loop markers and loop-enabled state."""
+        max_frame = self.frame_spinbox.maximum()
+
+        has_markers = isinstance(start_frame, int) and isinstance(end_frame, int)
+        if has_markers:
+            normalized_start = max(0, min(int(start_frame), max_frame))
+            normalized_end = max(0, min(int(end_frame), max_frame))
+        else:
+            normalized_start = None
+            normalized_end = None
+
+        self.loop_start_frame = normalized_start
+        self.loop_end_frame = normalized_end
+
+        if normalized_start is not None and normalized_end is not None:
+            self.timeline_slider.set_loop_markers(normalized_start, normalized_end)
+            self._set_loop_button_style(self.loop_start_btn, is_set=True)
+            self._set_loop_button_style(self.loop_end_btn, is_set=True)
+            if emit_signals:
+                self.loop_start_set.emit()
+                self.loop_end_set.emit()
+        else:
+            self.timeline_slider.clear_loop_markers()
+            self._set_loop_button_style(self.loop_start_btn, is_set=False)
+            self._set_loop_button_style(self.loop_end_btn, is_set=False)
+            if emit_signals:
+                self.loop_reset.emit()
+
+        previous_block = self.loop_checkbox.blockSignals(True)
+        self.loop_checkbox.setChecked(bool(enabled))
+        self.loop_checkbox.blockSignals(previous_block)
+        self.is_looping = bool(enabled)
+        if emit_signals:
+            self.loop_toggled.emit(self.is_looping)
+
+        self._update_marker_range_display()
+        if save:
+            self._save_loop_markers()
 
     @Slot()
     def reset(self):

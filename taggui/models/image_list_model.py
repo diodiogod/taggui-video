@@ -268,6 +268,51 @@ class Scope(str, Enum):
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
 
+    @staticmethod
+    def _parse_viewer_loop_markers(raw_markers) -> dict[str, dict[str, int | None]]:
+        """Normalize viewer-specific loop markers loaded from metadata."""
+        markers: dict[str, dict[str, int | None]] = {}
+        if not isinstance(raw_markers, dict):
+            return markers
+
+        for scope, values in raw_markers.items():
+            if not isinstance(scope, str) or not isinstance(values, dict):
+                continue
+            loop_start = values.get('loop_start_frame')
+            loop_end = values.get('loop_end_frame')
+            start_value = loop_start if isinstance(loop_start, int) else None
+            end_value = loop_end if isinstance(loop_end, int) else None
+            if start_value is None and end_value is None:
+                continue
+            markers[scope] = {
+                'loop_start_frame': start_value,
+                'loop_end_frame': end_value,
+            }
+        return markers
+
+    @staticmethod
+    def _serialize_viewer_loop_markers(image: Image) -> dict[str, dict[str, int | None]]:
+        """Prepare viewer-specific loop markers for JSON persistence."""
+        raw_markers = getattr(image, 'viewer_loop_markers', None)
+        if not isinstance(raw_markers, dict):
+            return {}
+
+        serialized: dict[str, dict[str, int | None]] = {}
+        for scope, values in raw_markers.items():
+            if not isinstance(scope, str) or not isinstance(values, dict):
+                continue
+            loop_start = values.get('loop_start_frame')
+            loop_end = values.get('loop_end_frame')
+            start_value = loop_start if isinstance(loop_start, int) else None
+            end_value = loop_end if isinstance(loop_end, int) else None
+            if start_value is None and end_value is None:
+                continue
+            serialized[scope] = {
+                'loop_start_frame': start_value,
+                'loop_end_frame': end_value,
+            }
+        return serialized
+
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
@@ -2922,6 +2967,9 @@ class ImageListModel(QAbstractListModel):
                         image.loop_start_frame = loop_start if isinstance(loop_start, int) else None
                         loop_end = meta.get('loop_end_frame')
                         image.loop_end_frame = loop_end if isinstance(loop_end, int) else None
+                        image.viewer_loop_markers = self._parse_viewer_loop_markers(
+                            meta.get('viewer_loop_markers')
+                        )
                     # Silently ignore unsupported JSON versions (like ComfyUI workflow files)
             new_images.append(image)
 
@@ -3327,6 +3375,9 @@ class ImageListModel(QAbstractListModel):
                              'rect': marking.rect.getRect()} for marking in image.markings]
         meta['loop_start_frame'] = image.loop_start_frame
         meta['loop_end_frame'] = image.loop_end_frame
+        viewer_loop_markers = self._serialize_viewer_loop_markers(image)
+        if viewer_loop_markers:
+            meta['viewer_loop_markers'] = viewer_loop_markers
         if does_exist or len(meta.keys()) > 1:
             try:
                 with image.path.with_suffix('.json').open('w', encoding='UTF-8') as meta_file:
@@ -4012,6 +4063,9 @@ class ImageListModel(QAbstractListModel):
                         loop_end = meta.get('loop_end_frame')
                         if loop_end is not None and isinstance(loop_end, int):
                             image.loop_end_frame = loop_end
+                        image.viewer_loop_markers = self._parse_viewer_loop_markers(
+                            meta.get('viewer_loop_markers')
+                        )
 
         # Insert the image in the correct sorted position
         # Use natural sort key for insertion

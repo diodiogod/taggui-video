@@ -32,10 +32,14 @@ class SignalManager:
                 toolbar_manager.toolbar.isVisible()))
 
         image_viewer.zoom.connect(self.main_window.zoom)
-        toolbar_manager.zoom_fit_best_action.triggered.connect(image_viewer.zoom_fit)
-        toolbar_manager.zoom_in_action.triggered.connect(image_viewer.zoom_in)
-        toolbar_manager.zoom_original_action.triggered.connect(image_viewer.zoom_original)
-        toolbar_manager.zoom_out_action.triggered.connect(image_viewer.zoom_out)
+        toolbar_manager.zoom_fit_best_action.triggered.connect(
+            lambda: self.main_window.get_active_viewer().zoom_fit())
+        toolbar_manager.zoom_in_action.triggered.connect(
+            lambda: self.main_window.get_active_viewer().zoom_in())
+        toolbar_manager.zoom_original_action.triggered.connect(
+            lambda: self.main_window.get_active_viewer().zoom_original())
+        toolbar_manager.zoom_out_action.triggered.connect(
+            lambda: self.main_window.get_active_viewer().zoom_out())
 
         toolbar_manager.add_action_group.triggered.connect(
             lambda action: image_viewer.add_marking(
@@ -119,7 +123,7 @@ class SignalManager:
                 if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
                     return
                 if current.isValid():
-                    image_viewer.load_image(current)
+                    self.main_window.get_active_viewer().load_image(current)
             except Exception as e:
                 print(f"[SIGNAL] ERROR in currentChanged->load_image: {e}")
                 import traceback
@@ -143,7 +147,10 @@ class SignalManager:
         def refresh_viewer_on_data_change(start: QModelIndex, end: QModelIndex, roles):
             """Reload viewer only for the live current selection to avoid stale-index crashes."""
             try:
-                if getattr(image_viewer, "_viewer_model_resetting", False):
+                active_viewer = self.main_window.get_active_viewer()
+                if active_viewer is None:
+                    return
+                if getattr(active_viewer, "_viewer_model_resetting", False):
                     return
                 current = image_list_selection_model.currentIndex()
                 if not current.isValid():
@@ -152,7 +159,7 @@ class SignalManager:
                     return
                 current_row = current.row()
                 if start.isValid() and end.isValid() and start.row() <= current_row <= end.row():
-                    image_viewer.load_image(current, False)
+                    active_viewer.load_image(current, False)
             except Exception as e:
                 print(f"[SIGNAL] ERROR in dataChanged->load_image: {e}")
 
