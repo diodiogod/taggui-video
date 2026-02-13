@@ -174,6 +174,9 @@ def main() -> int:
         QTimer.singleShot(120, lambda: do_capture(width, i))
 
     def do_capture(width: int, idx: int) -> None:
+        # Let async geometry/scaling settle before grabbing.
+        app.processEvents()
+        app.processEvents()
         app.processEvents()
         player_img = controls.grab().toImage()
         window_img = win.grab().toImage()
