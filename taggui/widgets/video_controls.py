@@ -376,6 +376,8 @@ class VideoControlsWidget(QWidget):
         self._last_frame_total_display = None
         self._last_time_display = None
         self._perf_profile = 'single'
+        self._last_playing_visual_state = None
+        self._last_mute_visual_state = None
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -1052,6 +1054,25 @@ class VideoControlsWidget(QWidget):
         merged = dict(defaults.get(component_id, {}))
         if isinstance(layout, dict):
             merged.update(layout)
+        try:
+            scale_value = float(merged.get('scale', 1.0))
+        except (TypeError, ValueError):
+            scale_value = 1.0
+        # Keep runtime responsive: avoid pathological per-component scaling
+        # values that can explode layout costs during playback updates.
+        scale_value = max(0.25, min(2.0, scale_value))
+        if component_id == 'speed_slider':
+            scale_value = min(1.45, scale_value)
+        merged['scale'] = scale_value
+
+        for key in ('container_width', 'container_height', 'offset_x', 'offset_y'):
+            if key in merged:
+                try:
+                    merged[key] = int(merged.get(key, 0))
+                except (TypeError, ValueError):
+                    merged[key] = 0
+        merged['container_width'] = max(0, min(900, merged.get('container_width', 0)))
+        merged['container_height'] = max(0, min(300, merged.get('container_height', 0)))
         if component_id in ('speed_label', 'speed_value_label'):
             try:
                 cw = int(merged.get('container_width', 0))
@@ -1696,6 +1717,9 @@ class VideoControlsWidget(QWidget):
                     widget.setFont(font)
 
         speed_slider_min_width = int(max(80, 100 * scale * component_scale('speed_slider')))
+        # Prevent speed slider from claiming disproportionate space and causing
+        # repeated expensive relayout in dense multi-view scenarios.
+        speed_slider_min_width = min(speed_slider_min_width, max(100, int(self.width() * 0.45)))
         self.speed_slider.setMinimumWidth(speed_slider_min_width)
         slider_height = int(max(20, 30 * scale * component_scale('timeline_slider')))
         self.timeline_slider.setMinimumHeight(slider_height)
@@ -2240,6 +2264,8 @@ class VideoControlsWidget(QWidget):
 
     def _update_mute_button(self):
         """Update mute button appearance based on state."""
+        if self._last_mute_visual_state is not None and self._last_mute_visual_state == self.is_muted:
+            return
         if self.is_muted:
             self.mute_btn.setText('🔇')
             self.mute_btn.setToolTip('Unmute Audio')
@@ -2272,6 +2298,7 @@ class VideoControlsWidget(QWidget):
                     border-color: #5FBF60;
                 }
             """)
+        self._last_mute_visual_state = self.is_muted
 
     @Slot(dict)
     def set_video_info(self, metadata: dict, image=None, proxy_model=None):
@@ -2542,6 +2569,8 @@ class VideoControlsWidget(QWidget):
             playing: Whether video is playing
             update_auto_play: If True, updates auto-play state (for manual user toggles)
         """
+        playing = bool(playing)
+        previous_playing = bool(self.is_playing)
         self.is_playing = playing
 
         # Only update auto-play state on manual user toggles
@@ -2549,6 +2578,15 @@ class VideoControlsWidget(QWidget):
             self.auto_play_enabled = playing
             # Save to settings for persistence across reboots
             settings.setValue('video_auto_play', playing)
+
+        # Avoid repeated icon/stylesheet churn during playback loops.
+        if (
+            self._last_playing_visual_state is not None
+            and self._last_playing_visual_state == playing
+            and previous_playing == playing
+            and not update_auto_play
+        ):
+            return
 
         if playing:
             self.play_pause_btn.setIcon(QIcon.fromTheme('media-playback-pause'))
@@ -2582,6 +2620,23 @@ class VideoControlsWidget(QWidget):
                     border-color: #666;
                 }
             """)
+        self._last_playing_visual_state = playing
+
+    def set_performance_profile(self, profile: str, *, is_active_owner: bool = False):
+        """Apply profile hints while preserving single-view UX quality."""
+        self._perf_profile = str(profile or 'single')
+
+        # Reduce secondary spawned-only non-critical labels in heavier multi-view loads.
+        reduced_noncritical = (
+            self._perf_profile in ('multi', 'heavy')
+            and bool(getattr(self, '_is_spawned_owner', False))
+            and not bool(is_active_owner)
+        )
+        target_preview_visible = not reduced_noncritical
+        if self.preview_container.isVisible() != target_preview_visible:
+            self.preview_container.setVisible(target_preview_visible)
+        if reduced_noncritical and self.sar_warning_label.isVisible():
+            self.sar_warning_label.hide()
 
     def _update_marker_range_display(self):
         """Update the marker range frame count display."""

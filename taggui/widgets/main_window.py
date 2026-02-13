@@ -90,6 +90,13 @@ class MainWindow(QMainWindow):
         self._floating_viewer_spawn_count = 0
         self._active_viewer = self.image_viewer
         self._exclusive_video_controls_visibility = True
+        self._video_controls_perf_profile = 'single'
+        self._video_controls_pending_updates = {}
+        self._video_controls_last_dispatch_at = {}
+        self._video_controls_scheduler_timer = QTimer(self)
+        self._video_controls_scheduler_timer.setSingleShot(False)
+        self._video_controls_scheduler_timer.setInterval(16)
+        self._video_controls_scheduler_timer.timeout.connect(self._flush_video_controls_updates)
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
         self.image_viewer.view.customContextMenuRequested.connect(
@@ -784,9 +791,17 @@ class MainWindow(QMainWindow):
         video_controls.skip_forward_requested.connect(
             lambda: self._skip_viewer_video(viewer, backward=False)
         )
-        video_player.frame_changed.connect(video_controls.update_position)
         video_player.frame_changed.connect(
-            lambda frame, time_ms: video_controls.set_playing(video_player.is_playing)
+            lambda frame, time_ms: self._queue_video_controls_update(viewer, frame, time_ms)
+        )
+        video_player.playback_started.connect(
+            lambda: video_controls.set_playing(True)
+        )
+        video_player.playback_paused.connect(
+            lambda: video_controls.set_playing(False)
+        )
+        video_player.playback_finished.connect(
+            lambda: video_controls.set_playing(False)
         )
         video_controls.loop_toggled.connect(
             lambda enabled: self._apply_loop_state_to_viewer_player(viewer)
@@ -803,6 +818,68 @@ class MainWindow(QMainWindow):
         video_controls.speed_changed.connect(video_player.set_playback_speed)
         video_controls.mute_toggled.connect(video_player.set_muted)
         video_controls.fixed_marker_size = self.toolbar_manager.fixed_marker_size_spinbox.value()
+
+    def _queue_video_controls_update(self, viewer: ImageViewer, frame: int, time_ms: float):
+        """Queue latest frame update for centralized controls scheduler."""
+        self._video_controls_pending_updates[viewer] = (int(frame), float(time_ms))
+        if not self._video_controls_scheduler_timer.isActive():
+            self._video_controls_scheduler_timer.start()
+
+    def _controls_dispatch_min_gap(self, *, is_active_owner: bool, is_playing: bool) -> float:
+        """Return minimum dispatch interval per viewer/profile."""
+        if not is_playing:
+            return 0.0
+        profile = getattr(self, '_video_controls_perf_profile', 'single')
+        if profile == 'dual':
+            return 0.018 if is_active_owner else 0.065
+        if profile == 'multi':
+            return 0.026 if is_active_owner else 0.11
+        if profile == 'heavy':
+            return 0.040 if is_active_owner else 0.16
+        return 0.0 if is_active_owner else 0.045
+
+    def _flush_video_controls_updates(self):
+        """Dispatch queued controls updates with active-viewer prioritization."""
+        if not self._video_controls_pending_updates:
+            self._video_controls_scheduler_timer.stop()
+            return
+
+        now = time.monotonic()
+        active_viewer = self.get_active_viewer()
+        to_remove = []
+        for viewer, payload in list(self._video_controls_pending_updates.items()):
+            try:
+                controls = viewer.video_controls
+                player = viewer.video_player
+            except RuntimeError:
+                to_remove.append(viewer)
+                continue
+
+            frame, time_ms = payload
+            is_active_owner = viewer is active_viewer
+            is_playing = bool(getattr(player, 'is_playing', False))
+            min_gap = self._controls_dispatch_min_gap(
+                is_active_owner=is_active_owner,
+                is_playing=is_playing,
+            )
+            last_dispatch = float(self._video_controls_last_dispatch_at.get(viewer, 0.0))
+            if (now - last_dispatch) < min_gap:
+                continue
+
+            # When a viewer isn't active and its controls are hidden, keep queued
+            # latest position but skip dispatch to avoid needless UI churn.
+            if (not is_active_owner) and (not controls.isVisible()):
+                continue
+
+            controls.update_position(frame, time_ms)
+            self._video_controls_last_dispatch_at[viewer] = now
+            to_remove.append(viewer)
+
+        for viewer in to_remove:
+            self._video_controls_pending_updates.pop(viewer, None)
+
+        if not self._video_controls_pending_updates:
+            self._video_controls_scheduler_timer.stop()
 
     def _skip_viewer_video(self, viewer: ImageViewer, backward: bool):
         """Skip one second on a specific viewer's video."""
@@ -1018,12 +1095,25 @@ class MainWindow(QMainWindow):
             profile = 'multi'
         else:
             profile = 'heavy'
+        self._video_controls_perf_profile = profile
 
+        scheduler_interval_ms = {
+            'single': 16,
+            'dual': 20,
+            'multi': 28,
+            'heavy': 36,
+        }.get(profile, 16)
+        self._video_controls_scheduler_timer.setInterval(scheduler_interval_ms)
+
+        active_viewer = self.get_active_viewer()
         for viewer in viewers:
             try:
                 controls = getattr(viewer, 'video_controls', None)
                 if controls is not None:
-                    controls._perf_profile = profile
+                    if hasattr(controls, 'set_performance_profile'):
+                        controls.set_performance_profile(profile, is_active_owner=(viewer is active_viewer))
+                    else:
+                        controls._perf_profile = profile
             except RuntimeError:
                 continue
 
@@ -1181,6 +1271,8 @@ class MainWindow(QMainWindow):
             viewer.video_player.cleanup()
         except Exception as e:
             print(f"[VIEWER] Floating viewer cleanup warning: {e}")
+        self._video_controls_pending_updates.pop(viewer, None)
+        self._video_controls_last_dispatch_at.pop(viewer, None)
 
         if getattr(self, '_active_viewer', None) is viewer:
             self.set_active_viewer(self.image_viewer)

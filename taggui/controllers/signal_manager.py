@@ -285,9 +285,20 @@ class SignalManager:
             lambda: self._skip_video(backward=False))
 
         # Connect video player updates to video controls
-        video_player.frame_changed.connect(video_controls.update_position)
         video_player.frame_changed.connect(
-            lambda frame, time_ms: video_controls.set_playing(video_player.is_playing))
+            lambda frame, time_ms: self.main_window._queue_video_controls_update(
+                self.main_window.image_viewer, frame, time_ms
+            )
+        )
+        video_player.playback_started.connect(
+            lambda: video_controls.set_playing(True)
+        )
+        video_player.playback_paused.connect(
+            lambda: video_controls.set_playing(False)
+        )
+        video_player.playback_finished.connect(
+            lambda: video_controls.set_playing(False)
+        )
 
         # Connect loop controls
         video_controls.loop_toggled.connect(lambda enabled: self._update_loop_state())

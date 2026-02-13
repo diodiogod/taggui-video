@@ -914,7 +914,9 @@ class SkinDesignerLive(QDialog):
                 cfg["align"] = "center"
             cfg["offset_x"] = max(-200, min(200, int(cfg.get("offset_x", 0))))
             cfg["offset_y"] = max(-100, min(100, int(cfg.get("offset_y", 0))))
-            cfg["scale"] = max(0.25, min(4.0, float(cfg.get("scale", 1.0))))
+            cfg["scale"] = max(0.25, min(2.0, float(cfg.get("scale", 1.0))))
+            if component_id == "speed_slider":
+                cfg["scale"] = min(1.45, float(cfg["scale"]))
             cfg["container_width"] = max(0, min(900, int(cfg.get("container_width", 0))))
             cfg["container_height"] = max(0, min(300, int(cfg.get("container_height", 0))))
 
