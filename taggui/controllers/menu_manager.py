@@ -24,6 +24,7 @@ class MenuManager:
         self.toggle_all_tags_editor_action = None
         self.toggle_auto_captioner_action = None
         self.toggle_auto_markings_action = None
+        self.toggle_perf_hud_action = None
         self.recent_folders_menu = None
         self.workspace_actions = {}
         self.workspace_action_group = None
@@ -69,9 +70,12 @@ class MenuManager:
         self.toggle_all_tags_editor_action = QAction('All Tags', parent=self.main_window)
         self.toggle_auto_captioner_action = QAction('Auto-Captioner', parent=self.main_window)
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
+        self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
         self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action = QAction('Hold Existing Spawned Viewers', parent=self.main_window)
+        self.toggle_perf_hud_action.setShortcut(QKeySequence('Ctrl+Shift+J'))
+        self.toggle_floating_hold_action.setShortcut(QKeySequence('H'))
         self.delete_marked_menu = None
         self.delete_marked_button = None
         self.delete_marked_widget_action = None
@@ -214,6 +218,7 @@ class MenuManager:
         self.toggle_all_tags_editor_action.setCheckable(True)
         self.toggle_auto_captioner_action.setCheckable(True)
         self.toggle_auto_markings_action.setCheckable(True)
+        self.toggle_perf_hud_action.setCheckable(True)
 
         # Connect toggle actions
         toolbar_manager = self.main_window.toolbar_manager
@@ -232,6 +237,9 @@ class MenuManager:
             lambda is_checked: self.main_window.auto_captioner.setVisible(is_checked))
         self.toggle_auto_markings_action.triggered.connect(
             lambda is_checked: self.main_window.auto_markings.setVisible(is_checked))
+        self.toggle_perf_hud_action.triggered.connect(
+            lambda checked: self.main_window.set_perf_hud_visible(checked)
+        )
 
         view_menu.addAction(self.toggle_toolbar_action)
         view_menu.addAction(self.toggle_main_viewer_action)
@@ -240,6 +248,8 @@ class MenuManager:
         view_menu.addAction(self.toggle_all_tags_editor_action)
         view_menu.addAction(self.toggle_auto_captioner_action)
         view_menu.addAction(self.toggle_auto_markings_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.toggle_perf_hud_action)
 
         self.spawn_floating_viewer_action.setShortcut(QKeySequence('Ctrl+Shift+N'))
         self.spawn_floating_viewer_action.triggered.connect(

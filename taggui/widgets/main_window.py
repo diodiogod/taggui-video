@@ -1,10 +1,11 @@
 import time
 import hashlib
+from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize
+from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRectF
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
-                           QIcon, QKeySequence, QShortcut, QMouseEvent)
+                           QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
@@ -40,6 +41,322 @@ from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
 
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
+
+
+class PerfHudOverlay(QWidget):
+    """Small translucent HUD with sparkline for UI timing diagnostics."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAutoFillBackground(False)
+        self.setMouseTracking(True)
+        self._ui_ms_samples = deque(maxlen=160)
+        self._playback_ms_samples = deque(maxlen=160)
+        self._lines = []
+        self._mode = "ui"
+        self._dragging = False
+        self._resizing = False
+        self._drag_offset = QPoint()
+        self._resize_start_global = QPoint()
+        self._resize_start_size = QSize()
+        self._on_mode_changed = None
+        self._on_geometry_changed = None
+        self._resize_grip_px = 20
+        self._title_bar_h = 28
+        self.setFixedSize(360, 152)
+        self.setMinimumSize(280, 120)
+        self.setMaximumSize(16777215, 16777215)
+        self._graph_rect = QRectF()
+        self._line_rects = []
+        self._last_tooltip_key = None
+        self._mode_btn = QPushButton("Mode: UI", self)
+        self._mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mode_btn.setStyleSheet(
+            "QPushButton { background: rgba(40,48,62,220); color: #EAF2FF; border: 1px solid rgba(160,190,255,120);"
+            " border-radius: 5px; padding: 2px 8px; font-size: 10px; font-weight: 600; }"
+            "QPushButton:hover { background: rgba(56,68,88,230); }"
+        )
+        self._mode_btn.setToolTip("Switch graph mode:\n- UI: app main-thread timing\n- Playback: video frame cadence timing")
+        self._mode_btn.clicked.connect(self._cycle_mode)
+        self.hide()
+
+    def _parent_global_bounds(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return None
+        try:
+            return parent.frameGeometry()
+        except Exception:
+            return None
+
+    def set_metrics(self, *, ui_ms: float, playback_ms: float | None, lines: list[str]):
+        self._ui_ms_samples.append(float(max(0.0, ui_ms)))
+        if playback_ms is not None:
+            self._playback_ms_samples.append(float(max(0.0, playback_ms)))
+        self._lines = list(lines)
+        self.update()
+
+    def set_mode_changed_callback(self, callback):
+        self._on_mode_changed = callback
+
+    def set_geometry_changed_callback(self, callback):
+        self._on_geometry_changed = callback
+
+    def _cycle_mode(self):
+        self._mode = "playback" if self._mode == "ui" else "ui"
+        self._mode_btn.setText("Mode: Playback" if self._mode == "playback" else "Mode: UI")
+        if callable(self._on_mode_changed):
+            try:
+                self._on_mode_changed(self._mode)
+            except Exception:
+                pass
+        self.update()
+
+    def _graph_samples(self):
+        if self._mode == "playback":
+            return list(self._playback_ms_samples)
+        return list(self._ui_ms_samples)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        panel_rect = self.rect().adjusted(1, 1, -1, -1)
+        painter.setBrush(QColor(12, 14, 18, 210))
+        painter.setPen(QPen(QColor(130, 180, 255, 160), 1))
+        painter.drawRoundedRect(panel_rect, 8, 8)
+
+        dynamic_title_h = max(24, min(42, int(self.height() * 0.16)))
+        graph_h = max(56, int(self.height() * 0.42))
+        graph_rect = QRectF(10, dynamic_title_h + 2, self.width() - 20, graph_h)
+        self._graph_rect = graph_rect
+        painter.setBrush(QColor(0, 0, 0, 90))
+        painter.setPen(QPen(QColor(180, 220, 255, 80), 1))
+        painter.drawRoundedRect(graph_rect, 5, 5)
+
+        painter.setPen(QPen(QColor(225, 236, 255, 190), 1))
+        title_font_size = max(9, min(16, int(self.height() * 0.08)))
+        painter.setFont(QFont("Consolas", title_font_size, QFont.Weight.Bold))
+        painter.drawText(12, max(18, dynamic_title_h - 8), "Performance HUD")
+
+        samples = self._graph_samples()
+        if len(samples) >= 2:
+            # Dynamic range keeps sparkline sensitive while still showing spikes.
+            sorted_vals = sorted(samples)
+            p95 = sorted_vals[int(max(0, min(len(sorted_vals) - 1, round(len(sorted_vals) * 0.95) - 1)))]
+            if self._mode == "playback":
+                ymax = max(33.3, min(3000.0, max(66.0, p95 * 1.35)))
+            else:
+                ymax = max(22.0, min(1200.0, max(33.3, p95 * 1.35)))
+            ymin = 0.0
+            step_x = graph_rect.width() / max(1, (len(samples) - 1))
+            points_raw = []
+            points_smooth = []
+            clipped_raw_x = []
+            # Exponential moving average for trend readability.
+            ema = samples[0]
+            alpha = 0.20
+            for i, value in enumerate(samples):
+                v = max(ymin, min(ymax, value))
+                if value > ymax:
+                    clipped_raw_x.append(graph_rect.left() + (i * step_x))
+                t = (v - ymin) / (ymax - ymin)
+                x = graph_rect.left() + (i * step_x)
+                y = graph_rect.bottom() - (t * graph_rect.height())
+                points_raw.append(QPoint(int(x), int(y)))
+
+                ema = (alpha * value) + ((1.0 - alpha) * ema)
+                ve = max(ymin, min(ymax, ema))
+                te = (ve - ymin) / (ymax - ymin)
+                ye = graph_rect.bottom() - (te * graph_rect.height())
+                points_smooth.append(QPoint(int(x), int(ye)))
+
+            # Reference lines: 60 FPS (16.7ms) and 30 FPS (33.3ms).
+            for ref_ms, color in ((16.7, QColor(255, 255, 255, 80)), (33.3, QColor(255, 170, 80, 90))):
+                if ref_ms <= ymax:
+                    tr = (ref_ms - ymin) / (ymax - ymin)
+                    yr = graph_rect.bottom() - (tr * graph_rect.height())
+                    painter.setPen(QPen(color, 1))
+                    painter.drawLine(int(graph_rect.left()) + 2, int(yr), int(graph_rect.right()) - 2, int(yr))
+
+            # Raw line (sensitive spikes)
+            painter.setPen(QPen(QColor(120, 220, 255, 180), 1))
+            for i in range(1, len(points_raw)):
+                painter.drawLine(points_raw[i - 1], points_raw[i])
+            if clipped_raw_x:
+                painter.setPen(QPen(QColor(255, 96, 96, 230), 1))
+                y_top = int(graph_rect.top()) + 1
+                y_mark = y_top + 6
+                for x in clipped_raw_x:
+                    xi = int(x)
+                    painter.drawLine(xi, y_top, xi, y_mark)
+            # Smoothed trend line
+            painter.setPen(QPen(QColor(80, 255, 120, 235), 2))
+            for i in range(1, len(points_smooth)):
+                painter.drawLine(points_smooth[i - 1], points_smooth[i])
+        elif self._mode == "playback":
+            painter.setPen(QPen(QColor(240, 240, 240, 160), 1))
+            painter.setFont(QFont("Consolas", 9))
+            painter.drawText(int(graph_rect.left()) + 8, int(graph_rect.center().y()) + 4, "No playback data yet")
+
+        painter.setPen(QPen(QColor(245, 248, 255), 1))
+        info_font_size = max(8, int(self.height() * 0.075))
+        # Auto-fit info text to panel width (no hard max clamp).
+        if self._lines:
+            test_font = QFont("Consolas", info_font_size)
+            painter.setFont(test_font)
+            max_line_w = max(painter.fontMetrics().horizontalAdvance(line) for line in self._lines[:4])
+            allowed_w = max(140, int(self.width() - 24))
+            if max_line_w > allowed_w:
+                scale = allowed_w / max(1, max_line_w)
+                info_font_size = max(7, int(info_font_size * scale))
+            elif max_line_w < int(allowed_w * 0.70):
+                grow = allowed_w / max(1, max_line_w)
+                info_font_size = int(info_font_size * min(1.35, grow))
+        painter.setFont(QFont("Consolas", info_font_size))
+        y = int(graph_rect.bottom()) + 16
+        self._line_rects = []
+        for line in self._lines[:4]:
+            line_h = max(16, int(info_font_size * 1.55))
+            line_rect = QRectF(10, y - line_h + 4, self.width() - 20, line_h)
+            self._line_rects.append(line_rect)
+            painter.drawText(int(line_rect.left()) + 2, y, line)
+            y += line_h
+
+        # Resize grip hint
+        grip = self.rect().adjusted(self.width() - self._resize_grip_px, self.height() - self._resize_grip_px, -2, -2)
+        painter.setPen(QPen(QColor(170, 200, 255, 160), 1))
+        painter.drawLine(grip.left() + 4, grip.bottom(), grip.right(), grip.top() + 4)
+        painter.drawLine(grip.left() + 8, grip.bottom(), grip.right(), grip.top() + 8)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        btn_h = max(18, min(30, int(self.height() * 0.14)))
+        btn_w = max(120, min(240, int(self.width() * 0.34)))
+        self._mode_btn.setGeometry(self.width() - btn_w - 10, 6, btn_w, btn_h)
+        mode_font_size = max(9, min(13, int(btn_h * 0.48)))
+        self._mode_btn.setFont(QFont("Consolas", mode_font_size))
+
+    def _is_in_resize_zone(self, pos: QPoint) -> bool:
+        return (
+            pos.x() >= self.width() - self._resize_grip_px
+            and pos.y() >= self.height() - self._resize_grip_px
+        )
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if self._is_in_resize_zone(pos):
+            self._resizing = True
+            self._resize_start_global = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else self.mapToGlobal(pos)
+            self._resize_start_size = self.size()
+            event.accept()
+            return
+        if not self._mode_btn.geometry().contains(pos):
+            self._dragging = True
+            self._drag_offset = (event.globalPosition().toPoint() - self.pos()) if hasattr(event, "globalPosition") else (self.mapToGlobal(pos) - self.pos())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else self.mapToGlobal(pos)
+
+        if self._resizing:
+            delta = global_pos - self._resize_start_global
+            new_w = max(self.minimumWidth(), self._resize_start_size.width() + delta.x())
+            new_h = max(self.minimumHeight(), self._resize_start_size.height() + delta.y())
+            parent_bounds = self._parent_global_bounds()
+            if parent_bounds is not None:
+                new_w = min(max(self.minimumWidth(), parent_bounds.width() - 6), new_w)
+                new_h = min(max(self.minimumHeight(), parent_bounds.height() - 6), new_h)
+            self.resize(new_w, new_h)
+            if callable(self._on_geometry_changed):
+                try:
+                    self._on_geometry_changed(self.geometry())
+                except Exception:
+                    pass
+            event.accept()
+            return
+        if self._dragging:
+            new_pos = global_pos - self._drag_offset
+            parent_bounds = self._parent_global_bounds()
+            if parent_bounds is not None:
+                min_x = parent_bounds.left()
+                min_y = parent_bounds.top()
+                max_x = parent_bounds.right() - self.width() + 1
+                max_y = parent_bounds.bottom() - self.height() + 1
+                new_pos.setX(max(min_x, min(max_x, new_pos.x())))
+                new_pos.setY(max(min_y, min(max_y, new_pos.y())))
+            self.move(new_pos)
+            if callable(self._on_geometry_changed):
+                try:
+                    self._on_geometry_changed(self.geometry())
+                except Exception:
+                    pass
+            event.accept()
+            return
+
+        if self._is_in_resize_zone(pos):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            self._set_context_tooltip("resize")
+        elif not self._mode_btn.geometry().contains(pos):
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+            self._set_context_tooltip("drag")
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._set_context_tooltip(self._tooltip_key_for_pos(pos))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        self._resizing = False
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_context_tooltip(None)
+        super().leaveEvent(event)
+
+    def _tooltip_key_for_pos(self, pos: QPoint) -> str | None:
+        if self._graph_rect.contains(pos):
+            return "graph"
+        for idx, rect in enumerate(self._line_rects):
+            if rect.contains(pos):
+                return f"line{idx}"
+        return "panel"
+
+    def _set_context_tooltip(self, key: str | None):
+        if key == self._last_tooltip_key:
+            return
+        self._last_tooltip_key = key
+        tips = {
+            "graph": (
+                "Graph area:\n"
+                "- Blue line: raw frame-time samples (spikes = stutter)\n"
+                "- Green line: smoothed trend\n"
+                "- White/Orange refs: ~60fps (16.7ms) and ~30fps (33.3ms)\n"
+                "- Red top ticks: spike clipped above current graph scale"
+            ),
+            "line0": "UI ms = main UI timing.\nPB ms = playback frame-interval estimate (lower and steadier is smoother).",
+            "line1": "videos = loaded video viewers.\nplaying = currently playing viewers.\nactive = controls owner.",
+            "line2": "pending = queued updates waiting dispatch.\nscheduler = tick interval.",
+            "line3": "dispatch/s = applied control updates per second.\ndropped/s = overwritten queued updates per second.",
+            "drag": "Drag HUD by this top area.",
+            "resize": "Resize HUD from this corner.",
+            "panel": "Performance HUD.\nCtrl+Shift+J to show/hide.",
+        }
+        self.setToolTip(tips.get(key, ""))
 
 
 class MainWindow(QMainWindow):
@@ -97,6 +414,23 @@ class MainWindow(QMainWindow):
         self._video_controls_scheduler_timer.setSingleShot(False)
         self._video_controls_scheduler_timer.setInterval(16)
         self._video_controls_scheduler_timer.timeout.connect(self._flush_video_controls_updates)
+        self._hud_dispatch_total = 0
+        self._hud_overwrite_total = 0
+        self._hud_playback_last_frame_ts = {}
+        self._hud_playback_last_frame_global_ts = None
+        self._hud_playback_ema_ms = None
+        self._perf_hud = PerfHudOverlay(self)
+        self._perf_hud.set_mode_changed_callback(self._on_perf_hud_mode_changed)
+        self._perf_hud.set_geometry_changed_callback(self._on_perf_hud_geometry_changed)
+        self._perf_hud_timer = QTimer(self)
+        self._perf_hud_timer.setInterval(120)
+        self._perf_hud_timer.timeout.connect(self._update_perf_hud)
+        self._perf_hud_last_tick = time.monotonic()
+        self._perf_hud_last_dispatch_total = 0
+        self._perf_hud_last_overwrite_total = 0
+        self._perf_hud_enabled = False
+        self._perf_hud_user_placed = False
+        self._perf_hud_saved_geometry = None
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
         self.image_viewer.view.customContextMenuRequested.connect(
@@ -159,6 +493,7 @@ class MainWindow(QMainWindow):
 
         # Create menus
         self.menu_manager.create_menus()
+        self._sync_perf_hud_menu_action()
         self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
         self.set_main_viewer_visible(self._main_viewer_visible, save=False)
 
@@ -257,6 +592,9 @@ class MainWindow(QMainWindow):
         self.toggle_floating_hold_shortcut = QShortcut(QKeySequence('H'), self)
         self.toggle_floating_hold_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.toggle_floating_hold_shortcut.activated.connect(self._toggle_floating_hold_shortcut)
+        self.toggle_perf_hud_shortcut = QShortcut(QKeySequence('Ctrl+Shift+J'), self)
+        self.toggle_perf_hud_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.toggle_perf_hud_shortcut.activated.connect(self._toggle_perf_hud)
         jump_to_first_untagged_image_shortcut = QShortcut(
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
@@ -397,10 +735,20 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         # Window resize should visibly relayout masonry even during playback.
         self._unfreeze_for_interaction(hold_ms=900)
+        if self._perf_hud_enabled:
+            self._reposition_perf_hud()
+
+    def moveEvent(self, event):
+        """Keep HUD anchored when the main window moves."""
+        super().moveEvent(event)
+        if self._perf_hud_enabled:
+            self._reposition_perf_hud()
 
     def showEvent(self, event):
         """Apply any deferred workspace preset once window is visible."""
         super().showEvent(event)
+        if self._perf_hud_enabled:
+            self._reposition_perf_hud()
         if self._workspace_apply_pending_id:
             # Let startup restore/layout settle before touching docks.
             self._schedule_workspace_apply(700)
@@ -435,7 +783,7 @@ class MainWindow(QMainWindow):
         self._background_workers_shutdown = True
 
         # Stop UI timers that may still schedule work while closing.
-        for timer_name in ('_unfreeze_timer', '_filter_timer'):
+        for timer_name in ('_unfreeze_timer', '_filter_timer', '_video_controls_scheduler_timer', '_perf_hud_timer'):
             timer = getattr(self, timer_name, None)
             if timer is not None and hasattr(timer, 'stop'):
                 try:
@@ -821,6 +1169,26 @@ class MainWindow(QMainWindow):
 
     def _queue_video_controls_update(self, viewer: ImageViewer, frame: int, time_ms: float):
         """Queue latest frame update for centralized controls scheduler."""
+        now = time.monotonic()
+        try:
+            if bool(getattr(viewer.video_player, 'is_playing', False)):
+                self._hud_playback_last_frame_global_ts = now
+                last_ts = self._hud_playback_last_frame_ts.get(viewer)
+                if last_ts is not None:
+                    dt_ms = (now - last_ts) * 1000.0
+                    if 1.0 <= dt_ms <= 3000.0:
+                        if self._hud_playback_ema_ms is None:
+                            self._hud_playback_ema_ms = dt_ms
+                        else:
+                            self._hud_playback_ema_ms = (0.22 * dt_ms) + (0.78 * self._hud_playback_ema_ms)
+                self._hud_playback_last_frame_ts[viewer] = now
+            else:
+                self._hud_playback_last_frame_ts.pop(viewer, None)
+        except Exception:
+            pass
+
+        if viewer in self._video_controls_pending_updates:
+            self._hud_overwrite_total += 1
         self._video_controls_pending_updates[viewer] = (int(frame), float(time_ms))
         if not self._video_controls_scheduler_timer.isActive():
             self._video_controls_scheduler_timer.start()
@@ -872,6 +1240,7 @@ class MainWindow(QMainWindow):
                 continue
 
             controls.update_position(frame, time_ms)
+            self._hud_dispatch_total += 1
             self._video_controls_last_dispatch_at[viewer] = now
             to_remove.append(viewer)
 
@@ -880,6 +1249,135 @@ class MainWindow(QMainWindow):
 
         if not self._video_controls_pending_updates:
             self._video_controls_scheduler_timer.stop()
+
+    def _active_viewer_label(self) -> str:
+        active = self.get_active_viewer()
+        if active is self.image_viewer:
+            return "main"
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                if window.viewer is active:
+                    slot = getattr(window, 'slot_id', '?')
+                    return f"spawn:{slot}"
+            except RuntimeError:
+                continue
+        return "unknown"
+
+    def _update_perf_hud(self):
+        if not self._perf_hud_enabled:
+            return
+        now = time.monotonic()
+        ui_ms = (now - self._perf_hud_last_tick) * 1000.0
+        self._perf_hud_last_tick = now
+
+        dispatch_delta = self._hud_dispatch_total - self._perf_hud_last_dispatch_total
+        overwrite_delta = self._hud_overwrite_total - self._perf_hud_last_overwrite_total
+        self._perf_hud_last_dispatch_total = self._hud_dispatch_total
+        self._perf_hud_last_overwrite_total = self._hud_overwrite_total
+        hz = max(0.01, self._perf_hud_timer.interval() / 1000.0)
+
+        loaded = 0
+        playing = 0
+        for viewer in self._iter_all_viewers():
+            try:
+                if bool(getattr(viewer, '_is_video_loaded', False)):
+                    loaded += 1
+                if bool(getattr(viewer.video_player, 'is_playing', False)):
+                    playing += 1
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        if loaded <= 0:
+            self._hud_playback_last_frame_global_ts = None
+            self._hud_playback_ema_ms = None
+
+        pb_ema = self._hud_playback_ema_ms
+        gap_ms = None
+        if self._hud_playback_last_frame_global_ts is not None:
+            gap_ms = max(0.0, (now - self._hud_playback_last_frame_global_ts) * 1000.0)
+
+        # Playback graph behavior (stutter-focused):
+        # - While playing, show cadence EMA and surface large frame gaps as spikes.
+        # - While paused/stopped, do not add new playback samples.
+        playback_ms = None
+        if playing > 0:
+            if gap_ms is not None and gap_ms > 260.0:
+                playback_ms = min(3000.0, gap_ms)
+            elif isinstance(pb_ema, (int, float)):
+                playback_ms = max(0.0, float(pb_ema))
+            elif gap_ms is not None:
+                playback_ms = min(3000.0, gap_ms)
+        else:
+            self._hud_playback_last_frame_global_ts = None
+
+        pb_text = f"{playback_ms:5.1f}ms" if isinstance(playback_ms, (int, float)) else " n/a "
+        lines = [
+            f"UI {ui_ms:5.1f}ms  PB(playback) {pb_text}  profile={self._video_controls_perf_profile}",
+            f"videos={loaded}  playing={playing}  active={self._active_viewer_label()}",
+            f"pending={len(self._video_controls_pending_updates)}  scheduler={self._video_controls_scheduler_timer.interval()}ms",
+            f"dispatch={dispatch_delta / hz:5.1f}/s   dropped={overwrite_delta / hz:5.1f}/s",
+            "Ctrl+Shift+J HUD  |  Ctrl+J jump first untagged",
+        ]
+        self._perf_hud.set_metrics(ui_ms=ui_ms, playback_ms=playback_ms, lines=lines)
+
+    def _on_perf_hud_mode_changed(self, mode: str):
+        # Reserved for future persistence; no-op for now.
+        _ = mode
+
+    def _on_perf_hud_geometry_changed(self, rect):
+        if rect is None:
+            return
+        self._perf_hud_user_placed = True
+        self._perf_hud_saved_geometry = rect
+
+    def _reposition_perf_hud(self):
+        if not self._perf_hud:
+            return
+        if self._perf_hud_user_placed and self._perf_hud_saved_geometry is not None:
+            self._perf_hud.raise_()
+            return
+        margin = 14
+        top_left = self.mapToGlobal(self.rect().topLeft())
+        x = top_left.x() + self.width() - self._perf_hud.width() - margin
+        y = top_left.y() + margin + 40
+        self._perf_hud.move(max(top_left.x() + margin, x), y)
+        self._perf_hud.raise_()
+
+    def _toggle_perf_hud(self):
+        self.set_perf_hud_visible(not self._perf_hud_enabled)
+
+    def _sync_perf_hud_menu_action(self):
+        action = getattr(getattr(self, 'menu_manager', None), 'toggle_perf_hud_action', None)
+        if action is None:
+            return
+        was_blocked = action.blockSignals(True)
+        action.setChecked(bool(self._perf_hud_enabled))
+        action.blockSignals(was_blocked)
+
+    def set_perf_hud_visible(self, visible: bool):
+        visible = bool(visible)
+        if visible == self._perf_hud_enabled:
+            self._sync_perf_hud_menu_action()
+            return
+        self._perf_hud_enabled = visible
+        if self._perf_hud_enabled:
+            self._perf_hud_last_tick = time.monotonic()
+            self._perf_hud_last_dispatch_total = self._hud_dispatch_total
+            self._perf_hud_last_overwrite_total = self._hud_overwrite_total
+            if self._perf_hud_saved_geometry is not None:
+                self._perf_hud.setGeometry(self._perf_hud_saved_geometry)
+                self._perf_hud_user_placed = True
+            else:
+                self._reposition_perf_hud()
+            self._perf_hud.show()
+            self._perf_hud.raise_()
+            self._perf_hud_timer.start()
+        else:
+            self._perf_hud_timer.stop()
+            self._perf_hud.hide()
+        self._sync_perf_hud_menu_action()
 
     def _skip_viewer_video(self, viewer: ImageViewer, backward: bool):
         """Skip one second on a specific viewer's video."""
@@ -1273,6 +1771,7 @@ class MainWindow(QMainWindow):
             print(f"[VIEWER] Floating viewer cleanup warning: {e}")
         self._video_controls_pending_updates.pop(viewer, None)
         self._video_controls_last_dispatch_at.pop(viewer, None)
+        self._hud_playback_last_frame_ts.pop(viewer, None)
 
         if getattr(self, '_active_viewer', None) is viewer:
             self.set_active_viewer(self.image_viewer)
@@ -1590,6 +2089,19 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(12000, _clear_restore)
                     QTimer.singleShot(2000, do_final_scroll)
                     return
+
+                # Single-page strict restore (max_page == 0): no scrollbar page jump
+                # happens, so we must still bind current selection explicitly.
+                selected_index_fresh = _fresh_view_index(selected_index)
+                if selected_index_fresh.isValid():
+                    _set_current_and_select(selected_index_fresh)
+                    view.scrollTo(
+                        selected_index_fresh,
+                        QAbstractItemView.ScrollHint.PositionAtCenter,
+                    )
+                self._restore_in_progress = False
+                self._restore_target_global_rank = -1
+                return
 
             # Non-paginated or no restore info: simple scrollTo
             selected_index_fresh = _fresh_view_index(selected_index)
