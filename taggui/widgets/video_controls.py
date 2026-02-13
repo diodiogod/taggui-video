@@ -1,7 +1,8 @@
 from PySide6.QtCore import Qt, Signal, Slot, QPointF, QRectF
 from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
-                               QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider)
+                               QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider,
+                               QSizePolicy)
 from utils.settings import settings, DEFAULT_SETTINGS
 from skins.engine import SkinManager
 
@@ -29,6 +30,10 @@ class LoopSlider(QSlider):
         self._marker_end_color = QColor(255, 140, 0)   # Default orange
         self._marker_outline_color = QColor(255, 255, 255)  # Default white
         self._marker_outline_width = 2
+        self._marker_width = 18
+        self._marker_height = 14
+        self._marker_offset_y = -2
+        self._marker_shape = 'triangle'
 
         # Set minimum height to show markers above slider
         self.setMinimumHeight(30)
@@ -56,7 +61,7 @@ class LoopSlider(QSlider):
         """Set loop marker colors from skin.
 
         Args:
-            colors: Dict with 'start_color', 'end_color', 'outline_color', 'outline_width'
+            colors: Dict with marker color/style properties.
         """
         start_hex = colors.get('start_color', '#FF0080')
         end_hex = colors.get('end_color', '#FF8C00')
@@ -66,7 +71,13 @@ class LoopSlider(QSlider):
         self._marker_start_color = QColor(start_hex)
         self._marker_end_color = QColor(end_hex)
         self._marker_outline_color = QColor(outline_hex)
-        self._marker_outline_width = colors.get('outline_width', 2)
+        self._marker_outline_width = max(1, int(colors.get('outline_width', 2)))
+        self._marker_width = max(8, int(colors.get('marker_width', 18)))
+        self._marker_height = max(6, int(colors.get('marker_height', 14)))
+        self._marker_offset_y = int(colors.get('marker_offset_y', -2))
+        shape = str(colors.get('marker_shape', 'triangle')).lower()
+        self._marker_shape = shape if shape in ('triangle', 'diamond') else 'triangle'
+        self._marker_size = max(10, int(self._marker_width * 0.9))
 
         # Trigger repaint
         self.update()
@@ -89,33 +100,38 @@ class LoopSlider(QSlider):
         self.initStyleOption(opt)
         groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
 
-        # Draw loop markers as triangles ABOVE the groove (pointing UP at it)
-        marker_width = 18  # Width of triangle base
-        marker_height = 14  # Height of triangle
+        marker_width = self._marker_width
+        marker_height = self._marker_height
+        marker_offset_y = self._marker_offset_y
+
+        def _build_marker_polygon(x_pos: int) -> QPolygonF:
+            if self._marker_shape == 'diamond':
+                return QPolygonF([
+                    QPointF(x_pos, groove.top() + marker_offset_y),
+                    QPointF(x_pos - marker_width / 2, groove.top() + marker_offset_y - marker_height / 2),
+                    QPointF(x_pos, groove.top() + marker_offset_y - marker_height),
+                    QPointF(x_pos + marker_width / 2, groove.top() + marker_offset_y - marker_height / 2),
+                ])
+            # Default: triangle pointing at groove
+            return QPolygonF([
+                QPointF(x_pos, groove.top() + marker_offset_y),
+                QPointF(x_pos - marker_width / 2, groove.top() + marker_offset_y - marker_height),
+                QPointF(x_pos + marker_width / 2, groove.top() + marker_offset_y - marker_height),
+            ])
 
         if self.loop_start is not None:
-            # Start marker (triangle pointing UP to groove)
             pos = self._value_to_position(self.loop_start, groove)
-            triangle = QPolygonF([
-                QPointF(pos, groove.top() - 2),  # Point at bottom (touching groove top)
-                QPointF(pos - marker_width / 2, groove.top() - marker_height - 2),  # Left corner
-                QPointF(pos + marker_width / 2, groove.top() - marker_height - 2)   # Right corner
-            ])
+            marker_poly = _build_marker_polygon(pos)
             painter.setPen(QPen(self._marker_outline_color, self._marker_outline_width))
             painter.setBrush(self._marker_start_color)
-            painter.drawPolygon(triangle)
+            painter.drawPolygon(marker_poly)
 
         if self.loop_end is not None:
-            # End marker (triangle pointing UP to groove)
             pos = self._value_to_position(self.loop_end, groove)
-            triangle = QPolygonF([
-                QPointF(pos, groove.top() - 2),  # Point at bottom (touching groove top)
-                QPointF(pos - marker_width / 2, groove.top() - marker_height - 2),  # Left corner
-                QPointF(pos + marker_width / 2, groove.top() - marker_height - 2)   # Right corner
-            ])
+            marker_poly = _build_marker_polygon(pos)
             painter.setPen(QPen(self._marker_outline_color, self._marker_outline_width))
             painter.setBrush(self._marker_end_color)
-            painter.drawPolygon(triangle)
+            painter.drawPolygon(marker_poly)
 
     def _value_to_position(self, value, groove_rect):
         """Convert slider value to pixel position."""
@@ -320,6 +336,10 @@ class VideoControlsWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._skin_bg_color = "#242424"
+        self._skin_bg_opacity = 0.95
+        self._skin_bg_border = "none"
+        self._skin_bg_radius = 0
 
         # Background styling is handled by SkinApplier via stylesheet
         # (Don't use setWindowOpacity - it makes children transparent too)
@@ -347,6 +367,15 @@ class VideoControlsWidget(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(8, 4, 8, 4)
         main_layout.setSpacing(8)
+        self._outer_layout = main_layout
+
+        # Background surface is intentionally separate from component entities, so
+        # controls can be offset beyond the visual bar for floating designs.
+        self.background_surface = QWidget(self)
+        self.background_surface.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.background_surface.setAutoFillBackground(False)
+        self.background_surface.lower()
+
 
         # Top row: Playback controls + Frame navigation
         self.controls_layout = QHBoxLayout()
@@ -522,55 +551,49 @@ class VideoControlsWidget(QWidget):
         self.speed_value_label.setMinimumWidth(45)
         self.speed_value_label.setStyleSheet("QLabel { color: #4CAF50; font-weight: bold; }")
         self.speed_value_label.mousePressEvent = self._reset_speed
+        self.speed_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.speed_value_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # Speed label for theme cycling (clicking "Speed:" text)
         self.speed_label.mousePressEvent = self._cycle_speed_theme
 
-        # Section layouts (lets skins control spacing/alignment without detaching widgets)
-        self.playback_layout = QHBoxLayout()
-        self.navigation_layout = QHBoxLayout()
-        self.frame_meta_layout = QHBoxLayout()
-        self.speed_group_layout = QHBoxLayout()
+        # Independent component slots (ground-up layout model)
+        self._component_slots = {}
+        self._component_widgets = {}
+        self._slot_managed_components = {'speed_label', 'speed_slider', 'speed_value_label'}
+        self._component_slot_rows = {}
+        self._component_slot_stretch = {}
+        self._component_slot_base_size = {}
 
-        self.playback_layout.setContentsMargins(0, 0, 0, 0)
-        self.navigation_layout.setContentsMargins(0, 0, 0, 0)
-        self.frame_meta_layout.setContentsMargins(0, 0, 0, 0)
-        self.speed_group_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.playback_layout.addWidget(self.play_pause_btn)
-        self.playback_layout.addWidget(self.stop_btn)
-        self.playback_layout.addWidget(self.mute_btn)
-
-        self.navigation_layout.addWidget(self.skip_back_btn)
-        self.navigation_layout.addWidget(self.prev_frame_btn)
-        self.navigation_layout.addWidget(self.next_frame_btn)
-        self.navigation_layout.addWidget(self.skip_forward_btn)
-
-        self.frame_meta_layout.addWidget(self.frame_label)
-        self.frame_meta_layout.addWidget(self.frame_spinbox)
-        self.frame_meta_layout.addWidget(self.frame_total_label)
-
-        self.speed_group_layout.addWidget(self.speed_label)
-        self.speed_group_layout.addWidget(self.speed_slider, 1)  # Expand to fill available section width
-        self.speed_group_layout.addWidget(self.speed_value_label)
+        self.controls_content_layout = QHBoxLayout()
+        self.controls_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.controls_content_layout.setSpacing(8)
 
         self._top_row_button_map = {
-            'play_button': self.play_pause_btn,
-            'stop_button': self.stop_btn,
-            'mute_button': self.mute_btn,
-            'skip_back_button': self.skip_back_btn,
-            'prev_frame_button': self.prev_frame_btn,
-            'next_frame_button': self.next_frame_btn,
-            'skip_forward_button': self.skip_forward_btn,
+            'play_button': self._create_component_slot('play_button', self.play_pause_btn, 'controls_row'),
+            'stop_button': self._create_component_slot('stop_button', self.stop_btn, 'controls_row'),
+            'mute_button': self._create_component_slot('mute_button', self.mute_btn, 'controls_row'),
+            'skip_back_button': self._create_component_slot('skip_back_button', self.skip_back_btn, 'controls_row'),
+            'prev_frame_button': self._create_component_slot('prev_frame_button', self.prev_frame_btn, 'controls_row'),
+            'next_frame_button': self._create_component_slot('next_frame_button', self.next_frame_btn, 'controls_row'),
+            'skip_forward_button': self._create_component_slot('skip_forward_button', self.skip_forward_btn, 'controls_row'),
         }
+        self._top_row_button_default_order = list(self._top_row_button_map.keys())
 
-        # Alignment spacers around grouped sections
+        self._controls_non_button_slots = {
+            'frame_label': self._create_component_slot('frame_label', self.frame_label, 'controls_row'),
+            'frame_spinbox': self._create_component_slot('frame_spinbox', self.frame_spinbox, 'controls_row'),
+            'frame_total_label': self._create_component_slot('frame_total_label', self.frame_total_label, 'controls_row'),
+            'speed_label': self._create_component_slot('speed_label', self.speed_label, 'controls_row'),
+            'speed_slider': self._create_component_slot('speed_slider', self.speed_slider, 'controls_row', stretch=1),
+            'speed_value_label': self._create_component_slot('speed_value_label', self.speed_value_label, 'controls_row'),
+        }
+        self._rebuild_top_controls_content()
+
+        # Alignment spacers around controls content
         self.controls_layout.addStretch(1)
         self.controls_left_spacer_index = self.controls_layout.count() - 1
-        self.controls_layout.addLayout(self.playback_layout)
-        self.controls_layout.addLayout(self.navigation_layout)
-        self.controls_layout.addLayout(self.frame_meta_layout)
-        self.controls_layout.addLayout(self.speed_group_layout)
+        self.controls_layout.addLayout(self.controls_content_layout)
         self.controls_layout.addStretch(1)
         self.controls_right_spacer_index = self.controls_layout.count() - 1
 
@@ -587,7 +610,10 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.marker_drag_started.connect(self._on_marker_drag_started)
         self.timeline_slider.marker_drag_ended.connect(self._on_marker_drag_ended)
         self.timeline_slider.marker_preview_frame.connect(self._on_marker_preview_frame)
-        self.slider_layout.addWidget(self.timeline_slider)
+        self.slider_layout.addWidget(
+            self._create_component_slot('timeline_slider', self.timeline_slider, 'timeline_row', stretch=1),
+            1,
+        )
 
         # Bottom row: Info display + Loop controls
         self.info_layout = QHBoxLayout()
@@ -671,17 +697,17 @@ class VideoControlsWidget(QWidget):
         self.loop_reset_btn.setStyleSheet("QPushButton { font-size: 16px; padding: 2px; }")
         self.loop_reset_btn.clicked.connect(self._reset_loop)
 
-        self.info_layout.addWidget(self.time_label)
-        self.info_layout.addWidget(self.fps_label)
-        self.info_layout.addWidget(self.frame_count_label)
+        self.info_layout.addWidget(self._create_component_slot('time_label', self.time_label, 'info_row'))
+        self.info_layout.addWidget(self._create_component_slot('fps_label', self.fps_label, 'info_row'))
+        self.info_layout.addWidget(self._create_component_slot('frame_count_label', self.frame_count_label, 'info_row'))
         self.info_layout.addStretch(1)
-        self.info_layout.addWidget(self.preview_container)
+        self.info_layout.addWidget(self._create_component_slot('preview_container', self.preview_container, 'info_row'))
         self.info_layout.addStretch(1)
-        self.info_layout.addWidget(self.sar_warning_label)
-        self.info_layout.addWidget(self.loop_reset_btn)
-        self.info_layout.addWidget(self.loop_start_btn)
-        self.info_layout.addWidget(self.loop_end_btn)
-        self.info_layout.addWidget(self.loop_checkbox)
+        self.info_layout.addWidget(self._create_component_slot('sar_warning_label', self.sar_warning_label, 'info_row'))
+        self.info_layout.addWidget(self._create_component_slot('loop_reset_button', self.loop_reset_btn, 'info_row'))
+        self.info_layout.addWidget(self._create_component_slot('loop_start_button', self.loop_start_btn, 'info_row'))
+        self.info_layout.addWidget(self._create_component_slot('loop_end_button', self.loop_end_btn, 'info_row'))
+        self.info_layout.addWidget(self._create_component_slot('loop_checkbox', self.loop_checkbox, 'info_row'))
 
         # Add all layouts to main
         self.main_layout = main_layout
@@ -741,6 +767,263 @@ class VideoControlsWidget(QWidget):
 
         # Hide by default
         self.hide()
+
+    def _floating_bleed(self) -> int:
+        """Extra empty area around the visual bar used for floating controls."""
+        if not hasattr(self, 'skin_manager') or not getattr(self.skin_manager, 'current_skin', None):
+            return 80
+        designer_layout = self.skin_manager.current_skin.get('video_player', {}).get('designer_layout', {})
+        if not isinstance(designer_layout, dict):
+            return 80
+        bleed = designer_layout.get('floating_bleed', 0)
+        try:
+            bleed = int(bleed)
+        except (TypeError, ValueError):
+            bleed = 80
+        return max(0, min(200, bleed))
+
+    def _refresh_background_surface(self):
+        """Apply current skin background to the dedicated visual surface widget."""
+        if not hasattr(self, 'background_surface'):
+            return
+        qcolor = QColor(str(getattr(self, '_skin_bg_color', '#242424')))
+        opacity = max(0.0, min(1.0, float(getattr(self, '_skin_bg_opacity', 0.95))))
+        qcolor.setAlphaF(opacity)
+        rgba = f"rgba({qcolor.red()}, {qcolor.green()}, {qcolor.blue()}, {qcolor.alpha()})"
+        border = str(getattr(self, '_skin_bg_border', 'none'))
+        radius = int(getattr(self, '_skin_bg_radius', 0))
+        self.background_surface.setStyleSheet(
+            f"QWidget {{ background-color: {rgba}; border: {border}; border-radius: {radius}px; }}"
+        )
+        self._update_background_surface_geometry()
+
+    def _update_background_surface_geometry(self):
+        """Keep background rectangle inset from floating area."""
+        if not hasattr(self, 'background_surface'):
+            return
+        bleed = self._floating_bleed()
+        rect = self.rect().adjusted(bleed, bleed, -bleed, -bleed)
+        if rect.width() < 1 or rect.height() < 1:
+            self.background_surface.hide()
+            return
+        self.background_surface.setGeometry(rect)
+        self.background_surface.lower()
+        self.background_surface.show()
+        self._update_component_overlay_geometry()
+
+    def _update_component_overlay_geometry(self):
+        """Keep overlay synced with player bounds and above background."""
+        # Overlay layer removed; components are parented directly to self.
+        return
+
+    def _reposition_component_overlays(self):
+        """Position real component widgets from anchor slot geometry."""
+        try:
+            self._update_component_overlay_geometry()
+        except RuntimeError:
+            return
+        invalid_anchor_found = False
+        for component_id in list(self._component_slots.keys()):
+            slot = self._component_slots.get(component_id)
+            widget = self._component_widgets.get(component_id)
+            if widget is None or slot is None:
+                continue
+            if component_id in self._slot_managed_components:
+                continue
+
+            cfg = self._get_component_layout(component_id)
+            align = str(cfg.get('align', 'center')).lower()
+            requested_container_width = int(cfg.get('container_width', 0))
+            offset_x = max(-240, min(240, int(cfg.get('offset_x', 0))))
+            offset_y = max(-180, min(180, int(cfg.get('offset_y', 0))))
+            try:
+                anchor = slot.geometry()
+            except RuntimeError:
+                # Qt object was deleted; drop stale registry entries safely.
+                self._component_slots.pop(component_id, None)
+                self._component_widgets.pop(component_id, None)
+                continue
+            if anchor.width() <= 0 or anchor.height() <= 0:
+                # Speed slider fallback anchor derived from Speed: and 1.00x labels.
+                if component_id == 'speed_slider':
+                    left_ref = self.speed_label.geometry()
+                    right_ref = self.speed_value_label.geometry()
+                    if left_ref.isValid() and right_ref.isValid() and right_ref.left() > left_ref.right():
+                        anchor = left_ref
+                        anchor.setLeft(left_ref.right() + 6)
+                        anchor.setRight(right_ref.left() - 6)
+                    else:
+                        invalid_anchor_found = True
+                        continue
+                else:
+                    invalid_anchor_found = True
+                    continue
+
+            hint = widget.sizeHint()
+            width = max(8, int(hint.width()))
+            height = max(8, int(hint.height()))
+
+            max_w = int(widget.maximumWidth())
+            max_h = int(widget.maximumHeight())
+            min_w = int(widget.minimumWidth())
+            min_h = int(widget.minimumHeight())
+
+            if 0 < max_w < 16777215:
+                width = max_w
+            if 0 < max_h < 16777215:
+                height = max_h
+            width = max(width, max(0, min_w))
+            height = max(height, max(0, min_h))
+
+            if component_id == 'speed_slider':
+                if requested_container_width > 0:
+                    width = max(20, requested_container_width)
+                else:
+                    width = max(20, anchor.width())
+            elif component_id == 'timeline_slider':
+                width = max(20, anchor.width())
+
+            if component_id in ('speed_label', 'speed_value_label'):
+                # Speed text/value are anchored by dedicated slots.
+                x = anchor.left()
+                y = anchor.top()
+                width = anchor.width()
+                height = anchor.height()
+                offset_x = 0
+                offset_y = 0
+            elif component_id == 'speed_slider':
+                # Slider is laid out in a dedicated lane between speed label and value.
+                x = anchor.left()
+                offset_x = 0
+            elif component_id == 'timeline_slider':
+                x = anchor.left()
+            elif align == 'left':
+                x = anchor.left()
+            elif align == 'right':
+                x = anchor.right() - width + 1
+            else:
+                x = anchor.left() + (anchor.width() - width) // 2
+            y = anchor.top() + (anchor.height() - height) // 2
+
+            try:
+                widget.setGeometry(int(x + offset_x), int(y + offset_y), int(width), int(height))
+            except RuntimeError:
+                self._component_widgets.pop(component_id, None)
+                continue
+            widget.show()
+            widget.raise_()
+
+        if invalid_anchor_found and self.isVisible():
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self._reposition_component_overlays)
+
+    def _create_component_slot(self, component_id: str, widget: QWidget, row_key: str, stretch: int = 0) -> QWidget:
+        """Create an anchor slot and attach real widget to overlay for free positioning."""
+        slot = QWidget(self)
+        slot.setAutoFillBackground(False)
+        slot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        if stretch > 0:
+            slot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        else:
+            slot.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        if component_id in self._slot_managed_components:
+            slot_layout = QHBoxLayout(slot)
+            slot_layout.setContentsMargins(0, 0, 0, 0)
+            slot_layout.setSpacing(0)
+            if component_id == 'speed_label':
+                slot_layout.addStretch(1)
+                slot_layout.addWidget(widget)
+            elif component_id == 'speed_value_label':
+                slot_layout.addWidget(widget)
+                slot_layout.addStretch(1)
+            else:
+                slot_layout.addWidget(widget, 1)
+            widget.setParent(slot)
+        else:
+            widget.setParent(self)
+        widget.show()
+
+        self._component_slots[component_id] = slot
+        self._component_widgets[component_id] = widget
+        self._component_slot_rows[component_id] = row_key
+        self._component_slot_stretch[component_id] = int(stretch)
+        self._component_slot_base_size[component_id] = {
+            "min_w": int(widget.minimumWidth()),
+            "max_w": int(widget.maximumWidth()),
+            "min_h": int(widget.minimumHeight()),
+            "max_h": int(widget.maximumHeight()),
+        }
+        return slot
+
+    def _rebuild_top_controls_content(self):
+        """Rebuild top-row order while preserving individual component slots."""
+        while self.controls_content_layout.count():
+            self.controls_content_layout.takeAt(0)
+
+        for component_id in self._top_row_button_default_order:
+            slot = self._top_row_button_map.get(component_id)
+            if slot:
+                self.controls_content_layout.addWidget(slot)
+
+        self.controls_content_layout.addWidget(self._controls_non_button_slots['frame_label'])
+        self.controls_content_layout.addWidget(self._controls_non_button_slots['frame_spinbox'])
+        self.controls_content_layout.addWidget(self._controls_non_button_slots['frame_total_label'])
+        self.controls_content_layout.addWidget(self._controls_non_button_slots['speed_label'])
+        self.controls_content_layout.addWidget(
+            self._controls_non_button_slots['speed_slider'],
+            self._component_slot_stretch.get('speed_slider', 1),
+        )
+        self.controls_content_layout.addWidget(self._controls_non_button_slots['speed_value_label'])
+
+    def _component_style_value(self, component_id: str, key: str, default):
+        """Resolve style value using component override fallback to global styling."""
+        skin = getattr(self.skin_manager, 'current_skin', {}) if hasattr(self, 'skin_manager') else {}
+        vp = skin.get('video_player', {}) if isinstance(skin, dict) else {}
+        component_styles = vp.get('component_styles', {})
+        if isinstance(component_styles, dict):
+            block = component_styles.get(component_id, {})
+            if isinstance(block, dict):
+                state_block = block.get('default', {})
+                if isinstance(state_block, dict) and key in state_block:
+                    return state_block[key]
+        styling = vp.get('styling', {})
+        if isinstance(styling, dict) and key in styling:
+            return styling.get(key)
+        return default
+
+    def _get_component_layout(self, component_id: str) -> dict:
+        defaults = {
+            # Keep speed trio visually grouped by default.
+            'speed_label': {'align': 'right', 'container_width': 64},
+            'speed_slider': {'align': 'center', 'container_width': 0},
+            'speed_value_label': {'align': 'left', 'container_width': 64},
+            'frame_spinbox': {'align': 'center', 'container_width': 86},
+            'frame_total_label': {'align': 'left', 'container_width': 64},
+            'loop_reset_button': {'container_width': 44},
+            'loop_start_button': {'container_width': 44},
+            'loop_end_button': {'container_width': 44},
+            'loop_checkbox': {'container_width': 72},
+        }
+        skin = getattr(self.skin_manager, 'current_skin', {}) if hasattr(self, 'skin_manager') else {}
+        vp = skin.get('video_player', {}) if isinstance(skin, dict) else {}
+        designer_layout = vp.get('designer_layout', {}) if isinstance(vp, dict) else {}
+        if not isinstance(designer_layout, dict):
+            return dict(defaults.get(component_id, {}))
+        component_layouts = designer_layout.get('component_layouts', {})
+        if not isinstance(component_layouts, dict):
+            return dict(defaults.get(component_id, {}))
+        layout = component_layouts.get(component_id, {})
+        merged = dict(defaults.get(component_id, {}))
+        if isinstance(layout, dict):
+            merged.update(layout)
+        if component_id in ('speed_label', 'speed_value_label'):
+            try:
+                cw = int(merged.get('container_width', 0))
+            except (TypeError, ValueError):
+                cw = 0
+            if cw <= 0:
+                merged['container_width'] = 58
+        return merged
 
     def _load_persistent_settings(self):
         """Load persistent settings from config."""
@@ -886,6 +1169,10 @@ class VideoControlsWidget(QWidget):
         # Apply designer position offsets (if any)
         self.apply_designer_positions()
 
+        # Keep layout/entity scaling synced with newly applied skin values.
+        self._apply_scaling()
+        self._schedule_layout_settle_reflow()
+
         # Force repaint
         self.update()
 
@@ -928,16 +1215,12 @@ class VideoControlsWidget(QWidget):
         info_offset_x = max(-500, min(500, info_offset_x))
         info_offset_y = max(-200, min(200, info_offset_y))
 
-        # Intra-section spacing
-        for layout in (
-            self.playback_layout,
-            self.navigation_layout,
-            self.frame_meta_layout,
-            self.speed_group_layout,
-        ):
-            layout.setSpacing(button_spacing)
+        # Per-component spacing in top row
+        self.controls_content_layout.setSpacing(button_spacing)
+        self.info_layout.setSpacing(button_spacing)
+        self.slider_layout.setSpacing(button_spacing)
 
-        # Inter-section spacing
+        # Inter-row spacing
         self.controls_layout.setSpacing(section_spacing)
 
         # Section alignment in controls row
@@ -974,6 +1257,8 @@ class VideoControlsWidget(QWidget):
             max(0, -info_offset_y),
         )
 
+        self._apply_component_layout_properties()
+
         # Timeline position (supported: above/below, integrated falls back to above)
         if timeline_position == 'below':
             self._set_main_row_order('controls_info_timeline')
@@ -981,7 +1266,36 @@ class VideoControlsWidget(QWidget):
             self._set_main_row_order('controls_timeline_info')
 
         # Keep the bar comfortably sized without hard-fixing height.
-        self.setMinimumHeight(control_bar_height)
+        self.setMinimumHeight(control_bar_height + (self._floating_bleed() * 2))
+
+    def _apply_component_layout_properties(self):
+        """Apply per-component container alignment/offset/size in slots."""
+        for component_id, slot in self._component_slots.items():
+            cfg = self._get_component_layout(component_id)
+            widget = self._component_widgets.get(component_id)
+            container_width = int(cfg.get('container_width', 0))
+            is_full_width_timeline = component_id == 'timeline_slider'
+            is_speed_slider = component_id == 'speed_slider'
+            container_height = int(cfg.get('container_height', 0))
+            hint_w = int(widget.sizeHint().width()) if widget else 0
+            hint_h = int(widget.sizeHint().height()) if widget else 0
+
+            if is_full_width_timeline or is_speed_slider:
+                slot.setMinimumWidth(0)
+                slot.setMaximumWidth(16777215)
+                slot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            elif container_width > 0:
+                slot.setFixedWidth(max(12, min(900, container_width)))
+            else:
+                slot.setMinimumWidth(max(12, hint_w))
+                slot.setMaximumWidth(16777215)
+            if container_height > 0:
+                slot.setFixedHeight(max(12, min(300, container_height)))
+            else:
+                slot.setMinimumHeight(max(12, hint_h))
+                slot.setMaximumHeight(16777215)
+
+        self._reposition_component_overlays()
 
     def _clear_layout(self, layout):
         """Detach all widgets/items from a layout."""
@@ -996,26 +1310,15 @@ class VideoControlsWidget(QWidget):
 
     def _apply_top_row_button_order(self, requested_order):
         """Apply deterministic ordering for the top-row transport buttons."""
-        default_order = [
-            'play_button',
-            'stop_button',
-            'mute_button',
-            'skip_back_button',
-            'prev_frame_button',
-            'next_frame_button',
-            'skip_forward_button',
-        ]
+        default_order = list(self._top_row_button_map.keys())
         if not isinstance(requested_order, list):
             requested_order = list(default_order)
         normalized = [name for name in requested_order if name in self._top_row_button_map]
         for name in default_order:
             if name not in normalized:
                 normalized.append(name)
-
-        self._clear_layout(self.playback_layout)
-        self._clear_layout(self.navigation_layout)
-        for name in normalized:
-            self.playback_layout.addWidget(self._top_row_button_map[name])
+        self._top_row_button_default_order = normalized
+        self._rebuild_top_controls_content()
 
     def _set_main_row_order(self, mode: str):
         """Reorder main rows safely when timeline position changes."""
@@ -1035,6 +1338,13 @@ class VideoControlsWidget(QWidget):
             self.main_layout.addLayout(self.info_layout)
 
         self._main_row_mode = mode
+        self._reposition_component_overlays()
+
+    def _schedule_layout_settle_reflow(self):
+        """Re-run positioning after Qt finishes the current layout pass."""
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._reposition_component_overlays)
+        QTimer.singleShot(0, self._update_background_surface_geometry)
 
     def apply_designer_positions(self):
         """Apply designer position offsets to widgets from skin data.
@@ -1085,6 +1395,10 @@ class VideoControlsWidget(QWidget):
         for prop_name, pos_data in self._designer_positions.items():
             if prop_name in self._positioned_widgets:
                 widget = self._positioned_widgets[prop_name]
+                # New anchor/entity layout owns all registered components.
+                # Skip legacy absolute positioning for these components.
+                if hasattr(self, '_component_slots') and prop_name in self._component_slots:
+                    continue
                 x = pos_data.get('x')
                 y = pos_data.get('y')
 
@@ -1195,7 +1509,6 @@ class VideoControlsWidget(QWidget):
     def _apply_scaling(self):
         """Apply scaling to internal elements based on current width."""
         width = self.width()
-        applier = self.skin_manager.get_current_applier() if hasattr(self, 'skin_manager') else None
         designer_layout = {}
         if hasattr(self, 'skin_manager') and self.skin_manager.current_skin:
             designer_layout = self.skin_manager.current_skin.get('video_player', {}).get('designer_layout', {})
@@ -1210,48 +1523,57 @@ class VideoControlsWidget(QWidget):
         max_scale = max(min_scale, min(3.0, max_scale))
         scale = min(max_scale, max(min_scale, width / ideal_width))
 
-        # Scale button sizes and fonts
-        base_button_size = 40
-        if applier:
-            base_button_size = int(applier.styling.get('button_size', 40))
-        button_size = int(base_button_size * scale)
-        for btn in [self.play_pause_btn, self.stop_btn, self.mute_btn, self.prev_frame_btn,
-                    self.next_frame_btn, self.skip_back_btn, self.skip_forward_btn]:
-            btn.setMaximumWidth(button_size)
-            btn.setMaximumHeight(button_size)
+        def component_scale(component_id: str) -> float:
+            cfg = self._get_component_layout(component_id)
+            return max(0.25, min(4.0, float(cfg.get('scale', 1.0))))
 
-        # Note: Don't override skin colors - skin system handles styling
-        # Only scaling needs to happen here
-
-        # Scale loop control buttons (sizes only, skin handles colors)
-        loop_btn_size = int(max(24, base_button_size - 10) * scale)
-        for btn in [self.loop_start_btn, self.loop_end_btn, self.loop_reset_btn]:
-            btn.setMaximumWidth(loop_btn_size)
-            btn.setMaximumHeight(loop_btn_size)
-
-        # Scale loop checkbox (size only, skin handles colors)
-        loop_checkbox_width = int((base_button_size + 10) * scale)
-        self.loop_checkbox.setMaximumWidth(loop_checkbox_width)
+        # Scale button sizes per component.
+        button_map = {
+            'play_button': self.play_pause_btn,
+            'stop_button': self.stop_btn,
+            'mute_button': self.mute_btn,
+            'prev_frame_button': self.prev_frame_btn,
+            'next_frame_button': self.next_frame_btn,
+            'skip_back_button': self.skip_back_btn,
+            'skip_forward_button': self.skip_forward_btn,
+            'loop_start_button': self.loop_start_btn,
+            'loop_end_button': self.loop_end_btn,
+            'loop_reset_button': self.loop_reset_btn,
+            'loop_checkbox': self.loop_checkbox,
+        }
+        for component_id, btn in button_map.items():
+            base_button_size = int(self._component_style_value(component_id, 'button_size', 40))
+            scaled_size = int(max(12, base_button_size * scale * component_scale(component_id)))
+            btn.setMaximumWidth(scaled_size)
+            btn.setMaximumHeight(scaled_size)
+            if component_id == 'loop_checkbox':
+                btn.setMaximumWidth(int(max(64, scaled_size * 1.9)))
 
         # Scale frame spinbox
-        spinbox_width = int(80 * scale)
+        spinbox_width = int(max(60, 80 * scale * component_scale('frame_spinbox')))
         self.frame_spinbox.setMaximumWidth(spinbox_width)
-        # Scale spinbox font (bigger base size: 12pt)
         spinbox_font = self.frame_spinbox.font()
-        spinbox_font.setPointSize(max(9, int(12 * scale)))
+        spinbox_font.setPointSize(max(8, int(11 * scale * component_scale('frame_spinbox'))))
         self.frame_spinbox.setFont(spinbox_font)
 
-        # Scale label fonts (bigger base size: 11pt)
-        label_font = self.frame_label.font()
-        label_font.setPointSize(max(8, int(11 * scale)))
-        for label in [self.frame_label, self.time_label, self.fps_label,
-                      self.frame_count_label, self.frame_total_label,
-                      self.sar_warning_label, self.speed_label, self.speed_value_label]:
-            label.setFont(label_font)
+        # Scale label fonts per component.
+        label_map = {
+            'frame_label': self.frame_label,
+            'frame_total_label': self.frame_total_label,
+            'time_label': self.time_label,
+            'fps_label': self.fps_label,
+            'frame_count_label': self.frame_count_label,
+            'sar_warning_label': self.sar_warning_label,
+            'speed_label': self.speed_label,
+            'speed_value_label': self.speed_value_label,
+        }
+        for component_id, label in label_map.items():
+            base_font_size = int(self._component_style_value(component_id, 'label_font_size', 11))
+            font = label.font()
+            font.setPointSize(max(7, int(base_font_size * scale * component_scale(component_id))))
+            label.setFont(font)
 
-        # Scale preview labels font size (slightly larger base size)
-        preview_font_size = max(8, int(10 * scale))
-        # Update existing preview labels
+        preview_font_size = max(8, int(10 * scale * component_scale('preview_container')))
         for i in range(self.preview_labels_layout.count()):
             item = self.preview_labels_layout.itemAt(i)
             if item and item.widget():
@@ -1261,23 +1583,23 @@ class VideoControlsWidget(QWidget):
                     font.setPointSize(preview_font_size)
                     widget.setFont(font)
 
-        # Scale speed slider - only set minimum width, let it expand
-        speed_slider_min_width = int(100 * scale)
+        speed_slider_min_width = int(max(80, 100 * scale * component_scale('speed_slider')))
         self.speed_slider.setMinimumWidth(speed_slider_min_width)
-        # Don't set maximum width - let it fill available space
-
-        # Scale slider minimum height
-        slider_height = int(30 * scale)
+        slider_height = int(max(20, 30 * scale * component_scale('timeline_slider')))
         self.timeline_slider.setMinimumHeight(slider_height)
 
         # Scale margins and spacing
         margin = int(8 * scale)
         spacing = int(8 * scale)
-        self.layout().setContentsMargins(margin, int(4 * scale), margin, int(4 * scale))
+        self.layout().setContentsMargins(
+            margin,
+            int(4 * scale),
+            margin,
+            int(4 * scale),
+        )
         self.layout().setSpacing(spacing)
-
-        # Reapply skin to restore colors after scaling (scaling only adjusts sizes)
-        self.apply_current_skin()
+        self._apply_component_layout_properties()
+        self._update_background_surface_geometry()
 
     def resizeEvent(self, event):
         """Scale all controls based on available width."""
@@ -1288,11 +1610,18 @@ class VideoControlsWidget(QWidget):
             return
 
         self._apply_scaling()
+        self._update_background_surface_geometry()
+        self._schedule_layout_settle_reflow()
 
         # Reapply designer positions after scaling
         if hasattr(self, '_designer_positions') and self._designer_positions:
             from PySide6.QtCore import QTimer
             QTimer.singleShot(10, self._apply_designer_positions_now)
+
+    def showEvent(self, event):
+        """Ensure overlay-positioned components snap to valid anchors when shown."""
+        super().showEvent(event)
+        self._schedule_layout_settle_reflow()
 
     @Slot()
     def _prev_frame(self):

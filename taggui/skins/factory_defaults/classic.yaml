@@ -1,0 +1,63 @@
+name: "Classic"
+author: "TagGUI"
+version: "1.0"
+
+# EXACT original design before skin system
+# 100% matches hardcoded video_controls.py values
+
+video_player:
+  layout:
+    control_bar_height: 60
+    control_bar_position: "bottom"
+    button_alignment: "center"
+    timeline_position: "above"
+    button_spacing: 10
+    section_spacing: 20  # Original addSpacing(20)
+
+  styling:
+    # Background - EXACT original (black with 0.8 opacity)
+    background: "#000000"
+    control_bar_color: "#000000"  # Qt.GlobalColor.black
+    control_bar_opacity: 0.80     # setWindowOpacity(0.8)
+
+    # Buttons - EXACT original hardcoded stylesheet
+    button_size: 36                # setMaximumWidth(40)
+    button_icon_color: "#FFFFFF"
+    button_bg_color: "#2b2b2b"     # Original background-color
+    button_hover_color: "#3a3a3a"  # Original hover
+    button_border: "2px solid #555555"  # Original border
+    button_border_radius: 4
+
+    # Timeline slider
+    timeline_height: 8
+    timeline_color: "#2196F3"
+    timeline_bg_color: "#1A1A1A"
+    slider_handle_size: 16
+    slider_handle_color: "#FFFFFF"
+    slider_handle_border: "2px solid #333333"
+
+    # Loop markers - EXACT original
+    loop_marker_start_color: "#FF0080"
+    loop_marker_end_color: "#FF8C00"
+    loop_marker_outline: "#FFFFFF"
+    loop_marker_outline_width: 2
+
+    # Speed slider - EXACT original gradient
+    speed_gradient_start: "#2D5A2D"
+    speed_gradient_mid: "#6B8E23"
+    speed_gradient_end: "#32CD32"
+
+    # Text - original defaults
+    text_color: "#FFFFFF"
+    text_secondary_color: "#B0B0B0"
+    label_font_size: 12
+
+  borders:
+    radius: 4
+    control_bar_border: "none"
+    button_border: "2px solid #555555"
+
+  shadows:
+    control_bar: "none"
+    button: "none"
+    overlay: "none"
