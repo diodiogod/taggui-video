@@ -116,17 +116,20 @@ class SkinDesignerLive(QDialog):
 
         root = QHBoxLayout(self)
 
-        # Left: real player instance for click-select
+        # Left: live player canvas (same drag/resize behavior as runtime)
         left = QVBoxLayout()
         left.addWidget(QLabel("Live Player (click any element)"))
-        self.live_preview = VideoControlsWidget(self)
-        self.live_preview.setMinimumHeight(180)
-        # Keep timeline visibly filled while designing colors/styles.
-        self.live_preview.timeline_slider.setMinimum(0)
-        self.live_preview.timeline_slider.setMaximum(100)
-        self.live_preview.timeline_slider.setValue(40)
+        self.preview_canvas = QFrame(self)
+        self.preview_canvas.setMinimumHeight(260)
+        self.preview_canvas.setFrameShape(QFrame.Shape.StyledPanel)
+        self.preview_canvas.setStyleSheet(
+            "QFrame { background-color: #202020; border: 1px solid #3A3A3A; border-radius: 6px; }"
+        )
+        left.addWidget(self.preview_canvas)
+
+        self.live_preview = VideoControlsWidget(self.preview_canvas)
+        self.live_preview.setGeometry(20, 56, 860, 190)
         self.live_preview.show()
-        left.addWidget(self.live_preview)
         root.addLayout(left, 2)
 
         # Selection outline overlay
@@ -171,9 +174,11 @@ class SkinDesignerLive(QDialog):
 
         self._component_widgets = self._build_component_map()
         self._install_click_handlers()
+        self._init_designer_preview_state()
         self._load_global_controls()
         self._refresh_color_button_swatches()
         self._apply_skin_everywhere()
+        QTimer.singleShot(0, self._ensure_preview_in_canvas_bounds)
 
     def _set_help_tooltips(self):
         """Attach informative tooltips for all interactive designer fields."""
@@ -951,13 +956,44 @@ class SkinDesignerLive(QDialog):
             widget.setProperty("designer_component_id", component_id)
             widget.installEventFilter(self)
 
+    def _init_designer_preview_state(self):
+        """Keep preview informative even without a real loaded video."""
+        self.live_preview.frame_spinbox.setMaximum(100)
+        self.live_preview.timeline_slider.setMinimum(0)
+        self.live_preview.timeline_slider.setMaximum(100)
+        self.live_preview.timeline_slider.setValue(40)
+        # Show fixed fake loop markers so style changes are visible while designing.
+        self.live_preview.apply_loop_state(18, 78, False, save=False, emit_signals=False)
+        self.live_preview._update_marker_range_display()
+
+    def _ensure_preview_in_canvas_bounds(self):
+        """Keep draggable/resizable preview fully inside its canvas."""
+        if not hasattr(self, "preview_canvas"):
+            return
+        canvas = self.preview_canvas.rect()
+        if canvas.width() < 80 or canvas.height() < 80:
+            return
+
+        margin = 6
+        min_w = max(120, min(400, canvas.width() - (margin * 2)))
+        x = max(margin, self.live_preview.x())
+        y = max(margin, self.live_preview.y())
+        max_w = max(min_w, canvas.width() - (margin * 2))
+        w = max(min_w, min(self.live_preview.width(), max_w))
+        h = max(80, min(self.live_preview.height(), canvas.height() - (margin * 2)))
+        if x + w > canvas.width() - margin:
+            x = max(margin, canvas.width() - margin - w)
+        if y + h > canvas.height() - margin:
+            y = max(margin, canvas.height() - margin - h)
+        self.live_preview.setGeometry(int(x), int(y), int(w), int(h))
+
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             # First try direct property on the watched widget.
             component_id = watched.property("designer_component_id")
             if component_id:
                 self._select_component(component_id)
-                return True
+                return False
 
             # Fallback: resolve click target via ancestry inside live preview.
             if watched is self.live_preview:
@@ -966,7 +1002,9 @@ class SkinDesignerLive(QDialog):
                 resolved = self._resolve_component_from_widget(clicked)
                 if resolved:
                     self._select_component(resolved)
-                    return True
+                    return False
+                self._select_component("control_bar")
+                return False
         return super().eventFilter(watched, event)
 
     def _resolve_component_from_widget(self, widget):
@@ -1319,6 +1357,23 @@ class SkinDesignerLive(QDialog):
         self._pick_color("loop_marker_end_color")
 
     def _reset_layout(self):
+        confirm = QMessageBox.warning(
+            self,
+            "Reset Layout?",
+            (
+                "This will reset layout positioning settings for the current skin:\n"
+                "- row offsets\n"
+                "- per-component layout overrides (align/offset/container/scale)\n"
+                "- floating bleed and layout scaling\n\n"
+                "Colors and non-layout styling are not changed.\n\n"
+                "Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
         d = self._designer_layout()
         d["controls_row"] = {"offset_x": 0, "offset_y": 0}
         d["timeline_row"] = {"offset_x": 0, "offset_y": 0}
@@ -1562,6 +1617,8 @@ class SkinDesignerLive(QDialog):
 
     def _apply_skin_everywhere(self):
         self.live_preview.apply_skin_data(self.skin_data)
+        self.live_preview.apply_loop_state(18, 78, False, save=False, emit_signals=False)
+        self.live_preview.timeline_slider.setValue(40)
         self._refresh_color_button_swatches()
         if self._selected_component:
             QTimer.singleShot(0, lambda: self._move_selection_frame(self._selected_component))
@@ -1569,6 +1626,10 @@ class SkinDesignerLive(QDialog):
             self._sync_pending = True
             QTimer.singleShot(25, self._apply_to_main_player_quiet)
         self._autosave_timer.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._ensure_preview_in_canvas_bounds)
 
     def _apply_to_main_player_quiet(self):
         self._sync_pending = False
