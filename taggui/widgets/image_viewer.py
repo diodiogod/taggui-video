@@ -113,6 +113,7 @@ class ImageViewer(QWidget):
             x_pos = max(0, min(x_pos, self.width() - controls_width))
             y_pos = max(0, min(y_pos, self.height() - controls_height))
             self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+            self.video_controls._stabilize_after_geometry_change()
 
         # Enable mouse tracking for auto-hide
         self.setMouseTracking(True)
@@ -449,9 +450,11 @@ class ImageViewer(QWidget):
                 x_pos = max(0, min(x_pos, self.width() - controls_width))
                 y_pos = max(0, min(y_pos, self.height() - controls_height))
                 self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+                self.video_controls._stabilize_after_geometry_change()
 
         # Raise to ensure it's on top
         self.video_controls.raise_()
+        self.video_controls._stabilize_after_geometry_change()
 
     def resizeEvent(self, event):
         """Reposition controls when viewer is resized."""

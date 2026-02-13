@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         type=str,
         default="",
-        help="Output directory (default: temp dir with timestamp)",
+        help="Output directory (default: repo Ignored/player-captures/<timestamp>)",
     )
     p.add_argument("--skin", type=str, default="", help="Optional skin name to load")
     return p.parse_args()
@@ -70,7 +69,7 @@ def main() -> int:
         outdir = Path(args.outdir)
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        outdir = Path(tempfile.gettempdir()) / f"taggui_player_resize_{stamp}"
+        outdir = repo_root / "Ignored" / "player-captures" / stamp
     outdir.mkdir(parents=True, exist_ok=True)
 
     win = QMainWindow()

@@ -354,6 +354,7 @@ class VideoControlsWidget(QWidget):
         # For dragging the controls
         self._dragging = False
         self._drag_start_pos = None
+        self._drag_has_moved = False
 
         # For resizing the controls
         self._resizing = False
@@ -362,6 +363,11 @@ class VideoControlsWidget(QWidget):
         self._resize_start_x = None
         self._resize_handle_width = 10  # Width of resize area on edges
         self._resize_corner_size = 20  # Size of corner resize areas (also resize width only)
+        self._height_sync_in_progress = False
+
+        # Double-click fit/restore state
+        self._fit_mode_active = False
+        self._pre_fit_geometry_percent = None
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -1313,7 +1319,7 @@ class VideoControlsWidget(QWidget):
             min_lane_h = 12 if is_visible else 0
 
             # Fully collapse hidden component slots so compact modes can truly shrink.
-            if not is_visible and not is_full_width_timeline and not is_speed_slider:
+            if not is_visible:
                 slot.setFixedWidth(0)
                 slot.setFixedHeight(0)
                 continue
@@ -1385,6 +1391,37 @@ class VideoControlsWidget(QWidget):
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self._reposition_component_overlays)
         QTimer.singleShot(0, self._update_background_surface_geometry)
+        QTimer.singleShot(0, self._sync_height_to_content)
+
+    def _stabilize_after_geometry_change(self):
+        """Run a few deferred layout passes to avoid half-rendered startup states."""
+        from PySide6.QtCore import QTimer
+
+        def _pass():
+            self._apply_scaling()
+            self._sync_height_to_content()
+            self._schedule_layout_settle_reflow()
+
+        QTimer.singleShot(0, _pass)
+        QTimer.singleShot(30, _pass)
+        QTimer.singleShot(90, _pass)
+
+    def _sync_height_to_content(self):
+        """Keep widget height aligned to current content/layout while preserving width."""
+        if self._height_sync_in_progress or self._resizing:
+            return
+        self._height_sync_in_progress = True
+        try:
+            current_width = max(self.minimum_runtime_width(), self.width())
+            self.layout().invalidate()
+            self.layout().activate()
+            target_height = max(self.minimumHeight(), self.sizeHint().height())
+            if abs(self.height() - target_height) > 1:
+                self.resize(current_width, target_height)
+            self._update_background_surface_geometry()
+            self._reposition_component_overlays()
+        finally:
+            self._height_sync_in_progress = False
 
     def apply_designer_positions(self):
         """Apply designer position offsets to widgets from skin data.
@@ -1570,11 +1607,18 @@ class VideoControlsWidget(QWidget):
             cfg = self._get_component_layout(component_id)
             return max(0.25, min(4.0, float(cfg.get('scale', 1.0))))
 
-        # Keep transport buttons visually proportional in compact mode.
-        if width < 460:
-            button_scale_floor = 0.62
-        elif width < 620:
+        # Keep transport buttons visually proportional in compact tiers.
+        # Three tiers:
+        # - middle (<520): near-full layout, gentle shrink
+        # - compact (<420): hide low-priority items
+        # - nano (<320): essentials-only layout
+        # Floors are monotonic so nano never looks "bigger" than compact.
+        if width < 320:
             button_scale_floor = 0.72
+        elif width < 420:
+            button_scale_floor = 0.76
+        elif width < 520:
+            button_scale_floor = 0.80
         else:
             button_scale_floor = 0.78
         button_scale = max(button_scale_floor, scale)
@@ -1647,7 +1691,7 @@ class VideoControlsWidget(QWidget):
         self._apply_compact_visibility(width)
 
         # Scale margins and spacing
-        margin = int(8 * scale)
+        margin = max(12, int(8 * scale))
         spacing = int(8 * scale)
         self.layout().setContentsMargins(
             margin,
@@ -1661,15 +1705,15 @@ class VideoControlsWidget(QWidget):
 
     def _apply_compact_visibility(self, width: int):
         """Hide low-priority labels when width is very small to prevent overlap."""
-        compact = width < 620
-        ultra = width < 560
-        super_compact = width < 540
-        nano = width < 540
+        middle = width < 520
+        compact = width < 420
+        nano = width < 320
 
+        # Middle tier: keep almost everything visible.
         self.fps_label.setVisible(not compact)
         self.frame_count_label.setVisible(not compact)
 
-        if ultra:
+        if compact:
             self.frame_label.setText('')
             self.speed_label.setText('')
             self.frame_label.setVisible(False)
@@ -1682,19 +1726,23 @@ class VideoControlsWidget(QWidget):
             self.speed_label.setText('Speed:')
             self.frame_total_label.setVisible(True)
 
-        self.preview_container.setVisible(not compact)
+        # Hide preview label row only when space gets tight.
+        self.preview_container.setVisible(not middle)
+        # Keep timeline visible in every tier (including nano).
+        self.timeline_slider.setVisible(True)
 
-        # Super-compact mode: preserve only core transport + timeline + basic time + loop toggle.
-        self.frame_spinbox.setVisible(not super_compact)
-        self.speed_slider.setVisible(not super_compact)
-        self.speed_value_label.setVisible(not super_compact)
-        self.skip_back_btn.setVisible(not super_compact)
-        self.skip_forward_btn.setVisible(not super_compact)
-        self.loop_start_btn.setVisible(not super_compact)
-        self.loop_end_btn.setVisible(not super_compact)
-        self.loop_reset_btn.setVisible(not super_compact)
+        # Compact tier: drop some non-essential controls but keep main interaction intact.
+        self.frame_spinbox.setVisible(not compact)
+        self.speed_slider.setVisible(not compact)
+        self.speed_value_label.setVisible(not compact)
+        self.skip_back_btn.setVisible(not compact)
+        self.skip_forward_btn.setVisible(not compact)
+        self.loop_start_btn.setVisible(not compact)
+        self.loop_end_btn.setVisible(not compact)
+        self.loop_reset_btn.setVisible(not compact)
 
-        # Nano mode: only core playback + timeline + time label + loop toggle.
+        # Nano mode: only core playback + timeline.
+        self.play_pause_btn.setVisible(True)
         if nano:
             self.mute_btn.setVisible(False)
             self.prev_frame_btn.setVisible(False)
@@ -1702,16 +1750,93 @@ class VideoControlsWidget(QWidget):
             self.frame_spinbox.setVisible(False)
             self.loop_checkbox.setVisible(False)
             self.time_label.setVisible(False)
+            # Extreme nano: keep only play/pause to avoid transport overlap.
+            self.stop_btn.setVisible(width >= 220)
         else:
             self.mute_btn.setVisible(True)
             self.prev_frame_btn.setVisible(True)
             self.next_frame_btn.setVisible(True)
             self.loop_checkbox.setVisible(True)
             self.time_label.setVisible(True)
+            self.stop_btn.setVisible(True)
 
     def minimum_runtime_width(self) -> int:
         """Minimum practical runtime width for drag-resize and viewer restore."""
-        return 180
+        return 80
+
+    def _capture_geometry_percent(self):
+        """Capture current geometry as parent-relative percentages."""
+        parent = self.parentWidget()
+        if not parent:
+            return None
+        pw = parent.width()
+        ph = parent.height()
+        if pw <= 0 or ph <= 0:
+            return None
+        return (
+            self.x() / pw,
+            self.y() / ph,
+            self.width() / pw,
+        )
+
+    def _apply_geometry_percent(self, geometry_percent):
+        """Apply parent-relative geometry percentages, clamped to parent bounds."""
+        if not geometry_percent or len(geometry_percent) != 3:
+            return
+        parent = self.parentWidget()
+        if not parent:
+            return
+        pw = parent.width()
+        ph = parent.height()
+        if pw <= 0 or ph <= 0:
+            return
+        x_pct, y_pct, w_pct = geometry_percent
+        min_w = self.minimum_runtime_width()
+        width = max(min_w, min(int(w_pct * pw), pw))
+        height = self.height()
+        x = max(0, min(int(x_pct * pw), pw - width))
+        y = max(0, min(int(y_pct * ph), ph - height))
+        self.setGeometry(x, y, width, height)
+        self._apply_scaling()
+        self._schedule_layout_settle_reflow()
+        settings.setValue('video_controls_x_percent', self.x() / pw)
+        settings.setValue('video_controls_y_percent', self.y() / ph)
+        settings.setValue('video_controls_width_percent', self.width() / pw)
+
+    def fit_to_parent_width(self):
+        """Auto-fit controls width to parent while preserving current Y position."""
+        parent = self.parentWidget()
+        if not parent:
+            return
+        parent_rect = parent.rect()
+        if parent_rect.width() <= 0 or parent_rect.height() <= 0:
+            return
+        min_w = self.minimum_runtime_width()
+        target_w = max(min_w, int(parent_rect.width() * 0.96))
+        target_w = min(target_w, parent_rect.width())
+        x_pos = max(0, (parent_rect.width() - target_w) // 2)
+        y_pos = max(0, min(self.y(), parent_rect.height() - self.height()))
+        self.setGeometry(x_pos, y_pos, target_w, self.height())
+        self._apply_scaling()
+        self._schedule_layout_settle_reflow()
+        self._sync_height_to_content()
+        settings.setValue('video_controls_x_percent', self.x() / parent_rect.width())
+        settings.setValue('video_controls_y_percent', self.y() / parent_rect.height())
+        settings.setValue('video_controls_width_percent', self.width() / parent_rect.width())
+
+    def toggle_fit_width(self):
+        """Toggle between auto-fit width and previously used custom geometry."""
+        if self._fit_mode_active:
+            if self._pre_fit_geometry_percent:
+                self._apply_geometry_percent(self._pre_fit_geometry_percent)
+            self._fit_mode_active = False
+            return
+
+        current_percent = self._capture_geometry_percent()
+        if current_percent:
+            self._pre_fit_geometry_percent = current_percent
+        self.fit_to_parent_width()
+        self._fit_mode_active = True
 
     def resizeEvent(self, event):
         """Scale all controls based on available width."""
@@ -1733,7 +1858,7 @@ class VideoControlsWidget(QWidget):
     def showEvent(self, event):
         """Ensure overlay-positioned components snap to valid anchors when shown."""
         super().showEvent(event)
-        self._schedule_layout_settle_reflow()
+        self._stabilize_after_geometry_change()
 
     @Slot()
     def _prev_frame(self):
@@ -2721,6 +2846,7 @@ class VideoControlsWidget(QWidget):
             # Otherwise, start dragging
             self._dragging = True
             self._drag_start_pos = event.globalPosition().toPoint() - self.pos()
+            self._drag_has_moved = False
             self._stop_parent_hide_timer()
             event.accept()
 
@@ -2776,6 +2902,8 @@ class VideoControlsWidget(QWidget):
             parent_rect = self.parent().rect()
             new_pos.setX(max(0, min(new_pos.x(), parent_rect.width() - self.width())))
             new_pos.setY(max(0, min(new_pos.y(), parent_rect.height() - self.height())))
+            if new_pos != self.pos():
+                self._drag_has_moved = True
             self.move(new_pos)
             event.accept()
 
@@ -2784,11 +2912,13 @@ class VideoControlsWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             was_resizing = self._resizing
             was_dragging = self._dragging
+            drag_moved = bool(self._drag_has_moved)
             current_width = self.width()  # Save width before changing flags
 
             # Always clear states first
             self._dragging = False
             self._resizing = False
+            self._drag_has_moved = False
 
             # Restart parent hide timer after drag/resize ends
             if was_resizing or was_dragging:
@@ -2810,7 +2940,7 @@ class VideoControlsWidget(QWidget):
                 self.update()
 
             # Save position and width as percentage of parent dimensions
-            if was_resizing or was_dragging:
+            if was_resizing or drag_moved:
                 if self.parent():
                     parent_width = self.parent().width()
                     parent_height = self.parent().height()
@@ -2821,7 +2951,30 @@ class VideoControlsWidget(QWidget):
                         settings.setValue('video_controls_x_percent', x_percent)
                         settings.setValue('video_controls_y_percent', y_percent)
                         settings.setValue('video_controls_width_percent', width_percent)
+                        self._pre_fit_geometry_percent = (x_percent, y_percent, width_percent)
+                        self._fit_mode_active = False
             event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-click empty bar background to fit width to viewer."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            clicked_child = self.childAt(event.pos())
+            non_interactive_fit_targets = {
+                self.time_label,
+                self.fps_label,
+                self.frame_count_label,
+                self.frame_label,
+                self.frame_total_label,
+            }
+            if (
+                clicked_child is None
+                or clicked_child is self.background_surface
+                or clicked_child in non_interactive_fit_targets
+            ):
+                self.toggle_fit_width()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
         """Show skin selection context menu on right-click."""
