@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from PIL import Image
 from PySide6.QtCore import QRect
+from utils.video.ffmpeg_gpu import ffmpeg_base_args
 
 
 def create_backup(file_path: Path) -> bool:
@@ -93,7 +94,7 @@ def apply_crop_to_video(video_path: Path, crop_rect: QRect) -> tuple[bool, str]:
 
         # Run ffmpeg to crop video
         cmd = [
-            'ffmpeg', '-y',
+            *ffmpeg_base_args(), '-y',
             '-loglevel', 'error',  # Only show errors, not warnings
             '-i', str(video_path),
             '-vf', crop_filter,

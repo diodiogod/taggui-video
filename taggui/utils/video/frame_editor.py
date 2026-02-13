@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 from .common import create_backup
+from .ffmpeg_gpu import ffmpeg_base_args
 
 
 class FrameEditor:
@@ -47,7 +48,7 @@ class FrameEditor:
 
             # ffmpeg command with stream copy (keyframe-accurate only, no re-encoding)
             cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-ss', str(start_time),  # Seek to start (keyframe)
                 '-i', str(input_path),
                 '-t', str(duration),     # Duration
@@ -155,7 +156,7 @@ class FrameEditor:
             # Note: -c copy cannot do frame-accurate cuts, only keyframe cuts
             # Using trim filter for frame accuracy with re-encoding
             cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-i', str(input_path),
                 '-vf', vf,
                 '-af', af,
@@ -335,7 +336,7 @@ class FrameEditor:
 
                 # Run single ffmpeg command with filter complex
                 cmd = [
-                    'ffmpeg',
+                    *ffmpeg_base_args(),
                     '-i', str(input_path),
                     '-filter_complex', filter_complex if filter_complex else 'copy',
                 ]
@@ -474,7 +475,7 @@ class FrameEditor:
             # Extract the frame to repeat as MP4
             # Using MP4 avoids problematic color space conversion issues (yuv420p doesn't need conversion)
             extract_cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-i', str(input_path),
                 '-vf', f'trim=start_frame={frame_num}:end_frame={frame_num+1}',
                 '-c:v', 'libx264',
@@ -563,7 +564,7 @@ class FrameEditor:
             temp_output = output_path.parent / f'.temp_output_{output_path.name}'
 
             cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-i', str(input_path),
                 '-i', str(frame_file),
                 '-filter_complex', filter_complex,
@@ -787,7 +788,7 @@ class FrameEditor:
             af = ','.join(audio_filters) if audio_filters else None
 
             cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-i', str(input_path),
                 '-filter:v', filter_string,
             ]
@@ -887,7 +888,7 @@ class FrameEditor:
             # Use fps filter to change framerate (automatically drops/duplicates frames)
             # This preserves duration by adjusting frame count
             cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-i', str(input_path),
                 '-filter:v', f'fps={target_fps}',
                 '-c:a', 'copy',  # Keep audio unchanged

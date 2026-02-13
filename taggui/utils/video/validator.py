@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Tuple, Optional
 import cv2
+from .ffmpeg_gpu import ffmpeg_base_args
 
 
 class VideoValidator:
@@ -26,7 +27,7 @@ class VideoValidator:
             if check_decode:
                 # More thorough check: try to decode all frames
                 cmd = [
-                    'ffmpeg',
+                    *ffmpeg_base_args(),
                     '-v', 'error',
                     '-i', str(video_path),
                     '-f', 'null',

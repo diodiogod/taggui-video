@@ -1,10 +1,13 @@
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout)
 
 from pathlib import Path
+import sys
 import shutil
+import subprocess
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox)
@@ -567,6 +570,8 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(floating_detail_zoom_spin_box, 2, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=3)
+
         layout.addLayout(grid_layout)
         layout.addStretch()
 
@@ -601,6 +606,100 @@ class SettingsDialog(QDialog):
             return f"{total_size:.1f} TB"
         except Exception:
             return "? (error)"
+
+    def _add_gpu_video_settings(self, grid_layout: QGridLayout, start_row: int):
+        """Add advanced GPU/video backend settings block."""
+        # Playback GPU preference (OS-level policy for Qt multimedia backend)
+        grid_layout.addWidget(QLabel('Playback GPU preference'), start_row, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.video_playback_gpu_combo = SettingsComboBox(
+            key='video_playback_gpu_preference',
+            default='system_default')
+        self.video_playback_gpu_combo.addItems([
+            'system_default',
+            'high_performance',
+            'power_saving',
+        ])
+        self.video_playback_gpu_combo.setToolTip(
+            'Preferred GPU policy for live playback/rendering (Qt/OS controlled).\n\n'
+            'system_default: Let OS/driver decide.\n'
+            'high_performance: Prefer discrete/high-power GPU.\n'
+            'power_saving: Prefer integrated/low-power GPU.\n\n'
+            'Important: On Windows this is applied in OS Graphics Settings per app.\n'
+            'Use the button below to open that panel. Restart TagGUI after changing.'
+        )
+        self.video_playback_gpu_combo.currentTextChanged.connect(
+            self._on_playback_gpu_preference_changed
+        )
+        grid_layout.addWidget(self.video_playback_gpu_combo, start_row, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        self.open_os_graphics_settings_btn = QPushButton('Open OS Graphics Settings...')
+        self.open_os_graphics_settings_btn.clicked.connect(self._open_os_graphics_settings)
+        self.open_os_graphics_settings_btn.setToolTip(
+            'Open Windows Graphics Settings (Advanced graphics) where you can force\n'
+            'TagGUI to use Power saving or High performance GPU.'
+        )
+        if not sys.platform.startswith('win'):
+            self.open_os_graphics_settings_btn.setEnabled(False)
+            self.open_os_graphics_settings_btn.setToolTip(
+                'OS graphics settings shortcut is currently available on Windows only.'
+            )
+        grid_layout.addWidget(self.open_os_graphics_settings_btn, start_row + 1, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        # FFmpeg acceleration mode (used by encoding/processing tools)
+        grid_layout.addWidget(QLabel('FFmpeg acceleration mode'), start_row + 2, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.video_ffmpeg_accel_mode_combo = SettingsComboBox(
+            key='video_ffmpeg_accel_mode',
+            default='none')
+        self.video_ffmpeg_accel_mode_combo.addItems(['none', 'cuda'])
+        self.video_ffmpeg_accel_mode_combo.setToolTip(
+            'Acceleration mode for FFmpeg-based processing operations\n'
+            '(crop/extract/fix/validation), not live playback.\n\n'
+            'none: CPU/default decode.\n'
+            'cuda: NVIDIA CUDA decode acceleration.'
+        )
+        self.video_ffmpeg_accel_mode_combo.currentTextChanged.connect(
+            self._on_ffmpeg_accel_mode_changed
+        )
+        grid_layout.addWidget(self.video_ffmpeg_accel_mode_combo, start_row + 2, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        grid_layout.addWidget(QLabel('FFmpeg CUDA device index'), start_row + 3, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.video_ffmpeg_cuda_device_spin = SettingsSpinBox(
+            key='video_ffmpeg_cuda_device',
+            minimum=0,
+            maximum=15,
+            default=0)
+        self.video_ffmpeg_cuda_device_spin.setToolTip(
+            'NVIDIA GPU index used by FFmpeg when acceleration mode is "cuda".\n'
+            'Examples:\n'
+            '- 0: first NVIDIA GPU\n'
+            '- 1: second NVIDIA GPU\n\n'
+            'If unsure, start with 0.'
+        )
+        self.video_ffmpeg_cuda_device_spin.setEnabled(
+            self.video_ffmpeg_accel_mode_combo.currentText() == 'cuda'
+        )
+        grid_layout.addWidget(self.video_ffmpeg_cuda_device_spin, start_row + 3, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        grid_layout.addWidget(QLabel('Detected GPUs'), start_row + 4, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        gpu_detect_row = QHBoxLayout()
+        self.detected_gpus_label = QLabel('')
+        self.detected_gpus_label.setWordWrap(True)
+        self.detected_gpus_label.setMinimumWidth(360)
+        refresh_gpu_btn = QPushButton('Refresh')
+        refresh_gpu_btn.clicked.connect(self._refresh_detected_gpus)
+        gpu_detect_row.addWidget(self.detected_gpus_label)
+        gpu_detect_row.addWidget(refresh_gpu_btn)
+        gpu_detect_row.addStretch()
+        grid_layout.addLayout(gpu_detect_row, start_row + 4, 1, Qt.AlignmentFlag.AlignLeft)
+        self._refresh_detected_gpus()
 
     @Slot()
     def _calculate_current_directory_size(self):
@@ -761,6 +860,86 @@ class SettingsDialog(QDialog):
         """Reset warning label to default state."""
         self.warning_label.hide()
         self.warning_label.setStyleSheet('color: red;')
+
+    @Slot(str)
+    def _on_playback_gpu_preference_changed(self, _value: str):
+        self.warning_label.setText(
+            'Playback GPU preference updated. On Windows, confirm this app in OS Graphics Settings, then restart TagGUI.'
+        )
+        self.warning_label.setStyleSheet('color: #d48806;')
+        self.warning_label.show()
+
+    @Slot(str)
+    def _on_ffmpeg_accel_mode_changed(self, mode: str):
+        self.video_ffmpeg_cuda_device_spin.setEnabled(mode == 'cuda')
+        self.warning_label.setText('FFmpeg acceleration preference saved (applies to new processing commands).')
+        self.warning_label.setStyleSheet('color: #0a7f2e;')
+        self.warning_label.show()
+
+    @Slot()
+    def _open_os_graphics_settings(self):
+        if not sys.platform.startswith('win'):
+            QMessageBox.information(
+                self,
+                'Unsupported Platform',
+                'OS graphics settings shortcut is currently available on Windows only.'
+            )
+            return
+        opened = QDesktopServices.openUrl(QUrl('ms-settings:display-advancedgraphics'))
+        if not opened:
+            QMessageBox.warning(
+                self,
+                'Could Not Open Settings',
+                'Failed to open Windows Graphics Settings automatically.\n'
+                'Open Settings > System > Display > Graphics manually.'
+            )
+
+    @Slot()
+    def _refresh_detected_gpus(self):
+        gpus = self._detect_gpu_names()
+        if not gpus:
+            self.detected_gpus_label.setText('No GPUs detected via system tools.')
+            return
+        self.detected_gpus_label.setText('; '.join(gpus))
+
+    def _detect_gpu_names(self) -> list[str]:
+        names: list[str] = []
+
+        # First try NVIDIA list with stable index order.
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=index,name', '--format=csv,noheader'],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line:
+                        names.append(f'NVIDIA {line}')
+        except Exception:
+            pass
+
+        # Fallback to Windows generic adapter list.
+        if sys.platform.startswith('win'):
+            try:
+                result = subprocess.run(
+                    ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        line = line.strip()
+                        if line and line.lower() != 'name':
+                            if line not in names:
+                                names.append(line)
+            except Exception:
+                pass
+
+        return names
 
     def disable_insert_space_after_tag_separator_check_box(self):
         self.insert_space_after_tag_separator_check_box.setEnabled(False)

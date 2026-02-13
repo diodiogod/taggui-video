@@ -45,6 +45,10 @@ DEFAULT_SETTINGS = {
     'masonry_strategy': 'full_compat',  # full_compat (stable) or windowed_strict (experimental 1M+ path)
     'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
+    # GPU preferences
+    'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving
+    'video_ffmpeg_accel_mode': 'none',  # none, cuda
+    'video_ffmpeg_cuda_device': 0,
 }
 
 

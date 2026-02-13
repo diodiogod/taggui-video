@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 from .common import create_backup
+from .ffmpeg_gpu import ffmpeg_base_args
 
 
 class SARFixer:
@@ -96,7 +97,7 @@ class SARFixer:
 
             # Re-encode with correct dimensions and square pixels
             cmd = [
-                'ffmpeg',
+                *ffmpeg_base_args(),
                 '-i', str(input_path),
                 '-vf', f'scale={display_width}:{height}:flags=lanczos,setsar=1:1',
                 '-c:v', 'libx264',
