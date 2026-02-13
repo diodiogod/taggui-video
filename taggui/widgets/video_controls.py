@@ -905,6 +905,28 @@ class VideoControlsWidget(QWidget):
                 x = anchor.left() + (anchor.width() - width) // 2
             y = anchor.top() + (anchor.height() - height) // 2
 
+            # Prevent narrow-width overlap: keep text-like widgets inside their anchor lane.
+            if component_id in (
+                'frame_label',
+                'frame_spinbox',
+                'frame_total_label',
+                'time_label',
+                'fps_label',
+                'frame_count_label',
+                'speed_label',
+                'speed_value_label',
+                'loop_checkbox',
+            ):
+                width = min(width, max(8, anchor.width()))
+                height = min(height, max(8, anchor.height()))
+                if align == 'right':
+                    x = anchor.right() - width + 1
+                elif align == 'left':
+                    x = anchor.left()
+                else:
+                    x = anchor.left() + (anchor.width() - width) // 2
+                y = anchor.top() + (anchor.height() - height) // 2
+
             try:
                 widget.setGeometry(int(x + offset_x), int(y + offset_y), int(width), int(height))
             except RuntimeError:
@@ -1277,8 +1299,11 @@ class VideoControlsWidget(QWidget):
             is_full_width_timeline = component_id == 'timeline_slider'
             is_speed_slider = component_id == 'speed_slider'
             container_height = int(cfg.get('container_height', 0))
-            hint_w = int(widget.sizeHint().width()) if widget else 0
-            hint_h = int(widget.sizeHint().height()) if widget else 0
+            is_visible = bool(widget and widget.isVisible())
+            hint_w = int(widget.sizeHint().width()) if (widget and is_visible) else 0
+            hint_h = int(widget.sizeHint().height()) if (widget and is_visible) else 0
+            min_lane_w = 12 if is_visible else 0
+            min_lane_h = 12 if is_visible else 0
 
             if is_full_width_timeline or is_speed_slider:
                 slot.setMinimumWidth(0)
@@ -1287,12 +1312,12 @@ class VideoControlsWidget(QWidget):
             elif container_width > 0:
                 slot.setFixedWidth(max(12, min(900, container_width)))
             else:
-                slot.setMinimumWidth(max(12, hint_w))
+                slot.setMinimumWidth(max(min_lane_w, hint_w))
                 slot.setMaximumWidth(16777215)
             if container_height > 0:
                 slot.setFixedHeight(max(12, min(300, container_height)))
             else:
-                slot.setMinimumHeight(max(12, hint_h))
+                slot.setMinimumHeight(max(min_lane_h, hint_h))
                 slot.setMaximumHeight(16777215)
 
         self._reposition_component_overlays()
@@ -1588,6 +1613,8 @@ class VideoControlsWidget(QWidget):
         slider_height = int(max(20, 30 * scale * component_scale('timeline_slider')))
         self.timeline_slider.setMinimumHeight(slider_height)
 
+        self._apply_compact_visibility(width)
+
         # Scale margins and spacing
         margin = int(8 * scale)
         spacing = int(8 * scale)
@@ -1600,6 +1627,29 @@ class VideoControlsWidget(QWidget):
         self.layout().setSpacing(spacing)
         self._apply_component_layout_properties()
         self._update_background_surface_geometry()
+
+    def _apply_compact_visibility(self, width: int):
+        """Hide low-priority labels when width is very small to prevent overlap."""
+        compact = width < 620
+        ultra = width < 560
+
+        self.fps_label.setVisible(not compact)
+        self.frame_count_label.setVisible(not compact)
+
+        if ultra:
+            self.frame_label.setText('')
+            self.speed_label.setText('')
+            self.frame_label.setVisible(False)
+            self.speed_label.setVisible(False)
+            self.frame_total_label.setVisible(False)
+        else:
+            self.frame_label.setVisible(True)
+            self.speed_label.setVisible(True)
+            self.frame_label.setText('Frame:')
+            self.speed_label.setText('Speed:')
+            self.frame_total_label.setVisible(True)
+
+        self.preview_container.setVisible(not compact)
 
     def resizeEvent(self, event):
         """Scale all controls based on available width."""
