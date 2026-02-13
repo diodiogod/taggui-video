@@ -103,7 +103,8 @@ class ImageViewer(QWidget):
             # Use saved width if available, otherwise use sizeHint
             if saved_width_percent is not None:
                 controls_width = int(saved_width_percent * self.width())
-                controls_width = max(400, min(controls_width, self.width()))  # Clamp
+                min_w = self.video_controls.minimum_runtime_width()
+                controls_width = max(min_w, min(controls_width, self.width()))  # Clamp
             else:
                 controls_width = self.video_controls.sizeHint().width()
             x_pos = int(saved_x_percent * self.width())
@@ -112,6 +113,7 @@ class ImageViewer(QWidget):
             x_pos = max(0, min(x_pos, self.width() - controls_width))
             y_pos = max(0, min(y_pos, self.height() - controls_height))
             self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+            self.video_controls._stabilize_after_geometry_change()
 
         # Enable mouse tracking for auto-hide
         self.setMouseTracking(True)
@@ -437,7 +439,8 @@ class ImageViewer(QWidget):
                 # Calculate width
                 if saved_width_percent is not None:
                     controls_width = int(saved_width_percent * self.width())
-                    controls_width = max(400, min(controls_width, self.width()))
+                    min_w = self.video_controls.minimum_runtime_width()
+                    controls_width = max(min_w, min(controls_width, self.width()))
                 else:
                     controls_width = self.video_controls.sizeHint().width()
 
@@ -447,9 +450,11 @@ class ImageViewer(QWidget):
                 x_pos = max(0, min(x_pos, self.width() - controls_width))
                 y_pos = max(0, min(y_pos, self.height() - controls_height))
                 self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+                self.video_controls._stabilize_after_geometry_change()
 
         # Raise to ensure it's on top
         self.video_controls.raise_()
+        self.video_controls._stabilize_after_geometry_change()
 
     def resizeEvent(self, event):
         """Reposition controls when viewer is resized."""

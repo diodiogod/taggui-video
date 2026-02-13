@@ -1,28 +1,51 @@
-name: "Volcanic"
+name: "Modern Dark"
 author: "TagGUI"
 version: "1.0"
 
+# Global design tokens following .interface-design/system.md
 tokens:
   colors:
+    # Neutrals
     bg-primary: "#0D0D0D"
     bg-secondary: "#1A1A1A"
     bg-tertiary: "#242424"
     border: "#333333"
+    border-accent: "#404040"
     text-primary: "#FFFFFF"
     text-secondary: "#B0B0B0"
-    primary: "#32CD32"
-    primary-hover: "#28A428"
-    accent: "#6B8E23"
+    text-tertiary: "#707070"
+
+    # Functional
+    primary: "#2196F3"
+    primary-hover: "#1976D2"
+    accent: "#00B4D8"
+    success: "#4CAF50"
+    warning: "#FFA726"
+    error: "#F44336"
+
+    # Loop markers
+    loop-start: "#FF0080"
+    loop-end: "#FF8C00"
 
   spacing:
     xs: 4
     sm: 8
     md: 16
     lg: 24
+    xl: 32
 
   opacity:
+    overlay: 0.85
     control-bar: 0.95
+    disabled: 0.50
+    hover: 0.08
 
+  shadows:
+    level-1: "0 2px 4px rgba(0,0,0,0.2)"
+    level-2: "0 4px 8px rgba(0,0,0,0.3)"
+    level-3: "0 8px 16px rgba(0,0,0,0.4)"
+
+# Video player specific configuration
 video_player:
   layout:
     control_bar_height: 60
@@ -30,13 +53,15 @@ video_player:
     button_alignment: "center"
     timeline_position: "above"
     button_spacing: "{tokens.spacing.sm}"
-    section_spacing: 20
+    section_spacing: 20  # Match original spacing for proper fit
 
   styling:
+    # Background
     background: "{tokens.colors.bg-primary}"
     control_bar_color: "{tokens.colors.bg-tertiary}"
     control_bar_opacity: "{tokens.opacity.control-bar}"
 
+    # Buttons
     button_size: 36
     button_icon_color: "{tokens.colors.text-primary}"
     button_bg_color: "{tokens.colors.bg-secondary}"
@@ -44,6 +69,7 @@ video_player:
     button_border: "1px solid {tokens.colors.border}"
     button_border_radius: 6
 
+    # Timeline/slider
     timeline_height: 8
     timeline_color: "{tokens.colors.primary}"
     timeline_bg_color: "{tokens.colors.bg-secondary}"
@@ -51,16 +77,18 @@ video_player:
     slider_handle_color: "#FFFFFF"
     slider_handle_border: "2px solid #333333"
 
-    loop_marker_start_color: "#FF0080"
-    loop_marker_end_color: "#FF8C00"
+    # Loop markers
+    loop_marker_start_color: "{tokens.colors.loop-start}"
+    loop_marker_end_color: "{tokens.colors.loop-end}"
     loop_marker_outline: "#FFFFFF"
     loop_marker_outline_width: 2
 
-    # Volcanic gradient (original from video_controls.py)
-    speed_gradient_start: "#2D5A2D"
-    speed_gradient_mid: "#6B8E23"
-    speed_gradient_end: "#32CD32"
+    # Speed slider gradient (modern blue-green)
+    speed_gradient_start: "#1565C0"
+    speed_gradient_mid: "#0097A7"
+    speed_gradient_end: "#00BCD4"
 
+    # Text
     text_color: "{tokens.colors.text-primary}"
     text_secondary_color: "{tokens.colors.text-secondary}"
     label_font_size: 12
@@ -68,7 +96,9 @@ video_player:
   borders:
     radius: 6
     control_bar_border: "1px solid {tokens.colors.border}"
+    button_border: "1px solid {tokens.colors.border}"
 
   shadows:
-    control_bar: "0 4px 8px rgba(0,0,0,0.3)"
-    button: "0 2px 4px rgba(0,0,0,0.2)"
+    control_bar: "{tokens.shadows.level-2}"
+    button: "{tokens.shadows.level-1}"
+    overlay: "{tokens.shadows.level-3}"
