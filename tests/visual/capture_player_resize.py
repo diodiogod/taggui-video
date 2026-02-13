@@ -142,7 +142,8 @@ def main() -> int:
     def place_controls(width: int) -> None:
         """Place controls like runtime overlay: bottom-centered, explicit geometry."""
         controls_height = controls.sizeHint().height()
-        width_clamped = max(400, min(int(width), max(400, int(central.width()))))
+        min_w = controls.minimum_runtime_width() if hasattr(controls, "minimum_runtime_width") else 240
+        width_clamped = max(min_w, min(int(width), max(min_w, int(central.width()))))
         x_pos = (central.width() - width_clamped) // 2
         y_pos = max(0, central.height() - controls_height)
         controls.setGeometry(int(x_pos), int(y_pos), int(width_clamped), int(controls_height))
