@@ -86,7 +86,15 @@ class _SpawnDragArrowOverlay(QWidget):
 class _DragIndicatorWidget(QWidget):
     """Drag indicator styled like hidden window markers, sized to match thumbnail."""
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(
+            parent,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -561,8 +569,7 @@ class ImageListViewGeometryMixin:
 
         ghost = getattr(self, "_spawn_drag_ghost_widget", None)
         if ghost is None:
-            ghost = _DragIndicatorWidget(self.viewport())
-            ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            ghost = _DragIndicatorWidget(None)
             self._spawn_drag_ghost_widget = ghost
 
         # Size to match the thumbnail
@@ -577,11 +584,9 @@ class ImageListViewGeometryMixin:
         if ghost is None:
             return
         cursor_global = global_pos if global_pos is not None else QCursor.pos()
-        cursor_local = self.viewport().mapFromGlobal(cursor_global)
-
-        # Center the indicator on cursor
+        # Center the top-level indicator on the global cursor position.
         size = getattr(self, '_spawn_drag_ghost_size', QSize(40, 40))
-        ghost.move(cursor_local.x() - size.width() // 2, cursor_local.y() - size.height() // 2)
+        ghost.move(cursor_global.x() - size.width() // 2, cursor_global.y() - size.height() // 2)
 
         try:
             self._spawn_drag_last_global_pos = QPoint(cursor_global)
