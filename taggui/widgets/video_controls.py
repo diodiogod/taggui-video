@@ -1237,13 +1237,18 @@ class VideoControlsWidget(QWidget):
         info_offset_x = max(-500, min(500, info_offset_x))
         info_offset_y = max(-200, min(200, info_offset_y))
 
-        # Per-component spacing in top row
-        self.controls_content_layout.setSpacing(button_spacing)
-        self.info_layout.setSpacing(button_spacing)
-        self.slider_layout.setSpacing(button_spacing)
+        responsive_scale = float(getattr(self, '_responsive_scale_factor', 1.0))
+        responsive_scale = max(0.45, min(1.0, responsive_scale))
+        scaled_button_spacing = max(2, int(round(button_spacing * responsive_scale)))
+        scaled_section_spacing = max(2, int(round(section_spacing * responsive_scale)))
+
+        # Per-component spacing in top/info/timeline rows
+        self.controls_content_layout.setSpacing(scaled_button_spacing)
+        self.info_layout.setSpacing(scaled_button_spacing)
+        self.slider_layout.setSpacing(scaled_button_spacing)
 
         # Inter-row spacing
-        self.controls_layout.setSpacing(section_spacing)
+        self.controls_layout.setSpacing(scaled_section_spacing)
 
         # Section alignment in controls row
         # left: [content...............]
@@ -1292,6 +1297,8 @@ class VideoControlsWidget(QWidget):
 
     def _apply_component_layout_properties(self):
         """Apply per-component container alignment/offset/size in slots."""
+        responsive_scale = float(getattr(self, '_responsive_scale_factor', 1.0))
+        responsive_scale = max(0.45, min(1.0, responsive_scale))
         for component_id, slot in self._component_slots.items():
             cfg = self._get_component_layout(component_id)
             widget = self._component_widgets.get(component_id)
@@ -1310,12 +1317,14 @@ class VideoControlsWidget(QWidget):
                 slot.setMaximumWidth(16777215)
                 slot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             elif container_width > 0:
-                slot.setFixedWidth(max(12, min(900, container_width)))
+                scaled_w = int(round(container_width * responsive_scale))
+                slot.setFixedWidth(max(12, min(900, scaled_w)))
             else:
                 slot.setMinimumWidth(max(min_lane_w, hint_w))
                 slot.setMaximumWidth(16777215)
             if container_height > 0:
-                slot.setFixedHeight(max(12, min(300, container_height)))
+                scaled_h = int(round(container_height * responsive_scale))
+                slot.setFixedHeight(max(12, min(300, scaled_h)))
             else:
                 slot.setMinimumHeight(max(min_lane_h, hint_h))
                 slot.setMaximumHeight(16777215)
@@ -1546,11 +1555,18 @@ class VideoControlsWidget(QWidget):
         max_scale = float(scaling_cfg.get('max_scale', 1.0)) if isinstance(scaling_cfg, dict) else 1.0
         min_scale = max(0.1, min(2.0, min_scale))
         max_scale = max(min_scale, min(3.0, max_scale))
-        scale = min(max_scale, max(min_scale, width / ideal_width))
+        raw_scale = min(max_scale, max(min_scale, width / ideal_width))
+        # Ease scaling so tiny widths do not over-shrink controls.
+        scale = raw_scale ** 0.78
+        self._responsive_scale_factor = scale
 
         def component_scale(component_id: str) -> float:
             cfg = self._get_component_layout(component_id)
             return max(0.25, min(4.0, float(cfg.get('scale', 1.0))))
+
+        # Keep transport buttons visually proportional in compact mode.
+        button_scale_floor = 0.78
+        button_scale = max(button_scale_floor, scale)
 
         # Scale button sizes per component.
         button_map = {
@@ -1568,11 +1584,15 @@ class VideoControlsWidget(QWidget):
         }
         for component_id, btn in button_map.items():
             base_button_size = int(self._component_style_value(component_id, 'button_size', 40))
-            scaled_size = int(max(12, base_button_size * scale * component_scale(component_id)))
+            scaled_size = int(max(12, base_button_size * button_scale * component_scale(component_id)))
+            btn.setMinimumWidth(scaled_size)
             btn.setMaximumWidth(scaled_size)
+            btn.setMinimumHeight(scaled_size)
             btn.setMaximumHeight(scaled_size)
             if component_id == 'loop_checkbox':
-                btn.setMaximumWidth(int(max(64, scaled_size * 1.9)))
+                loop_width = int(max(64, scaled_size * 1.9))
+                btn.setMinimumWidth(loop_width)
+                btn.setMaximumWidth(loop_width)
 
         # Scale frame spinbox
         spinbox_width = int(max(60, 80 * scale * component_scale('frame_spinbox')))
