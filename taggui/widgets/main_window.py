@@ -354,7 +354,7 @@ class PerfHudOverlay(QWidget):
             "line3": "dispatch/s = applied control updates per second.\ndropped/s = overwritten queued updates per second.",
             "drag": "Drag HUD by this top area.",
             "resize": "Resize HUD from this corner.",
-            "panel": "Performance HUD.\nCtrl+Shift+J to show/hide.",
+            "panel": "Performance HUD.\nCtrl+Shift+J or Ctrl+Alt+J to show/hide.",
         }
         self.setToolTip(tips.get(key, ""))
 
@@ -431,6 +431,7 @@ class MainWindow(QMainWindow):
         self._perf_hud_enabled = False
         self._perf_hud_user_placed = False
         self._perf_hud_saved_geometry = None
+        self._hud_shortcut_last_toggle_at = 0.0
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
         self.image_viewer.view.customContextMenuRequested.connect(
@@ -592,9 +593,6 @@ class MainWindow(QMainWindow):
         self.toggle_floating_hold_shortcut = QShortcut(QKeySequence('H'), self)
         self.toggle_floating_hold_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.toggle_floating_hold_shortcut.activated.connect(self._toggle_floating_hold_shortcut)
-        self.toggle_perf_hud_shortcut = QShortcut(QKeySequence('Ctrl+Shift+J'), self)
-        self.toggle_perf_hud_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.toggle_perf_hud_shortcut.activated.connect(self._toggle_perf_hud)
         jump_to_first_untagged_image_shortcut = QShortcut(
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
@@ -697,6 +695,27 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
+        if event.type() in (event.Type.ShortcutOverride, event.Type.KeyPress):
+            try:
+                if not event.isAutoRepeat() and event.key() == Qt.Key.Key_J:
+                    mods = event.modifiers()
+                    has_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+                    has_alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+                    has_shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+                    if has_ctrl and ((has_shift and not has_alt) or (has_alt and not has_shift)):
+                        if event.type() == event.Type.ShortcutOverride:
+                            event.accept()
+                            return True
+                        now = time.monotonic()
+                        # Guard against platform-specific duplicate key deliveries.
+                        if (now - self._hud_shortcut_last_toggle_at) >= 0.10:
+                            self._hud_shortcut_last_toggle_at = now
+                            self._toggle_perf_hud()
+                        event.accept()
+                        return True
+            except Exception:
+                pass
+
         if event.type() == event.Type.MouseButtonPress:
             try:
                 if event.button() == Qt.MouseButton.MiddleButton:
@@ -1318,7 +1337,7 @@ class MainWindow(QMainWindow):
             f"videos={loaded}  playing={playing}  active={self._active_viewer_label()}",
             f"pending={len(self._video_controls_pending_updates)}  scheduler={self._video_controls_scheduler_timer.interval()}ms",
             f"dispatch={dispatch_delta / hz:5.1f}/s   dropped={overwrite_delta / hz:5.1f}/s",
-            "Ctrl+Shift+J HUD  |  Ctrl+J jump first untagged",
+            "Ctrl+Shift+J / Ctrl+Alt+J HUD  |  Ctrl+J jump first untagged",
         ]
         self._perf_hud.set_metrics(ui_ms=ui_ms, playback_ms=playback_ms, lines=lines)
 

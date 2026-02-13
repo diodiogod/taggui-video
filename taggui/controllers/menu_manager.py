@@ -74,7 +74,6 @@ class MenuManager:
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
         self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action = QAction('Hold Existing Spawned Viewers', parent=self.main_window)
-        self.toggle_perf_hud_action.setShortcut(QKeySequence('Ctrl+Shift+J'))
         self.toggle_floating_hold_action.setShortcut(QKeySequence('H'))
         self.delete_marked_menu = None
         self.delete_marked_button = None
