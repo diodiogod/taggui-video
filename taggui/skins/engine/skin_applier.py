@@ -2,7 +2,8 @@
 
 from typing import Dict, Any, Optional
 from PySide6.QtWidgets import QWidget, QSlider, QPushButton, QLabel
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtGui import QPolygon, QRegion
 
 
 class SkinApplier:
@@ -92,12 +93,12 @@ class SkinApplier:
         Args:
             control_bar: QWidget control bar container
         """
-        from PySide6.QtGui import QColor, QPalette
-        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor
 
         bg_color = self.styling.get('control_bar_color', '#242424')
         opacity = self.styling.get('control_bar_opacity', 0.95)
         border = self.borders.get('control_bar_border', 'none')
+        radius = self.borders.get('radius', 0)
 
         # Ensure opacity is a number (handle edge cases)
         if isinstance(opacity, str):
@@ -106,29 +107,14 @@ class SkinApplier:
             except ValueError:
                 opacity = 0.95
 
-        # Create QColor with alpha channel
-        bg_qcolor = QColor(bg_color)
-        bg_qcolor.setAlphaF(opacity)  # Set opacity (0.0 - 1.0)
-
-        # Use QPalette to set background with alpha
-        # This approach properly supports transparency without affecting children
-        control_bar.setAutoFillBackground(True)
-        palette = control_bar.palette()
-        palette.setColor(QPalette.ColorRole.Window, bg_qcolor)
-        control_bar.setPalette(palette)
-
-        # Apply border/radius via stylesheet (palette doesn't support borders)
-        if border != 'none':
-            stylesheet = f"""
-                VideoControlsWidget {{
-                    border: {border};
-                    border-radius: {self.borders.get('radius', 0)}px;
-                }}
-            """
-            control_bar.setStyleSheet(stylesheet)
-        else:
-            # Clear any existing stylesheet
-            control_bar.setStyleSheet("")
+        # Store background style on control bar and let widget paint/apply to its background surface.
+        # This decouples child component movement from the background rectangle.
+        setattr(control_bar, '_skin_bg_color', QColor(bg_color).name())
+        setattr(control_bar, '_skin_bg_opacity', max(0.0, min(1.0, float(opacity))))
+        setattr(control_bar, '_skin_bg_border', str(border))
+        setattr(control_bar, '_skin_bg_radius', int(radius) if str(radius).isdigit() else 0)
+        if hasattr(control_bar, '_refresh_background_surface'):
+            control_bar._refresh_background_surface()
 
         # Don't use setFixedHeight - let the control bar size itself based on content
         # This matches original behavior where height was determined by layout
@@ -151,11 +137,17 @@ class SkinApplier:
         hover_color = self._resolve_component_style(component_id, 'button_hover_color', '#2196F3')
         border = self._resolve_component_style(component_id, 'button_border', '1px solid #333333')
         radius = self._resolve_component_style(component_id, 'button_border_radius', 6)
+        shape = str(self._resolve_component_style(component_id, 'button_shape', 'rounded')).lower()
+        button_font_family = self._resolve_component_style(component_id, 'button_font_family', '')
+        button_font_style = str(self._resolve_component_style(component_id, 'button_font_style', 'normal')).lower()
         opacity = float(self._resolve_component_style(component_id, 'opacity', 1.0))
         shadow = self.shadows.get('button', '0 2px 4px rgba(0,0,0,0.2)')
         opacity = max(0.0, min(1.0, opacity))
         bg_color = self._with_alpha(bg_color, opacity)
         hover_color = self._with_alpha(hover_color, opacity)
+        default_checked = self.styling.get('loop_marker_start_color', hover_color) if component_id == 'loop_checkbox' else hover_color
+        checked_bg = self._resolve_component_style(component_id, 'button_checked_bg_color', default_checked)
+        checked_bg = self._with_alpha(checked_bg, opacity)
 
         # Note: Don't set any size constraints here - let _apply_scaling() handle all sizing
         # This way the scaling system (40 * scale) works correctly
@@ -170,21 +162,74 @@ class SkinApplier:
         # EXACT original styling: hover changes background to hover_color and border to slightly lighter
         # Original was #3a3a3a bg with #666 border on hover
         hover_border_color = "#666" if bg_color == "#2b2b2b" else self._lighten_color(border_color, 1.2)
+        btn_weight = '700' if 'bold' in button_font_style else '400'
+        btn_italic = 'italic' if 'italic' in button_font_style else 'normal'
+        btn_family_css = f"font-family: '{button_font_family}';" if button_font_family else ""
+        if shape == 'square':
+            effective_radius = 0
+        elif shape == 'circle':
+            effective_radius = max(8, int(size // 2))
+        elif shape == 'star':
+            effective_radius = 2
+            border = f"2px dashed {border_color}"
+        else:
+            effective_radius = radius
 
         stylesheet = f"""
             QPushButton {{
                 background-color: {bg_color};
                 color: {icon_color};
                 border: {border};
-                border-radius: {radius}px;
+                border-radius: {effective_radius}px;
+                {btn_family_css}
+                font-weight: {btn_weight};
+                font-style: {btn_italic};
             }}
             QPushButton:hover {{
                 background-color: {hover_color};
                 border-color: {hover_border_color};
             }}
+            QPushButton:checked {{
+                background-color: {checked_bg};
+                border-color: {hover_border_color};
+                color: {icon_color};
+            }}
         """
+        if component_id == 'loop_checkbox':
+            loop_font = max(9, int(size * 0.28))
+            stylesheet += f"\nQPushButton {{ font-size: {loop_font}px; font-weight: 700; padding: 2px 6px; }}\n"
 
         button.setStyleSheet(stylesheet)
+        self._apply_button_shape_mask(button, shape, size)
+
+    def _apply_button_shape_mask(self, button: QPushButton, shape: str, size_hint: int):
+        """Apply non-rectangular masks for advanced shapes where possible."""
+        if shape != 'star':
+            button.clearMask()
+            return
+        max_w = int(button.maximumWidth())
+        max_h = int(button.maximumHeight())
+        if 0 < max_w < 16777215 and 0 < max_h < 16777215:
+            side = max(16, min(max_w, max_h))
+        else:
+            side = max(16, int(size_hint))
+        cx = side // 2
+        cy = side // 2
+        r_outer = side // 2 - 2
+        r_inner = max(4, int(r_outer * 0.45))
+        points = []
+        import math
+        for i in range(10):
+            angle = -math.pi / 2 + (i * math.pi / 5)
+            r = r_outer if i % 2 == 0 else r_inner
+            x = int(cx + r * math.cos(angle))
+            y = int(cy + r * math.sin(angle))
+            points.append(QPoint(x, y))
+        poly = QPolygon(points)
+        try:
+            button.setMask(QRegion(poly))
+        except Exception:
+            button.clearMask()
 
     def apply_to_timeline_slider(self, slider: QSlider, component_id: Optional[str] = None):
         """Apply skin to timeline slider.
@@ -290,14 +335,22 @@ class SkinApplier:
                       if is_secondary else
                       self._resolve_component_style(component_id, 'text_color', '#FFFFFF'))
         font_size = self._resolve_component_style(component_id, 'label_font_size', 12)
+        font_family = self._resolve_component_style(component_id, 'label_font_family', '')
+        font_style = str(self._resolve_component_style(component_id, 'label_font_style', 'normal')).lower()
         opacity = float(self._resolve_component_style(component_id, 'opacity', 1.0))
         opacity = max(0.0, min(1.0, opacity))
         text_color = self._with_alpha(text_color, opacity)
+        font_weight = '700' if 'bold' in font_style else '400'
+        italic = 'italic' if 'italic' in font_style else 'normal'
+        family_css = f"font-family: '{font_family}';" if font_family else ""
 
         stylesheet = f"""
             QLabel {{
                 color: {text_color};
                 font-size: {font_size}px;
+                {family_css}
+                font-weight: {font_weight};
+                font-style: {italic};
             }}
         """
 
@@ -307,13 +360,17 @@ class SkinApplier:
         """Get loop marker styling.
 
         Returns:
-            Dict with start_color, end_color, outline_color, outline_width
+            Dict with marker color/style values.
         """
         return {
             'start_color': self.styling.get('loop_marker_start_color', '#FF0080'),
             'end_color': self.styling.get('loop_marker_end_color', '#FF8C00'),
             'outline_color': self.styling.get('loop_marker_outline', '#FFFFFF'),
-            'outline_width': self.styling.get('loop_marker_outline_width', 2)
+            'outline_width': self.styling.get('loop_marker_outline_width', 2),
+            'marker_width': self.styling.get('loop_marker_width', 18),
+            'marker_height': self.styling.get('loop_marker_height', 14),
+            'marker_offset_y': self.styling.get('loop_marker_offset_y', -2),
+            'marker_shape': self.styling.get('loop_marker_shape', 'triangle'),
         }
 
     def _add_alpha_to_color(self, color: str, alpha: int) -> str:

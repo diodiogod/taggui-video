@@ -1,4 +1,4 @@
-name: "Layout Swap Transport"
+name: "Layout Timeline Lower"
 author: "TagGUI"
 version: "1.0"
 
@@ -7,7 +7,7 @@ video_player:
     control_bar_height: 60
     control_bar_position: "bottom"
     button_alignment: "center"
-    timeline_position: "above"
+    timeline_position: "below"
     button_spacing: 10
     section_spacing: 20
 
@@ -15,28 +15,20 @@ video_player:
     controls_row:
       button_alignment: "center"
       offset_x: 0
-      timeline_position: "above"
-      button_order:
-        - "skip_back_button"
-        - "play_button"
-        - "next_frame_button"
-        - "stop_button"
-        - "mute_button"
-        - "prev_frame_button"
-        - "skip_forward_button"
+      timeline_position: "below"
+    timeline_row:
+      offset_y: 6
+    info_row:
+      offset_y: -4
     component_layouts:
-      skip_back_button: { align: "center", container_width: 48 }
-      play_button: { align: "center", container_width: 48 }
-      next_frame_button: { align: "center", container_width: 48 }
-      stop_button: { align: "center", container_width: 48 }
-      mute_button: { align: "center", container_width: 48 }
-      prev_frame_button: { align: "center", container_width: 48 }
-      skip_forward_button: { align: "center", container_width: 48 }
-      speed_slider: {}
-      loop_reset_button: { container_width: 34 }
-      loop_start_button: { container_width: 34 }
-      loop_end_button: { container_width: 34 }
-      loop_checkbox: { container_width: 64 }
+      timeline_slider: { container_height: 34 }
+      time_label: { align: "left", container_width: 170 }
+      fps_label: { align: "left", container_width: 90 }
+      frame_count_label: { align: "left", container_width: 90 }
+      loop_reset_button: { align: "right", container_width: 34 }
+      loop_start_button: { align: "right", container_width: 34 }
+      loop_end_button: { align: "right", container_width: 34 }
+      loop_checkbox: { align: "right", container_width: 64 }
     snap_mode: "zones"
 
   styling:

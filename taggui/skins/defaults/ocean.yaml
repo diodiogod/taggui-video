@@ -1,74 +1,86 @@
-name: "Ocean"
-author: "TagGUI"
-version: "1.0"
-
+name: Ocean
+author: TagGUI
+version: '1.0'
 tokens:
   colors:
-    bg-primary: "#0A1628"
-    bg-secondary: "#0D1B2A"
-    bg-tertiary: "#1B263B"
-    border: "#2D3E5C"
-    text-primary: "#E0E1DD"
-    text-secondary: "#778DA9"
-    primary: "#00B4D8"
-    primary-hover: "#0096C7"
-    accent: "#48CAE4"
-
+    bg-primary: '#0A1628'
+    bg-secondary: '#0D1B2A'
+    bg-tertiary: '#1B263B'
+    border: '#2D3E5C'
+    text-primary: '#E0E1DD'
+    text-secondary: '#778DA9'
+    primary: '#00B4D8'
+    primary-hover: '#0096C7'
+    accent: '#48CAE4'
   spacing:
     xs: 4
     sm: 8
     md: 16
     lg: 24
-
   opacity:
-    control-bar: 0.90
-
+    control-bar: 0.9
 video_player:
   layout:
     control_bar_height: 60
-    control_bar_position: "bottom"
-    button_alignment: "center"
-    timeline_position: "above"
-    button_spacing: "{tokens.spacing.sm}"
+    control_bar_position: bottom
+    button_alignment: center
+    timeline_position: above
+    button_spacing: 8
     section_spacing: 20
-
   styling:
-    background: "{tokens.colors.bg-primary}"
-    control_bar_color: "{tokens.colors.bg-tertiary}"
-    control_bar_opacity: "{tokens.opacity.control-bar}"
-
-    button_size: 38
-    button_icon_color: "{tokens.colors.text-primary}"
-    button_bg_color: "{tokens.colors.bg-secondary}"
-    button_hover_color: "{tokens.colors.primary}"
-    button_border: "1px solid {tokens.colors.border}"
+    background: '#0A1628'
+    control_bar_color: '#1B263B'
+    control_bar_opacity: 0.9
+    button_size: 36
+    button_icon_color: '#E0E1DD'
+    button_bg_color: '#0D1B2A'
+    button_hover_color: '#00B4D8'
+    button_border: '1px solid #2D3E5C'
     button_border_radius: 6
-
     timeline_height: 8
-    timeline_color: "{tokens.colors.primary}"
-    timeline_bg_color: "{tokens.colors.bg-secondary}"
+    timeline_color: '#00B4D8'
+    timeline_bg_color: '#0D1B2A'
     slider_handle_size: 16
-    slider_handle_color: "#FFFFFF"
-    slider_handle_border: "2px solid #0077B6"
-
-    loop_marker_start_color: "#FF006E"
-    loop_marker_end_color: "#FB5607"
-    loop_marker_outline: "#E0E1DD"
+    slider_handle_color: '#FFFFFF'
+    slider_handle_border: '2px solid #0077B6'
+    loop_marker_start_color: '#FF006E'
+    loop_marker_end_color: '#FB5607'
+    loop_marker_outline: '#E0E1DD'
     loop_marker_outline_width: 2
-
-    # Ocean gradient (deep blue to cyan)
-    speed_gradient_start: "#03045E"
-    speed_gradient_mid: "#0077B6"
-    speed_gradient_end: "#00B4D8"
-
-    text_color: "{tokens.colors.text-primary}"
-    text_secondary_color: "{tokens.colors.text-secondary}"
+    speed_gradient_start: '#03045E'
+    speed_gradient_mid: '#0077B6'
+    speed_gradient_end: '#00B4D8'
+    text_color: '#E0E1DD'
+    text_secondary_color: '#778DA9'
     label_font_size: 12
-
+    loop_marker_width: 18
+    loop_marker_height: 14
+    loop_marker_offset_y: -2
+    loop_marker_shape: triangle
   borders:
     radius: 6
-    control_bar_border: "1px solid {tokens.colors.border}"
-
+    control_bar_border: '1px solid #2D3E5C'
   shadows:
-    control_bar: "0 4px 12px rgba(0,180,216,0.2)"
-    button: "0 2px 4px rgba(0,0,0,0.3)"
+    control_bar: 0 4px 12px rgba(0,180,216,0.2)
+    button: 0 2px 4px rgba(0,0,0,0.3)
+  component_styles:
+    control_bar:
+      default:
+        button_bg_color: '#1B263B'
+  designer_layout:
+    controls_row:
+      offset_x: 0
+      offset_y: 0
+    timeline_row:
+      offset_x: 0
+      offset_y: 0
+    info_row:
+      offset_x: 0
+      offset_y: 0
+    scaling:
+      ideal_width: 800
+      min_scale: 0.5
+      max_scale: 1.0
+    floating_bleed: 0
+    component_layouts: {}
+skin_schema_version: 2
