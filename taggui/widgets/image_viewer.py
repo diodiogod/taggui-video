@@ -38,8 +38,9 @@ class ImageViewer(QWidget):
     directory_reload_requested = Signal(name='directoryReloadRequested')
     activated = Signal(name='viewerActivated')
 
-    def __init__(self, proxy_image_list_model: ProxyImageListModel):
+    def __init__(self, proxy_image_list_model: ProxyImageListModel, *, is_spawned_viewer: bool = False):
         super().__init__()
+        self.is_spawned_viewer = bool(is_spawned_viewer)
         self.inhibit_reload_image = False
         self.proxy_image_list_model = proxy_image_list_model
         MarkingItem.pen_half_width = round(self.devicePixelRatio())
@@ -73,14 +74,21 @@ class ImageViewer(QWidget):
         self.current_video_item = None
         self.current_image_item = None
         self.video_controls = VideoControlsWidget(self)
+        self.video_controls._is_spawned_owner = self.is_spawned_viewer
         self.video_controls.setVisible(False)
-        # Load auto-hide setting (inverted from always_show setting)
-        always_show = settings.value('video_always_show_controls', False, type=bool)
-        self.video_controls_auto_hide = not always_show
+        # Spawned viewers always use auto-hide to keep multi-view playback responsive.
+        if self.is_spawned_viewer:
+            self.video_controls_auto_hide = True
+        else:
+            # Main viewer follows user setting (inverted from always_show setting).
+            always_show = settings.value('video_always_show_controls', False, type=bool)
+            self.video_controls_auto_hide = not always_show
         self._controls_visible = False
+        self._controls_hover_inside = False
         self._is_video_loaded = False
         self._floating_double_click_return_scale = None
         self._floating_last_auto_double_click_zoom_scale = None
+        self._pending_controls_stabilize = True
 
         # Timer for auto-hiding controls
         self._controls_hide_timer = QTimer(self)
@@ -113,7 +121,6 @@ class ImageViewer(QWidget):
             x_pos = max(0, min(x_pos, self.width() - controls_width))
             y_pos = max(0, min(y_pos, self.height() - controls_height))
             self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
-            self.video_controls._stabilize_after_geometry_change()
 
         # Enable mouse tracking for auto-hide
         self.setMouseTracking(True)
@@ -421,6 +428,7 @@ class ImageViewer(QWidget):
             return
 
         controls_height = self.video_controls.sizeHint().height()
+        target_geometry = None
 
         # Check if we have saved percentage positions and width
         saved_x_percent = settings.value('video_controls_x_percent', type=float)
@@ -432,7 +440,7 @@ class ImageViewer(QWidget):
             controls_width = self.video_controls.sizeHint().width()
             x_pos = (self.width() - controls_width) // 2
             y_pos = self.height() - controls_height
-            self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+            target_geometry = (x_pos, y_pos, controls_width, controls_height)
         else:
             # Use saved percentages to calculate position and width
             if self.width() > 0 and self.height() > 0:
@@ -449,12 +457,22 @@ class ImageViewer(QWidget):
                 # Clamp to valid range
                 x_pos = max(0, min(x_pos, self.width() - controls_width))
                 y_pos = max(0, min(y_pos, self.height() - controls_height))
-                self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
-                self.video_controls._stabilize_after_geometry_change()
+                target_geometry = (x_pos, y_pos, controls_width, controls_height)
+
+        if target_geometry is not None:
+            current = self.video_controls.geometry()
+            changed = (
+                current.x() != target_geometry[0]
+                or current.y() != target_geometry[1]
+                or current.width() != target_geometry[2]
+                or current.height() != target_geometry[3]
+            )
+            if changed:
+                self.video_controls.setGeometry(*target_geometry)
+                self._pending_controls_stabilize = True
 
         # Raise to ensure it's on top
         self.video_controls.raise_()
-        self.video_controls._stabilize_after_geometry_change()
 
     def resizeEvent(self, event):
         """Reposition controls when viewer is resized."""
@@ -469,23 +487,95 @@ class ImageViewer(QWidget):
 
     def mouseMoveEvent(self, event):
         """Show controls when hovering over their position."""
-        if self._is_video_loaded and self.video_controls_auto_hide:
-            # Check if mouse is near the controls position
-            controls_rect = self.video_controls.geometry()
-            # Expand detection area slightly
-            detection_rect = controls_rect.adjusted(-20, -20, 20, 20)
-            if detection_rect.contains(event.pos()):
-                self._show_controls_temporarily()
+        if self._is_video_loaded:
+            self._process_controls_hover(event.pos())
         super().mouseMoveEvent(event)
+
+    def _event_pos_to_viewer(self, watched, event):
+        """Map an event local position from watched object to viewer coordinates."""
+        if not hasattr(event, 'position'):
+            return None
+        try:
+            local_pos = event.position().toPoint()
+        except Exception:
+            try:
+                local_pos = event.pos()
+            except Exception:
+                return None
+        try:
+            if watched is self:
+                return local_pos
+            if watched is self.view:
+                return self.mapFrom(self.view, local_pos)
+            if watched is self.view.viewport():
+                return self.mapFrom(self.view.viewport(), local_pos)
+            if watched is self.video_controls:
+                return self.mapFrom(self.video_controls, local_pos)
+        except Exception:
+            return None
+        return None
+
+    def _resolve_main_window_host(self):
+        """Resolve the main window host that owns active-viewer routing."""
+        host = self.window()
+        if host is not None and hasattr(host, 'set_active_viewer'):
+            return host
+        parent = host.parentWidget() if (host is not None and hasattr(host, 'parentWidget')) else None
+        while parent is not None:
+            if hasattr(parent, 'set_active_viewer'):
+                return parent
+            parent = parent.parentWidget() if hasattr(parent, 'parentWidget') else None
+        return None
+
+    def _process_controls_hover(self, viewer_pos):
+        """Apply control ownership/show-hide behavior from one hover position."""
+        if viewer_pos is None or not self._is_video_loaded:
+            return
+        controls_rect = self.video_controls.geometry()
+        detection_rect = controls_rect.adjusted(-20, -20, 20, 20)
+        in_controls_zone = detection_rect.contains(viewer_pos)
+
+        if in_controls_zone:
+            host = self._resolve_main_window_host()
+
+            active_is_self = False
+            try:
+                if host is not None and hasattr(host, 'get_active_viewer'):
+                    active_is_self = host.get_active_viewer() is self
+            except Exception:
+                active_is_self = False
+
+            # Enforce ownership switch on zone enter OR when this viewer is not active.
+            if (not self._controls_hover_inside) or (not active_is_self):
+                # Direct switch guarantees immediate exclusive hide/show, even if
+                # signal/event ordering differs across top-level floating windows.
+                if host is not None and hasattr(host, 'set_active_viewer'):
+                    host.set_active_viewer(self)
+                else:
+                    self.activated.emit()
+                self._controls_hover_inside = True
+            if self.video_controls_auto_hide:
+                self._show_controls_temporarily()
+            elif not self._controls_visible:
+                # Main viewer may be force-hidden by exclusive visibility mode.
+                self._show_controls_permanent()
+        else:
+            self._controls_hover_inside = False
 
     def eventFilter(self, watched, event):
         event_type = event.type()
+        if event_type == QEvent.Type.MouseMove and self._is_video_loaded:
+            viewer_pos = self._event_pos_to_viewer(watched, event)
+            if viewer_pos is not None:
+                self._process_controls_hover(viewer_pos)
         if event_type in (
             QEvent.Type.MouseButtonPress,
             QEvent.Type.FocusIn,
             QEvent.Type.WindowActivate,
         ):
             self.activated.emit()
+        if event_type in (QEvent.Type.Leave, QEvent.Type.HoverLeave):
+            self._controls_hover_inside = False
         return super().eventFilter(watched, event)
 
     def _show_controls_temporarily(self):
@@ -494,6 +584,9 @@ class ImageViewer(QWidget):
             self.video_controls.setVisible(True)
             self._controls_visible = True
             self._position_video_controls()
+            if self._pending_controls_stabilize:
+                self.video_controls._stabilize_after_geometry_change()
+                self._pending_controls_stabilize = False
 
         # Reset hide timer (0.8 seconds)
         self._controls_hide_timer.stop()
@@ -521,10 +614,19 @@ class ImageViewer(QWidget):
         self.video_controls.setVisible(True)
         self._controls_visible = True
         self._position_video_controls()
+        if self._pending_controls_stabilize:
+            self.video_controls._stabilize_after_geometry_change()
+            self._pending_controls_stabilize = False
 
     @Slot(bool)
     def set_always_show_controls(self, always_show: bool):
         """Toggle always-show mode for video controls."""
+        if self.is_spawned_viewer:
+            # Spawned viewers intentionally remain auto-hide for performance.
+            self.video_controls_auto_hide = True
+            if self._is_video_loaded:
+                self._show_controls_temporarily()
+            return
         self.video_controls_auto_hide = not always_show
         if always_show and self._is_video_loaded:
             self._show_controls_permanent()
@@ -655,6 +757,12 @@ class ImageViewer(QWidget):
                         print(f"Video loaded but no frame available: {image.path}")
                         self._show_error_placeholder("Video loaded (no frame)")
                         return
+                    try:
+                        top = self.window()
+                        if top and hasattr(top, 'refresh_video_controls_performance_profile'):
+                            top.refresh_video_controls_performance_profile()
+                    except Exception:
+                        pass
                 else:
                     # Failed to load video, show error
                     print(f"Failed to load video: {image.path}")
@@ -669,6 +777,12 @@ class ImageViewer(QWidget):
 
                 # Stop video playback if switching from video to image
                 self.video_player.stop()
+                try:
+                    top = self.window()
+                    if top and hasattr(top, 'refresh_video_controls_performance_profile'):
+                        top.refresh_video_controls_performance_profile()
+                except Exception:
+                    pass
 
                 # Load static image using QImageReader (like thumbnails for best quality)
                 from PySide6.QtGui import QImageReader

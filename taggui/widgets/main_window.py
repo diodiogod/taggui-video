@@ -84,12 +84,14 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(taggui_icon())
         self.setPalette(self.app.style().standardPalette())
         self.set_font_size()
-        self.image_viewer = ImageViewer(self.proxy_image_list_model)
+        self.image_viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=False)
         self.image_viewer.video_controls.set_loop_persistence_scope('main')
         self._floating_viewers = []
         self._floating_viewer_spawn_count = 0
         self._active_viewer = self.image_viewer
+        self._exclusive_video_controls_visibility = True
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
+        self.refresh_video_controls_performance_profile()
         self.image_viewer.view.customContextMenuRequested.connect(
             self._on_main_viewer_context_menu_spawn
         )
@@ -706,6 +708,10 @@ class MainWindow(QMainWindow):
             _ = target.view
         except RuntimeError:
             target = self.image_viewer
+        if getattr(self, '_active_viewer', None) is target:
+            if self._exclusive_video_controls_visibility:
+                self._sync_active_viewer_controls_visibility(target)
+            return
         self._active_viewer = target
 
         active_zoom = -1 if getattr(target, 'is_zoom_to_fit', False) else target.view.transform().m11()
@@ -719,6 +725,34 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
         self._floating_viewers = live_windows
+
+        if self._exclusive_video_controls_visibility:
+            self._sync_active_viewer_controls_visibility(target)
+        self.refresh_video_controls_performance_profile()
+
+    def _sync_active_viewer_controls_visibility(self, active_viewer: ImageViewer | None):
+        """Show controls for one active viewer and hide controls for all others."""
+        if active_viewer is None:
+            return
+        for viewer in self._iter_all_viewers():
+            try:
+                if not getattr(viewer, '_is_video_loaded', False):
+                    continue
+                if viewer is active_viewer:
+                    if viewer.video_controls_auto_hide:
+                        viewer._show_controls_temporarily()
+                    else:
+                        viewer._show_controls_permanent()
+                else:
+                    viewer._controls_hide_timer.stop()
+                    viewer.video_controls.setVisible(False)
+                    viewer._controls_visible = False
+                    if hasattr(viewer, '_controls_hover_inside'):
+                        viewer._controls_hover_inside = False
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
 
     def _connect_floating_viewer(self, viewer: ImageViewer):
         """Bind floating viewer signals to existing main-window slots."""
@@ -965,6 +999,34 @@ class MainWindow(QMainWindow):
                 continue
         return viewers
 
+    def refresh_video_controls_performance_profile(self):
+        """Apply dynamic controls-update profile based on how many videos are live."""
+        viewers = self._iter_all_viewers()
+        loaded_count = 0
+        for viewer in viewers:
+            try:
+                if bool(getattr(viewer, '_is_video_loaded', False)):
+                    loaded_count += 1
+            except RuntimeError:
+                continue
+
+        if loaded_count <= 1:
+            profile = 'single'
+        elif loaded_count == 2:
+            profile = 'dual'
+        elif loaded_count <= 4:
+            profile = 'multi'
+        else:
+            profile = 'heavy'
+
+        for viewer in viewers:
+            try:
+                controls = getattr(viewer, 'video_controls', None)
+                if controls is not None:
+                    controls._perf_profile = profile
+            except RuntimeError:
+                continue
+
     def _apply_loop_state_to_viewer_player(self, viewer: ImageViewer):
         """Mirror loop settings from controls to the backing video player."""
         controls = getattr(viewer, 'video_controls', None)
@@ -1047,7 +1109,7 @@ class MainWindow(QMainWindow):
             target_proxy_index = self.image_list_selection_model.currentIndex()
         target_proxy_index = self._normalize_spawn_proxy_index(target_proxy_index)
 
-        viewer = ImageViewer(self.proxy_image_list_model)
+        viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=True)
         viewer.set_scene_padding(0)
         self._connect_floating_viewer(viewer)
 
@@ -1087,6 +1149,7 @@ class MainWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
         self.set_active_viewer(viewer)
+        self.refresh_video_controls_performance_profile()
 
     @Slot()
     def spawn_floating_viewer(self):
@@ -1121,6 +1184,7 @@ class MainWindow(QMainWindow):
 
         if getattr(self, '_active_viewer', None) is viewer:
             self.set_active_viewer(self.image_viewer)
+        self.refresh_video_controls_performance_profile()
 
     @Slot()
     def zoom(self, factor):

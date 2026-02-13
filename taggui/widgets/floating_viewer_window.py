@@ -112,6 +112,15 @@ class FloatingViewerWindow(QWidget):
             pass
         return QCursor.pos()
 
+    def refresh_video_controls_performance_profile(self):
+        """Proxy performance-profile refresh request to main window."""
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, 'refresh_video_controls_performance_profile'):
+            try:
+                parent.refresh_video_controls_performance_profile()
+            except Exception:
+                pass
+
     def _viewer_content_is_pannable(self) -> bool:
         checker = getattr(self.viewer, "is_content_pannable", None)
         if callable(checker):
@@ -300,6 +309,17 @@ class FloatingViewerWindow(QWidget):
 
     def _emit_activated(self):
         self.activated.emit(self.viewer)
+
+    def _force_activate_viewer_owner(self):
+        """Force main-window active viewer switch for strict single-controls mode."""
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, 'set_active_viewer'):
+            try:
+                parent.set_active_viewer(self.viewer)
+                return
+            except Exception:
+                pass
+        self._emit_activated()
 
     def set_frozen_passthrough_mode(self, enabled: bool):
         """Gray out and make this floating window input-transparent."""
@@ -742,6 +762,9 @@ class FloatingViewerWindow(QWidget):
                 self._update_overlay_hover_from_global_pos(QCursor.pos())
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._emit_activated()
+            elif event.type() == QEvent.Type.MouseMove:
+                # Keep ownership switching click-free when hovering controls.
+                self._force_activate_viewer_owner()
         elif watched in drag_sources:
             if event.type() == QEvent.Type.Enter:
                 self._update_overlay_hover_from_global_pos(QCursor.pos())
@@ -781,6 +804,15 @@ class FloatingViewerWindow(QWidget):
                     self._begin_window_drag(event, None)
                     return True
             elif event.type() == QEvent.Type.MouseMove:
+                # Force handoff on hover even if child event propagation differs.
+                if self._video_controls_widget is not None:
+                    try:
+                        if self._video_controls_widget.geometry().adjusted(-20, -20, 20, 20).contains(
+                            self.viewer.mapFromGlobal(self._event_global_pos(event))
+                        ):
+                            self._force_activate_viewer_owner()
+                    except Exception:
+                        pass
                 if self._is_window_drag_button_down(event):
                     global_pos = self._event_global_pos(event)
                     self.move(global_pos - self._window_drag_offset)

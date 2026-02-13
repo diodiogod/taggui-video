@@ -1,3 +1,5 @@
+import time
+
 from PySide6.QtCore import Qt, Signal, Slot, QPointF, QRectF
 from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
@@ -364,10 +366,16 @@ class VideoControlsWidget(QWidget):
         self._resize_handle_width = 10  # Width of resize area on edges
         self._resize_corner_size = 20  # Size of corner resize areas (also resize width only)
         self._height_sync_in_progress = False
+        self._stabilize_scheduled = False
 
         # Double-click fit/restore state
         self._fit_mode_active = False
         self._pre_fit_geometry_percent = None
+        self._last_position_ui_update_at = 0.0
+        self._last_position_text_update_at = 0.0
+        self._last_frame_total_display = None
+        self._last_time_display = None
+        self._perf_profile = 'single'
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -1394,17 +1402,21 @@ class VideoControlsWidget(QWidget):
         QTimer.singleShot(0, self._sync_height_to_content)
 
     def _stabilize_after_geometry_change(self):
-        """Run a few deferred layout passes to avoid half-rendered startup states."""
+        """Schedule one deferred layout stabilization pass."""
         from PySide6.QtCore import QTimer
+        if self._stabilize_scheduled:
+            return
+        self._stabilize_scheduled = True
 
         def _pass():
+            self._stabilize_scheduled = False
+            if not self.isVisible():
+                return
             self._apply_scaling()
             self._sync_height_to_content()
             self._schedule_layout_settle_reflow()
 
         QTimer.singleShot(0, _pass)
-        QTimer.singleShot(30, _pass)
-        QTimer.singleShot(90, _pass)
 
     def _sync_height_to_content(self):
         """Keep widget height aligned to current content/layout while preserving width."""
@@ -1858,7 +1870,7 @@ class VideoControlsWidget(QWidget):
     def showEvent(self, event):
         """Ensure overlay-positioned components snap to valid anchors when shown."""
         super().showEvent(event)
-        self._stabilize_after_geometry_change()
+        self._schedule_layout_settle_reflow()
 
     @Slot()
     def _prev_frame(self):
@@ -2411,18 +2423,87 @@ class VideoControlsWidget(QWidget):
     @Slot(int, float)
     def update_position(self, frame: int, time_ms: float):
         """Update display when playback position changes."""
+        # Hidden controls in background viewers don't need per-frame UI churn.
+        # This significantly reduces UI-thread pressure when multiple videos play.
+        if not self.isVisible():
+            return
+
         # Skip updates if in marker preview mode (dragging marker)
         # This keeps seekbar frozen at original position during preview
         if self._in_marker_preview:
             return
 
-        # Update frame display - block signals to prevent feedback loop
-        self._updating_slider = True
-        self.frame_spinbox.blockSignals(True)
-        self.frame_spinbox.setValue(frame)
-        self.frame_spinbox.blockSignals(False)
-        self.timeline_slider.setValue(frame)
-        self._updating_slider = False
+        now = time.monotonic()
+        host_window = self.window()
+        is_active_window = bool(host_window and host_window.isActiveWindow())
+        is_spawned_owner = bool(getattr(self, '_is_spawned_owner', False))
+        max_frame = self.frame_spinbox.maximum()
+        is_boundary_frame = frame <= 0 or frame >= max_frame
+        frame_delta = abs(frame - self.frame_spinbox.value())
+
+        # Dynamic profile keeps single-view UX responsive while scaling down
+        # per-frame churn when many videos are active.
+        profile = str(getattr(self, '_perf_profile', 'single') or 'single')
+        if profile == 'dual':
+            tuning = {
+                'main_active': (1.0 / 28.0, 0.14, 2, 4),
+                'main_inactive': (0.24, 0.38, 4, 6),
+                'spawn_active': (0.12, 0.22, 3, 5),
+                'spawn_inactive': (0.26, 0.44, 5, 7),
+            }
+        elif profile == 'multi':
+            tuning = {
+                'main_active': (1.0 / 22.0, 0.18, 3, 5),
+                'main_inactive': (0.28, 0.45, 5, 8),
+                'spawn_active': (0.16, 0.30, 4, 7),
+                'spawn_inactive': (0.34, 0.58, 6, 10),
+            }
+        elif profile == 'heavy':
+            tuning = {
+                'main_active': (1.0 / 16.0, 0.24, 4, 7),
+                'main_inactive': (0.36, 0.60, 7, 11),
+                'spawn_active': (0.22, 0.40, 6, 9),
+                'spawn_inactive': (0.46, 0.78, 9, 14),
+            }
+        else:
+            tuning = {
+                'main_active': (1.0 / 36.0, 0.10, 2, 3),
+                'main_inactive': (0.20, 0.30, 3, 5),
+                'spawn_active': (0.09, 0.16, 2, 4),
+                'spawn_inactive': (0.18, 0.32, 4, 6),
+            }
+
+        if is_spawned_owner:
+            key = 'spawn_active' if is_active_window else 'spawn_inactive'
+        else:
+            key = 'main_active' if is_active_window else 'main_inactive'
+        position_interval, text_interval, active_delta, inactive_delta = tuning[key]
+        min_frame_delta = active_delta if is_active_window else inactive_delta
+
+        # Keep seek/slider responsive, but don't push every decoded frame.
+        should_update_position = (
+            is_boundary_frame
+            or frame_delta >= min_frame_delta
+            or (now - self._last_position_ui_update_at) >= position_interval
+        )
+        if should_update_position:
+            self._updating_slider = True
+            if self.frame_spinbox.value() != frame:
+                self.frame_spinbox.blockSignals(True)
+                self.frame_spinbox.setValue(frame)
+                self.frame_spinbox.blockSignals(False)
+            if self.timeline_slider.value() != frame:
+                self.timeline_slider.setValue(frame)
+            self._updating_slider = False
+            self._last_position_ui_update_at = now
+
+        # Text labels are cheaper to update less frequently.
+        should_update_text = (
+            is_boundary_frame
+            or (now - self._last_position_text_update_at) >= text_interval
+        )
+        if not should_update_text:
+            return
 
         # Update frame total label with "last" indicator
         total_frames = self.frame_spinbox.maximum() + 1  # Convert from 0-based max to total count
@@ -2432,9 +2513,12 @@ class VideoControlsWidget(QWidget):
                 frame_display = "last"
             else:
                 frame_display = str(total_frames)
-            self.frame_total_label.setText(f'/ {frame_display}')
+            frame_total_text = f'/ {frame_display}'
         else:
-            self.frame_total_label.setText('/ 0')
+            frame_total_text = '/ 0'
+        if frame_total_text != self._last_frame_total_display:
+            self.frame_total_label.setText(frame_total_text)
+            self._last_frame_total_display = frame_total_text
 
         # Update time display
         time_seconds = time_ms / 1000.0
@@ -2444,7 +2528,11 @@ class VideoControlsWidget(QWidget):
 
         current_text = self.time_label.text()
         total_time = current_text.split('/ ')[-1] if '/' in current_text else '00:00.000'
-        self.time_label.setText(f'{minutes:02d}:{seconds:02d}.{milliseconds:03d} / {total_time}')
+        time_text = f'{minutes:02d}:{seconds:02d}.{milliseconds:03d} / {total_time}'
+        if time_text != self._last_time_display:
+            self.time_label.setText(time_text)
+            self._last_time_display = time_text
+        self._last_position_text_update_at = now
 
     @Slot(bool)
     def set_playing(self, playing: bool, update_auto_play: bool = False):
