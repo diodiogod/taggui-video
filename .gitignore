@@ -177,3 +177,9 @@ test-1m-images/
 
 # Private documentation
 docs/private/
+
+# Skin designer runtime artifacts
+taggui/skins/backups/
+taggui/skins/user/*.yaml
+!taggui/skins/user/custom-example.yaml
+!taggui/skins/user/custom1.yaml
