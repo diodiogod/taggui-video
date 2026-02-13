@@ -1312,6 +1312,12 @@ class VideoControlsWidget(QWidget):
             min_lane_w = 12 if is_visible else 0
             min_lane_h = 12 if is_visible else 0
 
+            # Fully collapse hidden component slots so compact modes can truly shrink.
+            if not is_visible and not is_full_width_timeline and not is_speed_slider:
+                slot.setFixedWidth(0)
+                slot.setFixedHeight(0)
+                continue
+
             if is_full_width_timeline or is_speed_slider:
                 slot.setMinimumWidth(0)
                 slot.setMaximumWidth(16777215)
@@ -1565,7 +1571,12 @@ class VideoControlsWidget(QWidget):
             return max(0.25, min(4.0, float(cfg.get('scale', 1.0))))
 
         # Keep transport buttons visually proportional in compact mode.
-        button_scale_floor = 0.78
+        if width < 460:
+            button_scale_floor = 0.62
+        elif width < 620:
+            button_scale_floor = 0.72
+        else:
+            button_scale_floor = 0.78
         button_scale = max(button_scale_floor, scale)
 
         # Scale button sizes per component.
@@ -1652,6 +1663,8 @@ class VideoControlsWidget(QWidget):
         """Hide low-priority labels when width is very small to prevent overlap."""
         compact = width < 620
         ultra = width < 560
+        super_compact = width < 540
+        nano = width < 540
 
         self.fps_label.setVisible(not compact)
         self.frame_count_label.setVisible(not compact)
@@ -1670,6 +1683,35 @@ class VideoControlsWidget(QWidget):
             self.frame_total_label.setVisible(True)
 
         self.preview_container.setVisible(not compact)
+
+        # Super-compact mode: preserve only core transport + timeline + basic time + loop toggle.
+        self.frame_spinbox.setVisible(not super_compact)
+        self.speed_slider.setVisible(not super_compact)
+        self.speed_value_label.setVisible(not super_compact)
+        self.skip_back_btn.setVisible(not super_compact)
+        self.skip_forward_btn.setVisible(not super_compact)
+        self.loop_start_btn.setVisible(not super_compact)
+        self.loop_end_btn.setVisible(not super_compact)
+        self.loop_reset_btn.setVisible(not super_compact)
+
+        # Nano mode: only core playback + timeline + time label + loop toggle.
+        if nano:
+            self.mute_btn.setVisible(False)
+            self.prev_frame_btn.setVisible(False)
+            self.next_frame_btn.setVisible(False)
+            self.frame_spinbox.setVisible(False)
+            self.loop_checkbox.setVisible(False)
+            self.time_label.setVisible(False)
+        else:
+            self.mute_btn.setVisible(True)
+            self.prev_frame_btn.setVisible(True)
+            self.next_frame_btn.setVisible(True)
+            self.loop_checkbox.setVisible(True)
+            self.time_label.setVisible(True)
+
+    def minimum_runtime_width(self) -> int:
+        """Minimum practical runtime width for drag-resize and viewer restore."""
+        return 180
 
     def resizeEvent(self, event):
         """Scale all controls based on available width."""
@@ -2711,8 +2753,9 @@ class VideoControlsWidget(QWidget):
                 # Resize from left edge
                 new_width = self._resize_start_width - delta.x()
                 new_x = self._resize_start_x + delta.x()
-                # Clamp width (min 400px, max parent width)
-                new_width = max(400, min(new_width, parent_rect.width()))
+                # Clamp width (min runtime width, max parent width)
+                min_w = self.minimum_runtime_width()
+                new_width = max(min_w, min(new_width, parent_rect.width()))
                 # Adjust x to maintain right edge position
                 new_x = self._resize_start_x + (self._resize_start_width - new_width)
                 # Clamp x position
@@ -2721,9 +2764,10 @@ class VideoControlsWidget(QWidget):
             elif self._resizing == 'right':
                 # Resize from right edge
                 new_width = self._resize_start_width + delta.x()
-                # Clamp width (min 400px, max fits in parent)
+                # Clamp width (min runtime width, max fits in parent)
                 max_width = parent_rect.width() - self.x()
-                new_width = max(400, min(new_width, max_width))
+                min_w = self.minimum_runtime_width()
+                new_width = max(min_w, min(new_width, max_width))
                 self.setGeometry(self.x(), self.y(), new_width, self.height())
             event.accept()
         elif self._dragging:

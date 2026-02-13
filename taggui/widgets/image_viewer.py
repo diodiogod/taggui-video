@@ -103,7 +103,8 @@ class ImageViewer(QWidget):
             # Use saved width if available, otherwise use sizeHint
             if saved_width_percent is not None:
                 controls_width = int(saved_width_percent * self.width())
-                controls_width = max(400, min(controls_width, self.width()))  # Clamp
+                min_w = self.video_controls.minimum_runtime_width()
+                controls_width = max(min_w, min(controls_width, self.width()))  # Clamp
             else:
                 controls_width = self.video_controls.sizeHint().width()
             x_pos = int(saved_x_percent * self.width())
@@ -437,7 +438,8 @@ class ImageViewer(QWidget):
                 # Calculate width
                 if saved_width_percent is not None:
                     controls_width = int(saved_width_percent * self.width())
-                    controls_width = max(400, min(controls_width, self.width()))
+                    min_w = self.video_controls.minimum_runtime_width()
+                    controls_width = max(min_w, min(controls_width, self.width()))
                 else:
                     controls_width = self.video_controls.sizeHint().width()
 
