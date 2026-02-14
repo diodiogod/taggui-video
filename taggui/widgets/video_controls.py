@@ -378,6 +378,7 @@ class VideoControlsWidget(QWidget):
         self._perf_profile = 'single'
         self._last_playing_visual_state = None
         self._last_mute_visual_state = None
+        self._timeline_scrubbing = False
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -619,6 +620,8 @@ class VideoControlsWidget(QWidget):
         self.timeline_slider.setMinimum(0)
         self.timeline_slider.setMaximum(0)
         self.timeline_slider.valueChanged.connect(self._slider_changed)
+        self.timeline_slider.sliderPressed.connect(self._on_timeline_slider_pressed)
+        self.timeline_slider.sliderReleased.connect(self._on_timeline_slider_released)
         # Connect marker dragging signals
         self.timeline_slider.loop_start_changed.connect(self._on_loop_start_dragged)
         self.timeline_slider.loop_end_changed.connect(self._on_loop_end_dragged)
@@ -764,6 +767,7 @@ class VideoControlsWidget(QWidget):
         self._in_marker_preview = False  # True when dragging a marker
         self._preview_restore_frame = None  # Frame to restore to after preview ends
         self._was_playing_before_preview = False  # Store play state to restore after preview
+        self._was_playing_before_scrub = False
 
         # Load persistent settings
         self._load_persistent_settings()
@@ -1916,6 +1920,31 @@ class VideoControlsWidget(QWidget):
         if not self._updating_slider:
             self.frame_spinbox.setValue(value)
 
+    @Slot()
+    def _on_timeline_slider_pressed(self):
+        # Pause while scrubbing so timeline drag does not fight active playback.
+        self._was_playing_before_scrub = bool(self.is_playing)
+        if self._was_playing_before_scrub:
+            self.play_pause_requested.emit()
+        self._timeline_scrubbing = True
+        # Force immediate paint cadence while actively scrubbing.
+        self._last_position_ui_update_at = 0.0
+        self._last_position_text_update_at = 0.0
+
+    @Slot()
+    def _on_timeline_slider_released(self):
+        self._timeline_scrubbing = False
+        # Ensure first post-scrub update is not delayed by stale timestamps.
+        self._last_position_ui_update_at = 0.0
+        self._last_position_text_update_at = 0.0
+        # Resume only if playback was active before the scrub began.
+        if self._was_playing_before_scrub and not self.is_playing:
+            self.play_pause_requested.emit()
+        self._was_playing_before_scrub = False
+
+    def is_timeline_scrubbing(self) -> bool:
+        return bool(self._timeline_scrubbing or self.timeline_slider.isSliderDown())
+
     def eventFilter(self, obj, event):
         """Event filter for speed slider mouse tracking and global mouse release."""
         # Handle global mouse release to catch releases outside widget during resize/drag
@@ -2460,6 +2489,8 @@ class VideoControlsWidget(QWidget):
         if self._in_marker_preview:
             return
 
+        is_scrubbing = self.is_timeline_scrubbing()
+
         now = time.monotonic()
         host_window = self.window()
         is_active_window = bool(host_window and host_window.isActiveWindow())
@@ -2506,6 +2537,12 @@ class VideoControlsWidget(QWidget):
             key = 'main_active' if is_active_window else 'main_inactive'
         position_interval, text_interval, active_delta, inactive_delta = tuning[key]
         min_frame_delta = active_delta if is_active_window else inactive_delta
+
+        # While user is dragging timeline, disable update throttles for this widget.
+        if is_scrubbing:
+            position_interval = 0.0
+            text_interval = 0.0
+            min_frame_delta = 0
 
         # Keep seek/slider responsive, but don't push every decoded frame.
         should_update_position = (

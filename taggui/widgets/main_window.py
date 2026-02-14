@@ -1206,6 +1206,25 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # While user scrubs timeline, bypass scheduler throttles for that viewer
+        # so seek preview stays responsive. Multi-view throttles remain intact for
+        # all other viewers.
+        try:
+            controls = viewer.video_controls
+            scrub_fn = getattr(controls, 'is_timeline_scrubbing', None)
+            is_scrubbing = bool(scrub_fn()) if callable(scrub_fn) else bool(scrub_fn)
+            if is_scrubbing:
+                controls.update_position(int(frame), float(time_ms))
+                self._hud_dispatch_total += 1
+                self._video_controls_last_dispatch_at[viewer] = now
+                self._video_controls_pending_updates.pop(viewer, None)
+                return
+        except RuntimeError:
+            self._video_controls_pending_updates.pop(viewer, None)
+            return
+        except Exception:
+            pass
+
         if viewer in self._video_controls_pending_updates:
             self._hud_overwrite_total += 1
         self._video_controls_pending_updates[viewer] = (int(frame), float(time_ms))
@@ -1245,10 +1264,17 @@ class MainWindow(QMainWindow):
             frame, time_ms = payload
             is_active_owner = viewer is active_viewer
             is_playing = bool(getattr(player, 'is_playing', False))
+            try:
+                scrub_fn = getattr(controls, 'is_timeline_scrubbing', None)
+                is_scrubbing = bool(scrub_fn()) if callable(scrub_fn) else bool(scrub_fn)
+            except Exception:
+                is_scrubbing = False
             min_gap = self._controls_dispatch_min_gap(
                 is_active_owner=is_active_owner,
                 is_playing=is_playing,
             )
+            if is_scrubbing:
+                min_gap = 0.0
             last_dispatch = float(self._video_controls_last_dispatch_at.get(viewer, 0.0))
             if (now - last_dispatch) < min_gap:
                 continue
