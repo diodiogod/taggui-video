@@ -2,6 +2,20 @@
 
 TagGUI is a cross-platform desktop app for tagging images and captions for AI datasets, with video editing features and customizable UI.
 
+## User Docs (Start Here)
+
+- `docs/GETTING_STARTED.md`
+- `docs/FEATURE_OVERVIEW.md`
+- `docs/LARGE_DATASET_GUIDE.md`
+- `docs/VIDEO_WORKFLOW_GUIDE.md`
+- `docs/SKIN_DESIGNER_GUIDE.md`
+- `docs/TROUBLESHOOTING.md`
+- `docs/KNOWN_LIMITATIONS.md`
+- `docs/MIGRATION_NOTES_FROM_TAGGUI.md`
+- `docs/archive/README_LEGACY_REFERENCE.md` (pre-redesign README snapshot)
+
+---
+
 **Latest Features:**
 - Windowed strict masonry for 1M+ image datasets
 - Incremental masonry caching for smooth scrolling

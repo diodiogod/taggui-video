@@ -113,9 +113,65 @@ class ImageDelegate(QStyledItemDelegate):
         self._video_stamp_margin = 5
         self._video_stamp_diameter = 18
         self._filename_tooltip_delay_ms = 1300
+        self._filename_tooltip_max_chars = 80
+        # Logical pixels in viewport coordinates; tuned higher to avoid jitter.
+        self._filename_tooltip_move_tolerance_px = 12
+        # Keep visible until movement/leave logic dismisses it.
+        self._filename_tooltip_display_ms = 600000
         self._filename_tooltip_token = 0
         self._last_hover_move_monotonic = time.monotonic()
+        self._filename_tooltip_anchor_pos = None
         self._tracked_viewport = None
+
+    def _event_pos(self, event):
+        try:
+            if hasattr(event, 'position'):
+                position = event.position()
+                if position is not None:
+                    return position.toPoint()
+        except Exception:
+            pass
+        try:
+            return event.pos()
+        except Exception:
+            return None
+
+    def _format_file_size(self, size_bytes):
+        if size_bytes is None or size_bytes < 0:
+            return None
+        size = float(size_bytes)
+        for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+            if size < 1024 or unit == 'TB':
+                return f"{int(size)} {unit}" if unit == 'B' else f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} PB"
+
+    def _build_filename_size_tooltip(self, image):
+        file_name = getattr(getattr(image, 'path', None), 'name', None)
+        if not file_name:
+            return None
+        if len(file_name) > self._filename_tooltip_max_chars:
+            suffix = Path(file_name).suffix
+            head_max = self._filename_tooltip_max_chars - len(suffix) - 3
+            if suffix and head_max > 0:
+                file_name = file_name[:head_max] + '...' + suffix
+            else:
+                file_name = file_name[:self._filename_tooltip_max_chars - 3] + '...'
+
+        size_bytes = getattr(image, 'file_size', None)
+        if size_bytes is None:
+            path = getattr(image, 'path', None)
+            if path:
+                try:
+                    size_bytes = path.stat().st_size
+                    image.file_size = size_bytes
+                except OSError:
+                    size_bytes = None
+
+        size_text = self._format_file_size(size_bytes)
+        if size_text:
+            return f"{file_name} - {size_text}"
+        return str(file_name)
 
     def clear_labels(self):
         """Clear all stored labels (called on model reset)."""
@@ -262,9 +318,18 @@ class ImageDelegate(QStyledItemDelegate):
             image = p_index.data(Qt.ItemDataRole.UserRole)
             if not image:
                 return
-            file_name = getattr(getattr(image, 'path', None), 'name', None)
-            if file_name:
-                QToolTip.showText(QCursor.pos(), str(file_name), view, item_rect, 1500)
+            tooltip_text = self._build_filename_size_tooltip(image)
+            if tooltip_text:
+                # Keep tooltip active across tiny cursor drift; we control dismissal
+                # in eventFilter using a movement threshold from anchor_pos.
+                QToolTip.showText(
+                    QCursor.pos(),
+                    tooltip_text,
+                    viewport,
+                    viewport.rect(),
+                    self._filename_tooltip_display_ms,
+                )
+                self._filename_tooltip_anchor_pos = cursor_pos
         except Exception:
             pass
 
@@ -287,11 +352,29 @@ class ImageDelegate(QStyledItemDelegate):
         if watched is self._tracked_viewport:
             event_type = event.type()
             if event_type in (QEvent.MouseMove, QEvent.HoverMove):
+                cursor_pos = self._event_pos(event)
+                if (
+                    QToolTip.isVisible()
+                    and cursor_pos is not None
+                    and self._filename_tooltip_anchor_pos is not None
+                ):
+                    move_distance = (cursor_pos - self._filename_tooltip_anchor_pos).manhattanLength()
+                    if move_distance <= self._filename_tooltip_move_tolerance_px:
+                        return super().eventFilter(watched, event)
+
+                    # Cursor moved beyond tolerance: dismiss now and restart delay.
+                    QToolTip.hideText()
+                    self._last_hover_move_monotonic = time.monotonic()
+                    self._filename_tooltip_token += 1
+                    self._filename_tooltip_anchor_pos = None
+                    return super().eventFilter(watched, event)
                 self._last_hover_move_monotonic = time.monotonic()
                 self._filename_tooltip_token += 1
+                self._filename_tooltip_anchor_pos = None
             elif event_type in (QEvent.Leave, QEvent.Wheel, QEvent.MouseButtonPress):
                 self._last_hover_move_monotonic = time.monotonic()
                 self._filename_tooltip_token += 1
+                self._filename_tooltip_anchor_pos = None
                 QToolTip.hideText()
         return super().eventFilter(watched, event)
 
@@ -322,6 +405,7 @@ class ImageDelegate(QStyledItemDelegate):
                                 f"Frame count: {frame_count}"
                             )
                             QToolTip.showText(event.globalPos(), tooltip_text, view, option.rect, 2000)
+                            self._filename_tooltip_anchor_pos = None
                             return True
 
                 # Default hover tooltip for all items: filename only.

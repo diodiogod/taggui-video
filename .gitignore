@@ -183,3 +183,8 @@ taggui/skins/backups/
 taggui/skins/user/*.yaml
 !taggui/skins/user/custom-example.yaml
 !taggui/skins/user/custom1.yaml
+
+# Local benchmark tooling/instructions (machine-specific paths)
+tools/taggui_profile_switch.py
+tools/benchmark_profile.ps1
+docs/BRANCH_BENCHMARK_FRAMEWORK.md
