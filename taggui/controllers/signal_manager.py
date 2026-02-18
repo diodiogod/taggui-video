@@ -305,7 +305,7 @@ class SignalManager:
         video_controls.loop_start_set.connect(lambda: self._update_loop_state())
         video_controls.loop_end_set.connect(lambda: self._update_loop_state())
         video_controls.loop_reset.connect(
-            lambda: video_player.set_loop(False, None, None))
+            lambda: self._update_loop_state())
 
         # Connect speed control
         video_controls.speed_changed.connect(video_player.set_playback_speed)
@@ -356,19 +356,22 @@ class SignalManager:
         video_controls = self.main_window.image_viewer.video_controls
         video_player = self.main_window.image_viewer.video_player
 
-        if not video_controls.is_looping:
+        is_looping = bool(video_controls.is_looping)
+        loop_range = video_controls.get_loop_range()
+        print(
+            "[VIDEO][LOOP_FLOW_SM] apply "
+            f"is_looping={is_looping} range={loop_range}"
+        )
+
+        if not is_looping:
             video_player.set_loop(False, None, None)
             return
 
-        loop_range = video_controls.get_loop_range()
         if loop_range:
             video_player.set_loop(True, loop_range[0], loop_range[1])
         else:
-            total_frames = video_player.get_total_frames()
-            if total_frames > 0:
-                video_player.set_loop(True, 0, total_frames - 1)
-            else:
-                video_player.set_loop(False, None, None)
+            # No markers: enable full-video loop mode.
+            video_player.set_loop(True, None, None)
 
     def _skip_video(self, backward: bool):
         """Skip 1 second backward or forward in video."""

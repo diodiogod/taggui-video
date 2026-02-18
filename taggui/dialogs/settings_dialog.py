@@ -9,6 +9,18 @@ import sys
 import shutil
 import subprocess
 from utils.settings import DEFAULT_SETTINGS, settings
+from utils.video.playback_backend import (
+    PLAYBACK_BACKEND_CHOICES,
+    PLAYBACK_BACKEND_QT_HYBRID,
+    MPV_BACKEND_AVAILABLE,
+    MPV_BACKEND_ERROR,
+    MPV_RUNTIME_SEARCHED_DIRS,
+    VLC_BACKEND_AVAILABLE,
+    VLC_BACKEND_ERROR,
+    VLC_RUNTIME_SEARCHED_DIRS,
+    resolve_runtime_playback_backend,
+    normalize_playback_backend_name,
+)
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox)
 from utils.grammar_checker import GrammarCheckMode
@@ -609,8 +621,46 @@ class SettingsDialog(QDialog):
 
     def _add_gpu_video_settings(self, grid_layout: QGridLayout, start_row: int):
         """Add advanced GPU/video backend settings block."""
+        row = start_row
+
+        # Playback backend selector (migration scaffold; runtime currently falls back to qt_hybrid)
+        grid_layout.addWidget(QLabel('Video playback backend'), row, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.video_playback_backend_combo = SettingsComboBox(
+            key='video_playback_backend',
+            default=PLAYBACK_BACKEND_QT_HYBRID,
+        )
+        self.video_playback_backend_combo.addItems(PLAYBACK_BACKEND_CHOICES)
+        self.video_playback_backend_combo.setToolTip(
+            'Select preferred playback engine.\n\n'
+            'qt_hybrid: Current stable backend (Qt + OpenCV hybrid).\n'
+            'mpv_experimental: Experimental MPV backend.\n'
+            'vlc_experimental: Experimental libVLC backend.\n\n'
+            f'mpv availability in current runtime: {"yes" if MPV_BACKEND_AVAILABLE else "no"}.\n'
+            f'vlc availability in current runtime: {"yes" if VLC_BACKEND_AVAILABLE else "no"}.\n'
+            'When unavailable, selected experimental backend falls back to qt_hybrid.\n'
+            + (f'\nmpv load error: {MPV_BACKEND_ERROR}' if (not MPV_BACKEND_AVAILABLE and MPV_BACKEND_ERROR) else '')
+            + (f'\nvlc load error: {VLC_BACKEND_ERROR}' if (not VLC_BACKEND_AVAILABLE and VLC_BACKEND_ERROR) else '')
+            + (
+                f"\n\nSearched runtime dirs:\n- " + "\n- ".join(MPV_RUNTIME_SEARCHED_DIRS[:6])
+                if MPV_RUNTIME_SEARCHED_DIRS else
+                '\n\nSearched runtime dirs (mpv): none found with mpv runtime files.'
+            )
+            + (
+                f"\n\nSearched runtime dirs (vlc):\n- " + "\n- ".join(VLC_RUNTIME_SEARCHED_DIRS[:6])
+                if VLC_RUNTIME_SEARCHED_DIRS else
+                '\n\nSearched runtime dirs (vlc): none found with vlc runtime files.'
+            )
+        )
+        self.video_playback_backend_combo.currentTextChanged.connect(
+            self._on_playback_backend_changed
+        )
+        grid_layout.addWidget(self.video_playback_backend_combo, row, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
         # Playback GPU preference (OS-level policy for Qt multimedia backend)
-        grid_layout.addWidget(QLabel('Playback GPU preference'), start_row, 0,
+        grid_layout.addWidget(QLabel('Playback GPU preference'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
         self.video_playback_gpu_combo = SettingsComboBox(
             key='video_playback_gpu_preference',
@@ -631,8 +681,9 @@ class SettingsDialog(QDialog):
         self.video_playback_gpu_combo.currentTextChanged.connect(
             self._on_playback_gpu_preference_changed
         )
-        grid_layout.addWidget(self.video_playback_gpu_combo, start_row, 1,
+        grid_layout.addWidget(self.video_playback_gpu_combo, row, 1,
                               Qt.AlignmentFlag.AlignLeft)
+        row += 1
 
         self.open_os_graphics_settings_btn = QPushButton('Open OS Graphics Settings...')
         self.open_os_graphics_settings_btn.clicked.connect(self._open_os_graphics_settings)
@@ -645,11 +696,12 @@ class SettingsDialog(QDialog):
             self.open_os_graphics_settings_btn.setToolTip(
                 'OS graphics settings shortcut is currently available on Windows only.'
             )
-        grid_layout.addWidget(self.open_os_graphics_settings_btn, start_row + 1, 1,
+        grid_layout.addWidget(self.open_os_graphics_settings_btn, row, 1,
                               Qt.AlignmentFlag.AlignLeft)
+        row += 1
 
         # FFmpeg acceleration mode (used by encoding/processing tools)
-        grid_layout.addWidget(QLabel('FFmpeg acceleration mode'), start_row + 2, 0,
+        grid_layout.addWidget(QLabel('FFmpeg acceleration mode'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
         self.video_ffmpeg_accel_mode_combo = SettingsComboBox(
             key='video_ffmpeg_accel_mode',
@@ -664,10 +716,11 @@ class SettingsDialog(QDialog):
         self.video_ffmpeg_accel_mode_combo.currentTextChanged.connect(
             self._on_ffmpeg_accel_mode_changed
         )
-        grid_layout.addWidget(self.video_ffmpeg_accel_mode_combo, start_row + 2, 1,
+        grid_layout.addWidget(self.video_ffmpeg_accel_mode_combo, row, 1,
                               Qt.AlignmentFlag.AlignLeft)
+        row += 1
 
-        grid_layout.addWidget(QLabel('FFmpeg CUDA device index'), start_row + 3, 0,
+        grid_layout.addWidget(QLabel('FFmpeg CUDA device index'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
         self.video_ffmpeg_cuda_device_spin = SettingsSpinBox(
             key='video_ffmpeg_cuda_device',
@@ -684,10 +737,11 @@ class SettingsDialog(QDialog):
         self.video_ffmpeg_cuda_device_spin.setEnabled(
             self.video_ffmpeg_accel_mode_combo.currentText() == 'cuda'
         )
-        grid_layout.addWidget(self.video_ffmpeg_cuda_device_spin, start_row + 3, 1,
+        grid_layout.addWidget(self.video_ffmpeg_cuda_device_spin, row, 1,
                               Qt.AlignmentFlag.AlignLeft)
+        row += 1
 
-        grid_layout.addWidget(QLabel('Detected GPUs'), start_row + 4, 0,
+        grid_layout.addWidget(QLabel('Detected GPUs'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
         gpu_detect_row = QHBoxLayout()
         self.detected_gpus_label = QLabel('')
@@ -698,7 +752,7 @@ class SettingsDialog(QDialog):
         gpu_detect_row.addWidget(self.detected_gpus_label)
         gpu_detect_row.addWidget(refresh_gpu_btn)
         gpu_detect_row.addStretch()
-        grid_layout.addLayout(gpu_detect_row, start_row + 4, 1, Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addLayout(gpu_detect_row, row, 1, Qt.AlignmentFlag.AlignLeft)
         self._refresh_detected_gpus()
 
     @Slot()
@@ -860,6 +914,29 @@ class SettingsDialog(QDialog):
         """Reset warning label to default state."""
         self.warning_label.hide()
         self.warning_label.setStyleSheet('color: red;')
+
+    @Slot(str)
+    def _on_playback_backend_changed(self, backend_name: str):
+        configured = normalize_playback_backend_name(backend_name)
+        runtime_backend = resolve_runtime_playback_backend(configured)
+        if configured != runtime_backend:
+            extra = ''
+            if configured == 'mpv_experimental' and MPV_BACKEND_ERROR:
+                extra = f' ({MPV_BACKEND_ERROR})'
+                if not MPV_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
+                    extra += " Place mpv-1.dll in 'third_party/mpv/windows-x86_64/' or 'venv/Scripts/'."
+            elif configured == 'vlc_experimental' and VLC_BACKEND_ERROR:
+                extra = f' ({VLC_BACKEND_ERROR})'
+                if not VLC_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
+                    extra += " Place libvlc.dll/libvlccore.dll in 'third_party/vlc/windows-x86_64/'."
+            self.warning_label.setText(
+                f'Playback backend "{configured}" is not active yet; runtime uses "{runtime_backend}"{extra}.'
+            )
+            self.warning_label.setStyleSheet('color: #d48806;')
+        else:
+            self.warning_label.setText(f'Playback backend set to "{runtime_backend}".')
+            self.warning_label.setStyleSheet('color: #0a7f2e;')
+        self.warning_label.show()
 
     @Slot(str)
     def _on_playback_gpu_preference_changed(self, _value: str):

@@ -1,6 +1,5 @@
 import sys
 from math import floor, sqrt
-import re
 
 from PySide6.QtCore import QSize
 
@@ -40,9 +39,11 @@ def prepare() -> list[tuple[int, int, float]] | None:
     global aspect_ratios
     _preferred_sizes = []
     aspect_ratios = notable_aspect_ratios.copy()
-    for res_str in re.split(r'\s*,\s*',
-                            settings.value('export_preferred_sizes', type=str) or ''):
+    raw_value = settings.value('export_preferred_sizes', type=str)
+    raw_text = str(raw_value or '')
+    for res_str in raw_text.split(','):
         try:
+            res_str = res_str.strip()
             if res_str == '':
                 continue
             size_str = res_str.split(':')
@@ -63,7 +64,7 @@ def prepare() -> list[tuple[int, int, float]] | None:
                     if ar_delta < 0.15:
                         aspect_ratios.append((ar[0], ar[1], aspect_ratio))
                         break
-        except ValueError:
+        except (ValueError, IndexError):
             # Handle cases where the resolution string is not in the correct format
             print(f'Warning: Invalid resolution format: {res_str}. Skipping.',
                     file=sys.stderr)

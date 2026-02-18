@@ -10,6 +10,10 @@ transformers==4.48.3
 
 # Video support
 opencv-python==4.10.0.84
+# Optional experimental backend wrapper (requires native mpv runtime files)
+python-mpv==1.0.8
+# Optional experimental backend wrapper (requires native vlc runtime files)
+python-vlc==3.0.21203
 
 # CogAgent
 timm==1.0.15

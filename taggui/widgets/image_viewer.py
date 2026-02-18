@@ -484,6 +484,10 @@ class ImageViewer(QWidget):
         if was_visible:
             self.video_controls.setVisible(True)
             self.video_controls.raise_()
+        try:
+            self.video_player.sync_external_surface_geometry()
+        except Exception:
+            pass
 
     def mouseMoveEvent(self, event):
         """Show controls when hovering over their position."""
@@ -915,6 +919,14 @@ class ImageViewer(QWidget):
             MarkingItem.zoom_factor, transform.m12(), transform.m13(),
             transform.m21(), MarkingItem.zoom_factor, transform.m23(),
             transform.m31(), transform.m32(), transform.m33()))
+        try:
+            self.video_player.sync_external_surface_geometry()
+        except Exception:
+            pass
+        try:
+            self.video_player.set_view_transformed(not self.is_zoom_to_fit)
+        except Exception:
+            pass
         for marking in self.marking_items:
             marking.adjust_layout()
         if self.is_zoom_to_fit:

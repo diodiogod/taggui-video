@@ -437,6 +437,10 @@ class MainWindow(QMainWindow):
         self.image_viewer.view.customContextMenuRequested.connect(
             self._on_main_viewer_context_menu_spawn
         )
+        self.image_viewer.view.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.image_viewer.view.viewport().customContextMenuRequested.connect(
+            self._on_main_viewer_viewport_context_menu_spawn
+        )
         self.create_central_widget()
         self._update_main_window_title()
 
@@ -597,9 +601,7 @@ class MainWindow(QMainWindow):
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
             self.image_list.jump_to_first_untagged_image)
-        self.restore()
-        self._apply_saved_workspace_preset()
-        self.image_tags_editor.tag_input_box.setFocus()
+        self._restore_after_init_scheduled = False
 
         self._filter_timer = QTimer()
         self._filter_timer.setSingleShot(True)
@@ -615,6 +617,28 @@ class MainWindow(QMainWindow):
         self._unfreeze_timer.setSingleShot(True)
         self._unfreeze_timer.timeout.connect(self._refreeze_after_interaction)
         settings.change.connect(self._on_setting_changed)
+        self._schedule_restore_after_init()
+
+    def _schedule_restore_after_init(self):
+        """Defer startup restore until the event loop is active."""
+        if self._restore_after_init_scheduled:
+            return
+        self._restore_after_init_scheduled = True
+        QTimer.singleShot(0, self._restore_after_init)
+
+    def _restore_after_init(self):
+        """Run startup restore with defensive guards to keep startup stable."""
+        self._restore_after_init_scheduled = False
+        try:
+            self.restore()
+            self._apply_saved_workspace_preset()
+        except Exception as e:
+            print(f"[RESTORE] Startup restore failed: {e}")
+        finally:
+            try:
+                self.image_tags_editor.tag_input_box.setFocus()
+            except Exception:
+                pass
 
     def _set_list_view_updates_enabled(self, enabled: bool):
         """Keep list view and viewport update flags in sync."""
@@ -695,7 +719,12 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
-        if event.type() in (event.Type.ShortcutOverride, event.Type.KeyPress):
+        try:
+            event_type = event.type()
+        except Exception:
+            return False
+
+        if event_type in (event.Type.ShortcutOverride, event.Type.KeyPress):
             try:
                 if not event.isAutoRepeat() and event.key() == Qt.Key.Key_J:
                     mods = event.modifiers()
@@ -716,12 +745,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        if event.type() == event.Type.MouseButtonPress:
+        if event_type == event.Type.MouseButtonPress:
             try:
                 if event.button() == Qt.MouseButton.MiddleButton:
                     focus_widget = QApplication.focusWidget()
                     if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
-                        return super().eventFilter(obj, event)
+                        return False
 
                     widget = obj if isinstance(obj, QWidget) else None
                     if widget is not None:
@@ -743,11 +772,23 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        if obj == self.image_list.list_view and event.type() == event.Type.Resize:
+        list_view = None
+        try:
+            if hasattr(self, 'image_list') and self.image_list is not None:
+                list_view = getattr(self.image_list, 'list_view', None)
+        except Exception:
+            list_view = None
+
+        if list_view is not None and obj == list_view and event_type == event.Type.Resize:
             # Resizing/splitter movement is a decisive user action: keep updates
             # enabled long enough for masonry to recalc and repaint live.
-            self._unfreeze_for_interaction(hold_ms=900)
-        return super().eventFilter(obj, event)
+            try:
+                self._unfreeze_for_interaction(hold_ms=900)
+            except Exception:
+                pass
+        # Base QObject.eventFilter returns False; avoid forwarding into C++ here
+        # during teardown/startup edge-cases where wrapped objects may be invalid.
+        return False
 
     def resizeEvent(self, event):
         """Handle window resize - unfreeze list to allow layout update."""
@@ -1180,7 +1221,7 @@ class MainWindow(QMainWindow):
             lambda: self._apply_loop_state_to_viewer_player(viewer)
         )
         video_controls.loop_reset.connect(
-            lambda: video_player.set_loop(False, None, None)
+            lambda: self._apply_loop_state_to_viewer_player(viewer)
         )
         video_controls.speed_changed.connect(video_player.set_playback_speed)
         video_controls.mute_toggled.connect(video_player.set_muted)
@@ -1609,6 +1650,15 @@ class MainWindow(QMainWindow):
 
         self.spawn_floating_viewer()
 
+    @Slot(object)
+    def _on_main_viewer_viewport_context_menu_spawn(self, pos):
+        """Bridge viewport right-click coordinates into the main-view spawn handler."""
+        try:
+            mapped = self.image_viewer.view.mapFrom(self.image_viewer.view.viewport(), pos)
+        except Exception:
+            mapped = pos
+        self._on_main_viewer_context_menu_spawn(mapped)
+
     def _iter_all_viewers(self) -> list[ImageViewer]:
         """Return main viewer plus currently alive floating viewers."""
         viewers = [self.image_viewer]
@@ -1667,20 +1717,25 @@ class MainWindow(QMainWindow):
         if controls is None or player is None:
             return
 
-        if not bool(getattr(controls, 'is_looping', False)):
+        is_looping = bool(getattr(controls, 'is_looping', False))
+        loop_range = controls.get_loop_range() if hasattr(controls, 'get_loop_range') else None
+        print(
+            "[VIDEO][LOOP_FLOW] apply "
+            f"is_looping={is_looping} range={loop_range} "
+            f"viewer={id(viewer)} controls={id(controls)} player={id(player)}"
+        )
+
+        if not is_looping:
             player.set_loop(False, None, None)
             return
 
-        loop_range = controls.get_loop_range() if hasattr(controls, 'get_loop_range') else None
         if loop_range:
             player.set_loop(True, int(loop_range[0]), int(loop_range[1]))
             return
 
-        total_frames = int(player.get_total_frames() or 0)
-        if total_frames > 0:
-            player.set_loop(True, 0, total_frames - 1)
-        else:
-            player.set_loop(False, None, None)
+        # No markers set: treat as full-video loop, not a marker segment.
+        # This keeps backend behavior consistent and avoids false segment-end misses.
+        player.set_loop(True, None, None)
 
     @Slot()
     def sync_video_playback(self):
@@ -1759,15 +1814,12 @@ class MainWindow(QMainWindow):
 
         self._floating_viewers.append(window)
 
-        loaded_ratio = None
-        if target_proxy_index.isValid():
-            viewer.load_image(target_proxy_index)
-            self._apply_inherited_video_state(viewer, source_video_state)
-            loaded_ratio = viewer.get_content_aspect_ratio()
+        target_row = target_proxy_index.row() if target_proxy_index.isValid() else -1
+        target_col = target_proxy_index.column() if target_proxy_index.isValid() else 0
 
         spawn_w, spawn_h = self._get_initial_floating_size(
             target_proxy_index,
-            aspect_ratio_override=loaded_ratio,
+            aspect_ratio_override=None,
         )
         window.resize(spawn_w, spawn_h)
 
@@ -1782,7 +1834,26 @@ class MainWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
         self.set_active_viewer(viewer)
-        self.refresh_video_controls_performance_profile()
+
+        def _deferred_load():
+            try:
+                if target_row < 0:
+                    return
+                live_target = self._normalize_spawn_proxy_index(
+                    self.proxy_image_list_model.index(target_row, target_col)
+                )
+                if not live_target.isValid():
+                    return
+                viewer.load_image(live_target)
+                self._apply_inherited_video_state(viewer, source_video_state)
+            except RuntimeError:
+                return
+            except Exception as e:
+                print(f"[VIEWER] Deferred spawn-load warning: {e}")
+            finally:
+                self.refresh_video_controls_performance_profile()
+
+        QTimer.singleShot(0, _deferred_load)
 
     @Slot()
     def spawn_floating_viewer(self):
@@ -2568,7 +2639,16 @@ class MainWindow(QMainWindow):
                 select_path = self._get_folder_last_selected_path(directory_path)
                 if not select_path and settings.contains('last_selected_path'):
                     select_path = settings.value('last_selected_path', type=str)
-                self.load_directory(directory_path, select_index=image_index, select_path=select_path)
+                def _restore_directory():
+                    try:
+                        self.load_directory(
+                            directory_path,
+                            select_index=image_index,
+                            select_path=select_path,
+                        )
+                    except Exception as e:
+                        print(f"[RESTORE] Failed to restore directory '{directory_path}': {e}")
+                QTimer.singleShot(0, _restore_directory)
 
     def _add_to_recent_directories(self, dir_path: str):
         """Add directory to recent list, maintaining max size."""

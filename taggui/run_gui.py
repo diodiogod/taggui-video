@@ -13,6 +13,18 @@ from datetime import datetime
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
 
+# Bootstrap optional bundled media runtimes before UI imports.
+try:
+    from utils.video.mpv_runtime import bootstrap_mpv_runtime_search_paths
+    bootstrap_mpv_runtime_search_paths()
+except Exception:
+    pass
+try:
+    from utils.video.vlc_runtime import bootstrap_vlc_runtime_search_paths
+    bootstrap_vlc_runtime_search_paths()
+except Exception:
+    pass
+
 try:
     import transformers
     from PySide6.QtGui import QImageReader

@@ -8,6 +8,11 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
 from utils.settings import settings, DEFAULT_SETTINGS
 from skins.engine import SkinManager
 
+try:
+    from shiboken6 import isValid as _shiboken_is_valid
+except Exception:
+    _shiboken_is_valid = None
+
 
 class LoopSlider(QSlider):
     """Custom slider with visual loop markers."""
@@ -367,6 +372,9 @@ class VideoControlsWidget(QWidget):
         self._resize_corner_size = 20  # Size of corner resize areas (also resize width only)
         self._height_sync_in_progress = False
         self._stabilize_scheduled = False
+        self._overlay_reposition_pending = False
+        self._overlay_reposition_in_progress = False
+        self._overlay_reposition_retry_count = 0
 
         # Double-click fit/restore state
         self._fit_mode_active = False
@@ -836,128 +844,207 @@ class VideoControlsWidget(QWidget):
         # Overlay layer removed; components are parented directly to self.
         return
 
+    def _qt_widget_alive(self, widget) -> bool:
+        """Best-effort liveness check for wrapped Qt objects."""
+        if widget is None:
+            return False
+        if _shiboken_is_valid is not None:
+            try:
+                if not _shiboken_is_valid(widget):
+                    return False
+            except Exception:
+                return False
+        try:
+            widget.objectName()
+        except RuntimeError:
+            return False
+        except Exception:
+            pass
+        return True
+
+    def _schedule_overlay_reposition(self, delay_ms: int = 0):
+        """Queue one overlay reposition pass (deduped) to avoid event-loop spin."""
+        if not self._qt_widget_alive(self):
+            return
+        if self._overlay_reposition_pending:
+            return
+        self._overlay_reposition_pending = True
+
+        from PySide6.QtCore import QTimer
+
+        def _run():
+            self._overlay_reposition_pending = False
+            if not self._qt_widget_alive(self):
+                return
+            self._reposition_component_overlays()
+
+        QTimer.singleShot(max(0, int(delay_ms)), _run)
+
     def _reposition_component_overlays(self):
         """Position real component widgets from anchor slot geometry."""
+        if not self._qt_widget_alive(self):
+            return
+        if self._overlay_reposition_in_progress:
+            return
+        try:
+            if not self.isVisible():
+                self._overlay_reposition_retry_count = 0
+                return
+        except RuntimeError:
+            return
+        self._overlay_reposition_in_progress = True
         try:
             self._update_component_overlay_geometry()
         except RuntimeError:
+            self._overlay_reposition_in_progress = False
             return
         invalid_anchor_found = False
-        for component_id in list(self._component_slots.keys()):
-            slot = self._component_slots.get(component_id)
-            widget = self._component_widgets.get(component_id)
-            if widget is None or slot is None:
-                continue
-            if component_id in self._slot_managed_components:
-                continue
+        try:
+            for component_id in list(self._component_slots.keys()):
+                slot = self._component_slots.get(component_id)
+                widget = self._component_widgets.get(component_id)
+                if widget is None or slot is None:
+                    continue
+                if (not self._qt_widget_alive(slot)) or (not self._qt_widget_alive(widget)):
+                    self._component_slots.pop(component_id, None)
+                    self._component_widgets.pop(component_id, None)
+                    continue
+                if component_id in self._slot_managed_components:
+                    continue
 
-            cfg = self._get_component_layout(component_id)
-            align = str(cfg.get('align', 'center')).lower()
-            requested_container_width = int(cfg.get('container_width', 0))
-            offset_x = max(-240, min(240, int(cfg.get('offset_x', 0))))
-            offset_y = max(-180, min(180, int(cfg.get('offset_y', 0))))
-            try:
-                anchor = slot.geometry()
-            except RuntimeError:
-                # Qt object was deleted; drop stale registry entries safely.
-                self._component_slots.pop(component_id, None)
-                self._component_widgets.pop(component_id, None)
-                continue
-            if anchor.width() <= 0 or anchor.height() <= 0:
-                # Speed slider fallback anchor derived from Speed: and 1.00x labels.
-                if component_id == 'speed_slider':
-                    left_ref = self.speed_label.geometry()
-                    right_ref = self.speed_value_label.geometry()
-                    if left_ref.isValid() and right_ref.isValid() and right_ref.left() > left_ref.right():
-                        anchor = left_ref
-                        anchor.setLeft(left_ref.right() + 6)
-                        anchor.setRight(right_ref.left() - 6)
+                try:
+                    cfg = self._get_component_layout(component_id)
+                except RuntimeError:
+                    self._component_slots.pop(component_id, None)
+                    self._component_widgets.pop(component_id, None)
+                    continue
+                align = str(cfg.get('align', 'center')).lower()
+                requested_container_width = int(cfg.get('container_width', 0))
+                offset_x = max(-240, min(240, int(cfg.get('offset_x', 0))))
+                offset_y = max(-180, min(180, int(cfg.get('offset_y', 0))))
+                try:
+                    anchor = slot.geometry()
+                except RuntimeError:
+                    # Qt object was deleted; drop stale registry entries safely.
+                    self._component_slots.pop(component_id, None)
+                    self._component_widgets.pop(component_id, None)
+                    continue
+                if anchor.width() <= 0 or anchor.height() <= 0:
+                    # Speed slider fallback anchor derived from Speed: and 1.00x labels.
+                    if component_id == 'speed_slider':
+                        try:
+                            left_ref = self.speed_label.geometry()
+                            right_ref = self.speed_value_label.geometry()
+                        except RuntimeError:
+                            invalid_anchor_found = True
+                            continue
+                        if left_ref.isValid() and right_ref.isValid() and right_ref.left() > left_ref.right():
+                            anchor = left_ref
+                            anchor.setLeft(left_ref.right() + 6)
+                            anchor.setRight(right_ref.left() - 6)
+                        else:
+                            invalid_anchor_found = True
+                            continue
                     else:
                         invalid_anchor_found = True
                         continue
-                else:
-                    invalid_anchor_found = True
+
+                try:
+                    hint = widget.sizeHint()
+                except RuntimeError:
+                    self._component_widgets.pop(component_id, None)
+                    continue
+                width = max(8, int(hint.width()))
+                height = max(8, int(hint.height()))
+
+                try:
+                    max_w = int(widget.maximumWidth())
+                    max_h = int(widget.maximumHeight())
+                    min_w = int(widget.minimumWidth())
+                    min_h = int(widget.minimumHeight())
+                except RuntimeError:
+                    self._component_widgets.pop(component_id, None)
                     continue
 
-            hint = widget.sizeHint()
-            width = max(8, int(hint.width()))
-            height = max(8, int(hint.height()))
+                if 0 < max_w < 16777215:
+                    width = max_w
+                if 0 < max_h < 16777215:
+                    height = max_h
+                width = max(width, max(0, min_w))
+                height = max(height, max(0, min_h))
 
-            max_w = int(widget.maximumWidth())
-            max_h = int(widget.maximumHeight())
-            min_w = int(widget.minimumWidth())
-            min_h = int(widget.minimumHeight())
-
-            if 0 < max_w < 16777215:
-                width = max_w
-            if 0 < max_h < 16777215:
-                height = max_h
-            width = max(width, max(0, min_w))
-            height = max(height, max(0, min_h))
-
-            if component_id == 'speed_slider':
-                if requested_container_width > 0:
-                    width = max(20, requested_container_width)
-                else:
+                if component_id == 'speed_slider':
+                    if requested_container_width > 0:
+                        width = max(20, requested_container_width)
+                    else:
+                        width = max(20, anchor.width())
+                elif component_id == 'timeline_slider':
                     width = max(20, anchor.width())
-            elif component_id == 'timeline_slider':
-                width = max(20, anchor.width())
 
-            if component_id in ('speed_label', 'speed_value_label'):
-                # Speed text/value are anchored by dedicated slots.
-                x = anchor.left()
-                y = anchor.top()
-                width = anchor.width()
-                height = anchor.height()
-                offset_x = 0
-                offset_y = 0
-            elif component_id == 'speed_slider':
-                # Slider is laid out in a dedicated lane between speed label and value.
-                x = anchor.left()
-                offset_x = 0
-            elif component_id == 'timeline_slider':
-                x = anchor.left()
-            elif align == 'left':
-                x = anchor.left()
-            elif align == 'right':
-                x = anchor.right() - width + 1
-            else:
-                x = anchor.left() + (anchor.width() - width) // 2
-            y = anchor.top() + (anchor.height() - height) // 2
-
-            # Prevent narrow-width overlap: keep text-like widgets inside their anchor lane.
-            if component_id in (
-                'frame_label',
-                'frame_spinbox',
-                'frame_total_label',
-                'time_label',
-                'fps_label',
-                'frame_count_label',
-                'speed_label',
-                'speed_value_label',
-                'loop_checkbox',
-            ):
-                width = min(width, max(8, anchor.width()))
-                height = min(height, max(8, anchor.height()))
-                if align == 'right':
-                    x = anchor.right() - width + 1
+                if component_id in ('speed_label', 'speed_value_label'):
+                    # Speed text/value are anchored by dedicated slots.
+                    x = anchor.left()
+                    y = anchor.top()
+                    width = anchor.width()
+                    height = anchor.height()
+                    offset_x = 0
+                    offset_y = 0
+                elif component_id == 'speed_slider':
+                    # Slider is laid out in a dedicated lane between speed label and value.
+                    x = anchor.left()
+                    offset_x = 0
+                elif component_id == 'timeline_slider':
+                    x = anchor.left()
                 elif align == 'left':
                     x = anchor.left()
+                elif align == 'right':
+                    x = anchor.right() - width + 1
                 else:
                     x = anchor.left() + (anchor.width() - width) // 2
                 y = anchor.top() + (anchor.height() - height) // 2
 
-            try:
-                widget.setGeometry(int(x + offset_x), int(y + offset_y), int(width), int(height))
-            except RuntimeError:
-                self._component_widgets.pop(component_id, None)
-                continue
-            widget.show()
-            widget.raise_()
+                # Prevent narrow-width overlap: keep text-like widgets inside their anchor lane.
+                if component_id in (
+                    'frame_label',
+                    'frame_spinbox',
+                    'frame_total_label',
+                    'time_label',
+                    'fps_label',
+                    'frame_count_label',
+                    'speed_label',
+                    'speed_value_label',
+                    'loop_checkbox',
+                ):
+                    width = min(width, max(8, anchor.width()))
+                    height = min(height, max(8, anchor.height()))
+                    if align == 'right':
+                        x = anchor.right() - width + 1
+                    elif align == 'left':
+                        x = anchor.left()
+                    else:
+                        x = anchor.left() + (anchor.width() - width) // 2
+                    y = anchor.top() + (anchor.height() - height) // 2
 
-        if invalid_anchor_found and self.isVisible():
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._reposition_component_overlays)
+                try:
+                    widget.setGeometry(int(x + offset_x), int(y + offset_y), int(width), int(height))
+                except RuntimeError:
+                    self._component_widgets.pop(component_id, None)
+                    continue
+                # Avoid forcing show/raise during rapid rebuilds; visibility is managed
+                # by skin/layout logic and explicit compact/nano mode rules.
+        finally:
+            self._overlay_reposition_in_progress = False
+
+        try:
+            should_retry = bool(invalid_anchor_found and self._qt_widget_alive(self) and self.isVisible())
+        except RuntimeError:
+            should_retry = False
+        if should_retry:
+            if self._overlay_reposition_retry_count < 12:
+                self._overlay_reposition_retry_count += 1
+                self._schedule_overlay_reposition(16)
+        else:
+            self._overlay_reposition_retry_count = 0
 
     def _create_component_slot(self, component_id: str, widget: QWidget, row_key: str, stretch: int = 0) -> QWidget:
         """Create an anchor slot and attach real widget to overlay for free positioning."""
@@ -1422,7 +1509,7 @@ class VideoControlsWidget(QWidget):
     def _schedule_layout_settle_reflow(self):
         """Re-run positioning after Qt finishes the current layout pass."""
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._reposition_component_overlays)
+        self._schedule_overlay_reposition(0)
         QTimer.singleShot(0, self._update_background_surface_geometry)
         QTimer.singleShot(0, self._sync_height_to_content)
 
@@ -1530,7 +1617,6 @@ class VideoControlsWidget(QWidget):
                         current_size = widget.size()
                         widget.setGeometry(int(x), int(y), current_size.width(), current_size.height())
                         widget.show()
-                        widget.raise_()
 
     def switch_skin(self, skin_name: str):
         """Switch to a different skin and apply it immediately.
@@ -2421,6 +2507,10 @@ class VideoControlsWidget(QWidget):
 
         # Restore loop state after video loads
         if self.is_looping:
+            print(
+                "[VIDEO][LOOP_UI] restore loop-on after load "
+                f"markers=({self.loop_start_frame},{self.loop_end_frame})"
+            )
             self.loop_toggled.emit(True)
             # If loop markers are defined, start playback/view from loop-in frame.
             if self.loop_start_frame is not None and self.loop_end_frame is not None:
@@ -2792,6 +2882,10 @@ class VideoControlsWidget(QWidget):
     def _toggle_loop(self, enabled: bool):
         """Toggle loop playback."""
         self.is_looping = enabled
+        print(
+            "[VIDEO][LOOP_UI] toggle "
+            f"enabled={bool(enabled)} markers=({self.loop_start_frame},{self.loop_end_frame})"
+        )
         self.loop_toggled.emit(enabled)
         # Save loop state to settings
         settings.setValue('video_loop_enabled', enabled)
@@ -2801,6 +2895,10 @@ class VideoControlsWidget(QWidget):
         """Reset loop markers only (keeps loop enabled/disabled state)."""
         self.loop_start_frame = None
         self.loop_end_frame = None
+        print(
+            "[VIDEO][LOOP_UI] reset markers "
+            f"keep_enabled={bool(self.is_looping)} save={bool(save)}"
+        )
         # Don't change is_looping or loop_checkbox state
         self.loop_reset.emit()
         # Clear button styling

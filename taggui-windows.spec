@@ -1,9 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
+import os
 
 datas = [('clip-vit-base-patch32', 'clip-vit-base-patch32'),
          ('images/icon.ico', 'images')]
 datas += collect_data_files('xformers')
+
+# Optional bundled mpv runtime files (for experimental mpv backend).
+if os.path.isdir('third_party/mpv'):
+    for root, _, files in os.walk('third_party/mpv'):
+        for filename in files:
+            src = os.path.join(root, filename)
+            dst = os.path.relpath(root, '.')
+            datas.append((src, dst))
+
+# Optional bundled vlc runtime files (for experimental vlc backend).
+if os.path.isdir('third_party/vlc'):
+    for root, _, files in os.walk('third_party/vlc'):
+        for filename in files:
+            src = os.path.join(root, filename)
+            dst = os.path.relpath(root, '.')
+            datas.append((src, dst))
+
 hiddenimports = [
     'timm.models.layers',
     'xformers._C',

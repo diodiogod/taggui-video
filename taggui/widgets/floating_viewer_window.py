@@ -82,17 +82,23 @@ class FloatingViewerWindow(QWidget):
         self._size_grip = QSizeGrip(self)
         self._size_grip.setFixedSize(14, 14)
         self._size_grip.setStyleSheet("QSizeGrip { background: transparent; }")
+        # Resize is handled by border hit-testing; keep grip hidden to avoid
+        # visible corner artifacts over native video surfaces.
+        self._size_grip.hide()
         self._size_grip.raise_()
 
         self._create_drag_handles()
         self._create_corner_resize_handles()
         self._create_edge_resize_handles()
+        self._use_widget_resize_handles = False
+        self._disable_widget_resize_handles()
 
         self.viewer.installEventFilter(self)
         self.installEventFilter(self)
         if hasattr(self.viewer, "view"):
             self.viewer.view.installEventFilter(self)
             self.viewer.view.viewport().installEventFilter(self)
+        self._refresh_video_surface_event_filters()
         self._video_controls_widget = getattr(self.viewer, "video_controls", None)
         if self._video_controls_widget is not None:
             self._video_controls_widget.installEventFilter(self)
@@ -101,6 +107,21 @@ class FloatingViewerWindow(QWidget):
 
         self._apply_style()
         self._reposition_overlay_controls()
+
+    def _disable_widget_resize_handles(self):
+        """Hide legacy resize widgets to avoid native-video corner artifacts."""
+        for zone in self._corner_resize_widgets.values():
+            try:
+                zone.hide()
+                zone.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            except Exception:
+                pass
+        for zone in self._edge_resize_widgets.values():
+            try:
+                zone.hide()
+                zone.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            except Exception:
+                pass
 
     def _event_global_pos(self, event) -> QPoint:
         try:
@@ -111,6 +132,26 @@ class FloatingViewerWindow(QWidget):
         except Exception:
             pass
         return QCursor.pos()
+
+    def _iter_video_surface_widgets(self):
+        """Yield live native video surface widgets used by backend renderers."""
+        player = getattr(self.viewer, "video_player", None)
+        if player is None:
+            return
+        for attr in ("vlc_widget", "mpv_widget"):
+            widget = getattr(player, attr, None)
+            if isinstance(widget, QWidget):
+                yield widget
+
+    def _refresh_video_surface_event_filters(self):
+        """Ensure floating-window event filter is attached to backend video widgets."""
+        for widget in self._iter_video_surface_widgets():
+            try:
+                widget.installEventFilter(self)
+                widget.setMouseTracking(True)
+            except RuntimeError:
+                # Surface may be recreated while switching videos/backends.
+                continue
 
     def refresh_video_controls_performance_profile(self):
         """Proxy performance-profile refresh request to main window."""
@@ -178,6 +219,9 @@ class FloatingViewerWindow(QWidget):
             if watched is self.viewer:
                 mapped = self.viewer.mapTo(view.viewport(), pos)
                 return view.mapToScene(mapped)
+            if isinstance(watched, QWidget):
+                mapped = watched.mapTo(view.viewport(), pos)
+                return view.mapToScene(mapped)
         except Exception:
             return None
         return None
@@ -195,6 +239,8 @@ class FloatingViewerWindow(QWidget):
                 return view.viewport().mapFrom(view, pos)
             if watched is self.viewer:
                 return self.viewer.mapTo(view.viewport(), pos)
+            if isinstance(watched, QWidget):
+                return watched.mapTo(view.viewport(), pos)
         except Exception:
             return None
         return None
@@ -280,6 +326,7 @@ class FloatingViewerWindow(QWidget):
         for corner, cursor in cursor_by_corner.items():
             zone = QWidget(self)
             zone.setObjectName("floatingViewerResizeCorner")
+            zone.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             zone.setCursor(cursor)
             zone.setToolTip("Resize floating viewer")
             zone.setMouseTracking(True)
@@ -299,6 +346,7 @@ class FloatingViewerWindow(QWidget):
         for edge, cursor in cursor_by_edge.items():
             zone = QWidget(self)
             zone.setObjectName("floatingViewerResizeEdge")
+            zone.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             zone.setCursor(cursor)
             zone.setToolTip("Resize floating viewer")
             zone.setMouseTracking(True)
@@ -393,6 +441,14 @@ class FloatingViewerWindow(QWidget):
                 border: 1px solid rgba(0, 0, 0, 140);
                 border-radius: 2px;
                 background: rgba(255, 255, 255, {border_alpha});
+            }}
+            #floatingViewerResizeCorner {{
+                background: transparent;
+                border: none;
+            }}
+            #floatingViewerResizeEdge {{
+                background: transparent;
+                border: none;
             }}
             #floatingViewerFrozenOutline {{
                 border: 3px solid rgba(28, 112, 255, 255);
@@ -655,13 +711,56 @@ class FloatingViewerWindow(QWidget):
 
         self.setGeometry(x, y, w, h)
 
+    def _resize_zone_from_local_pos(self, local_pos: QPoint):
+        """Return resize zone name from a local position near window borders."""
+        margin = 12
+        x = local_pos.x()
+        y = local_pos.y()
+        w = max(1, self.width())
+        h = max(1, self.height())
+        near_left = x <= margin
+        near_right = x >= (w - margin)
+        near_top = y <= margin
+        near_bottom = y >= (h - margin)
+
+        if near_left and near_top:
+            return "top_left"
+        if near_right and near_top:
+            return "top_right"
+        if near_left and near_bottom:
+            return "bottom_left"
+        if near_right and near_bottom:
+            return "bottom_right"
+        if near_left:
+            return "left"
+        if near_right:
+            return "right"
+        if near_top:
+            return "top"
+        if near_bottom:
+            return "bottom"
+        return None
+
+    def _cursor_for_resize_zone(self, zone_name: str | None):
+        if zone_name in ("top_left", "bottom_right"):
+            return Qt.CursorShape.SizeFDiagCursor
+        if zone_name in ("top_right", "bottom_left"):
+            return Qt.CursorShape.SizeBDiagCursor
+        if zone_name in ("left", "right"):
+            return Qt.CursorShape.SizeHorCursor
+        if zone_name in ("top", "bottom"):
+            return Qt.CursorShape.SizeVerCursor
+        return None
+
     def eventFilter(self, watched, event):
+        self._refresh_video_surface_event_filters()
         drag_sources = [self, self.viewer]
         if hasattr(self.viewer, "view"):
             drag_sources.append(self.viewer.view)
             drag_sources.append(self.viewer.view.viewport())
-        edge_name = self._edge_widget_to_edge.get(watched)
-        corner_name = self._corner_widget_to_corner.get(watched)
+        drag_sources.extend(self._iter_video_surface_widgets())
+        edge_name = self._edge_widget_to_edge.get(watched) if self._use_widget_resize_handles else None
+        corner_name = self._corner_widget_to_corner.get(watched) if self._use_widget_resize_handles else None
         handle_name = self._drag_widget_to_handle.get(watched)
 
         if edge_name is not None:
@@ -760,11 +859,47 @@ class FloatingViewerWindow(QWidget):
                 QEvent.Type.Hide,
             ):
                 self._update_overlay_hover_from_global_pos(QCursor.pos())
+            elif event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                local_pos = self.mapFromGlobal(self._event_global_pos(event))
+                zone_name = self._resize_zone_from_local_pos(local_pos)
+                if zone_name is not None:
+                    self._resize_active = True
+                    self._resize_corner = zone_name
+                    self._resize_start_geometry = self.geometry()
+                    self._resize_start_global_pos = self._event_global_pos(event)
+                    self._window_drag_active = False
+                    self._window_drag_button = Qt.MouseButton.NoButton
+                    self._active_drag_handle = None
+                    self._emit_activated()
+                    return True
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._emit_activated()
             elif event.type() == QEvent.Type.MouseMove:
+                if self._resize_active:
+                    self._apply_corner_resize(self._event_global_pos(event))
+                    return True
+                try:
+                    local_pos = self.mapFromGlobal(self._event_global_pos(event))
+                    zone_name = self._resize_zone_from_local_pos(local_pos)
+                    resize_cursor = self._cursor_for_resize_zone(zone_name)
+                    if resize_cursor is not None:
+                        watched.setCursor(resize_cursor)
+                    else:
+                        watched.unsetCursor()
+                except Exception:
+                    pass
                 # Keep ownership switching click-free when hovering controls.
                 self._force_activate_viewer_owner()
+            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                if self._resize_active:
+                    self._resize_active = False
+                    self._resize_corner = None
+                    try:
+                        watched.unsetCursor()
+                    except Exception:
+                        pass
+                    self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                    return True
         elif watched in drag_sources:
             if event.type() == QEvent.Type.Enter:
                 self._update_overlay_hover_from_global_pos(QCursor.pos())
@@ -797,6 +932,18 @@ class FloatingViewerWindow(QWidget):
                 return True
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._emit_activated()
+                if event.button() == Qt.MouseButton.LeftButton:
+                    local_pos = self.mapFromGlobal(self._event_global_pos(event))
+                    zone_name = self._resize_zone_from_local_pos(local_pos)
+                    if zone_name is not None:
+                        self._resize_active = True
+                        self._resize_corner = zone_name
+                        self._resize_start_geometry = self.geometry()
+                        self._resize_start_global_pos = self._event_global_pos(event)
+                        self._window_drag_active = False
+                        self._window_drag_button = Qt.MouseButton.NoButton
+                        self._active_drag_handle = None
+                        return True
                 if event.button() == Qt.MouseButton.MiddleButton:
                     self._begin_window_drag(event, None)
                     return True
@@ -804,6 +951,9 @@ class FloatingViewerWindow(QWidget):
                     self._begin_window_drag(event, None)
                     return True
             elif event.type() == QEvent.Type.MouseMove:
+                if self._resize_active:
+                    self._apply_corner_resize(self._event_global_pos(event))
+                    return True
                 # Force handoff on hover even if child event propagation differs.
                 if self._video_controls_widget is not None:
                     try:
@@ -818,8 +968,30 @@ class FloatingViewerWindow(QWidget):
                     self.move(global_pos - self._window_drag_offset)
                     self._update_overlay_hover_from_global_pos(global_pos)
                     return True
+                try:
+                    local_pos = self.mapFromGlobal(self._event_global_pos(event))
+                    zone_name = self._resize_zone_from_local_pos(local_pos)
+                    resize_cursor = self._cursor_for_resize_zone(zone_name)
+                    if resize_cursor is not None:
+                        if hasattr(watched, "setCursor"):
+                            watched.setCursor(resize_cursor)
+                        return False
+                    if hasattr(watched, "unsetCursor"):
+                        watched.unsetCursor()
+                except Exception:
+                    pass
                 self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
             elif event.type() == QEvent.Type.MouseButtonRelease:
+                if self._resize_active and event.button() == Qt.MouseButton.LeftButton:
+                    self._resize_active = False
+                    self._resize_corner = None
+                    try:
+                        if hasattr(watched, "unsetCursor"):
+                            watched.unsetCursor()
+                    except Exception:
+                        pass
+                    self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                    return True
                 if self._window_drag_active and event.button() == self._window_drag_button:
                     self._window_drag_active = False
                     self._window_drag_button = Qt.MouseButton.NoButton

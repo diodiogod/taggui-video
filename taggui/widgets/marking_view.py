@@ -2,10 +2,11 @@
 
 from PySide6.QtCore import QSize, Qt, QRect
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QMouseEvent, QPainter
-from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu
+from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu, QWidget
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from utils.image import ImageMarking
+from utils.settings import settings, DEFAULT_SETTINGS
 from utils.rect import RectPosition, map_rect_position_to_cursor
 from widgets.marking import MarkingItem, MarkingLabel, grid
 
@@ -15,7 +16,20 @@ class ImageGraphicsView(QGraphicsView):
 
     def __init__(self, scene, image_viewer):
         super().__init__(scene)
-        self.setViewport(QOpenGLWidget())
+        backend_name = str(
+            settings.value(
+                'video_playback_backend',
+                defaultValue=DEFAULT_SETTINGS.get('video_playback_backend', 'qt_hybrid'),
+                type=str,
+            ) or ''
+        ).strip().lower()
+        use_native_video_backend = backend_name in {'vlc_experimental', 'mpv_experimental'}
+        if use_native_video_backend:
+            # Native backends embed their own child surface and are unreliable when
+            # the view itself uses an OpenGL viewport.
+            self.setViewport(QWidget())
+        else:
+            self.setViewport(QOpenGLWidget())
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.showContextMenu)
         self.setRenderHint(QPainter.Antialiasing)
