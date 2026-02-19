@@ -749,7 +749,12 @@ class VideoPlayerWidget(QWidget):
                 pass
 
     def _restart_vlc_from_position_ms(self, position_ms: float, hard: bool = False):
-        """Restart VLC from a target position; soft first, hard fallback if needed."""
+        """Restart VLC from a target position using a cover-overlay loop restart.
+
+        Shows the last OpenCV frame as a cover overlay, hides VLC surface, does
+        a hard VLC restart, then lets the reveal system swap back to VLC once it
+        has a real frame — eliminating the black flash without cutting playback short.
+        """
         if self.vlc_player is None:
             return
         now = time.monotonic()
@@ -759,39 +764,48 @@ class VideoPlayerWidget(QWidget):
         self._vlc_last_loop_restart_monotonic = now
         safe_ms = max(0.0, float(position_ms))
         self._vlc_end_reached_flag = False
+        self._vlc_soft_restart_pending = False
+        self._vlc_soft_restart_deadline_monotonic = 0.0
         self._vlc_estimated_position_ms = safe_ms
         self._vlc_play_base_position_ms = safe_ms
         self._vlc_play_started_monotonic = time.monotonic()
         self._vlc_last_progress_ms = safe_ms
         self._vlc_stall_ticks = 0
-        if hard:
-            self._vlc_soft_restart_pending = False
-            self._vlc_soft_restart_deadline_monotonic = 0.0
+
+        # Capture last frame into pixmap_item so the cover shows the final frame,
+        # not a stale/black surface.
+        if self.fps > 0 and self.total_frames > 0:
+            last_frame = max(0, self.total_frames - 1)
             try:
-                self.vlc_player.stop()
+                self._show_opencv_frame(last_frame)
             except Exception:
                 pass
-            try:
-                self.vlc_player.play()
-            except Exception:
-                return
-            self._seek_vlc_position_ms(safe_ms)
-            QTimer.singleShot(16, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
-            QTimer.singleShot(35, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
-            return
 
-        # Soft restart path: avoid stop() to prevent black flash.
-        self._vlc_soft_restart_pending = True
-        self._vlc_soft_restart_deadline_monotonic = now + 0.24
+        # Hide VLC surface and show the cover overlay (last frame pixmap).
+        # The reveal system will swap back to VLC once it has a real frame.
+        self._cancel_vlc_reveal()
+        self._set_vlc_visible(False)
+        try:
+            if self.pixmap_item:
+                self.pixmap_item.show()
+        except RuntimeError:
+            pass
+        self._show_vlc_cover_overlay()
+
+        # Hard restart VLC — reliable from any terminal state (Ended/Stopped).
+        try:
+            self.vlc_player.stop()
+        except Exception:
+            pass
         try:
             self.vlc_player.play()
         except Exception:
+            self._hide_vlc_cover_overlay()
             return
-        # libVLC can ignore the first seek right after Ended->play transition.
         self._seek_vlc_position_ms(safe_ms)
-        QTimer.singleShot(0, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
         QTimer.singleShot(16, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
-        QTimer.singleShot(30, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
+
+        self._begin_vlc_reveal(delay_ms=80, force_ms=1200, require_stable=False)
 
     def _resolve_mpv_target_view(self):
         """Pick the most suitable QGraphicsView for the current pixmap scene."""
@@ -2081,66 +2095,6 @@ class VideoPlayerWidget(QWidget):
                 and near_tail_hint
                 and elapsed_play_s >= 0.35
             )
-            vlc_playing_state = getattr(vlc.State, "Playing", None) if vlc is not None else None
-            seamless_pre_end_restart = bool(
-                is_vlc_active
-                and self.loop_enabled
-                and is_full_video_loop
-                and not self._vlc_soft_restart_pending
-                and vlc_is_playing is True
-                and (vlc_state is None or vlc_state == vlc_playing_state)
-                and (
-                    near_video_end
-                    or (vlc_position_ratio is not None and vlc_position_ratio >= 0.95)
-                )
-            )
-
-            if seamless_pre_end_restart and (
-                (now_monotonic - float(self._vlc_last_loop_restart_monotonic or 0.0)) >= 0.18
-            ):
-                self._vlc_last_loop_restart_monotonic = now_monotonic
-                self._vlc_end_reached_flag = False
-                self._vlc_soft_restart_pending = False
-                self._vlc_soft_restart_deadline_monotonic = 0.0
-                self._log_loop_debug(
-                    "full-loop seamless pre-end seek restart "
-                    f"pos_ms={position_ms:.1f} frame={frame_number} "
-                    f"ratio={vlc_position_ratio if vlc_position_ratio is not None else 'n/a'} "
-                    f"state={vlc_state}",
-                    force=True,
-                )
-                self._seek_vlc_position_ms(0.0)
-                try:
-                    self.vlc_player.play()
-                except Exception:
-                    pass
-                return
-
-            if is_vlc_active and self._vlc_soft_restart_pending:
-                vlc_not_ended = True
-                if vlc is not None:
-                    vlc_not_ended = vlc_state != getattr(vlc.State, "Ended", None)
-                resumed = bool(
-                    vlc_is_playing is True
-                    and vlc_not_ended
-                    and position_ms >= max(5.0, frame_ms * 0.8)
-                )
-                if resumed:
-                    self._vlc_soft_restart_pending = False
-                    self._vlc_soft_restart_deadline_monotonic = 0.0
-                elif now_monotonic >= float(self._vlc_soft_restart_deadline_monotonic or 0.0):
-                    self._log_loop_debug(
-                        "soft restart did not resume; escalating hard "
-                        f"pos_ms={position_ms:.1f} frame={frame_number} "
-                        f"state={vlc_state} vlc_playing={vlc_is_playing}",
-                        force=True,
-                    )
-                    self._restart_vlc_from_position_ms(0.0, hard=True)
-                    return
-                else:
-                    # Wait for soft restart to settle before evaluating loop triggers again.
-                    return
-
             if is_vlc_active and self.loop_enabled and is_full_video_loop and (
                 vlc_reached_terminal
                 or vlc_backend_not_playing_tail

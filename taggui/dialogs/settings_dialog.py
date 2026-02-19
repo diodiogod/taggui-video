@@ -659,6 +659,18 @@ class SettingsDialog(QDialog):
                               Qt.AlignmentFlag.AlignLeft)
         row += 1
 
+        self.mpv_download_btn = QPushButton('Download libmpv-2.dll for Windows ↗')
+        self.mpv_download_btn.setToolTip(
+            'Opens the official mpv Windows builds page on SourceForge.\n'
+            'Download the latest libmpv package, extract libmpv-2.dll,\n'
+            'and place it in: third_party/mpv/windows-x86_64/'
+        )
+        self.mpv_download_btn.clicked.connect(self._open_mpv_download_page)
+        self.mpv_download_btn.hide()
+        grid_layout.addWidget(self.mpv_download_btn, row, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
         # Playback GPU preference (OS-level policy for Qt multimedia backend)
         grid_layout.addWidget(QLabel('Playback GPU preference'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
@@ -919,12 +931,18 @@ class SettingsDialog(QDialog):
     def _on_playback_backend_changed(self, backend_name: str):
         configured = normalize_playback_backend_name(backend_name)
         runtime_backend = resolve_runtime_playback_backend(configured)
+        show_mpv_download = (
+            configured == 'mpv_experimental'
+            and not MPV_BACKEND_AVAILABLE
+            and sys.platform.startswith('win')
+        )
+        self.mpv_download_btn.setVisible(show_mpv_download)
         if configured != runtime_backend:
             extra = ''
             if configured == 'mpv_experimental' and MPV_BACKEND_ERROR:
                 extra = f' ({MPV_BACKEND_ERROR})'
                 if not MPV_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
-                    extra += " Place mpv-1.dll in 'third_party/mpv/windows-x86_64/' or 'venv/Scripts/'."
+                    extra += " Place libmpv-2.dll in 'third_party/mpv/windows-x86_64/'."
             elif configured == 'vlc_experimental' and VLC_BACKEND_ERROR:
                 extra = f' ({VLC_BACKEND_ERROR})'
                 if not VLC_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
@@ -952,6 +970,12 @@ class SettingsDialog(QDialog):
         self.warning_label.setText('FFmpeg acceleration preference saved (applies to new processing commands).')
         self.warning_label.setStyleSheet('color: #0a7f2e;')
         self.warning_label.show()
+
+    @Slot()
+    def _open_mpv_download_page(self):
+        QDesktopServices.openUrl(QUrl(
+            'https://sourceforge.net/projects/mpv-player-windows/files/libmpv/'
+        ))
 
     @Slot()
     def _open_os_graphics_settings(self):
