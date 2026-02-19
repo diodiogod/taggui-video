@@ -387,6 +387,7 @@ class VideoControlsWidget(QWidget):
         self._last_playing_visual_state = None
         self._last_mute_visual_state = None
         self._timeline_scrubbing = False
+        self._exact_frame_resolver = None
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -2031,6 +2032,25 @@ class VideoControlsWidget(QWidget):
     def is_timeline_scrubbing(self) -> bool:
         return bool(self._timeline_scrubbing or self.timeline_slider.isSliderDown())
 
+    def set_exact_frame_resolver(self, resolver):
+        """Provide callable(frame_hint:int)->int for exact marker commit."""
+        self._exact_frame_resolver = resolver if callable(resolver) else None
+
+    def _resolve_exact_marker_frame(self, fallback_frame: int) -> int:
+        """Resolve exact frame for marker set actions (editing-safe)."""
+        resolved = int(fallback_frame)
+        if callable(self._exact_frame_resolver):
+            try:
+                candidate = self._exact_frame_resolver(int(fallback_frame))
+                if isinstance(candidate, (int, float)):
+                    resolved = int(candidate)
+            except Exception:
+                resolved = int(fallback_frame)
+        max_frame = self.frame_spinbox.maximum()
+        if max_frame < 0:
+            max_frame = 0
+        return max(0, min(int(resolved), int(max_frame)))
+
     def eventFilter(self, obj, event):
         """Event filter for speed slider mouse tracking and global mouse release."""
         # Handle global mouse release to catch releases outside widget during resize/drag
@@ -2832,12 +2852,13 @@ class VideoControlsWidget(QWidget):
     @Slot()
     def _set_loop_start(self):
         """Set loop start at current frame, and auto-set end if fixed marker size is enabled."""
-        self.loop_start_frame = self.frame_spinbox.value()
+        exact_frame = self._resolve_exact_marker_frame(self.frame_spinbox.value())
+        self.loop_start_frame = exact_frame
 
         # Auto-set end marker based on fixed marker size (only if not Custom/0)
         if self.fixed_marker_size > 0:
             max_frame = self.frame_spinbox.maximum()
-            self.loop_end_frame = min(self.loop_start_frame + self.fixed_marker_size - 1, max_frame)
+            self.loop_end_frame = min(exact_frame + self.fixed_marker_size - 1, max_frame)
             # Update end button color too
             self._set_loop_button_style(self.loop_end_btn, is_set=True)
             self.loop_end_set.emit()
@@ -2855,11 +2876,12 @@ class VideoControlsWidget(QWidget):
     @Slot()
     def _set_loop_end(self):
         """Set loop end at current frame, and auto-set start if fixed marker size is enabled."""
-        self.loop_end_frame = self.frame_spinbox.value()
+        exact_frame = self._resolve_exact_marker_frame(self.frame_spinbox.value())
+        self.loop_end_frame = exact_frame
 
         # Auto-set start marker based on fixed marker size (only if not Custom/0)
         if self.fixed_marker_size > 0:
-            self.loop_start_frame = max(0, self.loop_end_frame - self.fixed_marker_size + 1)
+            self.loop_start_frame = max(0, exact_frame - self.fixed_marker_size + 1)
             # Update start button color too
             self._set_loop_button_style(self.loop_start_btn, is_set=True)
             self.loop_start_set.emit()

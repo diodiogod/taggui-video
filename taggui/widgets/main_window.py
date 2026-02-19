@@ -1225,6 +1225,8 @@ class MainWindow(QMainWindow):
         )
         video_controls.speed_changed.connect(video_player.set_playback_speed)
         video_controls.mute_toggled.connect(video_player.set_muted)
+        if hasattr(video_controls, 'set_exact_frame_resolver'):
+            video_controls.set_exact_frame_resolver(video_player.resolve_exact_frame_for_marker)
         video_controls.fixed_marker_size = self.toolbar_manager.fixed_marker_size_spinbox.value()
 
     def _queue_video_controls_update(self, viewer: ImageViewer, frame: int, time_ms: float):

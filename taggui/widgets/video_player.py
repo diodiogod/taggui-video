@@ -9,7 +9,7 @@ import cv2
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl, QRect
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget, QMessageBox
+from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget, QMessageBox, QLabel
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
@@ -102,6 +102,9 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_deadline_monotonic = 0.0
         self._vlc_reveal_force_deadline_monotonic = 0.0
         self._vlc_reveal_start_position_ms = 0.0
+        self._vlc_reveal_require_stable = False
+        self._vlc_reveal_ready_hits = 0
+        self._vlc_next_start_from_still = False
         self._vlc_reveal_timer = QTimer(self)
         self._vlc_reveal_timer.setInterval(16)
         self._vlc_reveal_timer.timeout.connect(self._try_reveal_vlc_surface)
@@ -118,6 +121,8 @@ class VideoPlayerWidget(QWidget):
         self._vlc_last_loop_restart_monotonic = 0.0
         self._vlc_soft_restart_deadline_monotonic = 0.0
         self._vlc_soft_restart_pending = False
+        self._vlc_cover_label = None
+        self._vlc_cover_active = False
         self._loop_debug_last_log_monotonic = 0.0
         self._qt_video_source_path = None
         self._refresh_backend_selection()
@@ -194,6 +199,41 @@ class VideoPlayerWidget(QWidget):
             and self.vlc_player is not None
             and self.playback_speed >= 0
         )
+
+    def _get_live_pixmap_item(self):
+        """Return pixmap item only when its underlying Qt object is still alive."""
+        item = self.pixmap_item
+        if item is None:
+            return None
+        try:
+            item.scene()
+            return item
+        except RuntimeError:
+            self.pixmap_item = None
+            return None
+
+    def _get_live_pixmap_scene(self):
+        """Return (item, scene) when pixmap item and scene are valid."""
+        item = self._get_live_pixmap_item()
+        if item is None:
+            return None, None
+        try:
+            return item, item.scene()
+        except RuntimeError:
+            self.pixmap_item = None
+            return None, None
+
+    def _get_live_video_item(self):
+        """Return video item only when its underlying Qt object is still alive."""
+        item = self.video_item
+        if item is None:
+            return None
+        try:
+            item.zValue()
+            return item
+        except RuntimeError:
+            self.video_item = None
+            return None
 
     def set_view_transformed(self, transformed: bool):
         """Hint from viewer zoom/pan state to choose compatible render path."""
@@ -289,6 +329,11 @@ class VideoPlayerWidget(QWidget):
                     self.vlc_widget.show()
                     self._update_vlc_geometry_from_pixmap()
                     self._rebind_vlc_output_target()
+                    if self._vlc_cover_active and self._vlc_cover_label is not None:
+                        try:
+                            self._vlc_cover_label.raise_()
+                        except Exception:
+                            pass
                     if not self.vlc_geometry_timer.isActive():
                         self.vlc_geometry_timer.start()
                 else:
@@ -308,10 +353,11 @@ class VideoPlayerWidget(QWidget):
 
     def _update_vlc_geometry_from_pixmap(self):
         """Keep vlc proxy geometry aligned with current pixmap frame size."""
-        if not self.vlc_widget or not self.pixmap_item:
+        item = self._get_live_pixmap_item()
+        if not self.vlc_widget or item is None:
             return
         try:
-            pixmap = self.pixmap_item.pixmap()
+            pixmap = item.pixmap()
             if not pixmap or pixmap.isNull():
                 return
 
@@ -320,7 +366,7 @@ class VideoPlayerWidget(QWidget):
                 return
             self.vlc_host_view = view
 
-            scene_rect = self.pixmap_item.sceneBoundingRect()
+            scene_rect = item.sceneBoundingRect()
             mapped_poly = view.mapFromScene(scene_rect)
             widget_rect = mapped_poly.boundingRect()
             widget_rect = widget_rect.normalized()
@@ -332,6 +378,7 @@ class VideoPlayerWidget(QWidget):
             else:
                 self.vlc_widget.setGeometry(QRect(0, 0, 1, 1))
                 self._vlc_last_widget_rect = QRect(0, 0, 1, 1)
+            self._update_vlc_cover_geometry_from_pixmap()
             try:
                 parent = self.vlc_widget.parentWidget()
                 if parent is not None:
@@ -343,9 +390,93 @@ class VideoPlayerWidget(QWidget):
         except RuntimeError:
             self.vlc_widget = None
 
+    def _hide_vlc_cover_overlay(self):
+        """Hide temporary cover overlay used for seamless image->video handoff."""
+        self._vlc_cover_active = False
+        label = self._vlc_cover_label
+        if label is None:
+            return
+        try:
+            label.hide()
+            label.setPixmap(QPixmap())
+        except RuntimeError:
+            self._vlc_cover_label = None
+
+    def _show_vlc_cover_overlay(self):
+        """Show a still preview above VLC while first frame stabilizes."""
+        item = self._get_live_pixmap_item()
+        if item is None:
+            self._hide_vlc_cover_overlay()
+            return
+        try:
+            pixmap = item.pixmap()
+        except RuntimeError:
+            self.pixmap_item = None
+            self._hide_vlc_cover_overlay()
+            return
+        if pixmap is None or pixmap.isNull():
+            self._hide_vlc_cover_overlay()
+            return
+        target_view = self._resolve_mpv_target_view()
+        if target_view is None:
+            self._hide_vlc_cover_overlay()
+            return
+        target_parent = target_view.viewport()
+        label = self._vlc_cover_label
+        try:
+            if label is None or label.parentWidget() is not target_parent:
+                if label is not None:
+                    try:
+                        label.hide()
+                        label.deleteLater()
+                    except Exception:
+                        pass
+                label = QLabel(target_parent)
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                label.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+                label.setScaledContents(True)
+                label.hide()
+                self._vlc_cover_label = label
+            label.setPixmap(pixmap)
+            self._vlc_cover_active = True
+            self._update_vlc_cover_geometry_from_pixmap()
+            label.show()
+            label.raise_()
+        except RuntimeError:
+            self._vlc_cover_label = None
+            self._vlc_cover_active = False
+
+    def _update_vlc_cover_geometry_from_pixmap(self):
+        """Align temporary VLC cover overlay with current media rect."""
+        if not self._vlc_cover_active:
+            return
+        label = self._vlc_cover_label
+        item = self._get_live_pixmap_item()
+        if label is None or item is None:
+            return
+        try:
+            target_view = self._resolve_mpv_target_view()
+            if target_view is None:
+                return
+            target_parent = target_view.viewport()
+            if label.parentWidget() is not target_parent:
+                return
+            scene_rect = item.sceneBoundingRect()
+            mapped_poly = target_view.mapFromScene(scene_rect)
+            widget_rect = mapped_poly.boundingRect().normalized()
+            if widget_rect.width() > 1 and widget_rect.height() > 1:
+                label.setGeometry(widget_rect)
+                label.raise_()
+            else:
+                label.hide()
+        except RuntimeError:
+            self._vlc_cover_label = None
+            self._vlc_cover_active = False
+
     def _teardown_vlc(self, drop_player: bool = False):
         """Release vlc runtime resources if initialized."""
         self._cancel_vlc_reveal()
+        self._hide_vlc_cover_overlay()
         self.vlc_geometry_timer.stop()
         self._vlc_estimated_position_ms = 0.0
         self._vlc_play_started_monotonic = 0.0
@@ -488,7 +619,8 @@ class VideoPlayerWidget(QWidget):
         """Initialize libVLC renderer bound to a scene widget surface."""
         if vlc is None or not self._is_using_vlc_backend():
             return False
-        if not self.pixmap_item or not self.pixmap_item.scene() or not self.video_path:
+        _, scene = self._get_live_pixmap_scene()
+        if scene is None or not self.video_path:
             return False
 
         try:
@@ -663,9 +795,7 @@ class VideoPlayerWidget(QWidget):
 
     def _resolve_mpv_target_view(self):
         """Pick the most suitable QGraphicsView for the current pixmap scene."""
-        if not self.pixmap_item:
-            return None
-        scene = self.pixmap_item.scene()
+        _, scene = self._get_live_pixmap_scene()
         if scene is None:
             return None
         views = [v for v in scene.views() if v is not None]
@@ -699,15 +829,28 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_deadline_monotonic = 0.0
         self._vlc_reveal_force_deadline_monotonic = 0.0
         self._vlc_reveal_start_position_ms = 0.0
+        self._vlc_reveal_require_stable = False
+        self._vlc_reveal_ready_hits = 0
         self._vlc_reveal_timer.stop()
 
-    def _begin_vlc_reveal(self, delay_ms: int = 140, force_ms: int = 1400):
+    def hint_next_video_starts_from_still(self, from_still: bool):
+        """Hint one-shot reveal behavior for the next VLC start."""
+        self._vlc_next_start_from_still = bool(from_still)
+
+    def _begin_vlc_reveal(
+        self,
+        delay_ms: int = 140,
+        force_ms: int = 1400,
+        require_stable: bool = False,
+    ):
         """Keep first-frame pixmap visible until VLC starts producing frames."""
         if self.vlc_player is None:
             self._cancel_vlc_reveal()
             return
         self._vlc_pending_reveal = True
         self._vlc_reveal_start_position_ms = float(self._vlc_estimated_position_ms or 0.0)
+        self._vlc_reveal_require_stable = bool(require_stable)
+        self._vlc_reveal_ready_hits = 0
         now = time.monotonic()
         self._vlc_reveal_deadline_monotonic = now + max(0.05, (delay_ms / 1000.0))
         self._vlc_reveal_force_deadline_monotonic = now + max(0.45, (force_ms / 1000.0))
@@ -718,9 +861,11 @@ class VideoPlayerWidget(QWidget):
             self._vlc_reveal_timer.stop()
             return
         if self.vlc_player is None:
+            self._hide_vlc_cover_overlay()
             self._cancel_vlc_reveal()
             return
         if not self.is_playing or not self._is_vlc_forward_active():
+            self._hide_vlc_cover_overlay()
             self._cancel_vlc_reveal()
             return
 
@@ -728,29 +873,46 @@ class VideoPlayerWidget(QWidget):
         reached_min_delay = now >= self._vlc_reveal_deadline_monotonic
         force_ready = now >= self._vlc_reveal_force_deadline_monotonic
         position_ready = False
+        strict_mode = bool(self._vlc_reveal_require_stable)
         try:
             backend_pos_ms = float(self.vlc_player.get_time())
         except Exception:
             backend_pos_ms = -1.0
+        state_ready = True
+        if strict_mode and vlc is not None:
+            try:
+                state_ready = self.vlc_player.get_state() == getattr(vlc.State, "Playing", None)
+            except Exception:
+                state_ready = False
         if backend_pos_ms >= 0.0:
             reveal_threshold_ms = 35.0
             if self.fps > 0:
                 frame_ms = 1000.0 / float(self.fps)
-                reveal_threshold_ms = max(35.0, min(120.0, frame_ms * 1.25))
+                if strict_mode:
+                    reveal_threshold_ms = max(55.0, min(130.0, frame_ms * 1.5))
+                else:
+                    reveal_threshold_ms = max(35.0, min(120.0, frame_ms * 1.25))
             if backend_pos_ms >= (self._vlc_reveal_start_position_ms + reveal_threshold_ms):
                 position_ready = True
 
-        ready = (reached_min_delay and position_ready) or force_ready
+        signal_ready = bool(reached_min_delay and state_ready and position_ready)
+        if signal_ready:
+            self._vlc_reveal_ready_hits += 1
+        else:
+            self._vlc_reveal_ready_hits = 0
+
+        stable_hits_needed = 1
+        ready = (signal_ready and self._vlc_reveal_ready_hits >= stable_hits_needed) or force_ready
 
         if ready:
-            try:
-                if self.pixmap_item:
-                    self.pixmap_item.hide()
-            except RuntimeError:
-                pass
+            # Keep the preview pixmap visible under the native VLC surface.
+            # Hiding it right at handoff can expose a single white-frame blink
+            # while VLC's first composed frame lands.
             self._set_vlc_visible(True)
             self.sync_external_surface_geometry()
             QTimer.singleShot(60, self.sync_external_surface_geometry)
+            if self._vlc_cover_active:
+                QTimer.singleShot(40, self._hide_vlc_cover_overlay)
             self._cancel_vlc_reveal()
 
     def _begin_mpv_reveal(self, delay_ms: int = 120):
@@ -787,10 +949,11 @@ class VideoPlayerWidget(QWidget):
 
     def _update_mpv_geometry_from_pixmap(self):
         """Keep mpv proxy geometry aligned with current pixmap frame size."""
-        if not self.mpv_widget or not self.pixmap_item:
+        item = self._get_live_pixmap_item()
+        if not self.mpv_widget or item is None:
             return
         try:
-            pixmap = self.pixmap_item.pixmap()
+            pixmap = item.pixmap()
             if not pixmap or pixmap.isNull():
                 return
 
@@ -799,7 +962,7 @@ class VideoPlayerWidget(QWidget):
                 return
             self.mpv_host_view = view
 
-            scene_rect = self.pixmap_item.sceneBoundingRect()
+            scene_rect = item.sceneBoundingRect()
             mapped_poly = view.mapFromScene(scene_rect)
             widget_rect = mapped_poly.boundingRect().intersected(view.viewport().rect())
             if widget_rect.width() > 1 and widget_rect.height() > 1:
@@ -844,7 +1007,8 @@ class VideoPlayerWidget(QWidget):
         """Initialize mpv renderer bound to a scene widget surface."""
         if mpv is None or not self._is_using_mpv_backend():
             return False
-        if not self.pixmap_item or not self.pixmap_item.scene() or not self.video_path:
+        _, scene = self._get_live_pixmap_scene()
+        if scene is None or not self.video_path:
             return False
 
         try:
@@ -938,12 +1102,13 @@ class VideoPlayerWidget(QWidget):
             encoded = str(value)
         self._mpv_string_command('set', str(prop_name), encoded)
 
-    def _load_qt_media_source_for_current_video(self):
-        if not self.video_path or self.video_item is None:
-            return
+    def _load_qt_media_source_for_current_video(self) -> bool:
+        video_item = self._get_live_video_item()
+        if not self.video_path or video_item is None:
+            return False
         current_path = str(self.video_path)
         if self._qt_video_source_path == current_path:
-            return
+            return True
 
         import sys
         stdout_fd = sys.stdout.fileno()
@@ -954,21 +1119,163 @@ class VideoPlayerWidget(QWidget):
             os.dup2(devnull.fileno(), stdout_fd)
             os.dup2(devnull.fileno(), stderr_fd)
             try:
-                self.media_player.setSource(QUrl.fromLocalFile(current_path))
-                self.media_player.setVideoOutput(self.video_item)
+                try:
+                    self.media_player.setSource(QUrl.fromLocalFile(current_path))
+                    self.media_player.setVideoOutput(video_item)
+                except RuntimeError:
+                    self.video_item = None
+                    self._qt_video_source_path = None
+                    return False
             finally:
                 os.dup2(old_stdout, stdout_fd)
                 os.dup2(old_stderr, stderr_fd)
                 os.close(old_stdout)
                 os.close(old_stderr)
         self._qt_video_source_path = current_path
+        return True
 
     def sync_external_surface_geometry(self):
         """Force one immediate sync for external native video surfaces."""
         self._update_mpv_geometry_from_pixmap()
         self._update_vlc_geometry_from_pixmap()
+        self._update_vlc_cover_geometry_from_pixmap()
 
-    def load_video(self, video_path: Path, pixmap_item: QGraphicsPixmapItem):
+    def _open_capture_silently(self, video_path: Path):
+        """Open OpenCV capture while suppressing ffmpeg chatter."""
+        import sys
+        stdout_fd = sys.stdout.fileno()
+        stderr_fd = sys.stderr.fileno()
+        with open(os.devnull, 'w') as devnull:
+            old_stdout = os.dup(stdout_fd)
+            old_stderr = os.dup(stderr_fd)
+            os.dup2(devnull.fileno(), stdout_fd)
+            os.dup2(devnull.fileno(), stderr_fd)
+            try:
+                cap = cv2.VideoCapture(str(video_path))
+            finally:
+                os.dup2(old_stdout, stdout_fd)
+                os.dup2(old_stderr, stderr_fd)
+                os.close(old_stdout)
+                os.close(old_stderr)
+        return cap
+
+    def _apply_metadata_hints(self, video_metadata: dict | None) -> bool:
+        """Populate runtime metadata from cached model values when available."""
+        fps = 0.0
+        frame_count = 0
+        duration_ms = 0.0
+        if isinstance(video_metadata, dict):
+            try:
+                fps = float(video_metadata.get('fps') or 0.0)
+            except Exception:
+                fps = 0.0
+            try:
+                frame_count = int(video_metadata.get('frame_count') or 0)
+            except Exception:
+                frame_count = 0
+            try:
+                duration_s = float(video_metadata.get('duration') or 0.0)
+                if duration_s > 0:
+                    duration_ms = duration_s * 1000.0
+            except Exception:
+                duration_ms = 0.0
+        if fps > 0:
+            self.fps = float(fps)
+        if frame_count > 0:
+            self.total_frames = int(frame_count)
+        if duration_ms > 0:
+            self.duration_ms = float(duration_ms)
+        elif self.total_frames > 0 and self.fps > 0:
+            self.duration_ms = (self.total_frames / self.fps) * 1000.0
+        return bool(self.total_frames > 0 and self.fps > 0)
+
+    def _set_initial_preview_pixmap(
+        self,
+        preview_qimage: QImage | None,
+        video_dimensions: tuple[int, int] | None = None,
+    ) -> bool:
+        """Show a fast preview frame without opening OpenCV synchronously."""
+        if self.pixmap_item is None:
+            return False
+        if preview_qimage is None or preview_qimage.isNull():
+            return False
+        try:
+            pixmap = QPixmap.fromImage(preview_qimage.copy())
+            if pixmap.isNull():
+                return False
+            if (
+                isinstance(video_dimensions, tuple)
+                and len(video_dimensions) == 2
+                and int(video_dimensions[0]) > 0
+                and int(video_dimensions[1]) > 0
+            ):
+                target_w = int(video_dimensions[0])
+                target_h = int(video_dimensions[1])
+                scaled = pixmap.scaled(
+                    target_w,
+                    target_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                if not scaled.isNull():
+                    pixmap = scaled
+            self.pixmap_item.setPixmap(pixmap)
+            if self.video_item:
+                self.video_item.setSize(pixmap.size())
+            self._update_mpv_geometry_from_pixmap()
+            self._update_vlc_geometry_from_pixmap()
+            return True
+        except Exception:
+            return False
+
+    def _ensure_cap_ready(self) -> bool:
+        """Lazy-open OpenCV capture only when frame-accurate operations need it."""
+        if self.cap is not None:
+            try:
+                if self.cap.isOpened():
+                    return True
+            except Exception:
+                pass
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        if not self.video_path:
+            return False
+        cap = self._open_capture_silently(self.video_path)
+        if cap is None or not cap.isOpened():
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+            return False
+        self.cap = cap
+        try:
+            fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        except Exception:
+            fps = 0.0
+        try:
+            frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        except Exception:
+            frame_count = 0
+        if self.fps <= 0 and fps > 0:
+            self.fps = fps
+        if self.total_frames <= 0 and frame_count > 0:
+            self.total_frames = frame_count
+        if self.duration_ms <= 0 and self.total_frames > 0 and self.fps > 0:
+            self.duration_ms = (self.total_frames / self.fps) * 1000.0
+        return True
+
+    def load_video(
+        self,
+        video_path: Path,
+        pixmap_item: QGraphicsPixmapItem,
+        video_metadata: dict | None = None,
+        preview_qimage: QImage | None = None,
+        video_dimensions: tuple[int, int] | None = None,
+    ):
         """Load a video file."""
         self._refresh_backend_selection()
 
@@ -1018,32 +1325,25 @@ class VideoPlayerWidget(QWidget):
             except Exception:
                 pass
 
-        # Load with OpenCV to get metadata and for frame extraction
-        # Suppress ffmpeg output by temporarily redirecting stdout and stderr at OS level
-        import sys
-        stdout_fd = sys.stdout.fileno()
-        stderr_fd = sys.stderr.fileno()
-        with open(os.devnull, 'w') as devnull:
-            old_stdout = os.dup(stdout_fd)
-            old_stderr = os.dup(stderr_fd)
-            os.dup2(devnull.fileno(), stdout_fd)
-            os.dup2(devnull.fileno(), stderr_fd)
-            try:
-                self.cap = cv2.VideoCapture(str(video_path))
-            finally:
-                os.dup2(old_stdout, stdout_fd)
-                os.dup2(old_stderr, stderr_fd)
-                os.close(old_stdout)
-                os.close(old_stderr)
+        # Prefer cached metadata for instant clip-switch startup.
+        self.fps = 0.0
+        self.total_frames = 0
+        self.duration_ms = 0.0
+        metadata_ready = self._apply_metadata_hints(video_metadata)
 
-        if not self.cap.isOpened():
-            print(f"Failed to open video: {video_path}")
-            return False
+        # If metadata is missing, fall back to immediate OpenCV probe.
+        if not metadata_ready:
+            if not self._ensure_cap_ready():
+                print(f"Failed to open video: {video_path}")
+                return False
+            self._apply_metadata_hints(
+                {
+                    'fps': self.fps,
+                    'frame_count': self.total_frames,
+                    'duration': (self.duration_ms / 1000.0) if self.duration_ms > 0 else 0.0,
+                }
+            )
 
-        # Get video properties from OpenCV (more reliable for frame count)
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.duration_ms = (self.total_frames / self.fps * 1000) if self.fps > 0 else 0
         self.current_frame = 0
         self._mpv_estimated_position_ms = 0.0
         self._mpv_play_started_monotonic = 0.0
@@ -1067,16 +1367,30 @@ class VideoPlayerWidget(QWidget):
         self.video_item.setZValue(0)
 
         # Add to same scene as pixmap_item
-        if pixmap_item.scene():
-            pixmap_item.scene().addItem(self.video_item)
+        try:
+            scene = pixmap_item.scene()
+        except RuntimeError:
+            scene = None
+        if scene is not None:
+            scene.addItem(self.video_item)
 
         # For external backends, avoid touching QMediaPlayer during list-click load path.
         # Lazily load Qt source only if/when Qt playback path is used.
         if (not self._is_using_mpv_backend()) and (not self._is_using_vlc_backend()):
-            self._load_qt_media_source_for_current_video()
+            if not self._load_qt_media_source_for_current_video():
+                return False
 
-        # Show first frame using OpenCV (for frame-accurate display)
-        self._show_opencv_frame(0)
+        # Show initial preview without blocking on OpenCV unless necessary.
+        preview_ready = self._set_initial_preview_pixmap(
+            preview_qimage=preview_qimage,
+            video_dimensions=video_dimensions,
+        )
+        if not preview_ready:
+            if self._ensure_cap_ready():
+                self._show_opencv_frame(0)
+            else:
+                print(f"Failed to initialize preview frame: {video_path}")
+                return False
 
         # Do not initialize mpv on load; initialize lazily on first play().
         # This avoids startup/list-click crashes while browsing videos.
@@ -1101,6 +1415,9 @@ class VideoPlayerWidget(QWidget):
     def play(self):
         """Start playback using QMediaPlayer (or OpenCV for negative speeds)."""
         self._refresh_backend_selection()
+        reveal_from_still = bool(self._vlc_next_start_from_still)
+        self._vlc_next_start_from_still = False
+        self._hide_vlc_cover_overlay()
 
         if not self.video_path or self.is_playing:
             return
@@ -1121,6 +1438,10 @@ class VideoPlayerWidget(QWidget):
         self.playback_started.emit()  # Notify that playback started
 
         if self.playback_speed < 0:
+            if not self._ensure_cap_ready():
+                self.is_playing = False
+                self.playback_paused.emit()
+                return
             # Use OpenCV frame-by-frame for backward playback
             self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
             self._cancel_mpv_reveal()
@@ -1208,6 +1529,10 @@ class VideoPlayerWidget(QWidget):
                     self._cancel_mpv_reveal()
                     self._set_mpv_visible(False)
                     self._set_vlc_visible(False)
+                    if not self._load_qt_media_source_for_current_video():
+                        self.is_playing = False
+                        self.playback_paused.emit()
+                        return
                     try:
                         if self.video_item:
                             self.video_item.show()
@@ -1245,7 +1570,13 @@ class VideoPlayerWidget(QWidget):
                     self._cancel_mpv_reveal()
                     self._set_mpv_visible(False)
                     self._set_vlc_visible(False)
-                    self._begin_vlc_reveal(delay_ms=120)
+                    if reveal_from_still:
+                        self._show_vlc_cover_overlay()
+                    self._begin_vlc_reveal(
+                        delay_ms=85 if reveal_from_still else 120,
+                        force_ms=1200 if reveal_from_still else 1400,
+                        require_stable=reveal_from_still,
+                    )
                 except Exception as e:
                     print(f"[VIDEO] vlc play fallback to Qt backend: {e}")
                     self.runtime_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
@@ -1253,6 +1584,11 @@ class VideoPlayerWidget(QWidget):
                     self._cancel_vlc_reveal()
                     self._set_mpv_visible(False)
                     self._set_vlc_visible(False)
+                    self._hide_vlc_cover_overlay()
+                    if not self._load_qt_media_source_for_current_video():
+                        self.is_playing = False
+                        self.playback_paused.emit()
+                        return
                     try:
                         if self.video_item:
                             self.video_item.show()
@@ -1269,7 +1605,11 @@ class VideoPlayerWidget(QWidget):
                 self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
                 self._cancel_mpv_reveal()
                 self._cancel_vlc_reveal()
-                self._load_qt_media_source_for_current_video()
+                self._hide_vlc_cover_overlay()
+                if not self._load_qt_media_source_for_current_video():
+                    self.is_playing = False
+                    self.playback_paused.emit()
+                    return
                 try:
                     if self.pixmap_item:
                         self.pixmap_item.hide()
@@ -1304,6 +1644,7 @@ class VideoPlayerWidget(QWidget):
         self.is_playing = False
         self._cancel_mpv_reveal()
         self._cancel_vlc_reveal()
+        self._hide_vlc_cover_overlay()
         self.position_timer.stop()
         self.media_player.pause()
         if self.mpv_player is not None:
@@ -1399,6 +1740,7 @@ class VideoPlayerWidget(QWidget):
 
         self._cancel_mpv_reveal()
         self._cancel_vlc_reveal()
+        self._hide_vlc_cover_overlay()
         self.position_timer.stop()
 
         # Pause forward backends quickly (no reset/seek work here).
@@ -1444,14 +1786,21 @@ class VideoPlayerWidget(QWidget):
 
     def seek_to_frame(self, frame_number: int):
         """Seek to a specific frame (frame-accurate using OpenCV)."""
-        if not self.cap:
+        if self.total_frames <= 0 or self.fps <= 0:
+            self._ensure_cap_ready()
+        if self.total_frames <= 0:
             return
 
         frame_number = max(0, min(frame_number, self.total_frames - 1))
         self.current_frame = frame_number
 
         # Calculate position in milliseconds
-        position_ms = (frame_number / self.fps * 1000) if self.fps > 0 else 0
+        if self.fps > 0:
+            position_ms = (frame_number / self.fps * 1000)
+        elif self.total_frames > 1 and self.duration_ms > 0:
+            position_ms = (frame_number / (self.total_frames - 1)) * self.duration_ms
+        else:
+            position_ms = 0.0
         self._mpv_estimated_position_ms = float(position_ms)
         if self.is_playing and self._is_mpv_forward_active():
             self._mpv_play_base_position_ms = float(position_ms)
@@ -1496,10 +1845,16 @@ class VideoPlayerWidget(QWidget):
 
     def _show_opencv_frame(self, frame_number: int):
         """Extract and display exact frame using OpenCV."""
-        if not self.cap or not self.pixmap_item:
+        item = self._get_live_pixmap_item()
+        if item is None:
+            return
+        if not self._ensure_cap_ready() or not self.cap:
             return
 
-        frame_number = max(0, min(frame_number, self.total_frames - 1))
+        if self.total_frames > 0:
+            frame_number = max(0, min(frame_number, self.total_frames - 1))
+        else:
+            frame_number = max(0, int(frame_number))
 
         # Seek to frame
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -1550,7 +1905,7 @@ class VideoPlayerWidget(QWidget):
 
         # Update pixmap item
         try:
-            self.pixmap_item.setPixmap(pixmap)
+            item.setPixmap(pixmap)
 
             # Update video item size to match
             if self.video_item:
@@ -1559,6 +1914,7 @@ class VideoPlayerWidget(QWidget):
             self._update_vlc_geometry_from_pixmap()
         except RuntimeError:
             self.pixmap_item = None
+            return
 
     @Slot(int)
     def _on_position_changed(self, position_ms: int):
@@ -1887,6 +2243,45 @@ class VideoPlayerWidget(QWidget):
         """Get current frame number."""
         return self.current_frame
 
+    def resolve_exact_frame_for_marker(self, fallback_frame: int | None = None) -> int:
+        """Resolve the best exact frame candidate for marker commit."""
+        if self.total_frames <= 0 or self.fps <= 0:
+            self._ensure_cap_ready()
+
+        if fallback_frame is None:
+            fallback = int(self.current_frame or 0)
+        else:
+            try:
+                fallback = int(fallback_frame)
+            except Exception:
+                fallback = int(self.current_frame or 0)
+
+        if self.total_frames > 0:
+            fallback = max(0, min(fallback, self.total_frames - 1))
+        else:
+            fallback = max(0, fallback)
+
+        position_ms = None
+        try:
+            if self._is_vlc_forward_active():
+                position_ms = self._get_vlc_position_ms()
+            elif self._is_mpv_forward_active():
+                position_ms = self._get_mpv_position_ms()
+            elif self.is_playing:
+                position_ms = float(self.media_player.position())
+        except Exception:
+            position_ms = None
+
+        resolved = fallback
+        if position_ms is not None and self.fps > 0:
+            resolved = int(round((float(position_ms) / 1000.0) * float(self.fps)))
+
+        if self.total_frames > 0:
+            resolved = max(0, min(resolved, self.total_frames - 1))
+        else:
+            resolved = max(0, resolved)
+        return int(resolved)
+
     def get_total_frames(self):
         """Get total number of frames."""
         return self.total_frames
@@ -1901,7 +2296,7 @@ class VideoPlayerWidget(QWidget):
         Returns:
             numpy.ndarray: RGB frame data, or None if extraction fails
         """
-        if not self.cap:
+        if not self._ensure_cap_ready() or not self.cap:
             return None
 
         try:

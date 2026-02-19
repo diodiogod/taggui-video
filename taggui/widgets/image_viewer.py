@@ -740,9 +740,17 @@ class ImageViewer(QWidget):
         if is_complete:
             self.marking_items.clear()
             self.view.clear_scene()
+            auto_play_after_layout = False
+            was_video_loaded = bool(self._is_video_loaded)
 
             # Check if this is a video
             if image.is_video:
+                try:
+                    # Image -> video handoff needs a slightly stricter native-reveal policy
+                    # to avoid showing an unready backend frame.
+                    self.video_player.hint_next_video_starts_from_still(not was_video_loaded)
+                except Exception:
+                    pass
                 # Create a pixmap item for video frames BEFORE cleanup
                 image_item = QGraphicsPixmapItem()
                 # Enable high-quality smooth transformation for video frame downscaling
@@ -753,7 +761,13 @@ class ImageViewer(QWidget):
                 self.current_image_item = None
 
                 # Now load video and display first frame
-                if self.video_player.load_video(image.path, image_item):
+                if self.video_player.load_video(
+                    image.path,
+                    image_item,
+                    video_metadata=getattr(image, 'video_metadata', None),
+                    preview_qimage=getattr(image, 'thumbnail_qimage', None),
+                    video_dimensions=getattr(image, 'dimensions', None),
+                ):
                     # Update scene rect after video loads
                     if image_item.pixmap() and not image_item.pixmap().isNull():
                         self._set_scene_rect_for_item(image_item)
@@ -782,9 +796,8 @@ class ImageViewer(QWidget):
                         if not self.video_controls_auto_hide:
                             self._show_controls_permanent()
 
-                        # Auto-play if enabled (do this AFTER setting up controls to avoid signal conflicts)
-                        if self.video_controls.should_auto_play():
-                            self.video_player.play()
+                        # Auto-play is deferred until after zoom/layout settles.
+                        auto_play_after_layout = bool(self.video_controls.should_auto_play())
                     else:
                         print(f"Video loaded but no frame available: {image.path}")
                         self._show_error_placeholder("Video loaded (no frame)")
@@ -843,6 +856,8 @@ class ImageViewer(QWidget):
 
             self.zoom_fit()
             self.hud_item = ResizeHintHUD(MarkingItem.image_size, image_item)
+            if auto_play_after_layout:
+                QTimer.singleShot(0, self.video_player.play)
         else:
             for item in self.marking_items:
                 self.scene.removeItem(item)
