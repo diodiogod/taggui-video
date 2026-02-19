@@ -3036,6 +3036,10 @@ class VideoControlsWidget(QWidget):
     def _on_marker_preview_frame(self, frame):
         """Handle marker preview - show frame without moving seekbar."""
         if self._in_marker_preview:
+            # Show marker frame in spinbox during drag
+            self.frame_spinbox.blockSignals(True)
+            self.frame_spinbox.setValue(frame)
+            self.frame_spinbox.blockSignals(False)
             # Emit special preview signal that won't update the seekbar
             self.marker_preview_requested.emit(frame)
 
