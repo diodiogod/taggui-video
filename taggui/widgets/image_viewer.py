@@ -807,8 +807,9 @@ class ImageViewer(QWidget):
                 self.video_controls.setVisible(False)
                 self._controls_visible = False
 
-                # Stop video playback if switching from video to image
-                self.video_player.stop()
+                # Suspend video playback quickly when switching to still image.
+                # This avoids expensive frame-reset work on backend transitions.
+                self.video_player.suspend_for_media_switch()
                 try:
                     top = self.window()
                     if top and hasattr(top, 'refresh_video_controls_performance_profile'):

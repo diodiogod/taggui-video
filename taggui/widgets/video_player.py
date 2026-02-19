@@ -98,6 +98,13 @@ class VideoPlayerWidget(QWidget):
         self.vlc_geometry_timer = QTimer(self)
         self.vlc_geometry_timer.setInterval(100)
         self.vlc_geometry_timer.timeout.connect(self._update_vlc_geometry_from_pixmap)
+        self._vlc_pending_reveal = False
+        self._vlc_reveal_deadline_monotonic = 0.0
+        self._vlc_reveal_force_deadline_monotonic = 0.0
+        self._vlc_reveal_start_position_ms = 0.0
+        self._vlc_reveal_timer = QTimer(self)
+        self._vlc_reveal_timer.setInterval(16)
+        self._vlc_reveal_timer.timeout.connect(self._try_reveal_vlc_surface)
         self._vlc_estimated_position_ms = 0.0
         self._vlc_play_started_monotonic = 0.0
         self._vlc_play_base_position_ms = 0.0
@@ -338,6 +345,7 @@ class VideoPlayerWidget(QWidget):
 
     def _teardown_vlc(self, drop_player: bool = False):
         """Release vlc runtime resources if initialized."""
+        self._cancel_vlc_reveal()
         self.vlc_geometry_timer.stop()
         self._vlc_estimated_position_ms = 0.0
         self._vlc_play_started_monotonic = 0.0
@@ -686,6 +694,65 @@ class VideoPlayerWidget(QWidget):
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
 
+    def _cancel_vlc_reveal(self):
+        self._vlc_pending_reveal = False
+        self._vlc_reveal_deadline_monotonic = 0.0
+        self._vlc_reveal_force_deadline_monotonic = 0.0
+        self._vlc_reveal_start_position_ms = 0.0
+        self._vlc_reveal_timer.stop()
+
+    def _begin_vlc_reveal(self, delay_ms: int = 140, force_ms: int = 1400):
+        """Keep first-frame pixmap visible until VLC starts producing frames."""
+        if self.vlc_player is None:
+            self._cancel_vlc_reveal()
+            return
+        self._vlc_pending_reveal = True
+        self._vlc_reveal_start_position_ms = float(self._vlc_estimated_position_ms or 0.0)
+        now = time.monotonic()
+        self._vlc_reveal_deadline_monotonic = now + max(0.05, (delay_ms / 1000.0))
+        self._vlc_reveal_force_deadline_monotonic = now + max(0.45, (force_ms / 1000.0))
+        self._vlc_reveal_timer.start()
+
+    def _try_reveal_vlc_surface(self):
+        if not self._vlc_pending_reveal:
+            self._vlc_reveal_timer.stop()
+            return
+        if self.vlc_player is None:
+            self._cancel_vlc_reveal()
+            return
+        if not self.is_playing or not self._is_vlc_forward_active():
+            self._cancel_vlc_reveal()
+            return
+
+        now = time.monotonic()
+        reached_min_delay = now >= self._vlc_reveal_deadline_monotonic
+        force_ready = now >= self._vlc_reveal_force_deadline_monotonic
+        position_ready = False
+        try:
+            backend_pos_ms = float(self.vlc_player.get_time())
+        except Exception:
+            backend_pos_ms = -1.0
+        if backend_pos_ms >= 0.0:
+            reveal_threshold_ms = 35.0
+            if self.fps > 0:
+                frame_ms = 1000.0 / float(self.fps)
+                reveal_threshold_ms = max(35.0, min(120.0, frame_ms * 1.25))
+            if backend_pos_ms >= (self._vlc_reveal_start_position_ms + reveal_threshold_ms):
+                position_ready = True
+
+        ready = (reached_min_delay and position_ready) or force_ready
+
+        if ready:
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.hide()
+            except RuntimeError:
+                pass
+            self._set_vlc_visible(True)
+            self.sync_external_surface_geometry()
+            QTimer.singleShot(60, self.sync_external_surface_geometry)
+            self._cancel_vlc_reveal()
+
     def _begin_mpv_reveal(self, delay_ms: int = 120):
         """Reveal mpv surface immediately to avoid timer-related native crashes."""
         self._mpv_pending_reveal = False
@@ -905,8 +972,8 @@ class VideoPlayerWidget(QWidget):
         """Load a video file."""
         self._refresh_backend_selection()
 
-        # Stop any previous playback
-        self.pause()
+        # Stop any previous playback quickly (avoid expensive frame extraction).
+        self.suspend_for_media_switch()
 
         # Reset corruption detection state
         self.consecutive_frame_failures = 0
@@ -924,6 +991,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_needs_reload = True
         self._qt_video_source_path = None
         self._cancel_mpv_reveal()
+        self._cancel_vlc_reveal()
         self._set_mpv_visible(False)
         self._set_vlc_visible(False)
         if self.mpv_player is not None:
@@ -933,7 +1001,20 @@ class VideoPlayerWidget(QWidget):
                 pass
         if self.vlc_player is not None or self.vlc_widget is not None:
             try:
-                self._teardown_vlc(drop_player=True)
+                if self._is_using_vlc_backend():
+                    # Reuse VLC runtime between clips to reduce startup latency.
+                    if self.vlc_player is not None:
+                        try:
+                            self.vlc_player.stop()
+                        except Exception:
+                            pass
+                    self._vlc_end_reached_flag = False
+                    self._vlc_last_progress_ms = None
+                    self._vlc_stall_ticks = 0
+                    self._vlc_soft_restart_pending = False
+                    self._vlc_soft_restart_deadline_monotonic = 0.0
+                else:
+                    self._teardown_vlc(drop_player=True)
             except Exception:
                 pass
 
@@ -1043,6 +1124,7 @@ class VideoPlayerWidget(QWidget):
             # Use OpenCV frame-by-frame for backward playback
             self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
             self._cancel_mpv_reveal()
+            self._cancel_vlc_reveal()
             try:
                 if self.video_item:
                     self.video_item.hide()
@@ -1106,6 +1188,7 @@ class VideoPlayerWidget(QWidget):
                 except RuntimeError:
                     pass  # C++ object deleted
                 try:
+                    self._cancel_vlc_reveal()
                     self._active_forward_backend = PLAYBACK_BACKEND_MPV_EXPERIMENTAL
                     self._mpv_set_property('speed', max(0.1, float(self.playback_speed)))
                     self._mpv_set_property('pause', False)
@@ -1144,6 +1227,7 @@ class VideoPlayerWidget(QWidget):
                 except RuntimeError:
                     pass  # C++ object deleted
                 try:
+                    self._cancel_vlc_reveal()
                     self._active_forward_backend = PLAYBACK_BACKEND_VLC_EXPERIMENTAL
                     self._set_vlc_rate(self.playback_speed)
                     self._set_vlc_muted(bool(self.audio_output.isMuted()) if self.audio_output else True)
@@ -1155,20 +1239,18 @@ class VideoPlayerWidget(QWidget):
                     self._vlc_play_started_monotonic = time.monotonic()
                     try:
                         if self.pixmap_item:
-                            self.pixmap_item.hide()
+                            self.pixmap_item.show()
                     except RuntimeError:
                         pass
                     self._cancel_mpv_reveal()
                     self._set_mpv_visible(False)
-                    self._set_vlc_visible(True)
-                    # Geometry can still be stale right after first show/load.
-                    # Re-sync in the next event-loop ticks to avoid partial/offset render.
-                    QTimer.singleShot(0, self.sync_external_surface_geometry)
-                    QTimer.singleShot(60, self.sync_external_surface_geometry)
+                    self._set_vlc_visible(False)
+                    self._begin_vlc_reveal(delay_ms=120)
                 except Exception as e:
                     print(f"[VIDEO] vlc play fallback to Qt backend: {e}")
                     self.runtime_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
                     self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
+                    self._cancel_vlc_reveal()
                     self._set_mpv_visible(False)
                     self._set_vlc_visible(False)
                     try:
@@ -1186,6 +1268,7 @@ class VideoPlayerWidget(QWidget):
             else:
                 self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
                 self._cancel_mpv_reveal()
+                self._cancel_vlc_reveal()
                 self._load_qt_media_source_for_current_video()
                 try:
                     if self.pixmap_item:
@@ -1220,6 +1303,7 @@ class VideoPlayerWidget(QWidget):
         was_playing = self.is_playing
         self.is_playing = False
         self._cancel_mpv_reveal()
+        self._cancel_vlc_reveal()
         self.position_timer.stop()
         self.media_player.pause()
         if self.mpv_player is not None:
@@ -1303,6 +1387,53 @@ class VideoPlayerWidget(QWidget):
                 pass
         self.seek_to_frame(0)
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
+
+    def suspend_for_media_switch(self):
+        """Low-latency suspend when switching from video to still image.
+
+        This intentionally avoids OpenCV frame rendering/reset work so UI can
+        show the target image immediately.
+        """
+        was_playing = self.is_playing
+        self.is_playing = False
+
+        self._cancel_mpv_reveal()
+        self._cancel_vlc_reveal()
+        self.position_timer.stop()
+
+        # Pause forward backends quickly (no reset/seek work here).
+        try:
+            self.media_player.pause()
+        except Exception:
+            pass
+        if self.mpv_player is not None:
+            try:
+                self._mpv_set_property('pause', True)
+            except Exception:
+                pass
+        if self.vlc_player is not None:
+            try:
+                self._set_vlc_paused(True)
+            except Exception:
+                pass
+            self._vlc_stall_ticks = 0
+            self._vlc_soft_restart_pending = False
+            self._vlc_soft_restart_deadline_monotonic = 0.0
+
+        # Hide all video surfaces immediately.
+        try:
+            if self.video_item:
+                self.video_item.hide()
+        except RuntimeError:
+            pass
+        self._set_mpv_visible(False)
+        self._set_vlc_visible(False)
+
+        # Keep the internal state in a neutral backend mode.
+        self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
+
+        if was_playing:
+            self.playback_paused.emit()
 
     def toggle_play_pause(self):
         """Toggle between play and pause."""
@@ -1861,6 +1992,7 @@ class VideoPlayerWidget(QWidget):
     def cleanup(self):
         """Release video resources."""
         self._cancel_mpv_reveal()
+        self._cancel_vlc_reveal()
         self.position_timer.stop()
         self.is_playing = False
         try:
