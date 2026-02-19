@@ -104,6 +104,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_start_position_ms = 0.0
         self._vlc_reveal_require_stable = False
         self._vlc_reveal_ready_hits = 0
+        self._vlc_reveal_hold_play = False
         self._vlc_next_start_from_still = False
         self._vlc_reveal_timer = QTimer(self)
         self._vlc_reveal_timer.setInterval(16)
@@ -845,6 +846,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_start_position_ms = 0.0
         self._vlc_reveal_require_stable = False
         self._vlc_reveal_ready_hits = 0
+        self._vlc_reveal_hold_play = False
         self._vlc_reveal_timer.stop()
 
     def hint_next_video_starts_from_still(self, from_still: bool):
@@ -856,14 +858,20 @@ class VideoPlayerWidget(QWidget):
         delay_ms: int = 140,
         force_ms: int = 1400,
         require_stable: bool = False,
+        hold_play: bool = False,
     ):
-        """Keep first-frame pixmap visible until VLC starts producing frames."""
+        """Keep first-frame pixmap visible until VLC starts producing frames.
+
+        hold_play=True: VLC is kept paused at frame 0 during the reveal wait.
+        When the reveal fires, VLC is unpaused — guaranteeing no frames are skipped.
+        """
         if self.vlc_player is None:
             self._cancel_vlc_reveal()
             return
         self._vlc_pending_reveal = True
         self._vlc_reveal_start_position_ms = float(self._vlc_estimated_position_ms or 0.0)
         self._vlc_reveal_require_stable = bool(require_stable)
+        self._vlc_reveal_hold_play = bool(hold_play)
         self._vlc_reveal_ready_hits = 0
         now = time.monotonic()
         self._vlc_reveal_deadline_monotonic = now + max(0.05, (delay_ms / 1000.0))
@@ -886,6 +894,25 @@ class VideoPlayerWidget(QWidget):
         now = time.monotonic()
         reached_min_delay = now >= self._vlc_reveal_deadline_monotonic
         force_ready = now >= self._vlc_reveal_force_deadline_monotonic
+
+        # hold_play mode: VLC is paused at frame 0 — position won't advance, so
+        # skip position check and just wait for the min delay, then reveal+play together.
+        if self._vlc_reveal_hold_play:
+            if reached_min_delay or force_ready:
+                self._set_vlc_visible(True)
+                self.sync_external_surface_geometry()
+                QTimer.singleShot(60, self.sync_external_surface_geometry)
+                if self._vlc_cover_active:
+                    QTimer.singleShot(40, self._hide_vlc_cover_overlay)
+                self._cancel_vlc_reveal()
+                # Unpause VLC now that the surface is visible — playback starts from frame 0.
+                try:
+                    self._set_vlc_paused(False)
+                except Exception:
+                    pass
+                self._vlc_play_started_monotonic = time.monotonic()
+            return
+
         position_ready = False
         strict_mode = bool(self._vlc_reveal_require_stable)
         try:
@@ -1576,6 +1603,10 @@ class VideoPlayerWidget(QWidget):
                     self._seek_vlc_position_ms(self._vlc_estimated_position_ms)
                     self._vlc_play_base_position_ms = float(self._vlc_estimated_position_ms)
                     self._vlc_play_started_monotonic = time.monotonic()
+                    # hold_play: keep VLC paused at frame 0 during the reveal delay so
+                    # no frames are skipped before the surface becomes visible.
+                    if reveal_from_still:
+                        self._set_vlc_paused(True)
                     try:
                         if self.pixmap_item:
                             self.pixmap_item.show()
@@ -1589,7 +1620,8 @@ class VideoPlayerWidget(QWidget):
                     self._begin_vlc_reveal(
                         delay_ms=85 if reveal_from_still else 120,
                         force_ms=1200 if reveal_from_still else 1400,
-                        require_stable=reveal_from_still,
+                        require_stable=False,
+                        hold_play=reveal_from_still,
                     )
                 except Exception as e:
                     print(f"[VIDEO] vlc play fallback to Qt backend: {e}")
