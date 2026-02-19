@@ -256,6 +256,21 @@ class ImageGraphicsView(QGraphicsView):
         else:
             super().mouseMoveEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and not self.insertion_mode:
+            zoom_handler = getattr(self.image_viewer, "apply_floating_double_click_zoom", None)
+            if callable(zoom_handler):
+                scene_pos = self.mapToScene(event.pos())
+                view_pos = event.pos()
+                try:
+                    handled = bool(zoom_handler(scene_anchor_pos=scene_pos, view_anchor_pos=view_pos))
+                except Exception:
+                    handled = False
+                if handled:
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self._manual_pan_active and event.button() in (
             Qt.MouseButton.LeftButton,
