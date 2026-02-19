@@ -895,22 +895,21 @@ class VideoPlayerWidget(QWidget):
         reached_min_delay = now >= self._vlc_reveal_deadline_monotonic
         force_ready = now >= self._vlc_reveal_force_deadline_monotonic
 
-        # hold_play mode: VLC is paused at frame 0 — position won't advance, so
-        # skip position check and just wait for the min delay, then reveal+play together.
+        # hold_play mode: VLC is paused at frame 0 — unpause once the min delay
+        # has passed, then fall through to the normal position-check reveal so we
+        # only show the VLC surface after it has actually rendered a frame.
         if self._vlc_reveal_hold_play:
             if reached_min_delay or force_ready:
-                self._set_vlc_visible(True)
-                self.sync_external_surface_geometry()
-                QTimer.singleShot(60, self.sync_external_surface_geometry)
-                if self._vlc_cover_active:
-                    QTimer.singleShot(40, self._hide_vlc_cover_overlay)
-                self._cancel_vlc_reveal()
-                # Unpause VLC now that the surface is visible — playback starts from frame 0.
+                self._vlc_reveal_hold_play = False
                 try:
                     self._set_vlc_paused(False)
                 except Exception:
                     pass
                 self._vlc_play_started_monotonic = time.monotonic()
+                # Reset the reveal start position now that VLC is actually playing.
+                self._vlc_reveal_start_position_ms = 0.0
+                # Give VLC a moment to start producing frames before the position check runs.
+                self._vlc_reveal_deadline_monotonic = time.monotonic() + 0.04
             return
 
         position_ready = False
@@ -1599,6 +1598,13 @@ class VideoPlayerWidget(QWidget):
                     self._set_vlc_muted(bool(self.audio_output.isMuted()) if self.audio_output else True)
                     self._vlc_end_reached_flag = False
                     self._vlc_stall_ticks = 0
+                    # hide VLC surface first so pausing VLC can't flash black
+                    self._set_vlc_visible(False)
+                    try:
+                        if self.pixmap_item:
+                            self.pixmap_item.show()
+                    except RuntimeError:
+                        pass
                     self.vlc_player.play()
                     self._seek_vlc_position_ms(self._vlc_estimated_position_ms)
                     self._vlc_play_base_position_ms = float(self._vlc_estimated_position_ms)
@@ -1607,14 +1613,8 @@ class VideoPlayerWidget(QWidget):
                     # no frames are skipped before the surface becomes visible.
                     if reveal_from_still:
                         self._set_vlc_paused(True)
-                    try:
-                        if self.pixmap_item:
-                            self.pixmap_item.show()
-                    except RuntimeError:
-                        pass
                     self._cancel_mpv_reveal()
                     self._set_mpv_visible(False)
-                    self._set_vlc_visible(False)
                     if reveal_from_still:
                         self._show_vlc_cover_overlay()
                     self._begin_vlc_reveal(
