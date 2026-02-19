@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QPoint, QRect, QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QCursor
-from PySide6.QtWidgets import (QFrame, QGraphicsColorizeEffect, QMenu, QPushButton,
+from PySide6.QtWidgets import (QFrame, QGraphicsColorizeEffect, QGraphicsView, QMenu, QPushButton,
                                QSizeGrip, QVBoxLayout, QWidget)
 
 
@@ -42,6 +42,7 @@ class FloatingViewerWindow(QWidget):
         self._resize_corner = None
         self._resize_start_geometry = QRect()
         self._resize_start_global_pos = QPoint()
+        self._resize_prev_anchor = None
         self._video_controls_widget = None
         self._frozen_passthrough_mode = False
         self._colorize_effect = QGraphicsColorizeEffect(self.viewer)
@@ -711,6 +712,48 @@ class FloatingViewerWindow(QWidget):
 
         self.setGeometry(x, y, w, h)
 
+    def _set_view_resize_anchor_for_window_resize(self, active: bool):
+        """Keep zoom stable while resizing the floating window."""
+        view = getattr(self.viewer, "view", None)
+        if view is None or not hasattr(view, "setResizeAnchor"):
+            return
+        try:
+            if active:
+                if self._resize_prev_anchor is None:
+                    try:
+                        self._resize_prev_anchor = view.resizeAnchor()
+                    except Exception:
+                        self._resize_prev_anchor = QGraphicsView.ViewportAnchor.AnchorUnderMouse
+                view.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+            else:
+                restore_anchor = (
+                    self._resize_prev_anchor
+                    if self._resize_prev_anchor is not None
+                    else QGraphicsView.ViewportAnchor.AnchorUnderMouse
+                )
+                view.setResizeAnchor(restore_anchor)
+                self._resize_prev_anchor = None
+        except Exception:
+            self._resize_prev_anchor = None
+
+    def _begin_window_resize(self, event, zone_name: str):
+        self._resize_active = True
+        self._resize_corner = zone_name
+        self._resize_start_geometry = self.geometry()
+        self._resize_start_global_pos = self._event_global_pos(event)
+        self._window_drag_active = False
+        self._window_drag_button = Qt.MouseButton.NoButton
+        self._active_drag_handle = None
+        self._set_view_resize_anchor_for_window_resize(True)
+        self._emit_activated()
+
+    def _end_window_resize(self, event=None):
+        self._resize_active = False
+        self._resize_corner = None
+        self._set_view_resize_anchor_for_window_resize(False)
+        if event is not None:
+            self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+
     def _resize_zone_from_local_pos(self, local_pos: QPoint):
         """Return resize zone name from a local position near window borders."""
         margin = 12
@@ -770,22 +813,13 @@ class FloatingViewerWindow(QWidget):
                 self._show_window_menu(global_pos)
                 return True
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._resize_active = True
-                self._resize_corner = edge_name
-                self._resize_start_geometry = self.geometry()
-                self._resize_start_global_pos = self._event_global_pos(event)
-                self._window_drag_active = False
-                self._window_drag_button = Qt.MouseButton.NoButton
-                self._active_drag_handle = None
-                self._emit_activated()
+                self._begin_window_resize(event, edge_name)
                 return True
             if event.type() == QEvent.Type.MouseMove and self._resize_active:
                 self._apply_corner_resize(self._event_global_pos(event))
                 return True
             if event.type() == QEvent.Type.MouseButtonRelease and self._resize_active:
-                self._resize_active = False
-                self._resize_corner = None
-                self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                self._end_window_resize(event)
                 return True
             if event.type() == QEvent.Type.Enter:
                 self._emit_activated()
@@ -798,22 +832,13 @@ class FloatingViewerWindow(QWidget):
                 self._show_window_menu(global_pos)
                 return True
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._resize_active = True
-                self._resize_corner = corner_name
-                self._resize_start_geometry = self.geometry()
-                self._resize_start_global_pos = self._event_global_pos(event)
-                self._window_drag_active = False
-                self._window_drag_button = Qt.MouseButton.NoButton
-                self._active_drag_handle = None
-                self._emit_activated()
+                self._begin_window_resize(event, corner_name)
                 return True
             if event.type() == QEvent.Type.MouseMove and self._resize_active:
                 self._apply_corner_resize(self._event_global_pos(event))
                 return True
             if event.type() == QEvent.Type.MouseButtonRelease and self._resize_active:
-                self._resize_active = False
-                self._resize_corner = None
-                self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                self._end_window_resize(event)
                 return True
             if event.type() == QEvent.Type.Enter:
                 self._emit_activated()
@@ -863,14 +888,7 @@ class FloatingViewerWindow(QWidget):
                 local_pos = self.mapFromGlobal(self._event_global_pos(event))
                 zone_name = self._resize_zone_from_local_pos(local_pos)
                 if zone_name is not None:
-                    self._resize_active = True
-                    self._resize_corner = zone_name
-                    self._resize_start_geometry = self.geometry()
-                    self._resize_start_global_pos = self._event_global_pos(event)
-                    self._window_drag_active = False
-                    self._window_drag_button = Qt.MouseButton.NoButton
-                    self._active_drag_handle = None
-                    self._emit_activated()
+                    self._begin_window_resize(event, zone_name)
                     return True
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._emit_activated()
@@ -892,13 +910,11 @@ class FloatingViewerWindow(QWidget):
                 self._force_activate_viewer_owner()
             elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                 if self._resize_active:
-                    self._resize_active = False
-                    self._resize_corner = None
+                    self._end_window_resize(event)
                     try:
                         watched.unsetCursor()
                     except Exception:
                         pass
-                    self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
                     return True
         elif watched in drag_sources:
             if event.type() == QEvent.Type.Enter:
@@ -936,13 +952,7 @@ class FloatingViewerWindow(QWidget):
                     local_pos = self.mapFromGlobal(self._event_global_pos(event))
                     zone_name = self._resize_zone_from_local_pos(local_pos)
                     if zone_name is not None:
-                        self._resize_active = True
-                        self._resize_corner = zone_name
-                        self._resize_start_geometry = self.geometry()
-                        self._resize_start_global_pos = self._event_global_pos(event)
-                        self._window_drag_active = False
-                        self._window_drag_button = Qt.MouseButton.NoButton
-                        self._active_drag_handle = None
+                        self._begin_window_resize(event, zone_name)
                         return True
                 if event.button() == Qt.MouseButton.MiddleButton:
                     self._begin_window_drag(event, None)
@@ -983,14 +993,12 @@ class FloatingViewerWindow(QWidget):
                 self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 if self._resize_active and event.button() == Qt.MouseButton.LeftButton:
-                    self._resize_active = False
-                    self._resize_corner = None
+                    self._end_window_resize(event)
                     try:
                         if hasattr(watched, "unsetCursor"):
                             watched.unsetCursor()
                     except Exception:
                         pass
-                    self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
                     return True
                 if self._window_drag_active and event.button() == self._window_drag_button:
                     self._window_drag_active = False
@@ -1029,5 +1037,7 @@ class FloatingViewerWindow(QWidget):
         super().focusInEvent(event)
 
     def closeEvent(self, event):
+        if self._resize_active:
+            self._end_window_resize()
         self.closing.emit(self.viewer)
         super().closeEvent(event)
