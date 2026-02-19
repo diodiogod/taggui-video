@@ -179,7 +179,7 @@ def natural_sort_key(path: Path):
             parts.append(part.lower())
     return parts
 
-def get_file_paths(directory_path: Path) -> set[Path]:
+def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
     """
     Recursively get all file paths in a directory, including
     subdirectories. Includes symlinks.
@@ -192,11 +192,76 @@ def get_file_paths(directory_path: Path) -> set[Path]:
         if path.is_file() or path.is_symlink():
             file_paths.add(path)
             count += 1
+            if progress_callback and count % 20000 == 0:
+                try:
+                    progress_callback(count)
+                except Exception:
+                    pass
             # Progress feedback for large directories
             if count % 100000 == 0:
                 print(f"[SCAN] Found {count:,} files...")
+    if progress_callback:
+        try:
+            progress_callback(count)
+        except Exception:
+            pass
     print(f"[SCAN] Scan complete: {len(file_paths):,} total files found")
     return file_paths
+
+
+def get_directory_tree_stats(directory_path: Path, progress_callback=None) -> tuple[int, float]:
+    """
+    Fast recursive filesystem stats for cache freshness checks.
+
+    Returns:
+        (file_count, max_mtime_seen) where max_mtime_seen is the latest mtime of
+        any directory entry in the tree.
+    """
+    import os
+
+    file_count = 0
+    max_mtime = 0.0
+    stack = [directory_path]
+
+    try:
+        root_stat = directory_path.stat()
+        max_mtime = float(root_stat.st_mtime)
+    except OSError:
+        pass
+
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+
+                    mtime = float(getattr(stat, "st_mtime", 0.0) or 0.0)
+                    if mtime > max_mtime:
+                        max_mtime = mtime
+
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                        file_count += 1
+                        if progress_callback and file_count % 20000 == 0:
+                            try:
+                                progress_callback(file_count)
+                            except Exception:
+                                pass
+        except OSError:
+            continue
+
+    if progress_callback:
+        try:
+            progress_callback(file_count)
+        except Exception:
+            pass
+
+    return file_count, max_mtime
 
 
 def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict | None, QPixmap | None]:
@@ -2751,14 +2816,122 @@ class ImageListModel(QAbstractListModel):
         from utils.image_index_db import ImageIndexDB
         db = ImageIndexDB(directory_path)
         cached_paths = db.get_all_paths()
+        cache_stats = None
+        scan_progress = None
 
-        if cached_paths and len(cached_paths) > 1000:
-            # Use cached paths if we have a substantial cache (reboot scenario)
-            print(f"[CACHE] Using {len(cached_paths):,} cached file paths (skipping scan)")
-            file_paths = {Path(directory_path) / p for p in cached_paths}
-        else:
-            # Full scan needed (first time or small folder)
-            file_paths = get_file_paths(directory_path)
+        def _ensure_scan_progress():
+            nonlocal scan_progress
+            if scan_progress is not None:
+                return scan_progress
+            scan_progress = QProgressDialog("Scanning folder...", "", 0, 0)
+            scan_progress.setWindowTitle("Scanning Folder")
+            scan_progress.setWindowModality(Qt.WindowModal)
+            scan_progress.setCancelButton(None)
+            scan_progress.setMinimumDuration(0)
+            scan_progress.setAutoClose(False)
+            scan_progress.setAutoReset(False)
+            scan_progress.show()
+            QApplication.processEvents()
+            return scan_progress
+
+        def _update_scan_progress(label: str, count: int = None, maximum: int = None):
+            dialog = _ensure_scan_progress()
+            if maximum is None:
+                dialog.setRange(0, 0)
+            else:
+                dialog.setRange(0, max(1, int(maximum)))
+                if count is not None:
+                    dialog.setValue(max(0, min(int(count), dialog.maximum())))
+            if count is None:
+                dialog.setLabelText(label)
+            else:
+                dialog.setLabelText(f"{label}\nFiles: {int(count):,}")
+            QApplication.processEvents()
+
+        try:
+            if cached_paths and len(cached_paths) > 1000:
+                # For very large folders, cached path lists are fast, but must be
+                # validated or newly added files will be missed.
+                cached_count = len(cached_paths)
+                _update_scan_progress("Checking folder changes...")
+                fs_count, fs_tree_mtime = get_directory_tree_stats(
+                    directory_path,
+                    progress_callback=lambda c: _update_scan_progress(
+                        "Checking folder changes...",
+                        count=c,
+                    ),
+                )
+                cache_stats = (fs_count, fs_tree_mtime)
+
+                saved_count_raw = db.get_meta_value('path_cache_file_count')
+                saved_tree_mtime_raw = db.get_meta_value('path_cache_tree_mtime')
+
+                try:
+                    saved_count = int(saved_count_raw) if saved_count_raw is not None else None
+                except (TypeError, ValueError):
+                    saved_count = None
+                try:
+                    saved_tree_mtime = float(saved_tree_mtime_raw) if saved_tree_mtime_raw is not None else None
+                except (TypeError, ValueError):
+                    saved_tree_mtime = None
+
+                stale_reasons = []
+                if fs_count != cached_count:
+                    stale_reasons.append(f"count {cached_count:,}->{fs_count:,}")
+                if saved_count is None or saved_tree_mtime is None:
+                    stale_reasons.append("missing signature")
+                else:
+                    if saved_count != cached_count:
+                        stale_reasons.append(f"signature-count {saved_count:,}->{cached_count:,}")
+                    if fs_tree_mtime > (saved_tree_mtime + 0.001):
+                        stale_reasons.append("tree-mtime changed")
+
+                if stale_reasons:
+                    reason_text = ", ".join(stale_reasons)
+                    print(f"[CACHE] Path cache stale ({reason_text}), rescanning filesystem")
+                    _update_scan_progress(
+                        "Rescanning folder files...",
+                        count=0,
+                        maximum=max(1, fs_count),
+                    )
+                    file_paths = get_file_paths(
+                        directory_path,
+                        progress_callback=lambda c: _update_scan_progress(
+                            "Rescanning folder files...",
+                            count=c,
+                            maximum=max(1, fs_count),
+                        ),
+                    )
+                else:
+                    print(f"[CACHE] Using {cached_count:,} cached file paths (skipping scan)")
+                    file_paths = {Path(directory_path) / p for p in cached_paths}
+            else:
+                # Full scan needed (first time or small folder)
+                _update_scan_progress("Scanning folder files...")
+                file_paths = get_file_paths(
+                    directory_path,
+                    progress_callback=lambda c: _update_scan_progress(
+                        "Scanning folder files...",
+                        count=c,
+                    ),
+                )
+
+            # Persist signature used for path-cache freshness checks (large folders only).
+            if len(file_paths) > 1000:
+                try:
+                    if cache_stats is None:
+                        cache_stats = get_directory_tree_stats(directory_path)
+                    db.set_meta_value('path_cache_file_count', str(int(cache_stats[0])))
+                    db.set_meta_value('path_cache_tree_mtime', f"{float(cache_stats[1]):.6f}")
+                    db.set_meta_value('path_cache_updated_at', f"{time.time():.6f}")
+                except Exception:
+                    pass
+        finally:
+            if scan_progress is not None:
+                scan_progress.close()
+                scan_progress.deleteLater()
+                scan_progress = None
+
         image_suffixes_string = settings.value(
             'image_list_file_formats',
             defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)

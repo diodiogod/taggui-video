@@ -839,6 +839,42 @@ class ImageIndexDB:
         except sqlite3.Error:
             return []
 
+    def get_meta_value(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Get a value from DB meta table."""
+        if not self._ensure_connection():
+            return default
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT value FROM meta WHERE key = ?', (key,))
+                row = cursor.fetchone()
+                if row is None:
+                    return default
+                if isinstance(row, sqlite3.Row):
+                    return row['value']
+                return row[0] if row else default
+        except sqlite3.Error:
+            return default
+
+    def set_meta_value(self, key: str, value: str):
+        """Persist one value in DB meta table."""
+        if not self._ensure_connection():
+            return
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    '''
+                    INSERT INTO meta (key, value)
+                    VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    ''',
+                    (str(key), str(value)),
+                )
+                self.conn.commit()
+        except sqlite3.Error:
+            return
+
     # ========== Tag Management ==========
 
     def get_tags_for_image(self, image_id: int) -> List[str]:

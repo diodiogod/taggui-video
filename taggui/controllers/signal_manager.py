@@ -358,10 +358,6 @@ class SignalManager:
 
         is_looping = bool(video_controls.is_looping)
         loop_range = video_controls.get_loop_range()
-        print(
-            "[VIDEO][LOOP_FLOW_SM] apply "
-            f"is_looping={is_looping} range={loop_range}"
-        )
 
         if not is_looping:
             video_player.set_loop(False, None, None)
