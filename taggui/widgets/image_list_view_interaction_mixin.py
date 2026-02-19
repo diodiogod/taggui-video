@@ -891,10 +891,10 @@ class ImageListViewInteractionMixin:
                     self._last_masonry_window_signature = None
                     if hasattr(self, '_masonry_incremental_svc') and self._masonry_incremental_svc:
                         self._masonry_incremental_svc.clear_all()
-                    if hasattr(source_model, '_schedule_dimensions_updated'):
-                        source_model._schedule_dimensions_updated()
-                    elif hasattr(source_model, 'dimensions_updated'):
-                        source_model.dimensions_updated.emit()
+                    # Force a full masonry recalc directly — dimensions_updated is
+                    # throttled and has early-return guards that can silently drop it.
+                    if hasattr(self, '_recalculate_masonry_if_needed'):
+                        self._recalculate_masonry_if_needed("layoutChanged")
                 else:
                     print(f"  Could not read dimensions from file — skipping DB update.")
             except Exception as e:
