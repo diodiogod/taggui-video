@@ -1,7 +1,7 @@
 import re
 from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
-from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform
+from PySide6.QtGui import QCursor, QImage, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
@@ -129,6 +129,26 @@ class ImageViewer(QWidget):
         self.video_controls.installEventFilter(self)
         self.view.installEventFilter(self)
         self.view.viewport().installEventFilter(self)
+        self._refresh_video_surface_event_filters()
+
+    def _iter_video_surface_widgets(self):
+        """Yield live native video surface widgets used by backend renderers."""
+        player = getattr(self, "video_player", None)
+        if player is None:
+            return
+        for attr in ("vlc_widget", "mpv_widget"):
+            widget = getattr(player, attr, None)
+            if isinstance(widget, QWidget):
+                yield widget
+
+    def _refresh_video_surface_event_filters(self):
+        """Attach viewer event filter to backend video surface widgets."""
+        for widget in self._iter_video_surface_widgets():
+            try:
+                widget.installEventFilter(self)
+                widget.setMouseTracking(True)
+            except RuntimeError:
+                continue
 
     def set_scene_padding(self, padding_px: int):
         """Set scene padding around media for this viewer."""
@@ -515,6 +535,9 @@ class ImageViewer(QWidget):
                 return self.mapFrom(self.view.viewport(), local_pos)
             if watched is self.video_controls:
                 return self.mapFrom(self.video_controls, local_pos)
+            if isinstance(watched, QWidget):
+                global_pos = watched.mapToGlobal(local_pos)
+                return self.mapFromGlobal(global_pos)
         except Exception:
             return None
         return None
@@ -567,7 +590,12 @@ class ImageViewer(QWidget):
             self._controls_hover_inside = False
 
     def eventFilter(self, watched, event):
+        self._refresh_video_surface_event_filters()
         event_type = event.type()
+        if event_type == QEvent.Type.Wheel:
+            if any(watched is surface for surface in self._iter_video_surface_widgets()):
+                self.wheelEvent(event)
+                return True
         if event_type == QEvent.Type.MouseMove and self._is_video_loaded:
             viewer_pos = self._event_pos_to_viewer(watched, event)
             if viewer_pos is not None:
@@ -864,7 +892,13 @@ class ImageViewer(QWidget):
 
     @Slot()
     def zoom_in(self, center_pos: QPoint = None):
-        MarkingItem.zoom_factor = min(MarkingItem.zoom_factor * 1.25, 16)
+        try:
+            current_scale = abs(float(self.view.transform().m11()))
+        except Exception:
+            current_scale = 0.0
+        if current_scale <= 0:
+            current_scale = float(MarkingItem.zoom_factor or 1.0)
+        MarkingItem.zoom_factor = min(current_scale * 1.25, 16)
         self.is_zoom_to_fit = False
         self.zoom_emit()
 
@@ -875,8 +909,14 @@ class ImageViewer(QWidget):
         if scene.width() < 1 or scene.height() < 1:
             return
         limit = min(view.width()/scene.width(), view.height()/scene.height())
-        MarkingItem.zoom_factor = max(MarkingItem.zoom_factor / 1.25, limit)
-        self.is_zoom_to_fit = MarkingItem.zoom_factor == limit
+        try:
+            current_scale = abs(float(self.view.transform().m11()))
+        except Exception:
+            current_scale = 0.0
+        if current_scale <= 0:
+            current_scale = float(MarkingItem.zoom_factor or limit)
+        MarkingItem.zoom_factor = max(current_scale / 1.25, limit)
+        self.is_zoom_to_fit = abs(MarkingItem.zoom_factor - limit) <= max(1e-6, limit * 1e-6)
         self.zoom_emit()
 
     @Slot()
@@ -1014,18 +1054,68 @@ class ImageViewer(QWidget):
             return
 
         # Standard zoom behavior
-        old_pos = self.view.mapToScene(event.position().toPoint())
-
-        if event.angleDelta().y() > 0:
-            self.zoom_in()
-        elif event.angleDelta().y() < 0:
-            self.zoom_out()
-        else:
+        delta_y = event.angleDelta().y()
+        if delta_y == 0:
             return
 
-        new_pos = self.view.mapToScene(event.position().toPoint())
-        delta = new_pos - old_pos
-        self.view.translate(delta.x(), delta.y())
+        viewport = self.view.viewport()
+        viewport_rect = viewport.rect()
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return
+
+        anchor_view_pos = viewport.mapFromGlobal(QCursor.pos())
+        if not viewport_rect.contains(anchor_view_pos):
+            try:
+                anchor_view_pos = viewport.mapFromGlobal(event.globalPosition().toPoint())
+            except Exception:
+                try:
+                    anchor_view_pos = event.position().toPoint()
+                except Exception:
+                    anchor_view_pos = viewport_rect.center()
+                if not viewport_rect.contains(anchor_view_pos):
+                    try:
+                        anchor_view_pos = viewport.mapFrom(self.view, anchor_view_pos)
+                    except Exception:
+                        pass
+
+        if not viewport_rect.contains(anchor_view_pos):
+            anchor_view_pos = QPoint(
+                max(0, min(anchor_view_pos.x(), max(0, viewport_rect.width() - 1))),
+                max(0, min(anchor_view_pos.y(), max(0, viewport_rect.height() - 1))),
+            )
+
+        focus_scene_pos = self.view.mapToScene(anchor_view_pos)
+        scene_rect = self.scene.sceneRect()
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return
+
+        try:
+            current_scale = abs(float(self.view.transform().m11()))
+        except Exception:
+            current_scale = 0.0
+        if current_scale <= 0:
+            current_scale = float(MarkingItem.zoom_factor or 1.0)
+
+        fit_limit = min(
+            viewport_rect.width() / scene_rect.width(),
+            viewport_rect.height() / scene_rect.height(),
+        )
+        fit_limit = max(1e-9, float(fit_limit))
+
+        if delta_y > 0:
+            target_scale = min(current_scale * 1.25, 16.0)
+            zoom_to_fit_state = False
+        else:
+            target_scale = max(current_scale / 1.25, fit_limit)
+            zoom_to_fit_state = abs(target_scale - fit_limit) <= max(1e-6, fit_limit * 1e-6)
+
+        self._apply_uniform_zoom_scale(
+            target_scale,
+            zoom_to_fit_state=zoom_to_fit_state,
+            focus_scene_pos=focus_scene_pos,
+            anchor_view_pos=anchor_view_pos,
+        )
+        event.accept()
 
     def add_rectangle(self, rect: QRect, rect_type: ImageMarking,
                       interactive: bool, size: QSize = None, name: str = '',

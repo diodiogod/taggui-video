@@ -2507,10 +2507,6 @@ class VideoControlsWidget(QWidget):
 
         # Restore loop state after video loads
         if self.is_looping:
-            print(
-                "[VIDEO][LOOP_UI] restore loop-on after load "
-                f"markers=({self.loop_start_frame},{self.loop_end_frame})"
-            )
             self.loop_toggled.emit(True)
             # If loop markers are defined, start playback/view from loop-in frame.
             if self.loop_start_frame is not None and self.loop_end_frame is not None:
@@ -2882,10 +2878,6 @@ class VideoControlsWidget(QWidget):
     def _toggle_loop(self, enabled: bool):
         """Toggle loop playback."""
         self.is_looping = enabled
-        print(
-            "[VIDEO][LOOP_UI] toggle "
-            f"enabled={bool(enabled)} markers=({self.loop_start_frame},{self.loop_end_frame})"
-        )
         self.loop_toggled.emit(enabled)
         # Save loop state to settings
         settings.setValue('video_loop_enabled', enabled)
@@ -2895,10 +2887,6 @@ class VideoControlsWidget(QWidget):
         """Reset loop markers only (keeps loop enabled/disabled state)."""
         self.loop_start_frame = None
         self.loop_end_frame = None
-        print(
-            "[VIDEO][LOOP_UI] reset markers "
-            f"keep_enabled={bool(self.is_looping)} save={bool(save)}"
-        )
         # Don't change is_looping or loop_checkbox state
         self.loop_reset.emit()
         # Clear button styling

@@ -1719,11 +1719,6 @@ class MainWindow(QMainWindow):
 
         is_looping = bool(getattr(controls, 'is_looping', False))
         loop_range = controls.get_loop_range() if hasattr(controls, 'get_loop_range') else None
-        print(
-            "[VIDEO][LOOP_FLOW] apply "
-            f"is_looping={is_looping} range={loop_range} "
-            f"viewer={id(viewer)} controls={id(controls)} player={id(player)}"
-        )
 
         if not is_looping:
             player.set_loop(False, None, None)

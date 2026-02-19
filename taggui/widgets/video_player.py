@@ -164,12 +164,9 @@ class VideoPlayerWidget(QWidget):
             self._backend_fallback_warned = False
 
     def _log_loop_debug(self, message: str, force: bool = False):
-        """Rate-limited loop debug logging for backend diagnostics."""
-        now = time.monotonic()
-        if (not force) and ((now - self._loop_debug_last_log_monotonic) < 0.25):
-            return
-        self._loop_debug_last_log_monotonic = now
-        print(f"[VIDEO][LOOP] {message}")
+        """Loop debug logging intentionally disabled for normal runtime."""
+        _ = (message, force)
+        return
 
     def _is_using_mpv_backend(self) -> bool:
         return self.runtime_playback_backend == PLAYBACK_BACKEND_MPV_EXPERIMENTAL
