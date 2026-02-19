@@ -831,6 +831,75 @@ class ImageListViewInteractionMixin:
                     source_model._thumbnail_futures.pop(src_row, None)
                     source_model._thumbnail_futures.pop(proxy_row, None)
 
+        # ── 7. Re-enrich: re-read dimensions from disk + update DB ──
+        if image_via_proxy is not None and hasattr(source_model, '_directory_path') and source_model._directory_path:
+            print("[DEV-DIAG] Re-enriching dimensions from disk...")
+            try:
+                import imagesize
+                from utils.image_index_db import ImageIndexDB
+
+                img_path = image_via_proxy.path
+                suffix = img_path.suffix.lower()
+                video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+                is_video = suffix in video_extensions
+
+                dimensions = None
+                if is_video:
+                    from utils.video_utils import extract_video_info
+                    dimensions, _, _ = extract_video_info(img_path)
+                elif suffix == '.jxl':
+                    from utils.jxlutil import get_jxl_size
+                    dimensions = get_jxl_size(img_path)
+                else:
+                    dimensions = imagesize.get(str(img_path))
+                    if dimensions == (-1, -1):
+                        dimensions = None
+                    if dimensions:
+                        # Verify with PIL for suspicious aspect ratios or JPEG EXIF rotation
+                        ar = dimensions[0] / dimensions[1] if dimensions[1] else 1
+                        needs_pil = (ar < 0.2 or ar > 5.0 or dimensions[0] > 12000
+                                     or dimensions[1] > 12000
+                                     or suffix in ('.jpg', '.jpeg'))
+                        if needs_pil:
+                            try:
+                                from PIL import Image as _PILImage
+                                with _PILImage.open(img_path) as _img:
+                                    dimensions = _img.size
+                                    if suffix in ('.jpg', '.jpeg', '.tif', '.tiff'):
+                                        _exif = _img.getexif()
+                                        if _exif:
+                                            orientation = _exif.get(274)
+                                            if orientation in (5, 6, 7, 8):
+                                                dimensions = (dimensions[1], dimensions[0])
+                            except Exception:
+                                pass  # Keep imagesize result
+
+                if dimensions and dimensions != (-1, -1):
+                    old_dims = getattr(image_via_proxy, 'dimensions', None)
+                    image_via_proxy.dimensions = dimensions
+                    print(f"  Dimensions: {old_dims} → {dimensions[0]}x{dimensions[1]}")
+
+                    rel_path = str(img_path.relative_to(source_model._directory_path))
+                    mtime = img_path.stat().st_mtime
+                    db_fix = ImageIndexDB(source_model._directory_path)
+                    db_fix.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime)
+                    db_fix.commit()
+                    db_fix.close()
+                    print(f"  DB updated: {rel_path}")
+
+                    # Clear masonry caches so the new aspect ratio is reflected
+                    self._last_masonry_window_signature = None
+                    if hasattr(self, '_masonry_incremental_svc') and self._masonry_incremental_svc:
+                        self._masonry_incremental_svc.clear_all()
+                    if hasattr(source_model, '_schedule_dimensions_updated'):
+                        source_model._schedule_dimensions_updated()
+                    elif hasattr(source_model, 'dimensions_updated'):
+                        source_model.dimensions_updated.emit()
+                else:
+                    print(f"  Could not read dimensions from file — skipping DB update.")
+            except Exception as e:
+                print(f"  Re-enrichment failed: {e}")
+
         print("[DEV-DIAG] Triggering repair: viewport repaint (thumbnail will reload from source file)...")
         self.viewport().update()
         print("=" * 70 + "\n")
