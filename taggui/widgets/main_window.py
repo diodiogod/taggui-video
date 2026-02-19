@@ -39,6 +39,7 @@ from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
+from widgets.video_sync_coordinator import VideoSyncCoordinator
 
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
 
@@ -406,6 +407,7 @@ class MainWindow(QMainWindow):
         self._floating_viewers = []
         self._floating_viewer_spawn_count = 0
         self._active_viewer = self.image_viewer
+        self._sync_coordinator: VideoSyncCoordinator | None = None
         self._exclusive_video_controls_visibility = True
         self._video_controls_perf_profile = 'single'
         self._video_controls_pending_updates = {}
@@ -1736,7 +1738,15 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def sync_video_playback(self):
-        """Synchronize loaded videos to loop start and play them together."""
+        """Synchronize loaded videos using a strict startup+loop barrier coordinator."""
+        # Stop any previous coordinator first.
+        if self._sync_coordinator is not None:
+            try:
+                self._sync_coordinator.stop()
+            except Exception:
+                pass
+            self._sync_coordinator = None
+
         loaded_video_viewers = []
         for viewer in self._iter_all_viewers():
             try:
@@ -1748,41 +1758,15 @@ class MainWindow(QMainWindow):
         if not loaded_video_viewers:
             return
 
+        # Apply loop state so each player's loop markers are current.
         for viewer in loaded_video_viewers:
             try:
                 self._apply_loop_state_to_viewer_player(viewer)
             except Exception as e:
                 print(f"[SYNC] Loop state apply warning: {e}")
 
-        playing_now = [v for v in loaded_video_viewers if bool(getattr(v.video_player, 'is_playing', False))]
-        targets = playing_now if playing_now else loaded_video_viewers
-
-        for viewer in targets:
-            try:
-                viewer.video_player.pause()
-            except Exception as e:
-                print(f"[SYNC] Pause warning: {e}")
-
-        for viewer in targets:
-            try:
-                start_frame = 0
-                controls = viewer.video_controls
-                if bool(getattr(controls, 'is_looping', False)):
-                    loop_range = controls.get_loop_range()
-                    if loop_range:
-                        start_frame = max(0, int(loop_range[0]))
-                viewer.video_player.seek_to_frame(start_frame)
-            except Exception as e:
-                print(f"[SYNC] Seek warning: {e}")
-
-        def _start_all():
-            for viewer in targets:
-                try:
-                    viewer.video_player.play()
-                except Exception as e:
-                    print(f"[SYNC] Play warning: {e}")
-
-        QTimer.singleShot(0, _start_all)
+        self._sync_coordinator = VideoSyncCoordinator(loaded_video_viewers, parent=self)
+        self._sync_coordinator.start()
 
     def spawn_floating_viewer_at(self, target_index=None, spawn_global_pos: QPoint | None = None):
         """Create a floating viewer for a specific index and optional global position."""
@@ -1877,6 +1861,14 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 continue
         self._floating_viewers = remaining
+
+        # Stop any active sync coordinator — its player list is now stale.
+        if self._sync_coordinator is not None:
+            try:
+                self._sync_coordinator.stop()
+            except Exception:
+                pass
+            self._sync_coordinator = None
 
         try:
             viewer.video_player.cleanup()
