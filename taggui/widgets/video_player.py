@@ -749,12 +749,15 @@ class VideoPlayerWidget(QWidget):
             except Exception:
                 pass
 
-    def _restart_vlc_from_position_ms(self, position_ms: float, hard: bool = False):
+    def _restart_vlc_from_position_ms(self, position_ms: float, hard: bool = False, cover_frame: int | None = None):
         """Restart VLC from a target position using a cover-overlay loop restart.
 
-        Shows the last OpenCV frame as a cover overlay, hides VLC surface, does
+        Shows an OpenCV frame as a cover overlay, hides VLC surface, does
         a hard VLC restart, then lets the reveal system swap back to VLC once it
         has a real frame — eliminating the black flash without cutting playback short.
+
+        cover_frame: specific frame to show as cover (e.g. exact loop_end frame).
+                     Defaults to last frame of the video if None.
         """
         if self.vlc_player is None:
             return
@@ -773,12 +776,16 @@ class VideoPlayerWidget(QWidget):
         self._vlc_last_progress_ms = safe_ms
         self._vlc_stall_ticks = 0
 
-        # Capture last frame into pixmap_item so the cover shows the final frame,
-        # not a stale/black surface.
+        # Capture exact cover frame into pixmap_item.
+        # Use the provided cover_frame (e.g. exact loop_end) if given,
+        # otherwise fall back to the last frame of the video.
         if self.fps > 0 and self.total_frames > 0:
-            last_frame = max(0, self.total_frames - 1)
+            if cover_frame is not None:
+                frame_to_show = max(0, min(int(cover_frame), self.total_frames - 1))
+            else:
+                frame_to_show = max(0, self.total_frames - 1)
             try:
-                self._show_opencv_frame(last_frame)
+                self._show_opencv_frame(frame_to_show)
             except Exception:
                 pass
 
@@ -806,7 +813,9 @@ class VideoPlayerWidget(QWidget):
         self._seek_vlc_position_ms(safe_ms)
         QTimer.singleShot(16, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
 
-        self._begin_vlc_reveal(delay_ms=80, force_ms=1200, require_stable=False)
+        # Tighter reveal: fire as soon as VLC reports position past loop_start,
+        # not after an extra 80ms delay.
+        self._begin_vlc_reveal(delay_ms=16, force_ms=1200, require_stable=False)
 
     def _resolve_mpv_target_view(self):
         """Pick the most suitable QGraphicsView for the current pixmap scene."""
@@ -2178,7 +2187,11 @@ class VideoPlayerWidget(QWidget):
                         reached_loop_end = near_video_end or vlc_near_ratio_end or vlc_reached_terminal
                     else:
                         loop_end_ms = float(end_frame + 1) * frame_ms
-                        reached_loop_end = position_ms >= (loop_end_ms - max(12.0, frame_ms * 0.75))
+                        # Scale early-fire lead time with playback speed so fast
+                        # playback doesn't overshoot the end frame before we react.
+                        speed_factor = max(1.5, abs(float(self.playback_speed)) * 1.5)
+                        early_trigger_ms = max(frame_ms, frame_ms * speed_factor)
+                        reached_loop_end = position_ms >= (loop_end_ms - early_trigger_ms)
 
                 if reached_loop_end:
                     if self._is_mpv_forward_active() and self._is_segment_loop_active():
@@ -2187,8 +2200,32 @@ class VideoPlayerWidget(QWidget):
                     else:
                         # Loop back to start
                         start_position_ms = (float(start_frame) * frame_ms) if frame_ms > 0 else 0.0
+                        is_segment_loop = self.loop_start is not None or self.loop_end is not None
                         if is_vlc_active and vlc_reached_ended:
-                            self._restart_vlc_from_position_ms(start_position_ms)
+                            self._restart_vlc_from_position_ms(
+                                start_position_ms,
+                                cover_frame=end_frame if is_segment_loop else None,
+                            )
+                        elif is_vlc_active and is_segment_loop:
+                            # Segment loop mid-stream: cover with exact end frame,
+                            # hide VLC, seek, then reveal once VLC catches up.
+                            try:
+                                self._show_opencv_frame(end_frame)
+                            except Exception:
+                                pass
+                            self._cancel_vlc_reveal()
+                            self._set_vlc_visible(False)
+                            try:
+                                if self.pixmap_item:
+                                    self.pixmap_item.show()
+                            except RuntimeError:
+                                pass
+                            self._show_vlc_cover_overlay()
+                            self._seek_vlc_position_ms(start_position_ms)
+                            self._begin_vlc_reveal(delay_ms=16, force_ms=800, require_stable=False)
+                            # Override reveal start so position check gates on loop_start,
+                            # not the stale estimated position from before the seek.
+                            self._vlc_reveal_start_position_ms = start_position_ms
                         else:
                             self.seek_to_frame(start_frame)
                             if is_vlc_active and is_full_video_loop and vlc_near_ratio_end:
