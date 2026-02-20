@@ -1,17 +1,20 @@
 import os
 import sys
 import time
+import weakref
 # Set environment variables BEFORE importing cv2
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
 
 import cv2
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl, QRect
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl, QRect, QMetaObject, Q_ARG
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem, QWidget, QMessageBox, QLabel
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtGui import QOpenGLContext
 
 from utils.video import VideoValidator
 from utils.video.playback_backend import (
@@ -33,6 +36,89 @@ cv2.setLogLevel(0)
 
 mpv = MPV_PYTHON_MODULE
 vlc = VLC_PYTHON_MODULE
+
+
+class MpvGlWidget(QOpenGLWidget):
+    """QOpenGLWidget that renders MPV frames via the libmpv render API.
+
+    This avoids the native HWND / D3D11 swap chain entirely — MPV renders into
+    Qt's FBO via OpenGL, so loadfile replace and window resizes are always safe.
+    No more 0xe24c4a02 GPU driver crashes.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mpv_render_ctx = None
+        self._update_pending = False
+        self._render_ready = False  # True only when MPV has signalled a new frame
+        # Keep proc address resolver alive — ctypes GCs CFUNCTYPE objects otherwise
+        self._proc_address_fn = None
+
+    def set_render_context(self, ctx):
+        """Called after MPV and its render context are created."""
+        self._mpv_render_ctx = ctx
+        # update_cb is called from MPV's internal thread — must marshal to Qt thread
+        ctx.update_cb = self._on_mpv_update
+
+    def _on_mpv_update(self):
+        """Called from MPV thread when a new frame is ready. Posts to Qt thread."""
+        if not self._update_pending:
+            self._update_pending = True
+            try:
+                QMetaObject.invokeMethod(self, '_schedule_update', Qt.ConnectionType.QueuedConnection)
+            except RuntimeError:
+                # Widget was destroyed — stop trying to update
+                self._update_pending = False
+
+    @Slot()
+    def _schedule_update(self):
+        self._update_pending = False
+        self._render_ready = True
+        self.update()  # triggers paintGL on the Qt thread
+
+    def initializeGL(self):
+        pass  # Render context is created externally via set_render_context()
+
+    def paintGL(self):
+        if self._mpv_render_ctx is None or not self._render_ready:
+            return
+        self._render_ready = False
+        try:
+            ratio = self.devicePixelRatio()
+            w = int(self.width() * ratio)
+            h = int(self.height() * ratio)
+            fbo = int(self.defaultFramebufferObject())
+            self._mpv_render_ctx.render(
+                flip_y=True,
+                opengl_fbo={'w': w, 'h': h, 'fbo': fbo},
+            )
+            self._mpv_render_ctx.report_swap()
+        except Exception:
+            pass
+
+    def resizeGL(self, w, h):
+        # Just trigger a repaint — paintGL reads current size each frame
+        self.update()
+
+    def cleanup(self):
+        """Release the render context before the GL context is destroyed."""
+        ctx = self._mpv_render_ctx
+        if ctx is None:
+            return
+        # Clear first so paintGL and _on_mpv_update see None immediately.
+        self._mpv_render_ctx = None
+        self._render_ready = False
+        self._update_pending = False
+        try:
+            # Disconnect the update callback before freeing — prevents MPV's
+            # internal thread from firing update_cb on an already-freed handle.
+            ctx.update_cb = None
+        except Exception:
+            pass
+        try:
+            ctx.free()
+        except Exception:
+            pass
 
 
 class VideoPlayerWidget(QWidget):
@@ -93,7 +179,8 @@ class VideoPlayerWidget(QWidget):
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         self._mpv_loop_fallback_warned = False
         self._mpv_needs_reload = True
-        self._mpv_ready_for_seeks = False  # True after loadfile has settled
+        self._mpv_ready_for_seeks = False  # True after file-loaded event
+        self._mpv_vo_ready = False         # True after 30ms settle post file-loaded; gates command() calls
         self.vlc_instance = None
         self.vlc_player = None
         self.vlc_widget = None
@@ -153,9 +240,14 @@ class VideoPlayerWidget(QWidget):
         # Cross-thread signal: VLC position event fires on VLC thread, delivered on Qt main thread
         self._vlc_loop_end_crossed.connect(self._on_vlc_loop_end_crossed)
 
+        self._mpv_instance_generation = 0  # incremented on each new MPV instance
+        self._mpv_load_generation = 0      # incremented on each loadfile call; filters stale events
+        self._mpv_event_gen_box = None     # mutable list shared with event callback; [0] = current gen
+
         # MPV seek throttle — coalesces rapid scrub seeks, fires the last one after 50ms idle
         self._mpv_seek_pending_ms = None
         self._mpv_seek_was_playing = False
+        self._mpv_pending_play_speed = None  # set when play() fires before file-loaded event
         self._mpv_seek_timer = QTimer(self)
         self._mpv_seek_timer.setSingleShot(True)
         self._mpv_seek_timer.setInterval(50)
@@ -316,28 +408,70 @@ class VideoPlayerWidget(QWidget):
             return False
 
     def _set_mpv_visible(self, visible: bool):
-        """Show/hide mpv surface if it exists.
+        """Show/hide MPV output (QOpenGLWidget) and the pixmap_item cover.
 
-        Avoid frequent QWidget visible-state toggles; on Windows this has been
-        unstable with embedded mpv. Instead, keep the widget shown and hide by
-        collapsing geometry.
+        With vo=libmpv (render API) the mpv_widget is a QOpenGLWidget child of the
+        viewport — resizing and hiding it are always safe (no D3D11 swap chain).
+
+          - MPV visible  → show mpv_widget, hide pixmap_item cover
+          - MPV hidden   → hide mpv_widget, show pixmap_item cover
+
+        The geometry timer keeps the widget sized to the viewport during active
+        playback (e.g. window resize while playing).
+        """
+        if not visible:
+            self.mpv_geometry_timer.stop()
+            # Hide the GL widget and show the pixmap cover.
+            try:
+                if self.mpv_widget:
+                    self.mpv_widget.hide()
+            except RuntimeError:
+                pass
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.show()
+            except RuntimeError:
+                pass
+        else:
+            # Show the GL widget and sync its geometry, then hide the pixmap cover.
+            self._sync_mpv_widget_to_viewport()
+            try:
+                if self.mpv_widget:
+                    self.mpv_widget.show()
+                    self.mpv_widget.raise_()
+            except RuntimeError:
+                pass
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.hide()
+            except RuntimeError:
+                pass
+            if not self.mpv_geometry_timer.isActive():
+                self.mpv_geometry_timer.start()
+
+    def _sync_mpv_widget_to_viewport(self):
+        """Resize mpv_widget to cover the full host viewport. Safe to call anytime.
+
+        With vo=libmpv (QOpenGLWidget) resizing is always safe — no D3D11 swap chain.
         """
         try:
-            if self.mpv_widget:
-                try:
-                    import shiboken6
-                    if not shiboken6.isValid(self.mpv_widget):
-                        self.mpv_widget = None
-                        return
-                except Exception:
-                    pass
-                if visible:
-                    self._update_mpv_geometry_from_pixmap()
-                    if not self.mpv_geometry_timer.isActive():
-                        self.mpv_geometry_timer.start()
-                else:
-                    self.mpv_geometry_timer.stop()
-                    self.mpv_widget.setGeometry(QRect(0, 0, 1, 1))
+            if not self.mpv_widget:
+                return
+            try:
+                import shiboken6
+                if not shiboken6.isValid(self.mpv_widget):
+                    self.mpv_widget = None
+                    return
+            except Exception:
+                pass
+            view = self._resolve_mpv_target_view()
+            if view is None:
+                return
+            self.mpv_host_view = view
+            vp = view.viewport()
+            vp_rect = vp.rect()
+            if vp_rect.width() > 0 and vp_rect.height() > 0:
+                self.mpv_widget.setGeometry(vp_rect)
         except RuntimeError:
             self.mpv_widget = None
 
@@ -639,6 +773,42 @@ class VideoPlayerWidget(QWidget):
         self._vlc_event_manager = None
         self._vlc_end_event_handler = None
         self._vlc_position_event_handler = None
+
+    @Slot(int)
+    def _on_mpv_file_loaded(self, load_generation: int):
+        """Called on Qt main thread when MPV has finished loading the new file.
+
+        With vo=libmpv (render API) there is no D3D11 VO to initialize — commands
+        are safe as soon as file-loaded fires.  We keep a tiny 30ms deferral so
+        MPV's internal demuxer/decoder state has settled before we issue seeks.
+        """
+        if self.mpv_player is None:
+            return
+        if load_generation != self._mpv_load_generation:
+            return  # stale
+        self._mpv_ready_for_seeks = True
+        QTimer.singleShot(30, lambda gen=load_generation: self._on_mpv_ready_for_commands(gen))
+
+    def _on_mpv_ready_for_commands(self, load_generation: int):
+        """Execute deferred post-file-loaded commands once MPV state has settled."""
+        if self.mpv_player is None:
+            return
+        if load_generation != self._mpv_load_generation:
+            return  # stale — user switched video again during the 80ms window
+        # VO is now stable — allow command() calls.
+        self._mpv_vo_ready = True
+        # Apply loop settings.
+        self._apply_mpv_loop_settings()
+        # Flush any pending seek.
+        if self._mpv_seek_pending_ms is not None:
+            self._flush_mpv_seek()
+        # Execute deferred play if play() was called before file was ready.
+        if self._mpv_pending_play_speed is not None:
+            speed = self._mpv_pending_play_speed
+            self._mpv_pending_play_speed = None
+            self._mpv_string_command('set', 'speed', str(speed))
+            self._mpv_string_command('set', 'pause', 'no')
+            self._begin_mpv_reveal()
 
     @Slot()
     def _on_vlc_loop_end_crossed(self):
@@ -1164,15 +1334,10 @@ class VideoPlayerWidget(QWidget):
             self._vlc_loop_end_guard = False
 
     def _begin_mpv_reveal(self, delay_ms: int = 120):
-        """Reveal mpv surface immediately to avoid timer-related native crashes."""
+        """Reveal mpv surface by uncovering it (hide pixmap_item in front of MPV)."""
         self._mpv_pending_reveal = False
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
-        try:
-            if self.pixmap_item:
-                self.pixmap_item.hide()
-        except RuntimeError:
-            pass
         self._set_mpv_visible(True)
 
     def _try_reveal_mpv_surface(self):
@@ -1187,38 +1352,12 @@ class VideoPlayerWidget(QWidget):
         ready = time.monotonic() >= self._mpv_reveal_deadline_monotonic
 
         if ready:
-            try:
-                if self.pixmap_item:
-                    self.pixmap_item.hide()
-            except RuntimeError:
-                pass
             self._set_mpv_visible(True)
             self._cancel_mpv_reveal()
 
     def _update_mpv_geometry_from_pixmap(self):
-        """Keep mpv proxy geometry aligned with current pixmap frame size."""
-        item = self._get_live_pixmap_item()
-        if not self.mpv_widget or item is None:
-            return
-        try:
-            pixmap = item.pixmap()
-            if not pixmap or pixmap.isNull():
-                return
-
-            view = self._resolve_mpv_target_view()
-            if view is None:
-                return
-            self.mpv_host_view = view
-
-            scene_rect = item.sceneBoundingRect()
-            mapped_poly = view.mapFromScene(scene_rect)
-            widget_rect = mapped_poly.boundingRect().intersected(view.viewport().rect())
-            if widget_rect.width() > 1 and widget_rect.height() > 1:
-                self.mpv_widget.setGeometry(widget_rect)
-            else:
-                self.mpv_widget.setGeometry(QRect(0, 0, 1, 1))
-        except RuntimeError:
-            self.mpv_widget = None
+        """Keep mpv_widget covering the full host viewport (called by geometry timer)."""
+        self._sync_mpv_widget_to_viewport()
 
     def _teardown_mpv(self, drop_player: bool = False):
         """Release mpv runtime resources if initialized."""
@@ -1230,31 +1369,29 @@ class VideoPlayerWidget(QWidget):
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         self._mpv_needs_reload = True
         self._mpv_ready_for_seeks = False
+        self._mpv_vo_ready = False
+        self._mpv_pending_play_speed = None
         player = self.mpv_player
-        if player is not None:
-            try:
-                player.command('set', 'pause', 'yes')
-            except Exception:
-                pass
         if drop_player:
             if player is not None:
-                # Pause immediately to stop the render thread from presenting new frames.
+                # With vo=libmpv (render API) there is no D3D11 swap chain or render
+                # thread to quiesce — cleanup the GL render context first, then
+                # terminate() is safe to call synchronously from Qt main thread.
+                gl_widget = self.mpv_widget
+                if gl_widget is not None and isinstance(gl_widget, MpvGlWidget):
+                    try:
+                        gl_widget.makeCurrent()
+                        gl_widget.cleanup()
+                        gl_widget.doneCurrent()
+                    except Exception:
+                        try:
+                            gl_widget.cleanup()
+                        except Exception:
+                            pass
                 try:
-                    player.command('set', 'pause', 'yes')
+                    player.terminate()
                 except Exception:
                     pass
-                # Terminate on a background thread: gives render thread time to quiesce
-                # after pause, then destroys the mpv handle without blocking Qt.
-                # The widget deletion is deferred 300ms so the HWND outlives the render thread.
-                import threading
-                def _bg_terminate(p=player):
-                    import time as _time
-                    _time.sleep(0.15)  # let render thread see the pause
-                    try:
-                        p.terminate()
-                    except Exception:
-                        pass
-                threading.Thread(target=_bg_terminate, daemon=True).start()
             self.mpv_player = None
 
         if self.mpv_widget is not None:
@@ -1262,17 +1399,9 @@ class VideoPlayerWidget(QWidget):
             self.mpv_widget = None
             try:
                 widget.hide()
+                widget.deleteLater()
             except Exception:
                 pass
-            # Delay HWND destruction until after mpv render thread has stopped.
-            def _safe_delete(w=widget):
-                try:
-                    import shiboken6
-                    if shiboken6.isValid(w):
-                        w.deleteLater()
-                except Exception:
-                    pass
-            QTimer.singleShot(300, _safe_delete)
 
         self.mpv_host_view = None
 
@@ -1291,61 +1420,119 @@ class VideoPlayerWidget(QWidget):
 
             if self.mpv_widget is None:
                 self.mpv_host_view = target_view
-                self.mpv_widget = QWidget(self.mpv_host_view.viewport())
-                self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+                # Use QOpenGLWidget (render API) — no HWND, no D3D11 swap chain,
+                # no 0xe24c4a02 crashes on loadfile replace or resize.
+                self.mpv_widget = MpvGlWidget(self.mpv_host_view.viewport())
                 self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 self.mpv_widget.setStyleSheet('background: black;')
-                self.mpv_widget.setGeometry(0, 0, 1, 1)
+                vp = target_view.viewport()
+                vp_rect = vp.rect()
+                if vp_rect.width() > 0 and vp_rect.height() > 0:
+                    self.mpv_widget.setGeometry(vp_rect)
+                else:
+                    self.mpv_widget.setGeometry(0, 0, 640, 480)
                 self.mpv_widget.show()
             else:
                 self.mpv_host_view = target_view
 
-            self._update_mpv_geometry_from_pixmap()
             self._set_mpv_visible(False)
 
             import threading
             if VideoPlayerWidget._mpv_init_lock is None:
                 VideoPlayerWidget._mpv_init_lock = threading.Lock()
 
-            # Always create a fresh MPV instance for each video — reusing the same
-            # instance across loadfile calls causes D3D11 render thread crashes on
-            # Windows. Orphan the old player (bg thread terminates it safely).
-            if self.mpv_player is not None:
-                old_player = self.mpv_player
-                self.mpv_player = None
-                def _bg_retire(p=old_player):
-                    import time as _t
-                    try:
-                        p.command('set', 'pause', 'yes')
-                    except Exception:
-                        pass
-                    _t.sleep(0.2)
-                    try:
-                        p.terminate()
-                    except Exception:
-                        VideoPlayerWidget._mpv_orphan_players.append(p)
-                threading.Thread(target=_bg_retire, daemon=True).start()
+            speed = max(0.1, float(self.playback_speed))
+            muted = bool(self.audio_output.isMuted()) if self.audio_output else True
 
-            wid = int(self.mpv_widget.winId())
+            if self.mpv_player is not None:
+                # Reuse existing MPV instance via loadfile replace.
+                # With vo=libmpv (render API) there is no D3D11 swap chain,
+                # so loadfile replace is completely safe — no crash risk.
+                try:
+                    self.mpv_player.command('set', 'pause', 'yes')
+                except Exception:
+                    pass
+                try:
+                    self.mpv_player.command('set', 'speed', str(speed))
+                except Exception:
+                    pass
+                try:
+                    self.mpv_player.command('set', 'mute', 'yes' if muted else 'no')
+                except Exception:
+                    pass
+                self._mpv_ready_for_seeks = False
+                self._mpv_vo_ready = False
+                self._mpv_load_generation += 1
+                if self._mpv_event_gen_box is not None:
+                    self._mpv_event_gen_box[0] = self._mpv_load_generation
+                self._mpv_string_command('loadfile', str(self.video_path), 'replace')
+                self._mpv_needs_reload = False
+                return True
+
+            # First video — create MPV instance with render API (vo=libmpv).
+            self._mpv_instance_generation += 1
+            self._mpv_load_generation += 1
             with VideoPlayerWidget._mpv_init_lock:
                 self.mpv_player = mpv.MPV(
-                    wid=str(wid),
-                    vo='gpu',
-                    hwdec='no',
+                    vo='libmpv',
+                    hwdec='auto-copy',  # copy decoded frames to OpenGL — no zero-copy D3D11
                     keep_open='yes',
                     pause=True,
-                    osc='no',
+                    speed=str(speed),
+                    mute='yes' if muted else 'no',
                     input_default_bindings=False,
                     input_vo_keyboard=False,
+                    # Disable all built-in scripts. The custom mpv build already has
+                    # Lua/JavaScript compiled out (-Dlua=disabled), but load_scripts=False
+                    # ensures no external scripts are loaded either.
+                    load_scripts=False,
                 )
+
+            # Create the OpenGL render context — must be done with GL context current.
+            # makeCurrent() activates the QOpenGLWidget's GL context on this thread.
+            gl_widget = self.mpv_widget  # type: MpvGlWidget
+            gl_widget.makeCurrent()
+            try:
+                def _get_proc_addr(_, name):
+                    ctx = QOpenGLContext.currentContext()
+                    if ctx is None:
+                        return 0
+                    return int(ctx.getProcAddress(name) or 0)
+
+                proc_fn = mpv.MpvGlGetProcAddressFn(_get_proc_addr)
+                gl_widget._proc_address_fn = proc_fn  # keep alive
+
+                render_ctx = mpv.MpvRenderContext(
+                    self.mpv_player,
+                    'opengl',
+                    opengl_init_params={'get_proc_address': proc_fn},
+                )
+                gl_widget.set_render_context(render_ctx)
+            finally:
+                gl_widget.doneCurrent()
+
+            # Wire file-loaded event — use invokeMethod (never Signal.emit from MPV thread)
+            _self_ref = weakref.ref(self)
+            _gen_box = [self._mpv_load_generation]
+            self._mpv_event_gen_box = _gen_box
+            @self.mpv_player.event_callback('file-loaded')
+            def _on_file_loaded_event(event, _ref=_self_ref, _b=_gen_box):
+                try:
+                    obj = _ref()
+                    if obj is not None:
+                        QMetaObject.invokeMethod(
+                            obj,
+                            '_on_mpv_file_loaded',
+                            Qt.ConnectionType.QueuedConnection,
+                            Q_ARG(int, _b[0]),
+                        )
+                except Exception:
+                    pass
+
             self._mpv_ready_for_seeks = False
+            self._mpv_vo_ready = False
             self._mpv_string_command('loadfile', str(self.video_path), 'replace')
-            self._mpv_set_property('pause', True)
-            self._mpv_set_property('speed', max(0.1, float(self.playback_speed)))
-            self._mpv_set_property('mute', bool(self.audio_output.isMuted()) if self.audio_output else True)
             self._mpv_needs_reload = False
-            # Allow seeks after MPV has had time to open the file.
-            QTimer.singleShot(300, lambda: setattr(self, '_mpv_ready_for_seeks', True))
             return True
         except Exception as e:
             print(f"[VIDEO] Failed to initialize mpv backend: {e}")
@@ -1378,8 +1565,8 @@ class VideoPlayerWidget(QWidget):
             self._mpv_play_started_monotonic = time.monotonic()
         if self.mpv_player is None:
             return
-        # Pause MPV immediately on first seek of a scrub gesture to stop the
-        # render thread — seeking during active rendering crashes on Windows.
+        # Pause MPV immediately on first seek of a scrub gesture to prevent
+        # audio/video drift during rapid scrubbing.
         if not self._mpv_seek_timer.isActive() and self.is_playing and self._is_mpv_forward_active():
             self._mpv_seek_was_playing = True
             self._mpv_string_command('set', 'pause', 'yes')
@@ -1391,7 +1578,7 @@ class VideoPlayerWidget(QWidget):
         """Send the coalesced seek to MPV and resume if it was playing."""
         if self.mpv_player is None or self._mpv_seek_pending_ms is None:
             return
-        if not self._mpv_ready_for_seeks:
+        if not self._mpv_ready_for_seeks or not self._mpv_vo_ready:
             self._mpv_seek_timer.start()
             return
         seek_s = self._mpv_seek_pending_ms / 1000.0
@@ -1468,7 +1655,8 @@ class VideoPlayerWidget(QWidget):
             os.dup2(devnull.fileno(), stdout_fd)
             os.dup2(devnull.fileno(), stderr_fd)
             try:
-                cap = cv2.VideoCapture(str(video_path))
+                cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE)
             finally:
                 os.dup2(old_stdout, stdout_fd)
                 os.dup2(old_stderr, stderr_fd)
@@ -1612,17 +1800,19 @@ class VideoPlayerWidget(QWidget):
         self.pixmap_item = pixmap_item
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         self._mpv_needs_reload = True
+        self._mpv_pending_play_speed = None  # cancel any deferred play from previous clip
         self._vlc_needs_reload = True
         self._qt_video_source_path = None
-        self._cancel_mpv_reveal()
-        self._cancel_vlc_reveal()
-        self._set_mpv_visible(False)
-        self._set_vlc_visible(False)
+        # Pause MPV before switching to a new clip.
         if self.mpv_player is not None:
             try:
                 self._mpv_set_property('pause', True)
             except Exception:
                 pass
+        self._cancel_mpv_reveal()
+        self._cancel_vlc_reveal()
+        self._set_mpv_visible(False)
+        self._set_vlc_visible(False)
         if self.vlc_player is not None or self.vlc_widget is not None:
             try:
                 if self._is_using_vlc_backend():
@@ -1802,7 +1992,7 @@ class VideoPlayerWidget(QWidget):
                         self._mpv_play_base_position_ms = float(start_ms)
                         self._mpv_play_started_monotonic = time.monotonic()
                 if use_mpv_forward and self.mpv_player is not None:
-                    if self._is_segment_loop_active():
+                    if self._is_segment_loop_active() and self._mpv_vo_ready:
                         self._apply_mpv_loop_settings()
             elif use_vlc_forward:
                 if self.vlc_player is None or self._vlc_needs_reload:
@@ -1828,17 +2018,26 @@ class VideoPlayerWidget(QWidget):
                 try:
                     self._cancel_vlc_reveal()
                     self._active_forward_backend = PLAYBACK_BACKEND_MPV_EXPERIMENTAL
-                    self._mpv_set_property('speed', max(0.1, float(self.playback_speed)))
-                    self._mpv_set_property('pause', False)
-                    self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms)
-                    self._mpv_play_started_monotonic = time.monotonic()
-                    # Keep current frame visible until mpv output is ready.
-                    try:
-                        if self.pixmap_item:
-                            self.pixmap_item.show()
-                    except RuntimeError:
-                        pass
-                    self._begin_mpv_reveal(delay_ms=120)
+                    speed = max(0.1, float(self.playback_speed))
+                    if self._mpv_ready_for_seeks and self._mpv_vo_ready:
+                        # File is already loaded and VO is stable — safe to play immediately.
+                        self._mpv_string_command('set', 'speed', str(speed))
+                        self._mpv_string_command('set', 'pause', 'no')
+                        self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms)
+                        self._mpv_play_started_monotonic = time.monotonic()
+                        # Keep current frame visible until mpv output is ready.
+                        try:
+                            if self.pixmap_item:
+                                self.pixmap_item.show()
+                        except RuntimeError:
+                            pass
+                        self._begin_mpv_reveal(delay_ms=120)
+                    else:
+                        # loadfile was just issued; wait for file-loaded event before unpausing.
+                        # _on_mpv_file_loaded will call _begin_mpv_reveal when ready.
+                        self._mpv_pending_play_speed = speed
+                        self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms)
+                        self._mpv_play_started_monotonic = time.monotonic()
                 except Exception as e:
                     print(f"[VIDEO] mpv play fallback to Qt backend: {e}")
                     self.runtime_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
