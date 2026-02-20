@@ -33,6 +33,12 @@ class ImageListViewInteractionMixin:
         update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
         if callable(update_ghost):
             update_ghost(self._spawn_drag_last_global_pos)
+        host = self.window()
+        if host is not None and hasattr(host, "begin_compare_drag_from_thumbnail"):
+            try:
+                host.begin_compare_drag_from_thumbnail(index)
+            except Exception:
+                pass
         if hasattr(self, "_spawn_drag_poll_timer"):
             self._spawn_drag_poll_timer.start()
 
@@ -43,9 +49,18 @@ class ImageListViewInteractionMixin:
         hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
         if callable(hide_ghost):
             hide_ghost()
+        host = self.window()
         active_index = QPersistentModelIndex(getattr(self, "_spawn_drag_active_index", QPersistentModelIndex()))
         self._spawn_drag_active = False
         self._spawn_drag_active_index = QPersistentModelIndex()
+        compare_handled = False
+        if should_spawn and host is not None and hasattr(host, "release_compare_drag"):
+            try:
+                compare_handled = bool(host.release_compare_drag(self._spawn_drag_last_global_pos))
+            except Exception:
+                compare_handled = False
+        if compare_handled:
+            return
         if should_spawn and active_index.isValid():
             try:
                 live_index = self.model().index(active_index.row(), active_index.column())
@@ -55,6 +70,11 @@ class ImageListViewInteractionMixin:
                 spawn_direct = getattr(self, "_spawn_floating_for_index_at_cursor", None)
                 if callable(spawn_direct):
                     spawn_direct(live_index, spawn_global_pos=self._spawn_drag_last_global_pos)
+        if host is not None and hasattr(host, "cancel_compare_drag"):
+            try:
+                host.cancel_compare_drag()
+            except Exception:
+                pass
 
     def _poll_spawn_drag_release(self):
         """Release detector for ultra-fast drags that miss widget release events."""
@@ -66,6 +86,12 @@ class ImageListViewInteractionMixin:
         update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
         if callable(update_ghost):
             update_ghost(self._spawn_drag_last_global_pos)
+        host = self.window()
+        if host is not None and hasattr(host, "update_compare_drag_cursor"):
+            try:
+                host.update_compare_drag_cursor(self._spawn_drag_last_global_pos)
+            except Exception:
+                pass
         if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
             self._finish_spawn_drag_active(should_spawn=True)
 

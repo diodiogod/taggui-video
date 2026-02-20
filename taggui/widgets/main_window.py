@@ -3,13 +3,13 @@ import hashlib
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRectF
+from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
-                           QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
+                           QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
-                               QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit)
+                               QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu)
 
 from transformers import AutoTokenizer
 
@@ -39,6 +39,8 @@ from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
+from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
+from widgets.compare_drop_feedback_overlay import CompareDropFeedbackOverlay
 from widgets.video_sync_coordinator import VideoSyncCoordinator
 
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
@@ -406,6 +408,10 @@ class MainWindow(QMainWindow):
         self.image_viewer.video_controls.set_loop_persistence_scope('main')
         self._floating_viewers = []
         self._floating_viewer_spawn_count = 0
+        self._compare_drag_coordinator = CompareDragCoordinator(hold_seconds=1.0)
+        self._compare_drop_overlay = CompareDropFeedbackOverlay()
+        self._compare_drag_source = None
+        self._compare_drag_last_target = None
         self._active_viewer = self.image_viewer
         self._sync_coordinator: VideoSyncCoordinator | None = None
         self._exclusive_video_controls_visibility = True
@@ -603,6 +609,9 @@ class MainWindow(QMainWindow):
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
             self.image_list.jump_to_first_untagged_image)
+        self._exit_compare_shortcut = QShortcut(QKeySequence('Esc'), self)
+        self._exit_compare_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._exit_compare_shortcut.activated.connect(self._exit_active_compare_mode)
         self._restore_after_init_scheduled = False
 
         self._filter_timer = QTimer()
@@ -818,6 +827,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
+        self.cancel_compare_drag()
         self.close_all_floating_viewers()
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
@@ -969,6 +979,8 @@ class MainWindow(QMainWindow):
         if self._floating_hold_mode == enabled:
             return
         self._floating_hold_mode = enabled
+        if enabled:
+            self.cancel_compare_drag()
 
         live_windows = []
         for window in list(getattr(self, '_floating_viewers', [])):
@@ -1633,9 +1645,310 @@ class MainWindow(QMainWindow):
         height = max(24, height)
         return (width, height)
 
+    def _viewer_global_rect(self, viewer: ImageViewer) -> QRect:
+        try:
+            top_left = viewer.mapToGlobal(QPoint(0, 0))
+            return QRect(top_left, viewer.size())
+        except Exception:
+            return QRect()
+
+    def _floating_window_key(self, window: FloatingViewerWindow) -> str:
+        slot = getattr(window, "slot_id", None)
+        if isinstance(slot, int) and slot > 0:
+            return f"floating:{slot}"
+        return f"floating:{id(window)}"
+
+    def _window_for_viewer(self, viewer: ImageViewer) -> FloatingViewerWindow | None:
+        for window in list(getattr(self, "_floating_viewers", [])):
+            try:
+                if window.viewer is viewer:
+                    return window
+            except RuntimeError:
+                continue
+        return None
+
+    def _resolve_compare_source_proxy_index(self) -> QModelIndex:
+        source = getattr(self, "_compare_drag_source", None)
+        if not isinstance(source, dict):
+            return QModelIndex()
+        kind = source.get("kind")
+        if kind == "thumbnail":
+            return self._normalize_spawn_proxy_index(source.get("proxy_index"))
+        if kind == "window":
+            viewer = source.get("viewer")
+            if viewer is None:
+                return QModelIndex()
+            checker = getattr(viewer, "is_compare_mode_active", None)
+            if callable(checker):
+                try:
+                    if checker() and hasattr(viewer, "get_compare_base_index"):
+                        return self._normalize_spawn_proxy_index(viewer.get_compare_base_index())
+                except Exception:
+                    pass
+            return self._normalize_spawn_proxy_index(getattr(viewer, "proxy_image_index", QModelIndex()))
+        return QModelIndex()
+
+    def _resolve_compare_target_proxy_index(self, viewer: ImageViewer) -> QModelIndex:
+        if viewer is None:
+            return QModelIndex()
+        checker = getattr(viewer, "is_compare_mode_active", None)
+        if callable(checker):
+            try:
+                if checker() and hasattr(viewer, "get_compare_base_index"):
+                    return self._normalize_spawn_proxy_index(viewer.get_compare_base_index())
+            except Exception:
+                pass
+        return self._normalize_spawn_proxy_index(getattr(viewer, "proxy_image_index", QModelIndex()))
+
+    def _is_static_image_index(self, proxy_index: QModelIndex) -> bool:
+        if not proxy_index.isValid():
+            return False
+        try:
+            image = proxy_index.data(Qt.ItemDataRole.UserRole)
+            return bool(image is not None and not bool(getattr(image, "is_video", False)))
+        except Exception:
+            return False
+
+    def _is_compare_pair_allowed(self, source_index: QModelIndex, target_index: QModelIndex) -> bool:
+        return self._is_static_image_index(source_index) and self._is_static_image_index(target_index)
+
+    def _resolve_compare_drop_target(self, global_pos: QPoint) -> dict | None:
+        source = getattr(self, "_compare_drag_source", None)
+        source_window = source.get("window") if isinstance(source, dict) else None
+        source_key = source.get("key") if isinstance(source, dict) else None
+
+        candidates: list[CompareTargetCandidate] = []
+        candidate_map: dict[str, dict] = {}
+
+        for order, window in enumerate(list(getattr(self, "_floating_viewers", []))):
+            try:
+                if window is source_window:
+                    continue
+                if not window.isVisible():
+                    continue
+                rect = window.frameGeometry()
+                if not rect.contains(global_pos):
+                    continue
+                key = self._floating_window_key(window)
+                candidates.append(CompareTargetCandidate(key=key, kind="floating", order=order))
+                candidate_map[key] = {
+                    "key": key,
+                    "kind": "floating",
+                    "window": window,
+                    "viewer": window.viewer,
+                    "global_rect": QRect(rect),
+                }
+            except RuntimeError:
+                continue
+
+        if bool(getattr(self, "_main_viewer_visible", True)):
+            main_rect = self._viewer_global_rect(self.image_viewer)
+            if main_rect.isValid() and main_rect.contains(global_pos):
+                key = "main"
+                candidates.append(CompareTargetCandidate(key=key, kind="main", order=0))
+                candidate_map[key] = {
+                    "key": key,
+                    "kind": "main",
+                    "window": None,
+                    "viewer": self.image_viewer,
+                    "global_rect": QRect(main_rect),
+                }
+
+        best = select_best_target(candidates, source_key=source_key)
+        if best is None:
+            return None
+        return candidate_map.get(best.key)
+
+    def _clear_compare_drag_session(self):
+        self._compare_drag_coordinator.cancel_drag()
+        self._compare_drag_source = None
+        self._compare_drag_last_target = None
+        self._compare_drop_overlay.hide_feedback()
+
+    def begin_compare_drag_from_thumbnail(self, index_like) -> bool:
+        proxy_index = self._normalize_spawn_proxy_index(index_like)
+        if not proxy_index.isValid():
+            return False
+        self._compare_drag_source = {
+            "kind": "thumbnail",
+            "proxy_index": QPersistentModelIndex(proxy_index),
+            "key": f"thumb:{proxy_index.row()}:{proxy_index.column()}",
+        }
+        self._compare_drag_last_target = None
+        self._compare_drag_coordinator.begin_drag(self._compare_drag_source["key"])
+        self.update_compare_drag_cursor(QCursor.pos())
+        return True
+
+    def begin_compare_drag_from_window(self, window: FloatingViewerWindow, global_pos: QPoint | None = None) -> bool:
+        if window is None:
+            return False
+        try:
+            viewer = window.viewer
+        except RuntimeError:
+            return False
+        key = self._floating_window_key(window)
+        self._compare_drag_source = {
+            "kind": "window",
+            "window": window,
+            "viewer": viewer,
+            "key": key,
+        }
+        self._compare_drag_last_target = None
+        self._compare_drag_coordinator.begin_drag(key)
+        self.update_compare_drag_cursor(global_pos if global_pos is not None else QCursor.pos())
+        return True
+
+    def update_compare_drag_cursor(self, global_pos: QPoint | None):
+        if not self._compare_drag_coordinator.active:
+            return
+        if global_pos is None:
+            global_pos = QCursor.pos()
+        target = self._resolve_compare_drop_target(global_pos)
+        if target is None:
+            self._compare_drag_last_target = None
+            self._compare_drag_coordinator.update_target(None, blocked=False)
+            self._compare_drop_overlay.hide_feedback()
+            return
+
+        source_index = self._resolve_compare_source_proxy_index()
+        target_index = self._resolve_compare_target_proxy_index(target.get("viewer"))
+        blocked = not self._is_compare_pair_allowed(source_index, target_index)
+        state = self._compare_drag_coordinator.update_target(target.get("key"), blocked=blocked)
+        self._compare_drag_last_target = target
+        if state.get("state") == "none":
+            self._compare_drop_overlay.hide_feedback()
+            return
+        rect = target.get("global_rect")
+        if isinstance(rect, QRect) and rect.isValid():
+            self._compare_drop_overlay.show_feedback(
+                rect,
+                state=state.get("state", "none"),
+                progress=state.get("progress", 0.0),
+            )
+        else:
+            self._compare_drop_overlay.hide_feedback()
+
+    def release_compare_drag(self, global_pos: QPoint | None) -> bool:
+        if not self._compare_drag_coordinator.active:
+            return False
+
+        if global_pos is None:
+            global_pos = QCursor.pos()
+        self.update_compare_drag_cursor(global_pos)
+        result = self._compare_drag_coordinator.release_drag()
+        if not bool(result.get("handled")):
+            self._clear_compare_drag_session()
+            return False
+
+        target = self._compare_drag_last_target
+        if not isinstance(target, dict):
+            self._clear_compare_drag_session()
+            return False
+        target_viewer = target.get("viewer")
+        target_window = target.get("window")
+        if target_viewer is None:
+            self._clear_compare_drag_session()
+            return False
+
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
+        source_index = self._resolve_compare_source_proxy_index()
+        target_index = self._resolve_compare_target_proxy_index(target_viewer)
+        if not self._is_compare_pair_allowed(source_index, target_index):
+            self._clear_compare_drag_session()
+            return False
+
+        succeeded = False
+        checker = getattr(target_viewer, "is_compare_mode_active", None)
+        try:
+            if callable(checker) and checker():
+                replacer = getattr(target_viewer, "replace_compare_right", None)
+                if callable(replacer):
+                    succeeded = bool(replacer(source_index))
+            else:
+                enter = getattr(target_viewer, "enter_compare_mode", None)
+                if callable(enter):
+                    succeeded = bool(
+                        enter(
+                            base_index=target_index,
+                            incoming_index=source_index,
+                            keep_split_ratio=True,
+                        )
+                    )
+        except Exception:
+            succeeded = False
+
+        if succeeded:
+            self.set_active_viewer(target_viewer)
+            if source.get("kind") == "window":
+                source_window = source.get("window")
+                if source_window is not None and source_window is not target_window:
+                    try:
+                        source_window.close()
+                    except Exception:
+                        pass
+
+        self._clear_compare_drag_session()
+        return bool(succeeded)
+
+    def cancel_compare_drag(self):
+        self._clear_compare_drag_session()
+
+    def _on_compare_drag_window_started(self, window: FloatingViewerWindow, global_pos: QPoint):
+        self.begin_compare_drag_from_window(window, global_pos)
+
+    def _on_compare_drag_window_moved(self, window: FloatingViewerWindow, global_pos: QPoint):
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
+        if source.get("window") is window:
+            self.update_compare_drag_cursor(global_pos)
+
+    def _on_compare_drag_window_released(self, window: FloatingViewerWindow, global_pos: QPoint):
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
+        if source.get("window") is window:
+            self.release_compare_drag(global_pos)
+        else:
+            self.cancel_compare_drag()
+
+    def _on_compare_drag_window_canceled(self, window: FloatingViewerWindow):
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
+        if source.get("window") is window:
+            self.cancel_compare_drag()
+
+    @Slot()
+    def _exit_active_compare_mode(self):
+        active = self.get_active_viewer()
+        checker = getattr(active, "is_compare_mode_active", None)
+        if callable(checker):
+            try:
+                if checker():
+                    active.exit_compare_mode(reset_split=False)
+                    return
+            except Exception:
+                pass
+        for viewer in self._iter_all_viewers():
+            checker = getattr(viewer, "is_compare_mode_active", None)
+            if not callable(checker):
+                continue
+            try:
+                if checker():
+                    viewer.exit_compare_mode(reset_split=False)
+                    return
+            except Exception:
+                continue
+
+    @Slot(object)
+    def _on_compare_exit_requested(self, viewer: ImageViewer):
+        if viewer is None:
+            return
+        exit_fn = getattr(viewer, "exit_compare_mode", None)
+        if callable(exit_fn):
+            try:
+                exit_fn(reset_split=False)
+            except Exception:
+                pass
+
     @Slot(object)
     def _on_main_viewer_context_menu_spawn(self, pos):
-        """Spawn a floating viewer on right-click in the main viewer area."""
+        """Main-view right-click behavior with compare-exit support."""
         try:
             view = self.image_viewer.view
             scene_pos = view.mapToScene(pos)
@@ -1651,6 +1964,26 @@ class MainWindow(QMainWindow):
             if isinstance(current, (MarkingItem, MarkingLabel)):
                 return
             current = current.parentItem()
+
+        checker = getattr(self.image_viewer, "is_compare_mode_active", None)
+        compare_active = False
+        if callable(checker):
+            try:
+                compare_active = bool(checker())
+            except Exception:
+                compare_active = False
+        if compare_active:
+            menu = QMenu(self)
+            exit_action = menu.addAction("Exit compare mode")
+            menu.addSeparator()
+            spawn_action = menu.addAction("Spawn Floating Viewer")
+            global_pos = view.mapToGlobal(pos) if view is not None else QCursor.pos()
+            selected = menu.exec(global_pos)
+            if selected is exit_action:
+                self.image_viewer.exit_compare_mode(reset_split=False)
+            elif selected is spawn_action:
+                self.spawn_floating_viewer()
+            return
 
         self.spawn_floating_viewer()
 
@@ -1792,6 +2125,11 @@ class MainWindow(QMainWindow):
         window.closing.connect(self._on_floating_viewer_closed)
         window.sync_video_requested.connect(self.sync_video_playback)
         window.close_all_requested.connect(self.close_all_floating_viewers)
+        window.compare_drag_started.connect(self._on_compare_drag_window_started)
+        window.compare_drag_moved.connect(self._on_compare_drag_window_moved)
+        window.compare_drag_released.connect(self._on_compare_drag_window_released)
+        window.compare_drag_canceled.connect(self._on_compare_drag_window_canceled)
+        window.compare_exit_requested.connect(self._on_compare_exit_requested)
 
         self._floating_viewers.append(window)
 
@@ -1861,6 +2199,10 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 continue
         self._floating_viewers = remaining
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
+        target = self._compare_drag_last_target if isinstance(self._compare_drag_last_target, dict) else {}
+        if source.get("viewer") is viewer or target.get("viewer") is viewer:
+            self.cancel_compare_drag()
 
         # Stop any active sync coordinator — its player list is now stale.
         if self._sync_coordinator is not None:

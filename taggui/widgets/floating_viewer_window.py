@@ -13,6 +13,11 @@ class FloatingViewerWindow(QWidget):
     closing = Signal(object)    # Emits hosted viewer
     sync_video_requested = Signal()
     close_all_requested = Signal()
+    compare_drag_started = Signal(object, QPoint)
+    compare_drag_moved = Signal(object, QPoint)
+    compare_drag_released = Signal(object, QPoint)
+    compare_drag_canceled = Signal(object)
+    compare_exit_requested = Signal(object)
 
     def __init__(self, viewer: QWidget, title: str, parent=None):
         super().__init__(
@@ -26,6 +31,7 @@ class FloatingViewerWindow(QWidget):
         self._window_drag_button = Qt.MouseButton.NoButton
         self._window_drag_offset = QPoint()
         self._active_drag_handle = None
+        self._compare_drag_signal_active = False
         self._close_button_margin_px = 8
         self._close_button_clearance_px = 4
         self._active = False
@@ -282,6 +288,15 @@ class FloatingViewerWindow(QWidget):
         self._window_drag_offset = global_pos - self.frameGeometry().topLeft()
         self._emit_activated()
         self._update_overlay_hover_from_global_pos(global_pos)
+        if not self._compare_drag_signal_active:
+            self._compare_drag_signal_active = True
+            self.compare_drag_started.emit(self, global_pos)
+
+    def _cancel_compare_drag_signal(self):
+        if not self._compare_drag_signal_active:
+            return
+        self._compare_drag_signal_active = False
+        self.compare_drag_canceled.emit(self)
 
     def _is_window_drag_button_down(self, event) -> bool:
         if not self._window_drag_active or self._window_drag_button == Qt.MouseButton.NoButton:
@@ -670,10 +685,21 @@ class FloatingViewerWindow(QWidget):
 
     def _show_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
+        exit_compare_action = None
+        checker = getattr(self.viewer, "is_compare_mode_active", None)
+        if callable(checker):
+            try:
+                if checker():
+                    exit_compare_action = menu.addAction("Exit compare mode")
+                    menu.addSeparator()
+            except Exception:
+                exit_compare_action = None
         sync_action = menu.addAction("Sync video")
         close_all_action = menu.addAction("Close all spawned viewers")
         selected = menu.exec(global_pos)
-        if selected is sync_action:
+        if exit_compare_action is not None and selected is exit_compare_action:
+            self.compare_exit_requested.emit(self.viewer)
+        elif selected is sync_action:
             self.sync_video_requested.emit()
         elif selected is close_all_action:
             self.close_all_requested.emit()
@@ -737,6 +763,8 @@ class FloatingViewerWindow(QWidget):
             self._resize_prev_anchor = None
 
     def _begin_window_resize(self, event, zone_name: str):
+        if self._window_drag_active:
+            self._cancel_compare_drag_signal()
         self._resize_active = True
         self._resize_corner = zone_name
         self._resize_start_geometry = self.geometry()
@@ -861,16 +889,22 @@ class FloatingViewerWindow(QWidget):
                 global_pos = self._event_global_pos(event)
                 self.move(global_pos - self._window_drag_offset)
                 self._update_overlay_hover_from_global_pos(global_pos)
+                if self._compare_drag_signal_active:
+                    self.compare_drag_moved.emit(self, global_pos)
                 return True
             if (
                 event.type() == QEvent.Type.MouseButtonRelease
                 and self._window_drag_active
                 and event.button() == self._window_drag_button
             ):
+                release_global = self._event_global_pos(event)
                 self._window_drag_active = False
                 self._window_drag_button = Qt.MouseButton.NoButton
                 self._active_drag_handle = None
-                self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                self._update_overlay_hover_from_global_pos(release_global)
+                if self._compare_drag_signal_active:
+                    self._compare_drag_signal_active = False
+                    self.compare_drag_released.emit(self, release_global)
                 return True
             if event.type() == QEvent.Type.Enter:
                 self._show_drag_handle(handle_name, True)
@@ -977,6 +1011,8 @@ class FloatingViewerWindow(QWidget):
                     global_pos = self._event_global_pos(event)
                     self.move(global_pos - self._window_drag_offset)
                     self._update_overlay_hover_from_global_pos(global_pos)
+                    if self._compare_drag_signal_active:
+                        self.compare_drag_moved.emit(self, global_pos)
                     return True
                 try:
                     local_pos = self.mapFromGlobal(self._event_global_pos(event))
@@ -1001,10 +1037,14 @@ class FloatingViewerWindow(QWidget):
                         pass
                     return True
                 if self._window_drag_active and event.button() == self._window_drag_button:
+                    release_global = self._event_global_pos(event)
                     self._window_drag_active = False
                     self._window_drag_button = Qt.MouseButton.NoButton
                     self._active_drag_handle = None
-                    self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                    self._update_overlay_hover_from_global_pos(release_global)
+                    if self._compare_drag_signal_active:
+                        self._compare_drag_signal_active = False
+                        self.compare_drag_released.emit(self, release_global)
                     return True
             elif event.type() == QEvent.Type.FocusIn:
                 self._emit_activated()
@@ -1039,5 +1079,6 @@ class FloatingViewerWindow(QWidget):
     def closeEvent(self, event):
         if self._resize_active:
             self._end_window_resize()
+        self._cancel_compare_drag_signal()
         self.closing.emit(self.viewer)
         super().closeEvent(event)

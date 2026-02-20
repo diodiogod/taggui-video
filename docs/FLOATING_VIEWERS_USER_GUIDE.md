@@ -48,6 +48,29 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 
 - `Sync video`: aligns loaded videos to loop start (or frame 0) and starts them together.
 - `Close all spawned viewers`: closes all floating viewers.
+- `Exit compare mode`: appears only when that viewer is in image-compare mode.
+
+## Image Compare Merge (A/B Slider)
+
+- Compare mode is currently image-only (video pairs are rejected with blocked feedback).
+- Hold time is fixed at about 1 second.
+- The target's current image becomes the left side (A), and the dropped/merged image becomes the right side (B).
+- The vertical divider follows mouse X while compare mode is active.
+
+How to open compare mode:
+
+- Drag a thumbnail from the image list onto a target viewer (main or floating), hold for ~1s, then release.
+- Drag one floating window onto another target viewer, hold for ~1s, then release.
+
+What happens on merge:
+
+- If the source is a floating window, it closes after a successful merge into the target.
+- If the target is already in compare mode, the new merge replaces the right side only.
+
+How to exit compare mode:
+
+- Press `Esc`.
+- Or use `Exit compare mode` from the floating viewer context menu.
 
 ## Video Behavior Notes
 
