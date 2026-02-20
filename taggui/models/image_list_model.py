@@ -109,12 +109,11 @@ def load_thumbnail_data(
     original_size = None
     try:
         if is_video:
-            # For videos, extract first frame as thumbnail
-            dims, _, first_frame_pixmap = extract_video_info(image_path)
+            # For videos, extract first frame as thumbnail (returns QImage, thread-safe)
+            dims, _, first_frame_image = extract_video_info(image_path)
             original_size = dims
-            if first_frame_pixmap:
-                # Convert QPixmap to QImage (thread-safe)
-                qimage = first_frame_pixmap.toImage().scaledToWidth(
+            if first_frame_image and not first_frame_image.isNull():
+                qimage = first_frame_image.scaledToWidth(
                     thumbnail_width,
                     Qt.TransformationMode.SmoothTransformation)
             else:
@@ -264,16 +263,22 @@ def get_directory_tree_stats(directory_path: Path, progress_callback=None) -> tu
     return file_count, max_mtime
 
 
-def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict | None, QPixmap | None]:
+def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict | None, QImage | None]:
     """
     Extract metadata and first frame from a video file.
-    Returns: (dimensions, video_metadata, first_frame_pixmap)
+    Returns: (dimensions, video_metadata, first_frame_image)
 
     Thread-safe: Uses global lock to prevent OpenCV/ffmpeg crashes.
+    Returns QImage (thread-safe) instead of QPixmap (main-thread only).
     """
     with _video_lock:
         try:
-            cap = cv2.VideoCapture(str(video_path))
+            # Force software decoding (CAP_FFMPEG backend, no DXVA/D3D11 HW accel).
+            # OpenCV is built with DXVA + NVD3D11 support — if hw accel is active while
+            # MPV's D3D11 renderer is running, both fight over the D3D11 device and trigger
+            # exception 0xe24c4a02 in the GPU driver. SW decode avoids the conflict entirely.
+            cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE)
             if not cap.isOpened():
                 return None, None, None
 
@@ -295,12 +300,11 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
             if not ret:
                 return (width, height), None, None
 
-            # Convert BGR to RGB
+            # Convert BGR to RGB — return QImage (thread-safe; caller converts to QPixmap if needed)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = frame_rgb.shape
             bytes_per_line = ch * w
-            qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_image)
+            qt_image = QImage(frame_rgb.data.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
 
             video_metadata = {
                 'fps': fps,
@@ -311,7 +315,7 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
                 'sar_den': sar_den if sar_den > 0 else 1
             }
 
-            return (width, height), video_metadata, pixmap
+            return (width, height), video_metadata, qt_image
         except Exception as e:
             print(f"Error extracting video info from {video_path}: {e}")
             return None, None, None

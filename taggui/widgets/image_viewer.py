@@ -442,9 +442,27 @@ class ImageViewer(QWidget):
         except Exception:
             return None
 
+    def closeEvent(self, event):
+        """Stop all timers before the widget is destroyed to prevent use-after-free crashes."""
+        try:
+            self._controls_hide_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'video_player') and self.video_player:
+                self.video_player.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     def _position_video_controls(self, force_bottom=False):
         """Position video controls overlay at saved position."""
         if not self.video_controls:
+            return
+        try:
+            # Guard against destroyed C++ object when window is closing
+            _ = self.video_controls.isVisible()
+        except RuntimeError:
             return
 
         controls_height = self.video_controls.sizeHint().height()
@@ -612,6 +630,10 @@ class ImageViewer(QWidget):
 
     def _show_controls_temporarily(self):
         """Show controls and start hide timer."""
+        try:
+            _ = self.video_controls.isVisible()
+        except RuntimeError:
+            return  # widget already destroyed (window closing)
         if not self._controls_visible:
             self.video_controls.setVisible(True)
             self._controls_visible = True

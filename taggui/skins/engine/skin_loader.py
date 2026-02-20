@@ -1,11 +1,18 @@
 """Skin loader - reads and validates skin files."""
 
 import re
+import threading
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from .schema import SkinSchema
 from .migration import migrate_skin_to_v2
+
+# LibYAML C extension is not thread-safe. Serialise all yaml.safe_load calls
+# with a process-wide lock to prevent concurrent access violations when multiple
+# VideoControls instances are initialised in rapid succession (e.g. spawning many
+# floating viewers at once).
+_yaml_lock = threading.Lock()
 
 
 class SkinLoader:
@@ -25,7 +32,8 @@ class SkinLoader:
         """
         try:
             with open(skin_path, 'r', encoding='utf-8') as f:
-                skin_data = yaml.safe_load(f)
+                with _yaml_lock:
+                    skin_data = yaml.safe_load(f)
 
             if not skin_data:
                 print(f"Empty skin file: {skin_path}")
