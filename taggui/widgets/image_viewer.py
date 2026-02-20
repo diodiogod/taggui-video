@@ -300,6 +300,16 @@ class ImageViewer(QWidget):
             line_x = int(self.width() * max(0.0, min(1.0, float(self._compare_split_ratio))))
 
         line_x = max(0, min(max(0, self.width() - 1), int(line_x)))
+        split_ratio = max(0.0, min(1.0, float(self._compare_split_ratio)))
+        if (
+            self.width() <= 3
+            or line_x <= 0
+            or line_x >= (self.width() - 1)
+            or split_ratio <= 1e-4
+            or split_ratio >= (1.0 - 1e-4)
+        ):
+            overlay.hide()
+            return
         divider_width = 3
         overlay.setGeometry(line_x - (divider_width // 2), 0, divider_width, max(1, self.height()))
         overlay.show()
