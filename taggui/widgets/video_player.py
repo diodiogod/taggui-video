@@ -38,6 +38,7 @@ vlc = VLC_PYTHON_MODULE
 class VideoPlayerWidget(QWidget):
     """Hybrid video player using QMediaPlayer for playback and OpenCV for frame extraction."""
     _mpv_orphan_players = []
+    _mpv_init_lock = None  # threading.Lock — created lazily to avoid import-time issues
     _vlc_orphan_players = []
 
     # Signals
@@ -45,6 +46,7 @@ class VideoPlayerWidget(QWidget):
     playback_finished = Signal()
     playback_started = Signal()  # Emitted when playback starts
     playback_paused = Signal()   # Emitted when playback pauses
+    _vlc_loop_end_crossed = Signal()  # Emitted from VLC thread when segment loop end is reached
 
     def __init__(self):
         super().__init__()
@@ -91,6 +93,7 @@ class VideoPlayerWidget(QWidget):
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         self._mpv_loop_fallback_warned = False
         self._mpv_needs_reload = True
+        self._mpv_ready_for_seeks = False  # True after loadfile has settled
         self.vlc_instance = None
         self.vlc_player = None
         self.vlc_widget = None
@@ -102,6 +105,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_deadline_monotonic = 0.0
         self._vlc_reveal_force_deadline_monotonic = 0.0
         self._vlc_reveal_start_position_ms = 0.0
+        self._vlc_reveal_loop_start_ms = None  # When set, reveal gates on exact loop_start position
         self._vlc_reveal_require_stable = False
         self._vlc_reveal_ready_hits = 0
         self._vlc_reveal_hold_play = False
@@ -115,8 +119,11 @@ class VideoPlayerWidget(QWidget):
         self._vlc_needs_reload = True
         self._vlc_last_widget_rect = QRect(0, 0, 1, 1)
         self._vlc_end_reached_flag = False
+        self._vlc_loop_end_flag = False   # Set by VLC thread, consumed by position timer
+        self._vlc_loop_end_guard = False  # Prevents double-firing within one loop cycle
         self._vlc_event_manager = None
         self._vlc_end_event_handler = None
+        self._vlc_position_event_handler = None
         self._vlc_last_progress_ms = None
         self._vlc_stall_ticks = 0
         self._vlc_last_loop_restart_monotonic = 0.0
@@ -142,6 +149,24 @@ class VideoPlayerWidget(QWidget):
         self.position_timer = QTimer()
         self.position_timer.setInterval(16)  # ~60 FPS update rate
         self.position_timer.timeout.connect(self._update_frame_from_position)
+
+        # Cross-thread signal: VLC position event fires on VLC thread, delivered on Qt main thread
+        self._vlc_loop_end_crossed.connect(self._on_vlc_loop_end_crossed)
+
+        # MPV seek throttle — coalesces rapid scrub seeks, fires the last one after 50ms idle
+        self._mpv_seek_pending_ms = None
+        self._mpv_seek_was_playing = False
+        self._mpv_seek_timer = QTimer(self)
+        self._mpv_seek_timer.setSingleShot(True)
+        self._mpv_seek_timer.setInterval(50)
+        self._mpv_seek_timer.timeout.connect(self._flush_mpv_seek)
+
+        # Polling timer for VLC loop-end detection — samples get_time() at 50ms intervals
+        # which is ~5x faster than VLC's own PositionChanged event, and works regardless
+        # of VLC decode speed (4K etc. where wall-clock != media-clock).
+        self._vlc_loop_end_wall_timer = QTimer(self)
+        self._vlc_loop_end_wall_timer.setInterval(50)
+        self._vlc_loop_end_wall_timer.timeout.connect(self._on_vlc_loop_end_wall_timer)
 
     def _refresh_backend_selection(self):
         """Resolve playback backend setting to runtime backend.
@@ -262,8 +287,9 @@ class VideoPlayerWidget(QWidget):
 
         frame_ms = 1000.0 / float(self.fps)
         start_ms = float(frame_bounds[0]) * frame_ms
-        # Use exclusive end to keep the selected end frame perceptually included.
-        end_ms = float(frame_bounds[1] + 1) * frame_ms
+        # Set ab-loop-b to the start of end_frame — MPV loops back when it
+        # reaches this timestamp, so end_frame is the last frame displayed.
+        end_ms = float(frame_bounds[1]) * frame_ms
         if end_ms <= start_ms:
             end_ms = start_ms + frame_ms
         return start_ms, end_ms
@@ -531,7 +557,7 @@ class VideoPlayerWidget(QWidget):
             pass
 
     def _bind_vlc_events(self):
-        """Attach VLC end-of-media event for reliable loop handling."""
+        """Attach VLC events for end-of-media and segment loop boundary detection."""
         if self.vlc_player is None or vlc is None:
             return
         self._unbind_vlc_events()
@@ -540,32 +566,168 @@ class VideoPlayerWidget(QWidget):
         except Exception:
             self._vlc_event_manager = None
             self._vlc_end_event_handler = None
+            self._vlc_position_event_handler = None
             return
 
         def _on_end_reached(_event):
+            print(f"[LOOP_DBG] MediaPlayerEndReached fired")
             self._vlc_end_reached_flag = True
+
+        def _on_position_changed(_event):
+            # Runs on VLC internal thread — safe to set Python flags and call vlc_player methods.
+            # Do NOT call any Qt UI methods here.
+            if not self._is_segment_loop_active() or self._vlc_loop_end_guard:
+                return
+            if self.fps <= 0 or self.duration_ms <= 0:
+                return
+            try:
+                pos_ratio = float(self.vlc_player.get_position())
+                if pos_ratio < 0:
+                    return
+                pos_ms = pos_ratio * float(self.duration_ms)
+                frame_ms = 1000.0 / float(self.fps)
+                end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
+                loop_end_ms = float(end_frame) * frame_ms
+                current_frame_at_event = int(pos_ms / frame_ms)
+                print(f"[LOOP_DBG] pos_ms={pos_ms:.1f} loop_end_ms={loop_end_ms:.1f} "
+                      f"frame={current_frame_at_event} end_frame={end_frame}")
+                if pos_ms >= (loop_end_ms - frame_ms):
+                    self._vlc_loop_end_guard = True
+                    # Pause VLC immediately from this thread to stop overshoot.
+                    # The main thread will handle the seek-back and cover display.
+                    try:
+                        self.vlc_player.pause()
+                    except Exception:
+                        pass
+                    # Set flag — main thread timer picks it up within 16ms.
+                    self._vlc_loop_end_flag = True
+                    print(f"[LOOP_DBG] SET FLAG + paused at pos_ms={pos_ms:.1f}")
+            except Exception:
+                pass
 
         try:
             event_manager.event_attach(vlc.EventType.MediaPlayerEndReached, _on_end_reached)
+            event_manager.event_attach(vlc.EventType.MediaPlayerPositionChanged, _on_position_changed)
             self._vlc_event_manager = event_manager
             self._vlc_end_event_handler = _on_end_reached
+            self._vlc_position_event_handler = _on_position_changed
         except Exception as e:
-            print(f"[VIDEO] Failed to bind VLC end event: {e}")
+            print(f"[VIDEO] Failed to bind VLC events: {e}")
             self._vlc_event_manager = None
             self._vlc_end_event_handler = None
+            self._vlc_position_event_handler = None
 
     def _unbind_vlc_events(self):
         """Detach VLC events on teardown/recreate."""
-        if self._vlc_event_manager is not None and self._vlc_end_event_handler is not None and vlc is not None:
+        if self._vlc_event_manager is not None and vlc is not None:
             try:
-                self._vlc_event_manager.event_detach(
-                    vlc.EventType.MediaPlayerEndReached,
-                    self._vlc_end_event_handler,
-                )
+                if self._vlc_end_event_handler is not None:
+                    self._vlc_event_manager.event_detach(
+                        vlc.EventType.MediaPlayerEndReached,
+                        self._vlc_end_event_handler,
+                    )
+            except Exception:
+                pass
+            try:
+                if self._vlc_position_event_handler is not None:
+                    self._vlc_event_manager.event_detach(
+                        vlc.EventType.MediaPlayerPositionChanged,
+                        self._vlc_position_event_handler,
+                    )
             except Exception:
                 pass
         self._vlc_event_manager = None
         self._vlc_end_event_handler = None
+        self._vlc_position_event_handler = None
+
+    @Slot()
+    def _on_vlc_loop_end_crossed(self):
+        """Called on Qt main thread when VLC position event signals loop_end was reached."""
+        if not self._is_segment_loop_active() or not self.is_playing:
+            self._vlc_loop_end_guard = False
+            return
+        if not self._is_vlc_forward_active():
+            self._vlc_loop_end_guard = False
+            return
+        if self.fps <= 0:
+            self._vlc_loop_end_guard = False
+            return
+
+        frame_ms = 1000.0 / float(self.fps)
+        end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
+        start_frame = max(0, int(self.loop_start if self.loop_start is not None else 0))
+        start_position_ms = float(start_frame) * frame_ms
+
+        # Load start_frame into pixmap_item so the cover shows the correct first frame.
+        try:
+            self._show_opencv_frame(start_frame)
+        except Exception:
+            pass
+
+        # Raise cover over VLC WITHOUT hiding VLC — avoids blank-frame repaint gap.
+        # VLC keeps rendering underneath; the cover sits on top hiding any overshoot.
+        self._cancel_vlc_reveal()
+        try:
+            if self.pixmap_item:
+                self.pixmap_item.show()
+        except RuntimeError:
+            pass
+        self._show_vlc_cover_overlay()
+
+        # Seek VLC back to loop start, resume, reveal once VLC reaches start.
+        self._seek_vlc_position_ms(start_position_ms)
+        try:
+            self.vlc_player.play()
+        except Exception:
+            pass
+        self._begin_vlc_reveal(
+            delay_ms=16, force_ms=800, require_stable=False,
+            loop_start_ms=start_position_ms,
+        )
+        # Start poll timer for next loop end.
+        self._schedule_vlc_loop_end_wall_timer(start_position_ms)
+
+    def _schedule_vlc_loop_end_wall_timer(self, known_start_ms: float = -1.0):
+        """Start the VLC loop-end polling timer.
+
+        The timer polls get_time() every 50ms and triggers loop-end cover the
+        moment VLC reaches (loop_end - 1 frame). This works regardless of
+        decode speed (4K etc.) because it reads actual media time, not wall time.
+        """
+        self._vlc_loop_end_wall_timer.stop()
+        if not self._is_segment_loop_active() or self.fps <= 0:
+            return
+        print(f"[LOOP_DBG] Starting loop-end poll timer (known_start_ms={known_start_ms:.1f})")
+        self._vlc_loop_end_wall_timer.start()
+
+    @Slot()
+    def _on_vlc_loop_end_wall_timer(self):
+        """Poll VLC get_time() every 50ms; trigger loop-end cover when close enough."""
+        if not self._is_segment_loop_active() or not self.is_playing:
+            self._vlc_loop_end_wall_timer.stop()
+            return
+        if not self._is_vlc_forward_active():
+            self._vlc_loop_end_wall_timer.stop()
+            return
+        if self._vlc_loop_end_guard:
+            return
+        try:
+            pos_ms = float(self.vlc_player.get_time()) if self.vlc_player else -1.0
+        except Exception:
+            pos_ms = -1.0
+        if pos_ms <= 0:
+            return
+        if self.fps <= 0:
+            return
+        frame_ms = 1000.0 / float(self.fps)
+        end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
+        loop_end_ms = float(end_frame) * frame_ms
+        # Trigger when within 1 frame of loop_end.
+        if pos_ms >= (loop_end_ms - frame_ms):
+            print(f"[LOOP_DBG] POLL TIMER triggered: pos_ms={pos_ms:.1f} loop_end_ms={loop_end_ms:.1f}")
+            self._vlc_loop_end_wall_timer.stop()
+            self._vlc_loop_end_guard = True
+            self._on_vlc_loop_end_crossed()
 
     def _set_vlc_rate(self, rate: float):
         if self.vlc_player is None:
@@ -749,7 +911,7 @@ class VideoPlayerWidget(QWidget):
             except Exception:
                 pass
 
-    def _restart_vlc_from_position_ms(self, position_ms: float, hard: bool = False, cover_frame: int | None = None):
+    def _restart_vlc_from_position_ms(self, position_ms: float, hard: bool = False, cover_frame: int | None = None, loop_start_ms: float | None = None):
         """Restart VLC from a target position using a cover-overlay loop restart.
 
         Shows an OpenCV frame as a cover overlay, hides VLC surface, does
@@ -764,9 +926,11 @@ class VideoPlayerWidget(QWidget):
         now = time.monotonic()
         # Guard against repeated loop restarts while VLC reports stale terminal state.
         if (now - float(self._vlc_last_loop_restart_monotonic or 0.0)) < 0.20:
+            print(f"[LOOP_DBG] _restart_vlc_from_position_ms SKIPPED (too soon)")
             return
         self._vlc_last_loop_restart_monotonic = now
         safe_ms = max(0.0, float(position_ms))
+        print(f"[LOOP_DBG] _restart_vlc_from_position_ms called: position_ms={position_ms:.1f} cover_frame={cover_frame} loop_start_ms={loop_start_ms}")
         self._vlc_end_reached_flag = False
         self._vlc_soft_restart_pending = False
         self._vlc_soft_restart_deadline_monotonic = 0.0
@@ -805,17 +969,38 @@ class VideoPlayerWidget(QWidget):
             self.vlc_player.stop()
         except Exception:
             pass
+
+        # If segment loop is active, set --start-time and --stop-time on the media
+        # so VLC enforces the loop boundaries internally — no polling needed.
+        if self._is_segment_loop_active() and self.fps > 0 and self.video_path is not None:
+            try:
+                frame_ms = 1000.0 / float(self.fps)
+                end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
+                stop_time_s = float(end_frame + 1) * frame_ms / 1000.0
+                start_time_s = safe_ms / 1000.0
+                media = self.vlc_instance.media_new(str(self.video_path))
+                media.add_option(f':start-time={start_time_s:.6f}')
+                media.add_option(f':stop-time={stop_time_s:.6f}')
+                self.vlc_player.set_media(media)
+                media.release()
+                print(f"[LOOP_DBG] set media start={start_time_s:.3f}s stop={stop_time_s:.3f}s")
+            except Exception as e:
+                print(f"[LOOP_DBG] Failed to set stop-time: {e}")
+
         try:
             self.vlc_player.play()
         except Exception:
             self._hide_vlc_cover_overlay()
             return
-        self._seek_vlc_position_ms(safe_ms)
-        QTimer.singleShot(16, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
+        # No need to seek — start-time option handles it.
+        if not self._is_segment_loop_active():
+            self._seek_vlc_position_ms(safe_ms)
+            QTimer.singleShot(16, lambda ms=safe_ms: self._seek_vlc_position_ms(ms))
+        # Start poll timer for loop end cover.
+        self._schedule_vlc_loop_end_wall_timer(safe_ms)
 
-        # Tighter reveal: fire as soon as VLC reports position past loop_start,
-        # not after an extra 80ms delay.
-        self._begin_vlc_reveal(delay_ms=16, force_ms=1200, require_stable=False)
+        # Tighter reveal: fire as soon as VLC reports position past loop_start.
+        self._begin_vlc_reveal(delay_ms=16, force_ms=1200, require_stable=False, loop_start_ms=loop_start_ms)
 
     def _resolve_mpv_target_view(self):
         """Pick the most suitable QGraphicsView for the current pixmap scene."""
@@ -853,6 +1038,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_deadline_monotonic = 0.0
         self._vlc_reveal_force_deadline_monotonic = 0.0
         self._vlc_reveal_start_position_ms = 0.0
+        self._vlc_reveal_loop_start_ms = None
         self._vlc_reveal_require_stable = False
         self._vlc_reveal_ready_hits = 0
         self._vlc_reveal_hold_play = False
@@ -868,17 +1054,23 @@ class VideoPlayerWidget(QWidget):
         force_ms: int = 1400,
         require_stable: bool = False,
         hold_play: bool = False,
+        loop_start_ms: float | None = None,
     ):
         """Keep first-frame pixmap visible until VLC starts producing frames.
 
         hold_play=True: VLC is kept paused at frame 0 during the reveal wait.
         When the reveal fires, VLC is unpaused — guaranteeing no frames are skipped.
+
+        loop_start_ms: when set, reveal fires as soon as VLC reports position >=
+                       this value, bypassing the normal threshold arithmetic.
+                       Use for segment loop restarts for frame-accurate start.
         """
         if self.vlc_player is None:
             self._cancel_vlc_reveal()
             return
         self._vlc_pending_reveal = True
         self._vlc_reveal_start_position_ms = float(self._vlc_estimated_position_ms or 0.0)
+        self._vlc_reveal_loop_start_ms = float(loop_start_ms) if loop_start_ms is not None else None
         self._vlc_reveal_require_stable = bool(require_stable)
         self._vlc_reveal_hold_play = bool(hold_play)
         self._vlc_reveal_ready_hits = 0
@@ -934,15 +1126,20 @@ class VideoPlayerWidget(QWidget):
             except Exception:
                 state_ready = False
         if backend_pos_ms >= 0.0:
-            reveal_threshold_ms = 35.0
-            if self.fps > 0:
-                frame_ms = 1000.0 / float(self.fps)
-                if strict_mode:
-                    reveal_threshold_ms = max(55.0, min(130.0, frame_ms * 1.5))
-                else:
-                    reveal_threshold_ms = max(35.0, min(120.0, frame_ms * 1.25))
-            if backend_pos_ms >= (self._vlc_reveal_start_position_ms + reveal_threshold_ms):
-                position_ready = True
+            loop_start_gate = self._vlc_reveal_loop_start_ms
+            if loop_start_gate is not None:
+                # Frame-accurate loop start: reveal exactly when VLC reaches loop_start.
+                position_ready = backend_pos_ms >= float(loop_start_gate)
+            else:
+                reveal_threshold_ms = 35.0
+                if self.fps > 0:
+                    frame_ms = 1000.0 / float(self.fps)
+                    if strict_mode:
+                        reveal_threshold_ms = max(55.0, min(130.0, frame_ms * 1.5))
+                    else:
+                        reveal_threshold_ms = max(35.0, min(120.0, frame_ms * 1.25))
+                if backend_pos_ms >= (self._vlc_reveal_start_position_ms + reveal_threshold_ms):
+                    position_ready = True
 
         signal_ready = bool(reached_min_delay and state_ready and position_ready)
         if signal_ready:
@@ -963,6 +1160,8 @@ class VideoPlayerWidget(QWidget):
             if self._vlc_cover_active:
                 QTimer.singleShot(40, self._hide_vlc_cover_overlay)
             self._cancel_vlc_reveal()
+            # VLC is now past loop_start — allow next loop cycle to fire.
+            self._vlc_loop_end_guard = False
 
     def _begin_mpv_reveal(self, delay_ms: int = 120):
         """Reveal mpv surface immediately to avoid timer-related native crashes."""
@@ -1030,6 +1229,7 @@ class VideoPlayerWidget(QWidget):
         self._mpv_play_base_position_ms = 0.0
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         self._mpv_needs_reload = True
+        self._mpv_ready_for_seeks = False
         player = self.mpv_player
         if player is not None:
             try:
@@ -1037,18 +1237,42 @@ class VideoPlayerWidget(QWidget):
             except Exception:
                 pass
         if drop_player:
-            # Intentionally avoid explicit terminate() due repeated Windows native crashes.
             if player is not None:
-                VideoPlayerWidget._mpv_orphan_players.append(player)
+                # Pause immediately to stop the render thread from presenting new frames.
+                try:
+                    player.command('set', 'pause', 'yes')
+                except Exception:
+                    pass
+                # Terminate on a background thread: gives render thread time to quiesce
+                # after pause, then destroys the mpv handle without blocking Qt.
+                # The widget deletion is deferred 300ms so the HWND outlives the render thread.
+                import threading
+                def _bg_terminate(p=player):
+                    import time as _time
+                    _time.sleep(0.15)  # let render thread see the pause
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_terminate, daemon=True).start()
             self.mpv_player = None
 
         if self.mpv_widget is not None:
+            widget = self.mpv_widget
+            self.mpv_widget = None
             try:
-                self.mpv_widget.hide()
-                self.mpv_widget.deleteLater()
+                widget.hide()
             except Exception:
                 pass
-            self.mpv_widget = None
+            # Delay HWND destruction until after mpv render thread has stopped.
+            def _safe_delete(w=widget):
+                try:
+                    import shiboken6
+                    if shiboken6.isValid(w):
+                        w.deleteLater()
+                except Exception:
+                    pass
+            QTimer.singleShot(300, _safe_delete)
 
         self.mpv_host_view = None
 
@@ -1079,8 +1303,31 @@ class VideoPlayerWidget(QWidget):
             self._update_mpv_geometry_from_pixmap()
             self._set_mpv_visible(False)
 
-            if self.mpv_player is None:
-                wid = int(self.mpv_widget.winId())
+            import threading
+            if VideoPlayerWidget._mpv_init_lock is None:
+                VideoPlayerWidget._mpv_init_lock = threading.Lock()
+
+            # Always create a fresh MPV instance for each video — reusing the same
+            # instance across loadfile calls causes D3D11 render thread crashes on
+            # Windows. Orphan the old player (bg thread terminates it safely).
+            if self.mpv_player is not None:
+                old_player = self.mpv_player
+                self.mpv_player = None
+                def _bg_retire(p=old_player):
+                    import time as _t
+                    try:
+                        p.command('set', 'pause', 'yes')
+                    except Exception:
+                        pass
+                    _t.sleep(0.2)
+                    try:
+                        p.terminate()
+                    except Exception:
+                        VideoPlayerWidget._mpv_orphan_players.append(p)
+                threading.Thread(target=_bg_retire, daemon=True).start()
+
+            wid = int(self.mpv_widget.winId())
+            with VideoPlayerWidget._mpv_init_lock:
                 self.mpv_player = mpv.MPV(
                     wid=str(wid),
                     vo='gpu',
@@ -1090,13 +1337,15 @@ class VideoPlayerWidget(QWidget):
                     osc='no',
                     input_default_bindings=False,
                     input_vo_keyboard=False,
-                    start_event_thread=False,
                 )
+            self._mpv_ready_for_seeks = False
             self._mpv_string_command('loadfile', str(self.video_path), 'replace')
             self._mpv_set_property('pause', True)
             self._mpv_set_property('speed', max(0.1, float(self.playback_speed)))
             self._mpv_set_property('mute', bool(self.audio_output.isMuted()) if self.audio_output else True)
             self._mpv_needs_reload = False
+            # Allow seeks after MPV has had time to open the file.
+            QTimer.singleShot(300, lambda: setattr(self, '_mpv_ready_for_seeks', True))
             return True
         except Exception as e:
             print(f"[VIDEO] Failed to initialize mpv backend: {e}")
@@ -1129,18 +1378,37 @@ class VideoPlayerWidget(QWidget):
             self._mpv_play_started_monotonic = time.monotonic()
         if self.mpv_player is None:
             return
-        seek_s = float(position_ms) / 1000.0
-        try:
-            self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute', 'exact')
-        except Exception:
-            pass
+        # Pause MPV immediately on first seek of a scrub gesture to stop the
+        # render thread — seeking during active rendering crashes on Windows.
+        if not self._mpv_seek_timer.isActive() and self.is_playing and self._is_mpv_forward_active():
+            self._mpv_seek_was_playing = True
+            self._mpv_string_command('set', 'pause', 'yes')
+        # Coalesce rapid scrub seeks — send only the last position after 50ms idle.
+        self._mpv_seek_pending_ms = float(position_ms)
+        self._mpv_seek_timer.start()
+
+    def _flush_mpv_seek(self):
+        """Send the coalesced seek to MPV and resume if it was playing."""
+        if self.mpv_player is None or self._mpv_seek_pending_ms is None:
+            return
+        if not self._mpv_ready_for_seeks:
+            self._mpv_seek_timer.start()
+            return
+        seek_s = self._mpv_seek_pending_ms / 1000.0
+        self._mpv_seek_pending_ms = None
+        self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute', 'exact')
+        if self._mpv_seek_was_playing and self.is_playing:
+            self._mpv_string_command('set', 'pause', 'no')
+        self._mpv_seek_was_playing = False
 
     def _mpv_string_command(self, name: str, *args):
         if self.mpv_player is None:
             return
         call_args = [str(arg) for arg in args if arg is not None]
-        # Avoid python-mpv string_command on Windows; it has been a native crash hotspot.
-        self.mpv_player.command(str(name), *call_args)
+        try:
+            self.mpv_player.command(str(name), *call_args)
+        except Exception:
+            pass
 
     def _mpv_set_property(self, prop_name: str, value):
         if self.mpv_player is None:
@@ -1632,6 +1900,7 @@ class VideoPlayerWidget(QWidget):
                         require_stable=False,
                         hold_play=reveal_from_still,
                     )
+                    self._schedule_vlc_loop_end_wall_timer(float(self._vlc_estimated_position_ms))
                 except Exception as e:
                     print(f"[VIDEO] vlc play fallback to Qt backend: {e}")
                     self.runtime_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
@@ -2031,6 +2300,17 @@ class VideoPlayerWidget(QWidget):
         if not self.is_playing:
             return
 
+        # Check flag set by VLC position event thread — faster than queued signal.
+        if self._vlc_loop_end_flag and self._is_vlc_forward_active():
+            self._vlc_loop_end_flag = False
+            try:
+                pos_now = float(self.vlc_player.get_time()) if self.vlc_player else -1
+            except Exception:
+                pos_now = -1
+            print(f"[LOOP_DBG] FLAG consumed by timer: vlc_time_now={pos_now:.1f}")
+            self._on_vlc_loop_end_crossed()
+            return
+
         if self._is_mpv_forward_active():
             position_ms = self._get_mpv_position_ms()
             if position_ms is None:
@@ -2186,9 +2466,9 @@ class VideoPlayerWidget(QWidget):
                     if self.loop_start is None and self.loop_end is None:
                         reached_loop_end = near_video_end or vlc_near_ratio_end or vlc_reached_terminal
                     else:
-                        loop_end_ms = float(end_frame + 1) * frame_ms
-                        # Scale early-fire lead time with playback speed so fast
-                        # playback doesn't overshoot the end frame before we react.
+                        # Fire when position reaches the start of end_frame (not end_frame+1).
+                        # Scale lead time with speed so fast playback doesn't overshoot.
+                        loop_end_ms = float(end_frame) * frame_ms
                         speed_factor = max(1.5, abs(float(self.playback_speed)) * 1.5)
                         early_trigger_ms = max(frame_ms, frame_ms * speed_factor)
                         reached_loop_end = position_ms >= (loop_end_ms - early_trigger_ms)
@@ -2204,11 +2484,12 @@ class VideoPlayerWidget(QWidget):
                         if is_vlc_active and vlc_reached_ended:
                             self._restart_vlc_from_position_ms(
                                 start_position_ms,
-                                cover_frame=end_frame if is_segment_loop else None,
+                                cover_frame=start_frame if is_segment_loop else None,
+                                loop_start_ms=start_position_ms if is_segment_loop else None,
                             )
-                        elif is_vlc_active and is_segment_loop:
-                            # Segment loop mid-stream: cover with exact end frame,
-                            # hide VLC, seek, then reveal once VLC catches up.
+                        elif is_vlc_active and is_segment_loop and not self._vlc_loop_end_guard:
+                            # Fallback: event-based path didn't fire (VLC build difference).
+                            # Cover with exact end_frame and restart.
                             try:
                                 self._show_opencv_frame(end_frame)
                             except Exception:
@@ -2222,10 +2503,10 @@ class VideoPlayerWidget(QWidget):
                                 pass
                             self._show_vlc_cover_overlay()
                             self._seek_vlc_position_ms(start_position_ms)
-                            self._begin_vlc_reveal(delay_ms=16, force_ms=800, require_stable=False)
-                            # Override reveal start so position check gates on loop_start,
-                            # not the stale estimated position from before the seek.
-                            self._vlc_reveal_start_position_ms = start_position_ms
+                            self._begin_vlc_reveal(
+                                delay_ms=16, force_ms=800, require_stable=False,
+                                loop_start_ms=start_position_ms,
+                            )
                         else:
                             self.seek_to_frame(start_frame)
                             if is_vlc_active and is_full_video_loop and vlc_near_ratio_end:
@@ -2343,7 +2624,11 @@ class VideoPlayerWidget(QWidget):
         self.loop_enabled = enabled
         self.loop_start = start_frame
         self.loop_end = end_frame
+        # Reset loop-end guard/flag whenever markers change so next cycle fires cleanly.
+        self._vlc_loop_end_guard = False
+        self._vlc_loop_end_flag = False
         if not enabled:
+            self._vlc_loop_end_wall_timer.stop()
             self._vlc_end_reached_flag = False
             self._vlc_stall_ticks = 0
             self._vlc_soft_restart_pending = False
