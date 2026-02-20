@@ -2489,11 +2489,12 @@ class VideoPlayerWidget(QWidget):
             display_width = int(w * sar_num / sar_den)
             frame_rgb = cv2.resize(frame_rgb, (display_width, h), interpolation=cv2.INTER_LINEAR)
 
-        # Convert to QPixmap
+        # Convert to QPixmap — use tobytes() so QImage owns the buffer and
+        # the numpy array can be freed without corrupting the image data.
         h, w, ch = frame_rgb.shape
         bytes_per_line = ch * w
-        qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qt_image.copy())
+        qt_image = QImage(frame_rgb.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qt_image)
 
         # Update pixmap item
         try:
