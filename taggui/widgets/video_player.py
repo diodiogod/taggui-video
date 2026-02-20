@@ -2090,6 +2090,10 @@ class VideoPlayerWidget(QWidget):
                     speed = max(0.1, float(self.playback_speed))
                     if self._mpv_ready_for_seeks and self._mpv_vo_ready:
                         # File is already loaded and VO is stable — safe to play immediately.
+                        # Seek to estimated position first so MPV resumes from the right spot
+                        # (e.g. after OpenCV reverse playback moved current_frame).
+                        seek_sec = self._mpv_estimated_position_ms / 1000.0
+                        self._mpv_string_command('seek', str(seek_sec), 'absolute')
                         self._mpv_string_command('set', 'speed', str(speed))
                         self._mpv_string_command('set', 'pause', 'no')
                         self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms)
@@ -2524,11 +2528,13 @@ class VideoPlayerWidget(QWidget):
         if self.playback_speed < 0:
             # Backward playback
             start_frame = self.loop_start if (self.loop_enabled and self.loop_start is not None) else 0
+            # Wrap destination: loop_end marker, or last frame of video
+            wrap_to_frame = self.loop_end if (self.loop_enabled and self.loop_end is not None) else (self.total_frames - 1)
 
             if self.current_frame <= start_frame:
-                if self.loop_enabled and self.loop_end is not None:
-                    # Loop back to end
-                    self.current_frame = self.loop_end
+                if self.loop_enabled:
+                    # Loop back to end (marker or last frame)
+                    self.current_frame = wrap_to_frame
                     self._show_opencv_frame(self.current_frame)
                 else:
                     # Reached start, stop
@@ -2930,8 +2936,16 @@ class VideoPlayerWidget(QWidget):
             is_negative = self.playback_speed < 0
 
             if was_negative != is_negative:
-                # Need to switch playback modes
+                # Need to switch playback modes.
                 self.pause()
+                # Sync estimated position from current_frame so MPV/VLC resume
+                # from where OpenCV left off, not from their pre-reverse position.
+                # Must happen after pause() since pause() overwrites _mpv_estimated_position_ms.
+                if was_negative and self.fps > 0:
+                    sync_ms = self.current_frame / self.fps * 1000.0
+                    self._mpv_estimated_position_ms = sync_ms
+                    self._mpv_play_base_position_ms = sync_ms
+                    self._vlc_estimated_position_ms = sync_ms
                 self.play()
             elif is_negative:
                 # Update OpenCV timer interval
