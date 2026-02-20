@@ -179,6 +179,7 @@ class VideoPlayerWidget(QWidget):
         self.mpv_player = None
         self.mpv_widget = None
         self.mpv_host_view = None
+        self._mpv_surface_active = False  # True only when MPV should be covering the viewport
         # Parking widget: mpv_widget is reparented here while not playing.
         # It stays hidden the entire time it is parked, so no native window
         # flash occurs — the GL context is preserved, just detached from the
@@ -239,6 +240,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_soft_restart_pending = False
         self._vlc_cover_label = None
         self._vlc_cover_active = False
+        self._opencv_cover_label = None  # QLabel overlay for reverse/OpenCV frames above MPV widget
         self._loop_debug_last_log_monotonic = 0.0
         self._qt_video_source_path = None
         self._refresh_backend_selection()
@@ -394,14 +396,12 @@ class VideoPlayerWidget(QWidget):
             return
         try:
             self.mpv_host_view = view
-            # Create parented to the parking widget so the GL context is
-            # initialized without ever touching the viewport paint tree.
-            self.mpv_widget = MpvGlWidget(self._mpv_parking_widget)
+            self.mpv_widget = MpvGlWidget(view.viewport())
             self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.mpv_widget.setStyleSheet('background: transparent;')
+            self.mpv_widget.setAutoFillBackground(False)
             self.mpv_widget.setGeometry(0, 0, 1, 1)
-            # Show inside the hidden parking widget — GL context initializes
-            # silently without any visible flash.
+            self.mpv_widget.lower()
             self.mpv_widget.show()
         except Exception:
             self.mpv_widget = None
@@ -467,15 +467,11 @@ class VideoPlayerWidget(QWidget):
         playback (e.g. window resize while playing).
         """
         if not visible:
+            self._mpv_surface_active = False
             self.mpv_geometry_timer.stop()
-            # Reparent to parking widget and hide. The widget stays hidden the
-            # whole time it is parked so no native-window rebuild flash occurs.
-            # This removes mpv_widget from the viewport paint tree entirely,
-            # preventing its FBO from compositing black over the pixmap.
             try:
                 if self.mpv_widget:
-                    self.mpv_widget.hide()
-                    self.mpv_widget.setParent(self._mpv_parking_widget)
+                    self.mpv_widget.setGeometry(-8, -8, 4, 4)
             except RuntimeError:
                 pass
             try:
@@ -484,20 +480,12 @@ class VideoPlayerWidget(QWidget):
             except RuntimeError:
                 pass
         else:
-            # Reparent back to viewport, size, then show — all before Qt
-            # processes events so it appears as a single atomic operation.
-            view = self._resolve_mpv_target_view()
-            if view is not None:
-                try:
-                    if self.mpv_widget:
-                        self.mpv_widget.setParent(view.viewport())
-                except RuntimeError:
-                    pass
+            self._mpv_surface_active = True
+            self._hide_opencv_cover_overlay()
             self._sync_mpv_widget_to_viewport()
             try:
                 if self.mpv_widget:
                     self.mpv_widget.raise_()
-                    self.mpv_widget.show()
             except RuntimeError:
                 pass
             try:
@@ -517,6 +505,11 @@ class VideoPlayerWidget(QWidget):
         """
         try:
             if not self.mpv_widget:
+                return
+            # Only resize when MPV is supposed to be covering the viewport.
+            # Without this guard, zoom triggers sync and resizes the widget
+            # back to full size even when it's been moved off-screen (paused).
+            if not self._mpv_surface_active:
                 return
             try:
                 import shiboken6
@@ -708,6 +701,88 @@ class VideoPlayerWidget(QWidget):
         except RuntimeError:
             self._vlc_cover_label = None
             self._vlc_cover_active = False
+
+    def _update_opencv_cover_geometry(self):
+        """Align OpenCV reverse-playback overlay with current media rect (e.g. on zoom)."""
+        label = self._opencv_cover_label
+        if label is None:
+            return
+        try:
+            if not label.isVisible():
+                return
+            view = self._resolve_mpv_target_view()
+            if view is None:
+                return
+            target_parent = view.viewport()
+            if label.parentWidget() is not target_parent:
+                return
+            item = self._get_live_pixmap_item()
+            if item is None:
+                return
+            scene_rect = item.sceneBoundingRect()
+            widget_rect = view.mapFromScene(scene_rect).boundingRect().normalized()
+            if widget_rect.width() > 1 and widget_rect.height() > 1:
+                label.setGeometry(widget_rect)
+                label.raise_()
+            else:
+                label.hide()
+        except RuntimeError:
+            self._opencv_cover_label = None
+
+    def _hide_opencv_cover_overlay(self):
+        """Hide the OpenCV reverse-playback cover overlay."""
+        label = self._opencv_cover_label
+        if label is None:
+            return
+        try:
+            label.hide()
+            label.setPixmap(QPixmap())
+        except RuntimeError:
+            self._opencv_cover_label = None
+
+    def _show_opencv_frame_as_overlay(self, pixmap: 'QPixmap'):
+        """Display an OpenCV frame as a native QLabel overlay above MPV widget.
+
+        Since QOpenGLWidget always composites on top of QGraphicsScene items,
+        we use a native QLabel sibling raised above mpv_widget instead of
+        writing to pixmap_item (which lives in the scene and gets covered).
+        """
+        view = self._resolve_mpv_target_view()
+        if view is None:
+            return
+        target_parent = view.viewport()
+        label = self._opencv_cover_label
+        try:
+            if label is None or label.parentWidget() is not target_parent:
+                if label is not None:
+                    try:
+                        label.hide()
+                        label.deleteLater()
+                    except Exception:
+                        pass
+                label = QLabel(target_parent)
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                label.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+                label.setScaledContents(True)
+                label.hide()
+                self._opencv_cover_label = label
+            label.setPixmap(pixmap)
+            # Size to match the media rect in viewport coordinates.
+            item = self._get_live_pixmap_item()
+            if item is not None:
+                try:
+                    scene_rect = item.sceneBoundingRect()
+                    widget_rect = view.mapFromScene(scene_rect).boundingRect().normalized()
+                    if widget_rect.width() > 1 and widget_rect.height() > 1:
+                        label.setGeometry(widget_rect)
+                except Exception:
+                    pass
+            else:
+                label.setGeometry(view.viewport().rect())
+            label.show()
+            label.raise_()
+        except RuntimeError:
+            self._opencv_cover_label = None
 
     def _teardown_vlc(self, drop_player: bool = False):
         """Release vlc runtime resources if initialized."""
@@ -1537,10 +1612,12 @@ class VideoPlayerWidget(QWidget):
                 self.mpv_host_view = target_view
                 # Create in parking widget — _set_mpv_visible(False) called
                 # below will keep it hidden there until first frame is ready.
-                self.mpv_widget = MpvGlWidget(self._mpv_parking_widget)
+                self.mpv_widget = MpvGlWidget(self.mpv_host_view.viewport())
                 self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 self.mpv_widget.setStyleSheet('background: transparent;')
+                self.mpv_widget.setAutoFillBackground(False)
                 self.mpv_widget.setGeometry(0, 0, 1, 1)
+                self.mpv_widget.lower()
                 self.mpv_widget.show()
             else:
                 self.mpv_host_view = target_view
@@ -1693,7 +1770,7 @@ class VideoPlayerWidget(QWidget):
             return
         seek_s = self._mpv_seek_pending_ms / 1000.0
         self._mpv_seek_pending_ms = None
-        self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute', 'exact')
+        self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute+exact')
         if self._mpv_seek_was_playing and self.is_playing:
             self._mpv_string_command('set', 'pause', 'no')
         self._mpv_seek_was_playing = False
@@ -1753,6 +1830,7 @@ class VideoPlayerWidget(QWidget):
         self._update_mpv_geometry_from_pixmap()
         self._update_vlc_geometry_from_pixmap()
         self._update_vlc_cover_geometry_from_pixmap()
+        self._update_opencv_cover_geometry()
 
     def _open_capture_silently(self, video_path: Path):
         """Open OpenCV capture while suppressing ffmpeg chatter."""
@@ -2068,13 +2146,13 @@ class VideoPlayerWidget(QWidget):
                     self.video_item.hide()
             except RuntimeError:
                 pass  # C++ object deleted
-            try:
-                if self.pixmap_item:
-                    self.pixmap_item.show()
-            except RuntimeError:
-                pass  # C++ object deleted
-            self._set_mpv_visible(False)
             self._set_vlc_visible(False)
+            # Activate the OpenCV cover overlay — a native QLabel raised above
+            # mpv_widget. QOpenGLWidget always composites on top of QGraphicsScene
+            # items so we can't use pixmap_item during reverse; the overlay is a
+            # native sibling widget that can be raised above mpv_widget.
+            # Show a placeholder frame immediately so there's no blank flash.
+            self._show_opencv_frame(self.current_frame)
             # Start OpenCV playback timer
             interval_ms = round(1000 / (self.fps * abs(self.playback_speed)))
             self.position_timer.setInterval(interval_ms)
@@ -2134,17 +2212,13 @@ class VideoPlayerWidget(QWidget):
                         # Seek to estimated position first so MPV resumes from the right spot
                         # (e.g. after OpenCV reverse playback moved current_frame).
                         seek_sec = self._mpv_estimated_position_ms / 1000.0
-                        self._mpv_string_command('seek', str(seek_sec), 'absolute')
+                        self._mpv_string_command('seek', str(seek_sec), 'absolute+exact')
                         self._mpv_string_command('set', 'speed', str(speed))
                         self._mpv_string_command('set', 'pause', 'no')
                         self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms)
                         self._mpv_play_started_monotonic = time.monotonic()
-                        # Keep current frame visible until mpv output is ready.
-                        try:
-                            if self.pixmap_item:
-                                self.pixmap_item.show()
-                        except RuntimeError:
-                            pass
+                        # Hide opencv cover overlay — MPV is taking over display.
+                        self._hide_opencv_cover_overlay()
                         self._begin_mpv_reveal(delay_ms=120)
                     else:
                         # loadfile was just issued; wait for file-loaded event before unpausing.
@@ -2309,26 +2383,57 @@ class VideoPlayerWidget(QWidget):
             self.playback_paused.emit()  # Notify that playback paused
 
         if self._is_mpv_forward_active():
+            # MPV was playing forward — just keep widget visible, already paused.
             try:
                 if self.video_item:
                     self.video_item.hide()
             except RuntimeError:
-                pass  # C++ object deleted
+                pass
             try:
                 if self.pixmap_item:
                     self.pixmap_item.hide()
             except RuntimeError:
-                pass  # C++ object deleted
+                pass
             self._set_mpv_visible(True)
             self._set_vlc_visible(False)
             return
 
-        # Switch to OpenCV frame for frame-accurate display
+        # If MPV backend is selected and initialized, use it for frame-accurate
+        # pause display via exact seek — no OpenCV needed, better format support.
+        # Skip if the opencv cover overlay is active — means we just came from
+        # reverse playback; keep the overlay showing the last OpenCV frame.
+        _opencv_active = False
+        try:
+            _opencv_active = bool(self._opencv_cover_label and self._opencv_cover_label.isVisible())
+        except RuntimeError:
+            pass
+        if self._is_using_mpv_backend() and self.mpv_player is not None \
+                and self._mpv_ready_for_seeks and not _opencv_active:
+            seek_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else self._mpv_estimated_position_ms
+            try:
+                self._mpv_string_command('seek', f'{seek_ms / 1000.0:.6f}', 'absolute+exact')
+            except Exception:
+                pass
+            try:
+                if self.video_item:
+                    self.video_item.hide()
+            except RuntimeError:
+                pass
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.hide()
+            except RuntimeError:
+                pass
+            self._set_mpv_visible(True)
+            self._set_vlc_visible(False)
+            return
+
+        # Fallback: OpenCV frame display (reverse playback, or MPV not ready).
         try:
             if self.video_item:
                 self.video_item.hide()
         except RuntimeError:
-            pass  # C++ object deleted
+            pass
         self._set_mpv_visible(False)
         self._set_vlc_visible(False)
 
@@ -2336,9 +2441,8 @@ class VideoPlayerWidget(QWidget):
             if self.pixmap_item:
                 self.pixmap_item.show()
         except RuntimeError:
-            pass  # C++ object deleted
+            pass
 
-        # Show exact current frame
         self._show_opencv_frame(self.current_frame)
 
     def stop(self):
@@ -2378,6 +2482,7 @@ class VideoPlayerWidget(QWidget):
         self._cancel_mpv_reveal()
         self._cancel_vlc_reveal()
         self._hide_vlc_cover_overlay()
+        self._hide_opencv_cover_overlay()
         self.position_timer.stop()
 
         # Pause forward backends quickly (no reset/seek work here).
@@ -2451,29 +2556,23 @@ class VideoPlayerWidget(QWidget):
         if self.vlc_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
             self._seek_vlc_position_ms(position_ms)
 
-        # If paused, show exact frame with OpenCV
+        # If paused, show exact frame via MPV seek (or OpenCV fallback).
         if not self.is_playing:
-            if self._is_mpv_forward_active():
+            if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
+                # Route through the coalescing seek timer — rapid scrub events
+                # are collapsed to one seek per 50ms, always absolute+exact.
+                self._seek_mpv_position_ms(position_ms)
                 try:
                     if self.video_item:
                         self.video_item.hide()
                 except RuntimeError:
                     pass
-                if self.mpv_widget is not None and self.mpv_widget.isVisible():
-                    self._cancel_mpv_reveal()
-                    try:
-                        if self.pixmap_item:
-                            self.pixmap_item.hide()
-                    except RuntimeError:
-                        pass
-                    self._set_mpv_visible(True)
-                else:
-                    try:
-                        if self.pixmap_item:
-                            self.pixmap_item.show()
-                    except RuntimeError:
-                        pass
-                    self._begin_mpv_reveal(delay_ms=80)
+                try:
+                    if self.pixmap_item:
+                        self.pixmap_item.hide()
+                except RuntimeError:
+                    pass
+                self._set_mpv_visible(True)
             else:
                 self._show_opencv_frame(frame_number)
 
@@ -2541,7 +2640,16 @@ class VideoPlayerWidget(QWidget):
         qt_image = QImage(frame_rgb.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image)
 
-        # Update pixmap item
+        # If MPV widget is actively covering the viewport, it composites on top of
+        # QGraphicsScene items (pixmap_item) regardless of Z-order. In that case
+        # use a native QLabel overlay raised above mpv_widget instead.
+        # Only route to overlay when MPV surface is active — otherwise (paused,
+        # stopped, initial load) write to pixmap_item as normal.
+        if self.mpv_widget is not None and self._mpv_surface_active:
+            self._show_opencv_frame_as_overlay(pixmap)
+            return
+
+        # Update pixmap item (no MPV widget present)
         try:
             item.setPixmap(pixmap)
 
