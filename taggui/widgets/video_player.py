@@ -394,14 +394,12 @@ class VideoPlayerWidget(QWidget):
             return
         try:
             self.mpv_host_view = view
-            # Create parented to the parking widget so the GL context is
-            # initialized without ever touching the viewport paint tree.
-            self.mpv_widget = MpvGlWidget(self._mpv_parking_widget)
+            self.mpv_widget = MpvGlWidget(view.viewport())
             self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.mpv_widget.setStyleSheet('background: transparent;')
+            self.mpv_widget.setAutoFillBackground(False)
             self.mpv_widget.setGeometry(0, 0, 1, 1)
-            # Show inside the hidden parking widget — GL context initializes
-            # silently without any visible flash.
+            self.mpv_widget.lower()
             self.mpv_widget.show()
         except Exception:
             self.mpv_widget = None
@@ -468,14 +466,13 @@ class VideoPlayerWidget(QWidget):
         """
         if not visible:
             self.mpv_geometry_timer.stop()
-            # Reparent to parking widget and hide. The widget stays hidden the
-            # whole time it is parked so no native-window rebuild flash occurs.
-            # This removes mpv_widget from the viewport paint tree entirely,
-            # preventing its FBO from compositing black over the pixmap.
+            # Move off-screen — native QOpenGLWidget always composites on top of
+            # QGraphicsScene items regardless of Z-order, so shrinking to 1x1 still
+            # shows a black pixel. Moving to a negative position puts it outside
+            # the visible viewport entirely while keeping the GL context alive.
             try:
                 if self.mpv_widget:
-                    self.mpv_widget.hide()
-                    self.mpv_widget.setParent(self._mpv_parking_widget)
+                    self.mpv_widget.setGeometry(-8, -8, 4, 4)
             except RuntimeError:
                 pass
             try:
@@ -484,20 +481,10 @@ class VideoPlayerWidget(QWidget):
             except RuntimeError:
                 pass
         else:
-            # Reparent back to viewport, size, then show — all before Qt
-            # processes events so it appears as a single atomic operation.
-            view = self._resolve_mpv_target_view()
-            if view is not None:
-                try:
-                    if self.mpv_widget:
-                        self.mpv_widget.setParent(view.viewport())
-                except RuntimeError:
-                    pass
             self._sync_mpv_widget_to_viewport()
             try:
                 if self.mpv_widget:
                     self.mpv_widget.raise_()
-                    self.mpv_widget.show()
             except RuntimeError:
                 pass
             try:
@@ -1537,10 +1524,12 @@ class VideoPlayerWidget(QWidget):
                 self.mpv_host_view = target_view
                 # Create in parking widget — _set_mpv_visible(False) called
                 # below will keep it hidden there until first frame is ready.
-                self.mpv_widget = MpvGlWidget(self._mpv_parking_widget)
+                self.mpv_widget = MpvGlWidget(self.mpv_host_view.viewport())
                 self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 self.mpv_widget.setStyleSheet('background: transparent;')
+                self.mpv_widget.setAutoFillBackground(False)
                 self.mpv_widget.setGeometry(0, 0, 1, 1)
+                self.mpv_widget.lower()
                 self.mpv_widget.show()
             else:
                 self.mpv_host_view = target_view
@@ -1693,7 +1682,7 @@ class VideoPlayerWidget(QWidget):
             return
         seek_s = self._mpv_seek_pending_ms / 1000.0
         self._mpv_seek_pending_ms = None
-        self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute', 'exact')
+        self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute+exact')
         if self._mpv_seek_was_playing and self.is_playing:
             self._mpv_string_command('set', 'pause', 'no')
         self._mpv_seek_was_playing = False
@@ -2073,7 +2062,16 @@ class VideoPlayerWidget(QWidget):
                     self.pixmap_item.show()
             except RuntimeError:
                 pass  # C++ object deleted
-            self._set_mpv_visible(False)
+            # Move mpv_widget off-screen during reverse — native GL widgets always
+            # composite on top of QGraphicsScene items, so even 1x1 shows black.
+            # Negative position puts it outside the visible area entirely while
+            # keeping the GL context alive for seamless reverse→forward resume.
+            self.mpv_geometry_timer.stop()
+            try:
+                if self.mpv_widget:
+                    self.mpv_widget.setGeometry(-8, -8, 4, 4)
+            except RuntimeError:
+                pass
             self._set_vlc_visible(False)
             # Start OpenCV playback timer
             interval_ms = round(1000 / (self.fps * abs(self.playback_speed)))
@@ -2476,11 +2474,9 @@ class VideoPlayerWidget(QWidget):
         # If paused, show exact frame via MPV seek (or OpenCV fallback).
         if not self.is_playing:
             if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
-                # MPV exact seek — works whether MPV was forward-active or coming from reverse.
-                try:
-                    self._mpv_string_command('seek', f'{position_ms / 1000.0:.6f}', 'absolute+exact')
-                except Exception:
-                    pass
+                # Route through the coalescing seek timer — rapid scrub events
+                # are collapsed to one seek per 50ms, always absolute+exact.
+                self._seek_mpv_position_ms(position_ms)
                 try:
                     if self.video_item:
                         self.video_item.hide()
