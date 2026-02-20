@@ -107,7 +107,6 @@ class MpvGlWidget(QOpenGLWidget):
             self.frame_painted.emit()
 
     def resizeGL(self, w, h):
-        # Just trigger a repaint — paintGL reads current size each frame
         self.update()
 
     def cleanup(self):
@@ -175,6 +174,12 @@ class VideoPlayerWidget(QWidget):
         self.mpv_player = None
         self.mpv_widget = None
         self.mpv_host_view = None
+        # Off-screen parking widget: mpv_widget is reparented here when hidden
+        # so Qt never includes it in the viewport's paint tree, preventing GL
+        # FBO clears from compositing over the pixmap on window restore/zoom.
+        self._mpv_parking_widget = QWidget()
+        self._mpv_parking_widget.setFixedSize(1, 1)
+        self._mpv_parking_widget.hide()
         self.mpv_geometry_timer = QTimer(self)
         self.mpv_geometry_timer.setInterval(100)
         self.mpv_geometry_timer.timeout.connect(self._update_mpv_geometry_from_pixmap)
@@ -431,9 +436,14 @@ class VideoPlayerWidget(QWidget):
         """
         if not visible:
             self.mpv_geometry_timer.stop()
-            # Hide the GL widget and show the pixmap cover.
+            # Reparent mpv_widget to the off-screen parking widget so it is
+            # completely removed from the viewport's paint tree. A hidden
+            # QOpenGLWidget still gets its FBO cleared by Qt on window
+            # restore/expose, which composites black or garbage over the
+            # pixmap behind it. Reparenting is the only reliable fix.
             try:
                 if self.mpv_widget:
+                    self.mpv_widget.setParent(self._mpv_parking_widget)
                     self.mpv_widget.hide()
             except RuntimeError:
                 pass
@@ -443,7 +453,14 @@ class VideoPlayerWidget(QWidget):
             except RuntimeError:
                 pass
         else:
-            # Show the GL widget and sync its geometry, then hide the pixmap cover.
+            # Reparent back to the viewport, sync geometry, then show.
+            view = self._resolve_mpv_target_view()
+            if view is not None:
+                try:
+                    if self.mpv_widget:
+                        self.mpv_widget.setParent(view.viewport())
+                except RuntimeError:
+                    pass
             self._sync_mpv_widget_to_viewport()
             try:
                 if self.mpv_widget:
