@@ -2941,6 +2941,14 @@ class VideoPlayerWidget(QWidget):
                 # Update active forward backend rate
                 if self._is_mpv_forward_active():
                     try:
+                        # Re-anchor dead-reckoning clock at current estimated
+                        # position before changing speed, otherwise the new
+                        # speed multiplied by the old elapsed time produces a
+                        # wrong (jumped-back) position estimate.
+                        current_ms = self._get_mpv_position_ms()
+                        if current_ms is not None:
+                            self._mpv_play_base_position_ms = float(current_ms)
+                            self._mpv_play_started_monotonic = time.monotonic()
                         self._mpv_set_property('speed', max(0.1, float(self.playback_speed)))
                     except Exception:
                         pass
