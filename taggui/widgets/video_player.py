@@ -3159,9 +3159,18 @@ class VideoPlayerWidget(QWidget):
 
         # Release QMediaPlayer first (more sticky on Windows)
         if self.media_player:
-            self.media_player.stop()
-            self.media_player.setVideoOutput(None)  # Disconnect video output
-            self.media_player.setSource(QUrl())  # Clear source
+            try:
+                self.media_player.stop()
+            except Exception:
+                pass
+            try:
+                self.media_player.setVideoOutput(None)  # Disconnect video output
+            except Exception:
+                pass
+            try:
+                self.media_player.setSource(QUrl())  # Clear source
+            except Exception:
+                pass
 
         # Release OpenCV capture
         if self.cap:
@@ -3169,9 +3178,19 @@ class VideoPlayerWidget(QWidget):
             self.cap = None
 
         # Remove video item from scene
-        if self.video_item and self.video_item.scene():
-            self.video_item.scene().removeItem(self.video_item)
-            self.video_item = None
+        video_item = self.video_item
+        self.video_item = None
+        if video_item is not None:
+            scene = None
+            try:
+                scene = video_item.scene()
+            except Exception:
+                scene = None
+            if scene is not None:
+                try:
+                    scene.removeItem(video_item)
+                except Exception:
+                    pass
         self._teardown_mpv(drop_player=True)
         self._teardown_vlc(drop_player=True)
 

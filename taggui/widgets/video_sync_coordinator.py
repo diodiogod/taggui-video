@@ -204,8 +204,9 @@ class VideoSyncCoordinator(QObject):
     _STATE_BARRIER = "barrier"
     _STATE_RUNNING = "running"
 
-    def __init__(self, viewers: list, parent=None):
+    def __init__(self, viewers: list, parent=None, *, show_sync_icon: bool = True):
         super().__init__(parent)
+        self._show_sync_icon = bool(show_sync_icon)
         self._entries: list[_PlayerEntry] = []
         for v in viewers:
             try:
@@ -250,7 +251,8 @@ class VideoSyncCoordinator(QObject):
         )
 
         for entry in self._entries:
-            entry.show_sync_icon()
+            if self._show_sync_icon:
+                entry.show_sync_icon()
             entry.disable_loop()
             # Connect playback_finished signal.
             try:

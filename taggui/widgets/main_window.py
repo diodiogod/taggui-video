@@ -39,6 +39,7 @@ from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
+from widgets.media_comparison_widget import MediaComparisonWidget
 from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
 from widgets.compare_drop_feedback_overlay import CompareDropFeedbackOverlay
 from widgets.video_sync_coordinator import VideoSyncCoordinator
@@ -407,6 +408,7 @@ class MainWindow(QMainWindow):
         self.image_viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=False)
         self.image_viewer.video_controls.set_loop_persistence_scope('main')
         self._floating_viewers = []
+        self._comparison_windows = []
         self._floating_viewer_spawn_count = 0
         self._compare_drag_coordinator = CompareDragCoordinator(hold_seconds=1.0)
         self._compare_drop_overlay = CompareDropFeedbackOverlay()
@@ -1701,16 +1703,30 @@ class MainWindow(QMainWindow):
         return self._normalize_spawn_proxy_index(getattr(viewer, "proxy_image_index", QModelIndex()))
 
     def _is_static_image_index(self, proxy_index: QModelIndex) -> bool:
+        return self._media_kind_for_index(proxy_index) == "image"
+
+    def _media_kind_for_index(self, proxy_index: QModelIndex) -> str | None:
         if not proxy_index.isValid():
-            return False
+            return None
         try:
             image = proxy_index.data(Qt.ItemDataRole.UserRole)
-            return bool(image is not None and not bool(getattr(image, "is_video", False)))
+            if image is None:
+                return None
+            return "video" if bool(getattr(image, "is_video", False)) else "image"
         except Exception:
-            return False
+            return None
+
+    def _compare_pair_kind(self, source_index: QModelIndex, target_index: QModelIndex) -> str | None:
+        source_kind = self._media_kind_for_index(source_index)
+        if source_kind is None:
+            return None
+        target_kind = self._media_kind_for_index(target_index)
+        if target_kind != source_kind:
+            return None
+        return source_kind
 
     def _is_compare_pair_allowed(self, source_index: QModelIndex, target_index: QModelIndex) -> bool:
-        return self._is_static_image_index(source_index) and self._is_static_image_index(target_index)
+        return self._compare_pair_kind(source_index, target_index) in {"image", "video"}
 
     def _resolve_compare_drop_target(self, global_pos: QPoint) -> dict | None:
         source = getattr(self, "_compare_drag_source", None)
@@ -1853,32 +1869,46 @@ class MainWindow(QMainWindow):
         source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
         source_index = self._resolve_compare_source_proxy_index()
         target_index = self._resolve_compare_target_proxy_index(target_viewer)
-        if not self._is_compare_pair_allowed(source_index, target_index):
+        pair_kind = self._compare_pair_kind(source_index, target_index)
+        if pair_kind is None:
             self._clear_compare_drag_session()
             return False
 
         succeeded = False
-        checker = getattr(target_viewer, "is_compare_mode_active", None)
-        try:
-            if callable(checker) and checker():
-                replacer = getattr(target_viewer, "replace_compare_right", None)
-                if callable(replacer):
-                    succeeded = bool(replacer(source_index))
-            else:
-                enter = getattr(target_viewer, "enter_compare_mode", None)
-                if callable(enter):
-                    succeeded = bool(
-                        enter(
-                            base_index=target_index,
-                            incoming_index=source_index,
-                            keep_split_ratio=True,
+        if pair_kind == "video":
+            reference_widget = target_window if target_window is not None else target_viewer
+            try:
+                comp_window = self.spawn_media_comparison_from_indices(
+                    target_index,
+                    source_index,
+                    reference_widget=reference_widget,
+                )
+                succeeded = comp_window is not None
+            except Exception:
+                succeeded = False
+        else:
+            checker = getattr(target_viewer, "is_compare_mode_active", None)
+            try:
+                if callable(checker) and checker():
+                    replacer = getattr(target_viewer, "replace_compare_right", None)
+                    if callable(replacer):
+                        succeeded = bool(replacer(source_index))
+                else:
+                    enter = getattr(target_viewer, "enter_compare_mode", None)
+                    if callable(enter):
+                        succeeded = bool(
+                            enter(
+                                base_index=target_index,
+                                incoming_index=source_index,
+                                keep_split_ratio=True,
+                            )
                         )
-                    )
-        except Exception:
-            succeeded = False
+            except Exception:
+                succeeded = False
 
         if succeeded:
-            self.set_active_viewer(target_viewer)
+            if pair_kind == "image":
+                self.set_active_viewer(target_viewer)
             if source.get("kind") == "window":
                 source_window = source.get("window")
                 if source_window is not None and source_window is not target_window:
@@ -2004,6 +2034,25 @@ class MainWindow(QMainWindow):
                 viewers.append(window.viewer)
             except RuntimeError:
                 continue
+        alive_comparisons = []
+        for window in list(getattr(self, "_comparison_windows", [])):
+            try:
+                for viewer in window.viewers():
+                    viewers.append(viewer)
+                alive_comparisons.append(window)
+            except RuntimeError:
+                continue
+        self._comparison_windows = alive_comparisons
+        return viewers
+
+    def _iter_manual_sync_viewers(self) -> list[ImageViewer]:
+        """Return viewers controlled by manual/global sync actions."""
+        viewers = [self.image_viewer]
+        for window in list(getattr(self, "_floating_viewers", [])):
+            try:
+                viewers.append(window.viewer)
+            except RuntimeError:
+                continue
         return viewers
 
     def refresh_video_controls_performance_profile(self):
@@ -2081,7 +2130,7 @@ class MainWindow(QMainWindow):
             self._sync_coordinator = None
 
         loaded_video_viewers = []
-        for viewer in self._iter_all_viewers():
+        for viewer in self._iter_manual_sync_viewers():
             try:
                 if getattr(viewer, '_is_video_loaded', False) and getattr(viewer.video_player, 'video_path', None):
                     loaded_video_viewers.append(viewer)
@@ -2179,10 +2228,96 @@ class MainWindow(QMainWindow):
         """Create a new floating viewer for the current list selection."""
         self.spawn_floating_viewer_at()
 
+    def spawn_media_comparison_from_indices(
+        self,
+        target_index: QModelIndex,
+        source_index: QModelIndex,
+        reference_widget=None,
+    ) -> MediaComparisonWidget | None:
+        """Spawn an A/B comparison window for two media indices."""
+        target_proxy = self._normalize_spawn_proxy_index(target_index)
+        source_proxy = self._normalize_spawn_proxy_index(source_index)
+        if not target_proxy.isValid() or not source_proxy.isValid():
+            return None
+        if self._compare_pair_kind(source_proxy, target_proxy) is None:
+            return None
+
+        comp_widget = MediaComparisonWidget(
+            target_proxy,
+            source_proxy,
+            self.proxy_image_list_model,
+            parent=self,
+        )
+
+        target_size = None
+        target_top_left = None
+        if reference_widget is not None:
+            try:
+                target_size = reference_widget.size()
+                target_top_left = reference_widget.mapToGlobal(QPoint(0, 0))
+            except Exception:
+                target_size = None
+                target_top_left = None
+
+        if target_size is not None:
+            comp_widget.resize(max(400, int(target_size.width())), max(300, int(target_size.height())))
+        else:
+            comp_widget.resize(960, 640)
+
+        if target_top_left is not None:
+            comp_widget.move(target_top_left)
+        else:
+            top_left = self.mapToGlobal(self.rect().topLeft())
+            comp_widget.move(top_left + QPoint(140, 100))
+
+        self._comparison_windows.append(comp_widget)
+        comp_widget.closing.connect(lambda: self._on_media_comparison_closed(comp_widget))
+        comp_widget.show()
+        comp_widget.raise_()
+        comp_widget.activateWindow()
+
+        def _after_spawn():
+            try:
+                self.refresh_video_controls_performance_profile()
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _after_spawn)
+        return comp_widget
+
+    def _on_media_comparison_closed(self, comp_widget: MediaComparisonWidget):
+        closed_viewers = []
+        try:
+            closed_viewers = list(comp_widget.viewers())
+        except Exception:
+            closed_viewers = []
+
+        remaining = []
+        for window in list(getattr(self, "_comparison_windows", [])):
+            try:
+                if window is comp_widget:
+                    continue
+                remaining.append(window)
+            except RuntimeError:
+                continue
+        self._comparison_windows = remaining
+
+        for viewer in closed_viewers:
+            self._video_controls_pending_updates.pop(viewer, None)
+            self._video_controls_last_dispatch_at.pop(viewer, None)
+            self._hud_playback_last_frame_ts.pop(viewer, None)
+
+        self.refresh_video_controls_performance_profile()
+
     @Slot()
     def close_all_floating_viewers(self):
         """Close all spawned floating viewers."""
         for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                window.close()
+            except RuntimeError:
+                pass
+        for window in list(getattr(self, '_comparison_windows', [])):
             try:
                 window.close()
             except RuntimeError:
