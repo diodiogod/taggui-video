@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 from .common import create_backup
-from .ffmpeg_gpu import ffmpeg_base_args
+from .ffmpeg_gpu import ffmpeg_base_args, ffmpeg_base_args_software
 
 
 class FrameEditor:
@@ -48,7 +48,7 @@ class FrameEditor:
 
             # ffmpeg command with stream copy (keyframe-accurate only, no re-encoding)
             cmd = [
-                *ffmpeg_base_args(),
+                *ffmpeg_base_args_software(),
                 '-ss', str(start_time),  # Seek to start (keyframe)
                 '-i', str(input_path),
                 '-t', str(duration),     # Duration
@@ -117,8 +117,14 @@ class FrameEditor:
             temp_output = output_path.parent / f'.temp_extract_{output_path.name}'
             actual_output = temp_output if input_path == output_path else output_path
 
-            # Build video filter chain
-            vf_parts = [f'trim=start_frame={start_frame}:end_frame={end_frame+1}', 'setpts=PTS-STARTPTS']
+            # Build video filter chain.
+            # Use trim with time instead of frame number — trim=start_frame is unreliable
+            # when the video PTS doesn't start at 0 (common with social media containers).
+            # setpts=PTS-STARTPTS resets timestamps after trim so the output starts at t=0.
+            vf_parts = [
+                f'trim=start={start_time:.6f}:duration={duration:.6f}',
+                'setpts=PTS-STARTPTS',
+            ]
             if reverse:
                 vf_parts.append('reverse')
 
@@ -132,8 +138,8 @@ class FrameEditor:
 
             vf = ','.join(vf_parts)
 
-            # Build audio filter chain
-            af_parts = [f'atrim=start={start_time}:duration={duration}', 'asetpts=PTS-STARTPTS']
+            # Build audio filter chain (time-based, same approach)
+            af_parts = [f'atrim=start={start_time:.6f}:duration={duration:.6f}', 'asetpts=PTS-STARTPTS']
             if reverse:
                 af_parts.append('areverse')
 
@@ -152,18 +158,18 @@ class FrameEditor:
 
             af = ','.join(af_parts)
 
-            # ffmpeg command to extract range - frame-accurate extraction
-            # Note: -c copy cannot do frame-accurate cuts, only keyframe cuts
-            # Using trim filter for frame accuracy with re-encoding
+            # Frame-accurate extraction via trim filter (re-encodes).
+            # -ss before -i would only seek to keyframes; trim filter is frame-accurate.
             cmd = [
-                *ffmpeg_base_args(),
+                *ffmpeg_base_args_software(),
                 '-i', str(input_path),
                 '-vf', vf,
                 '-af', af,
                 '-c:v', 'libx264',
-                '-crf', '18',  # High quality
+                '-pix_fmt', 'yuv420p',
+                '-crf', '18',
                 '-preset', 'medium',
-                '-c:a', 'aac',  # Re-encode audio
+                '-c:a', 'aac',
                 '-b:a', '192k',
                 '-y',
                 str(actual_output)
@@ -336,7 +342,7 @@ class FrameEditor:
 
                 # Run single ffmpeg command with filter complex
                 cmd = [
-                    *ffmpeg_base_args(),
+                    *ffmpeg_base_args_software(),
                     '-i', str(input_path),
                     '-filter_complex', filter_complex if filter_complex else 'copy',
                 ]
@@ -354,6 +360,7 @@ class FrameEditor:
 
                 cmd.extend([
                     '-c:v', 'libx264',
+                    '-pix_fmt', 'yuv420p',
                     '-crf', '18',
                     '-preset', 'slow',
                     '-c:a', 'aac',
@@ -475,7 +482,7 @@ class FrameEditor:
             # Extract the frame to repeat as MP4
             # Using MP4 avoids problematic color space conversion issues (yuv420p doesn't need conversion)
             extract_cmd = [
-                *ffmpeg_base_args(),
+                *ffmpeg_base_args_software(),
                 '-i', str(input_path),
                 '-vf', f'trim=start_frame={frame_num}:end_frame={frame_num+1}',
                 '-c:v', 'libx264',
@@ -564,13 +571,14 @@ class FrameEditor:
             temp_output = output_path.parent / f'.temp_output_{output_path.name}'
 
             cmd = [
-                *ffmpeg_base_args(),
+                *ffmpeg_base_args_software(),
                 '-i', str(input_path),
                 '-i', str(frame_file),
                 '-filter_complex', filter_complex,
                 '-map', '[outv]',
                 '-map', '[aout]',
                 '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
                 '-crf', '18',
                 '-preset', 'slow',
                 '-c:a', 'aac',
@@ -788,7 +796,7 @@ class FrameEditor:
             af = ','.join(audio_filters) if audio_filters else None
 
             cmd = [
-                *ffmpeg_base_args(),
+                *ffmpeg_base_args_software(),
                 '-i', str(input_path),
                 '-filter:v', filter_string,
             ]
@@ -888,7 +896,7 @@ class FrameEditor:
             # Use fps filter to change framerate (automatically drops/duplicates frames)
             # This preserves duration by adjusting frame count
             cmd = [
-                *ffmpeg_base_args(),
+                *ffmpeg_base_args_software(),
                 '-i', str(input_path),
                 '-filter:v', f'fps={target_fps}',
                 '-c:a', 'copy',  # Keep audio unchanged
