@@ -2309,26 +2309,49 @@ class VideoPlayerWidget(QWidget):
             self.playback_paused.emit()  # Notify that playback paused
 
         if self._is_mpv_forward_active():
+            # MPV was playing forward — just keep widget visible, already paused.
             try:
                 if self.video_item:
                     self.video_item.hide()
             except RuntimeError:
-                pass  # C++ object deleted
+                pass
             try:
                 if self.pixmap_item:
                     self.pixmap_item.hide()
             except RuntimeError:
-                pass  # C++ object deleted
+                pass
             self._set_mpv_visible(True)
             self._set_vlc_visible(False)
             return
 
-        # Switch to OpenCV frame for frame-accurate display
+        # If MPV backend is selected and initialized, use it for frame-accurate
+        # pause display via exact seek — no OpenCV needed, better format support.
+        if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
+            seek_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else self._mpv_estimated_position_ms
+            try:
+                self._mpv_string_command('seek', f'{seek_ms / 1000.0:.6f}', 'absolute+exact')
+            except Exception:
+                pass
+            try:
+                if self.video_item:
+                    self.video_item.hide()
+            except RuntimeError:
+                pass
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.hide()
+            except RuntimeError:
+                pass
+            self._set_mpv_visible(True)
+            self._set_vlc_visible(False)
+            return
+
+        # Fallback: OpenCV frame display (reverse playback, or MPV not ready).
         try:
             if self.video_item:
                 self.video_item.hide()
         except RuntimeError:
-            pass  # C++ object deleted
+            pass
         self._set_mpv_visible(False)
         self._set_vlc_visible(False)
 
@@ -2336,9 +2359,8 @@ class VideoPlayerWidget(QWidget):
             if self.pixmap_item:
                 self.pixmap_item.show()
         except RuntimeError:
-            pass  # C++ object deleted
+            pass
 
-        # Show exact current frame
         self._show_opencv_frame(self.current_frame)
 
     def stop(self):
@@ -2451,29 +2473,25 @@ class VideoPlayerWidget(QWidget):
         if self.vlc_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
             self._seek_vlc_position_ms(position_ms)
 
-        # If paused, show exact frame with OpenCV
+        # If paused, show exact frame via MPV seek (or OpenCV fallback).
         if not self.is_playing:
-            if self._is_mpv_forward_active():
+            if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
+                # MPV exact seek — works whether MPV was forward-active or coming from reverse.
+                try:
+                    self._mpv_string_command('seek', f'{position_ms / 1000.0:.6f}', 'absolute+exact')
+                except Exception:
+                    pass
                 try:
                     if self.video_item:
                         self.video_item.hide()
                 except RuntimeError:
                     pass
-                if self.mpv_widget is not None and self.mpv_widget.isVisible():
-                    self._cancel_mpv_reveal()
-                    try:
-                        if self.pixmap_item:
-                            self.pixmap_item.hide()
-                    except RuntimeError:
-                        pass
-                    self._set_mpv_visible(True)
-                else:
-                    try:
-                        if self.pixmap_item:
-                            self.pixmap_item.show()
-                    except RuntimeError:
-                        pass
-                    self._begin_mpv_reveal(delay_ms=80)
+                try:
+                    if self.pixmap_item:
+                        self.pixmap_item.hide()
+                except RuntimeError:
+                    pass
+                self._set_mpv_visible(True)
             else:
                 self._show_opencv_frame(frame_number)
 
