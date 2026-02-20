@@ -59,6 +59,11 @@ class MpvGlWidget(QOpenGLWidget):
         self._emit_frame_painted = False  # set True by _begin_mpv_reveal to arm one-shot signal
         # Keep proc address resolver alive — ctypes GCs CFUNCTYPE objects otherwise
         self._proc_address_fn = None
+        # Prevent Qt from auto-clearing the FBO before paintGL — without this,
+        # every resize/restore clears to black even when paintGL returns early,
+        # compositing a black rectangle over the pixmap behind us.
+        self.setAutoFillBackground(False)
+        self.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.PartialUpdate)
 
     def set_render_context(self, ctx):
         """Called after MPV and its render context are created."""
@@ -174,9 +179,10 @@ class VideoPlayerWidget(QWidget):
         self.mpv_player = None
         self.mpv_widget = None
         self.mpv_host_view = None
-        # Off-screen parking widget: mpv_widget is reparented here when hidden
-        # so Qt never includes it in the viewport's paint tree, preventing GL
-        # FBO clears from compositing over the pixmap on window restore/zoom.
+        # Parking widget: mpv_widget is reparented here while not playing.
+        # It stays hidden the entire time it is parked, so no native window
+        # flash occurs — the GL context is preserved, just detached from the
+        # viewport's paint tree so its FBO can't corrupt the pixmap display.
         self._mpv_parking_widget = QWidget()
         self._mpv_parking_widget.setFixedSize(1, 1)
         self._mpv_parking_widget.hide()
@@ -374,6 +380,32 @@ class VideoPlayerWidget(QWidget):
         # Keep native backend active; only refresh geometry against the new transform.
         self.sync_external_surface_geometry()
 
+    def prewarm_gl_widget(self, view):
+        """Create and warm up the MpvGlWidget GL context before first play.
+
+        QOpenGLWidget initializes its native GL context on first show(), which
+        forces a full repaint of the parent window and causes a visible ~1s
+        flash. Calling this at startup (while the UI is still loading) hides
+        the flash because the window isn't fully visible yet.
+        """
+        if mpv is None or not self._is_using_mpv_backend():
+            return
+        if self.mpv_widget is not None:
+            return
+        try:
+            self.mpv_host_view = view
+            # Create parented to the parking widget so the GL context is
+            # initialized without ever touching the viewport paint tree.
+            self.mpv_widget = MpvGlWidget(self._mpv_parking_widget)
+            self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.mpv_widget.setStyleSheet('background: transparent;')
+            self.mpv_widget.setGeometry(0, 0, 1, 1)
+            # Show inside the hidden parking widget — GL context initializes
+            # silently without any visible flash.
+            self.mpv_widget.show()
+        except Exception:
+            self.mpv_widget = None
+
     def _is_segment_loop_active(self) -> bool:
         return bool(self.loop_enabled and self.loop_start is not None and self.loop_end is not None)
 
@@ -436,15 +468,14 @@ class VideoPlayerWidget(QWidget):
         """
         if not visible:
             self.mpv_geometry_timer.stop()
-            # Reparent mpv_widget to the off-screen parking widget so it is
-            # completely removed from the viewport's paint tree. A hidden
-            # QOpenGLWidget still gets its FBO cleared by Qt on window
-            # restore/expose, which composites black or garbage over the
-            # pixmap behind it. Reparenting is the only reliable fix.
+            # Reparent to parking widget and hide. The widget stays hidden the
+            # whole time it is parked so no native-window rebuild flash occurs.
+            # This removes mpv_widget from the viewport paint tree entirely,
+            # preventing its FBO from compositing black over the pixmap.
             try:
                 if self.mpv_widget:
-                    self.mpv_widget.setParent(self._mpv_parking_widget)
                     self.mpv_widget.hide()
+                    self.mpv_widget.setParent(self._mpv_parking_widget)
             except RuntimeError:
                 pass
             try:
@@ -453,7 +484,8 @@ class VideoPlayerWidget(QWidget):
             except RuntimeError:
                 pass
         else:
-            # Reparent back to the viewport, sync geometry, then show.
+            # Reparent back to viewport, size, then show — all before Qt
+            # processes events so it appears as a single atomic operation.
             view = self._resolve_mpv_target_view()
             if view is not None:
                 try:
@@ -464,8 +496,8 @@ class VideoPlayerWidget(QWidget):
             self._sync_mpv_widget_to_viewport()
             try:
                 if self.mpv_widget:
-                    self.mpv_widget.show()
                     self.mpv_widget.raise_()
+                    self.mpv_widget.show()
             except RuntimeError:
                 pass
             try:
@@ -1503,20 +1535,12 @@ class VideoPlayerWidget(QWidget):
 
             if self.mpv_widget is None:
                 self.mpv_host_view = target_view
-                # Use QOpenGLWidget (render API) — no HWND, no D3D11 swap chain,
-                # no 0xe24c4a02 crashes on loadfile replace or resize.
-                self.mpv_widget = MpvGlWidget(self.mpv_host_view.viewport())
-                # Transparent to mouse events — same pattern as vlc_widget.
-                # Events fall through to the viewport which already has the
-                # image_viewer/floating_viewer wheelEvent and double-click wiring.
+                # Create in parking widget — _set_mpv_visible(False) called
+                # below will keep it hidden there until first frame is ready.
+                self.mpv_widget = MpvGlWidget(self._mpv_parking_widget)
                 self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-                self.mpv_widget.setStyleSheet('background: black;')
-                vp = target_view.viewport()
-                vp_rect = vp.rect()
-                if vp_rect.width() > 0 and vp_rect.height() > 0:
-                    self.mpv_widget.setGeometry(vp_rect)
-                else:
-                    self.mpv_widget.setGeometry(0, 0, 640, 480)
+                self.mpv_widget.setStyleSheet('background: transparent;')
+                self.mpv_widget.setGeometry(0, 0, 1, 1)
                 self.mpv_widget.show()
             else:
                 self.mpv_host_view = target_view

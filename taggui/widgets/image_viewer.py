@@ -71,6 +71,10 @@ class ImageViewer(QWidget):
 
         # Video player and controls
         self.video_player = VideoPlayerWidget()
+        # Pre-warm the MPV GL widget so its GL context is initialized during
+        # startup (while the window is still loading) rather than on first play,
+        # which would cause a ~1s full-window flash.
+        QTimer.singleShot(0, lambda: self.video_player.prewarm_gl_widget(self.view))
         self.current_video_item = None
         self.current_image_item = None
         self.video_controls = VideoControlsWidget(self)
