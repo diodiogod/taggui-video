@@ -46,11 +46,17 @@ class MpvGlWidget(QOpenGLWidget):
     No more 0xe24c4a02 GPU driver crashes.
     """
 
+    # Emitted on the Qt thread after the first frame is painted (used to
+    # synchronise the reveal: hide the pixmap cover only once MPV has actually
+    # drawn the first frame of the new file).
+    frame_painted = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._mpv_render_ctx = None
         self._update_pending = False
         self._render_ready = False  # True only when MPV has signalled a new frame
+        self._emit_frame_painted = False  # set True by _begin_mpv_reveal to arm one-shot signal
         # Keep proc address resolver alive — ctypes GCs CFUNCTYPE objects otherwise
         self._proc_address_fn = None
 
@@ -95,6 +101,10 @@ class MpvGlWidget(QOpenGLWidget):
             self._mpv_render_ctx.report_swap()
         except Exception:
             pass
+        # One-shot: notify reveal machinery that a real frame has been painted.
+        if self._emit_frame_painted:
+            self._emit_frame_painted = False
+            self.frame_painted.emit()
 
     def resizeGL(self, w, h):
         # Just trigger a repaint — paintGL reads current size each frame
@@ -450,8 +460,10 @@ class VideoPlayerWidget(QWidget):
                 self.mpv_geometry_timer.start()
 
     def _sync_mpv_widget_to_viewport(self):
-        """Resize mpv_widget to cover the full host viewport. Safe to call anytime.
+        """Resize mpv_widget to match the pixmap item's on-screen rect.
 
+        When zoom-to-fit, this equals the full viewport. When zoomed/panned,
+        this follows the transformed pixmap bounds — same approach as VLC.
         With vo=libmpv (QOpenGLWidget) resizing is always safe — no D3D11 swap chain.
         """
         try:
@@ -470,6 +482,20 @@ class VideoPlayerWidget(QWidget):
             self.mpv_host_view = view
             vp = view.viewport()
             vp_rect = vp.rect()
+
+            # Try to match the pixmap item's screen rect (respects zoom/pan).
+            item = self._get_live_pixmap_item()
+            if item is not None:
+                try:
+                    scene_rect = item.sceneBoundingRect()
+                    mapped = view.mapFromScene(scene_rect).boundingRect().normalized()
+                    if mapped.width() > 1 and mapped.height() > 1:
+                        self.mpv_widget.setGeometry(mapped)
+                        return
+                except Exception:
+                    pass
+
+            # Fallback: cover full viewport (zoom-to-fit or no pixmap item yet).
             if vp_rect.width() > 0 and vp_rect.height() > 0:
                 self.mpv_widget.setGeometry(vp_rect)
         except RuntimeError:
@@ -1202,6 +1228,9 @@ class VideoPlayerWidget(QWidget):
         self._mpv_pending_reveal = False
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
+        gl_widget = getattr(self, 'mpv_widget', None)
+        if isinstance(gl_widget, MpvGlWidget):
+            gl_widget._emit_frame_painted = False
 
     def _cancel_vlc_reveal(self):
         self._vlc_pending_reveal = False
@@ -1334,11 +1363,48 @@ class VideoPlayerWidget(QWidget):
             self._vlc_loop_end_guard = False
 
     def _begin_mpv_reveal(self, delay_ms: int = 120):
-        """Reveal mpv surface by uncovering it (hide pixmap_item in front of MPV)."""
+        """Reveal mpv surface once MPV has painted the first frame of the new file.
+
+        Connects a one-shot slot to MpvGlWidget.frame_painted so the pixmap
+        cover is only removed after the GL buffer actually contains the new
+        video's first frame — eliminating the flash of the previous video's
+        last frame that occurred when revealing immediately.
+        """
         self._mpv_pending_reveal = False
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
-        self._set_mpv_visible(True)
+
+        gl_widget = getattr(self, 'mpv_widget', None)
+        if gl_widget is None or not isinstance(gl_widget, MpvGlWidget):
+            # No GL widget — reveal immediately (fallback).
+            self._set_mpv_visible(True)
+            return
+
+        # Arm the one-shot signal and connect a lambda that reveals once fired.
+        gl_widget._emit_frame_painted = True
+
+        def _on_first_frame():
+            try:
+                gl_widget.frame_painted.disconnect(_on_first_frame)
+            except Exception:
+                pass
+            self._set_mpv_visible(True)
+
+        gl_widget.frame_painted.connect(_on_first_frame)
+
+        # Safety net: if the frame never arrives (e.g. video stays paused),
+        # reveal after a short timeout so the UI doesn't stay blank forever.
+        def _reveal_timeout():
+            if not gl_widget._emit_frame_painted:
+                return  # already revealed via frame_painted
+            gl_widget._emit_frame_painted = False
+            try:
+                gl_widget.frame_painted.disconnect(_on_first_frame)
+            except Exception:
+                pass
+            self._set_mpv_visible(True)
+
+        QTimer.singleShot(300, _reveal_timeout)
 
     def _try_reveal_mpv_surface(self):
         if not self._mpv_pending_reveal:
@@ -1423,6 +1489,9 @@ class VideoPlayerWidget(QWidget):
                 # Use QOpenGLWidget (render API) — no HWND, no D3D11 swap chain,
                 # no 0xe24c4a02 crashes on loadfile replace or resize.
                 self.mpv_widget = MpvGlWidget(self.mpv_host_view.viewport())
+                # Transparent to mouse events — same pattern as vlc_widget.
+                # Events fall through to the viewport which already has the
+                # image_viewer/floating_viewer wheelEvent and double-click wiring.
                 self.mpv_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 self.mpv_widget.setStyleSheet('background: black;')
                 vp = target_view.viewport()

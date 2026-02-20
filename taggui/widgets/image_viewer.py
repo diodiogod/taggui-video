@@ -611,7 +611,12 @@ class ImageViewer(QWidget):
         self._refresh_video_surface_event_filters()
         event_type = event.type()
         if event_type == QEvent.Type.Wheel:
-            if any(watched is surface for surface in self._iter_video_surface_widgets()):
+            # Forward wheel to zoom handler when it comes from a video surface
+            # widget directly, OR from the viewport (video surfaces use
+            # WA_TransparentForMouseEvents so events fall through to viewport).
+            is_video_surface = any(watched is s for s in self._iter_video_surface_widgets())
+            is_viewport = watched is self.view.viewport()
+            if is_video_surface or (is_viewport and self._is_video_loaded):
                 self.wheelEvent(event)
                 return True
         if event_type == QEvent.Type.MouseMove and self._is_video_loaded:
