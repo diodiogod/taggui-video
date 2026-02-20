@@ -1588,8 +1588,10 @@ class VideoPlayerWidget(QWidget):
             widget = self.mpv_widget
             self.mpv_widget = None
             try:
-                widget.hide()
-                widget.deleteLater()
+                import shiboken6
+                if shiboken6.isValid(widget):
+                    widget.hide()
+                    widget.deleteLater()
             except Exception:
                 pass
 
