@@ -64,6 +64,8 @@ class ImageViewer(QWidget):
 
         self.view = ImageGraphicsView(self.scene, self)
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
+        self._compare_saved_viewport_update_mode = self.view.viewportUpdateMode()
+        self._compare_forced_full_viewport_update = False
         self.crop_marking: ImageMarking | None = None
         settings.change.connect(self.setting_change)
 
@@ -266,6 +268,28 @@ class ImageViewer(QWidget):
                 pass
         self._compare_layers = []
         self._compare_overlay_indices = []
+
+    def _set_compare_viewport_update_mode(self, enabled: bool):
+        view = getattr(self, "view", None)
+        if view is None:
+            return
+        try:
+            if bool(enabled):
+                if not bool(getattr(self, "_compare_forced_full_viewport_update", False)):
+                    self._compare_saved_viewport_update_mode = view.viewportUpdateMode()
+                    view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+                    self._compare_forced_full_viewport_update = True
+            else:
+                if bool(getattr(self, "_compare_forced_full_viewport_update", False)):
+                    restore_mode = getattr(
+                        self,
+                        "_compare_saved_viewport_update_mode",
+                        QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate,
+                    )
+                    view.setViewportUpdateMode(restore_mode)
+                    self._compare_forced_full_viewport_update = False
+        except Exception:
+            pass
 
     def get_compare_fit_mode(self) -> str:
         mode = str(getattr(self, "_compare_fit_mode", COMPARE_FIT_MODE_PRESERVE) or COMPARE_FIT_MODE_PRESERVE).strip().lower()
@@ -700,6 +724,7 @@ class ImageViewer(QWidget):
         had_compare = bool(self._compare_mode_active or self._compare_overlay_count() > 0)
         self._compare_reveal_timer.stop()
         self._set_compare_cursor_sync_enabled(False)
+        self._set_compare_viewport_update_mode(False)
         self._clear_compare_scene_items()
         self._compare_mode_active = False
         self._compare_base_index = QPersistentModelIndex()
@@ -774,6 +799,7 @@ class ImageViewer(QWidget):
             return False
         self._compare_layers = [first_layer]
 
+        self._set_compare_viewport_update_mode(True)
         self._update_compare_overlay_geometry()
         self._set_compare_cursor_sync_enabled(True)
         self._compare_reveal_timer.start()
@@ -1118,6 +1144,10 @@ class ImageViewer(QWidget):
             pass
         try:
             self._compare_cursor_sync_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._set_compare_viewport_update_mode(False)
         except Exception:
             pass
         try:
