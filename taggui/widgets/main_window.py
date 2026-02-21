@@ -1802,6 +1802,16 @@ class MainWindow(QMainWindow):
             viewer = window.viewer
         except RuntimeError:
             return False
+        # Do not allow a viewer that is already in compare mode to become a
+        # new compare source. It can still be a compare target.
+        checker = getattr(viewer, "is_compare_mode_active", None)
+        if callable(checker):
+            try:
+                if checker():
+                    self._clear_compare_drag_session()
+                    return False
+            except Exception:
+                pass
         key = self._floating_window_key(window)
         self._compare_drag_source = {
             "kind": "window",
@@ -3010,6 +3020,16 @@ class MainWindow(QMainWindow):
         """Ignore selection churn caused by buffered page remaps during/after drag jumps."""
         view = self.image_list.list_view
         source_model = self.image_list_model
+
+        # Thumbnail click-drag gesture is in progress: defer main-viewer update
+        # until release decides if it was a click or a drag.
+        if bool(getattr(view, '_suppress_selection_commit_until_release', False)):
+            # Defensive fallback: if a release event was missed, do not keep
+            # suppression latched forever.
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                return True
+            view._suppress_selection_commit_until_release = False
+
         if not (
             view.use_masonry
             and hasattr(source_model, '_paginated_mode')
@@ -3043,6 +3063,25 @@ class MainWindow(QMainWindow):
         # During drag-release stabilization, only accept current changes that still
         # point to the stable selected global.
         return int(mapped) != int(selected_global)
+
+    def commit_thumbnail_click_selection(self):
+        """Apply deferred thumbnail click selection after release (not drag)."""
+        index = self.image_list_selection_model.currentIndex()
+        if not index.isValid():
+            return
+        self.save_image_index(index)
+        try:
+            self.image_list.update_image_index_label(index)
+        except Exception:
+            pass
+        try:
+            self.get_selection_target_viewer().load_image(index)
+        except Exception:
+            pass
+        try:
+            self.image_tags_editor.load_image_tags(index)
+        except Exception:
+            pass
 
 
     @Slot(float)

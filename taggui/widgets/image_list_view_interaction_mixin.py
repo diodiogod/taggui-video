@@ -52,6 +52,7 @@ class ImageListViewInteractionMixin:
         host = self.window()
         active_index = QPersistentModelIndex(getattr(self, "_spawn_drag_active_index", QPersistentModelIndex()))
         self._spawn_drag_active = False
+        self._suppress_selection_commit_until_release = False
         self._spawn_drag_active_index = QPersistentModelIndex()
         compare_handled = False
         if should_spawn and host is not None and hasattr(host, "release_compare_drag"):
@@ -129,14 +130,17 @@ class ImageListViewInteractionMixin:
                 self._spawn_drag_start_pos = event.pos()
                 self._spawn_drag_index = QPersistentModelIndex(start_index)
                 self._spawn_drag_origin_global_pos = self._event_global_point(event)
+                self._suppress_selection_commit_until_release = True
             else:
                 self._spawn_drag_start_pos = None
                 self._spawn_drag_index = QPersistentModelIndex()
                 self._spawn_drag_origin_global_pos = QPoint()
+                self._suppress_selection_commit_until_release = False
         else:
             self._spawn_drag_start_pos = None
             self._spawn_drag_index = QPersistentModelIndex()
             self._spawn_drag_origin_global_pos = QPoint()
+            self._suppress_selection_commit_until_release = False
     
         # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
@@ -460,6 +464,11 @@ class ImageListViewInteractionMixin:
 
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
+        should_commit_click_selection = (
+            event.button() == Qt.MouseButton.LeftButton
+            and bool(getattr(self, "_suppress_selection_commit_until_release", False))
+            and not bool(getattr(self, "_spawn_drag_active", False))
+        )
         self._clear_spawn_drag_tracking()
         if bool(getattr(self, "_spawn_drag_active", False)):
             self._finish_spawn_drag_active(should_spawn=(event.button() == Qt.MouseButton.LeftButton))
@@ -477,11 +486,22 @@ class ImageListViewInteractionMixin:
         else:
             super().mouseReleaseEvent(event)
 
+        if should_commit_click_selection:
+            host = self.window()
+            if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
+                try:
+                    host.commit_thumbnail_click_selection()
+                except Exception:
+                    pass
+        self._suppress_selection_commit_until_release = False
+
     def leaveEvent(self, event):
         # If pointer exits during a fast drag/release, ensure no stale spawn
         # gesture remains armed.
         if not bool(getattr(self, "_spawn_drag_active", False)):
             self._clear_spawn_drag_tracking()
+            if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+                self._suppress_selection_commit_until_release = False
         super().leaveEvent(event)
 
     def focusOutEvent(self, event):
@@ -489,6 +509,8 @@ class ImageListViewInteractionMixin:
         # and let poll timer detect button release globally.
         if not bool(getattr(self, "_spawn_drag_active", False)):
             self._clear_spawn_drag_tracking()
+            if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+                self._suppress_selection_commit_until_release = False
         super().focusOutEvent(event)
 
 
