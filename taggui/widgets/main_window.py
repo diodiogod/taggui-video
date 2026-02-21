@@ -1900,9 +1900,13 @@ class MainWindow(QMainWindow):
             checker = getattr(target_viewer, "is_compare_mode_active", None)
             try:
                 if callable(checker) and checker():
-                    replacer = getattr(target_viewer, "replace_compare_right", None)
-                    if callable(replacer):
-                        succeeded = bool(replacer(source_index))
+                    adder = getattr(target_viewer, "add_compare_layer", None)
+                    if callable(adder):
+                        succeeded = bool(adder(source_index))
+                    if not succeeded:
+                        replacer = getattr(target_viewer, "replace_compare_right", None)
+                        if callable(replacer):
+                            succeeded = bool(replacer(source_index))
                 else:
                     enter = getattr(target_viewer, "enter_compare_mode", None)
                     if callable(enter):

@@ -88,14 +88,13 @@ class ImageViewer(QWidget):
         self.current_image_item = None
         self._compare_mode_active = False
         self._compare_base_index = QPersistentModelIndex()
-        self._compare_right_index = QPersistentModelIndex()
-        self._compare_split_ratio = 0.5
+        self._compare_overlay_indices: list[QPersistentModelIndex] = []
+        self._compare_split_ratio_x = 0.5
+        self._compare_split_ratio_y = 0.5
         self._compare_reveal_progress = 1.0
-        self._compare_overlay_item = None
-        self._compare_clip_item = None
+        self._compare_layers: list[dict] = []
         self._compare_divider_item = None
-        self._compare_last_viewer_x = None
-        self._compare_overlay_offset = QPointF(0.0, 0.0)
+        self._compare_last_viewer_pos = None
         compare_fit_mode = str(
             settings.value(
                 'compare_fit_mode',
@@ -113,9 +112,18 @@ class ImageViewer(QWidget):
         self._compare_divider_overlay.setStyleSheet("background-color: rgba(255, 255, 255, 230);")
         self._compare_divider_overlay.hide()
         self._compare_divider_overlay.raise_()
+        self._compare_divider_overlay_h = QWidget(self)
+        self._compare_divider_overlay_h.setObjectName("imageViewerCompareDividerHorizontal")
+        self._compare_divider_overlay_h.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._compare_divider_overlay_h.setStyleSheet("background-color: rgba(255, 255, 255, 230);")
+        self._compare_divider_overlay_h.hide()
+        self._compare_divider_overlay_h.raise_()
         self._compare_reveal_timer = QTimer(self)
         self._compare_reveal_timer.setInterval(16)
         self._compare_reveal_timer.timeout.connect(self._tick_compare_reveal)
+        self._compare_cursor_sync_timer = QTimer(self)
+        self._compare_cursor_sync_timer.setInterval(16)
+        self._compare_cursor_sync_timer.timeout.connect(self._poll_compare_cursor_sync)
         self.video_controls = VideoControlsWidget(self)
         self.video_controls._is_spawned_owner = self.is_spawned_viewer
         self.video_controls.setVisible(False)
@@ -248,16 +256,16 @@ class ImageViewer(QWidget):
         return QPixmap.fromImage(qimage)
 
     def _clear_compare_scene_items(self):
-        for attr in ("_compare_overlay_item", "_compare_clip_item", "_compare_divider_item"):
-            item = getattr(self, attr, None)
-            if item is None:
+        for layer in list(getattr(self, "_compare_layers", []) or []):
+            clip_item = layer.get("clip_item")
+            if clip_item is None:
                 continue
             try:
-                self.scene.removeItem(item)
+                self.scene.removeItem(clip_item)
             except Exception:
                 pass
-            setattr(self, attr, None)
-        self._compare_overlay_offset = QPointF(0.0, 0.0)
+        self._compare_layers = []
+        self._compare_overlay_indices = []
 
     def get_compare_fit_mode(self) -> str:
         mode = str(getattr(self, "_compare_fit_mode", COMPARE_FIT_MODE_PRESERVE) or COMPARE_FIT_MODE_PRESERVE).strip().lower()
@@ -279,6 +287,54 @@ class ImageViewer(QWidget):
         if self._compare_mode_active:
             self._refresh_compare_overlay_pixmap(reset_reveal=False)
         return changed
+
+    def _compare_overlay_count(self) -> int:
+        return min(len(self._compare_overlay_indices), len(self._compare_layers))
+
+    def _compare_effective_split_ratios(self) -> tuple[float, float]:
+        split_x = max(0.0, min(1.0, float(self._compare_split_ratio_x)))
+        split_y = max(0.0, min(1.0, float(self._compare_split_ratio_y)))
+        if self._compare_overlay_count() <= 1:
+            progress = max(0.0, min(1.0, float(self._compare_reveal_progress)))
+            split_x *= progress
+        return split_x, split_y
+
+    def _build_compare_layer(
+        self,
+        *,
+        base_size: QSize,
+        incoming_proxy: QModelIndex,
+        layer_ordinal: int,
+    ) -> dict | None:
+        incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
+        if incoming_pixmap.isNull():
+            return None
+        prepared_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
+            base_size,
+            incoming_pixmap,
+        )
+
+        clip_item = QGraphicsRectItem()
+        clip_item.setPen(Qt.PenStyle.NoPen)
+        clip_item.setBrush(Qt.BrushStyle.NoBrush)
+        clip_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        clip_item.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape,
+            True,
+        )
+        clip_item.setZValue(2.0 + (2.0 * float(layer_ordinal)))
+        self.scene.addItem(clip_item)
+
+        overlay_item = QGraphicsPixmapItem(prepared_pixmap)
+        overlay_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        overlay_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        overlay_item.setZValue(1.0)
+        overlay_item.setParentItem(clip_item)
+        return {
+            "clip_item": clip_item,
+            "overlay_item": overlay_item,
+            "offset": overlay_offset,
+        }
 
     def _prepare_compare_overlay_pixmap(self, base_size: QSize, incoming_pixmap: QPixmap):
         if base_size.width() <= 0 or base_size.height() <= 0 or incoming_pixmap.isNull():
@@ -328,27 +384,47 @@ class ImageViewer(QWidget):
         offset_y = (float(base_size.height()) - float(scaled.height())) * 0.5
         return scaled, QPointF(offset_x, offset_y)
 
-    def _refresh_compare_overlay_pixmap(self, *, reset_reveal: bool):
+    def _refresh_compare_overlay_pixmap(self, *, reset_reveal: bool) -> bool:
         if not self._compare_mode_active:
-            return
-        overlay_item = self._compare_overlay_item
+            return False
         base_item = self.current_image_item
-        incoming_proxy = self._normalize_proxy_index(self._compare_right_index)
-        if overlay_item is None or base_item is None or not incoming_proxy.isValid():
-            return
-
+        if base_item is None:
+            return False
         base_pixmap = base_item.pixmap()
-        incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
-        if base_pixmap.isNull() or incoming_pixmap.isNull():
-            return
+        if base_pixmap.isNull():
+            return False
 
-        prepared_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(base_pixmap.size(), incoming_pixmap)
-        overlay_item.setPixmap(prepared_pixmap)
-        self._compare_overlay_offset = overlay_offset
+        overlay_count = self._compare_overlay_count()
+        if overlay_count <= 0:
+            return False
+
+        for layer_idx in range(overlay_count):
+            incoming_proxy = self._normalize_proxy_index(self._compare_overlay_indices[layer_idx])
+            if not incoming_proxy.isValid():
+                return False
+            incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
+            if incoming_pixmap.isNull():
+                return False
+            prepared_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
+                base_pixmap.size(),
+                incoming_pixmap,
+            )
+            layer = self._compare_layers[layer_idx]
+            overlay_item = layer.get("overlay_item")
+            if overlay_item is None:
+                return False
+            overlay_item.setPixmap(prepared_pixmap)
+            layer["offset"] = overlay_offset
+
         if reset_reveal:
-            self._compare_reveal_progress = 0.0
-            self._compare_reveal_timer.start()
+            if overlay_count <= 1:
+                self._compare_reveal_progress = 0.0
+                self._compare_reveal_timer.start()
+            else:
+                self._compare_reveal_progress = 1.0
+                self._compare_reveal_timer.stop()
         self._update_compare_overlay_geometry()
+        return True
 
     def _tick_compare_reveal(self):
         if not self._compare_mode_active:
@@ -365,71 +441,159 @@ class ImageViewer(QWidget):
         base_item = self.current_image_item
         if base_item is None:
             return
-        clip_item = self._compare_clip_item
-        overlay_item = self._compare_overlay_item
-        if clip_item is None or overlay_item is None:
+        overlay_count = self._compare_overlay_count()
+        if overlay_count <= 0:
             return
 
         base_rect = base_item.boundingRect()
         if base_rect.width() <= 0 or base_rect.height() <= 0:
             return
         base_pos = base_item.pos()
-        clip_item.setPos(base_pos)
-        overlay_item.setPos(self._compare_overlay_offset)
+        base_width = float(base_rect.width())
+        base_height = float(base_rect.height())
+        split_ratio_x, split_ratio_y = self._compare_effective_split_ratios()
+        split_x = max(0.0, min(base_width, base_width * split_ratio_x))
+        split_y = max(0.0, min(base_height, base_height * split_ratio_y))
 
-        progress = max(0.0, min(1.0, float(self._compare_reveal_progress)))
-        split_ratio = max(0.0, min(1.0, float(self._compare_split_ratio)))
-        split_ratio *= progress
-        split_x = max(0.0, min(float(base_rect.width()), float(base_rect.width()) * split_ratio))
-        clip_item.setRect(QRectF(0.0, 0.0, split_x, float(base_rect.height())))
-        self._update_compare_divider_overlay(self._compare_last_viewer_x)
+        for layer_idx in range(overlay_count):
+            layer = self._compare_layers[layer_idx]
+            clip_item = layer.get("clip_item")
+            overlay_item = layer.get("overlay_item")
+            if clip_item is None or overlay_item is None:
+                continue
+            clip_item.setPos(base_pos)
+            overlay_item.setPos(layer.get("offset", QPointF(0.0, 0.0)))
 
-    def _update_compare_divider_overlay(self, viewer_x: int | None = None):
-        overlay = getattr(self, "_compare_divider_overlay", None)
-        if overlay is None:
+            if overlay_count == 1:
+                rect = QRectF(0.0, 0.0, split_x, base_height)
+            elif overlay_count == 2:
+                if layer_idx == 0:
+                    rect = QRectF(0.0, 0.0, split_x, split_y)
+                else:
+                    rect = QRectF(0.0, split_y, base_width, max(0.0, base_height - split_y))
+            else:
+                if layer_idx == 0:
+                    rect = QRectF(0.0, 0.0, split_x, split_y)
+                elif layer_idx == 1:
+                    rect = QRectF(0.0, split_y, split_x, max(0.0, base_height - split_y))
+                else:
+                    rect = QRectF(
+                        split_x,
+                        split_y,
+                        max(0.0, base_width - split_x),
+                        max(0.0, base_height - split_y),
+                    )
+            clip_item.setRect(rect)
+
+        self._update_compare_divider_overlay(self._compare_last_viewer_pos)
+
+    def _update_compare_divider_overlay(self, viewer_pos: QPoint | None = None):
+        overlay_v = getattr(self, "_compare_divider_overlay", None)
+        overlay_h = getattr(self, "_compare_divider_overlay_h", None)
+        if overlay_v is None:
             return
         if not self._compare_mode_active:
-            overlay.hide()
+            overlay_v.hide()
+            if overlay_h is not None:
+                overlay_h.hide()
             return
 
-        line_x = None if viewer_x is None else int(viewer_x)
-        if line_x is None:
+        overlay_count = self._compare_overlay_count()
+        if overlay_count <= 0:
+            overlay_v.hide()
+            if overlay_h is not None:
+                overlay_h.hide()
+            return
+
+        line_x = None
+        line_y = None
+        if viewer_pos is not None:
+            try:
+                line_x = int(viewer_pos.x())
+                line_y = int(viewer_pos.y())
+            except Exception:
+                line_x = None
+                line_y = None
+        if line_x is None or (overlay_count >= 2 and line_y is None):
             base_item = self.current_image_item
             if base_item is not None:
                 try:
                     base_rect = base_item.boundingRect()
                     base_pos = base_item.pos()
-                    split_ratio = max(0.0, min(1.0, float(self._compare_split_ratio)))
-                    progress = max(0.0, min(1.0, float(self._compare_reveal_progress)))
-                    split_scene_x = float(base_pos.x()) + (float(base_rect.width()) * split_ratio * progress)
-                    split_scene_y = float(base_pos.y()) + (float(base_rect.height()) * 0.5)
+                    split_ratio_x, split_ratio_y = self._compare_effective_split_ratios()
+                    split_scene_x = float(base_pos.x()) + (float(base_rect.width()) * split_ratio_x)
+                    split_scene_y = float(base_pos.y()) + (float(base_rect.height()) * split_ratio_y)
                     split_view_pos = self.view.mapFromScene(split_scene_x, split_scene_y)
                     split_viewer_pos = self.mapFrom(self.view.viewport(), split_view_pos)
-                    line_x = int(split_viewer_pos.x())
+                    if line_x is None:
+                        line_x = int(split_viewer_pos.x())
+                    if line_y is None:
+                        line_y = int(split_viewer_pos.y())
                 except Exception:
                     line_x = None
+                    line_y = None
 
+        split_ratio_x, split_ratio_y = self._compare_effective_split_ratios()
         if line_x is None:
-            line_x = int(self.width() * max(0.0, min(1.0, float(self._compare_split_ratio))))
+            line_x = int(self.width() * split_ratio_x)
 
         line_x = max(0, min(max(0, self.width() - 1), int(line_x)))
-        split_ratio = max(0.0, min(1.0, float(self._compare_split_ratio)))
         if (
             self.width() <= 3
             or line_x <= 0
             or line_x >= (self.width() - 1)
-            or split_ratio <= 1e-4
-            or split_ratio >= (1.0 - 1e-4)
+            or split_ratio_x <= 1e-4
+            or split_ratio_x >= (1.0 - 1e-4)
         ):
-            overlay.hide()
+            overlay_v.hide()
+        else:
+            divider_width = 3
+            vertical_top = 0
+            vertical_height = max(1, self.height())
+            # In 3-image mode (A/B top + C bottom), the vertical divider
+            # only applies to the top region, ending at the horizontal split.
+            if overlay_count == 2:
+                if line_y is None:
+                    line_y = int(self.height() * split_ratio_y)
+                line_y = max(0, min(max(0, self.height() - 1), int(line_y)))
+                vertical_height = max(1, line_y)
+            overlay_v.setGeometry(
+                line_x - (divider_width // 2),
+                vertical_top,
+                divider_width,
+                vertical_height,
+            )
+            overlay_v.show()
+            overlay_v.raise_()
+
+        if overlay_h is None or overlay_count < 2:
+            if overlay_h is not None:
+                overlay_h.hide()
             return
-        divider_width = 3
-        overlay.setGeometry(line_x - (divider_width // 2), 0, divider_width, max(1, self.height()))
-        overlay.show()
-        overlay.raise_()
+
+        if line_y is None:
+            line_y = int(self.height() * split_ratio_y)
+        line_y = max(0, min(max(0, self.height() - 1), int(line_y)))
+        if (
+            self.height() <= 3
+            or line_y <= 0
+            or line_y >= (self.height() - 1)
+            or split_ratio_y <= 1e-4
+            or split_ratio_y >= (1.0 - 1e-4)
+        ):
+            overlay_h.hide()
+            return
+        divider_height = 3
+        overlay_h.setGeometry(0, line_y - (divider_height // 2), max(1, self.width()), divider_height)
+        overlay_h.show()
+        overlay_h.raise_()
 
     def _set_compare_split_ratio(self, split: float):
-        split = max(0.0, min(1.0, float(split)))
+        self._set_compare_split_ratios(split, None)
+
+    def _set_compare_split_ratios(self, split_x: float, split_y: float | None):
+        split_x = max(0.0, min(1.0, float(split_x)))
+        next_split_y = None if split_y is None else max(0.0, min(1.0, float(split_y)))
         # Once user starts moving the mouse, stop reveal interpolation so
         # divider tracking stays locked to pointer position.
         reveal_completed_by_input = False
@@ -438,9 +602,16 @@ class ImageViewer(QWidget):
             self._compare_reveal_timer.stop()
             reveal_completed_by_input = True
 
-        if abs(split - float(self._compare_split_ratio)) < 1e-4 and not reveal_completed_by_input:
+        changed_x = abs(split_x - float(self._compare_split_ratio_x)) >= 1e-4
+        changed_y = (
+            next_split_y is not None
+            and abs(next_split_y - float(self._compare_split_ratio_y)) >= 1e-4
+        )
+        if not changed_x and not changed_y and not reveal_completed_by_input:
             return
-        self._compare_split_ratio = split
+        self._compare_split_ratio_x = split_x
+        if next_split_y is not None:
+            self._compare_split_ratio_y = next_split_y
         self._update_compare_overlay_geometry()
 
     def set_compare_split_from_viewer_pos(self, viewer_pos: QPoint):
@@ -465,8 +636,8 @@ class ImageViewer(QWidget):
         if global_pos is None:
             return
         try:
-            self._compare_last_viewer_x = int(self.mapFromGlobal(global_pos).x())
-            self._update_compare_divider_overlay(self._compare_last_viewer_x)
+            self._compare_last_viewer_pos = self.mapFromGlobal(global_pos)
+            self._update_compare_divider_overlay(self._compare_last_viewer_pos)
         except Exception:
             pass
 
@@ -475,20 +646,46 @@ class ImageViewer(QWidget):
             scene_pos = self.view.mapToScene(viewport_pos)
             base_scene_rect = base_item.sceneBoundingRect()
             width = float(base_scene_rect.width())
-            if width <= 0.0:
+            height = float(base_scene_rect.height())
+            if width <= 0.0 or height <= 0.0:
                 return
-            split = (float(scene_pos.x()) - float(base_scene_rect.left())) / width
-            self._set_compare_split_ratio(split)
+            split_x = (float(scene_pos.x()) - float(base_scene_rect.left())) / width
+            split_y = (float(scene_pos.y()) - float(base_scene_rect.top())) / height
+            self._set_compare_split_ratios(split_x, split_y)
             return
         except Exception:
             pass
 
         viewport_rect = self.view.viewport().rect()
         width = max(1, int(viewport_rect.width()))
-        self._set_compare_split_ratio(float(viewer_pos.x()) / float(width))
+        height = max(1, int(viewport_rect.height()))
+        self._set_compare_split_ratios(
+            float(viewer_pos.x()) / float(width),
+            float(viewer_pos.y()) / float(height),
+        )
 
     def set_compare_split_from_view_x(self, x_pos: int):
         self.set_compare_split_from_viewer_pos(QPoint(int(x_pos), int(self.height() * 0.5)))
+
+    def _set_compare_cursor_sync_enabled(self, enabled: bool):
+        timer = getattr(self, "_compare_cursor_sync_timer", None)
+        if timer is None:
+            return
+        if not bool(enabled):
+            timer.stop()
+            return
+        if not self._compare_mode_active:
+            timer.stop()
+            return
+        if not timer.isActive():
+            timer.start()
+        self._sync_compare_split_to_global_cursor()
+
+    def _poll_compare_cursor_sync(self):
+        if not self._compare_mode_active:
+            self._set_compare_cursor_sync_enabled(False)
+            return
+        self._sync_compare_split_to_global_cursor()
 
     def _sync_compare_split_to_global_cursor(self):
         if not self._compare_mode_active:
@@ -500,18 +697,21 @@ class ImageViewer(QWidget):
         self.set_compare_split_from_viewer_pos(cursor_viewer_pos)
 
     def exit_compare_mode(self, *, reset_split: bool = False) -> bool:
-        had_compare = bool(self._compare_mode_active or self._compare_overlay_item is not None)
+        had_compare = bool(self._compare_mode_active or self._compare_overlay_count() > 0)
         self._compare_reveal_timer.stop()
+        self._set_compare_cursor_sync_enabled(False)
         self._clear_compare_scene_items()
         self._compare_mode_active = False
         self._compare_base_index = QPersistentModelIndex()
-        self._compare_right_index = QPersistentModelIndex()
-        self._compare_last_viewer_x = None
+        self._compare_last_viewer_pos = None
         if self._compare_divider_overlay is not None:
             self._compare_divider_overlay.hide()
+        if self._compare_divider_overlay_h is not None:
+            self._compare_divider_overlay_h.hide()
         self._compare_reveal_progress = 1.0
         if reset_split:
-            self._compare_split_ratio = 0.5
+            self._compare_split_ratio_x = 0.5
+            self._compare_split_ratio_y = 0.5
         return had_compare
 
     def enter_compare_mode(
@@ -547,46 +747,68 @@ class ImageViewer(QWidget):
             return False
 
         base_pixmap = self.current_image_item.pixmap()
-        incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
-        if base_pixmap.isNull() or incoming_pixmap.isNull():
+        if base_pixmap.isNull():
             return False
-
-        incoming_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
-            base_pixmap.size(),
-            incoming_pixmap,
-        )
 
         self._compare_reveal_timer.stop()
         self._clear_compare_scene_items()
         self._compare_mode_active = True
         self._compare_base_index = QPersistentModelIndex(base_proxy)
-        self._compare_right_index = QPersistentModelIndex(incoming_proxy)
-        self._compare_last_viewer_x = None
+        self._compare_overlay_indices = [QPersistentModelIndex(incoming_proxy)]
+        self._compare_last_viewer_pos = None
         if not keep_split_ratio:
-            self._compare_split_ratio = 0.5
+            self._compare_split_ratio_x = 0.5
+            self._compare_split_ratio_y = 0.5
         self._compare_reveal_progress = 0.0
-
-        self._compare_clip_item = QGraphicsRectItem()
-        self._compare_clip_item.setPen(Qt.PenStyle.NoPen)
-        self._compare_clip_item.setBrush(Qt.BrushStyle.NoBrush)
-        self._compare_clip_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self._compare_clip_item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape,
-            True,
-        )
-        self._compare_clip_item.setZValue(2.0)
-        self.scene.addItem(self._compare_clip_item)
-
-        self._compare_overlay_item = QGraphicsPixmapItem(incoming_pixmap)
-        self._compare_overlay_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-        self._compare_overlay_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self._compare_overlay_item.setZValue(3.0)
-        self._compare_overlay_item.setParentItem(self._compare_clip_item)
-        self._compare_overlay_offset = overlay_offset
         self._compare_divider_item = None
 
+        first_layer = self._build_compare_layer(
+            base_size=base_pixmap.size(),
+            incoming_proxy=incoming_proxy,
+            layer_ordinal=0,
+        )
+        if first_layer is None:
+            self._compare_mode_active = False
+            self._compare_base_index = QPersistentModelIndex()
+            self._compare_overlay_indices = []
+            return False
+        self._compare_layers = [first_layer]
+
         self._update_compare_overlay_geometry()
+        self._set_compare_cursor_sync_enabled(True)
         self._compare_reveal_timer.start()
+        return True
+
+    def add_compare_layer(self, incoming_index) -> bool:
+        incoming_proxy = self._normalize_proxy_index(incoming_index)
+        if not incoming_proxy.isValid() or not self._is_static_image_index(incoming_proxy):
+            return False
+        if not self._compare_mode_active:
+            base_proxy = self._normalize_proxy_index(self.proxy_image_index)
+            return self.enter_compare_mode(base_proxy, incoming_proxy, keep_split_ratio=True)
+        if self._is_video_loaded or self.current_image_item is None:
+            return False
+        if len(self._compare_overlay_indices) >= 3:
+            return self.replace_compare_right(incoming_proxy)
+
+        base_pixmap = self.current_image_item.pixmap()
+        if base_pixmap.isNull():
+            return False
+        layer = self._build_compare_layer(
+            base_size=base_pixmap.size(),
+            incoming_proxy=incoming_proxy,
+            layer_ordinal=len(self._compare_overlay_indices),
+        )
+        if layer is None:
+            return False
+
+        self._compare_overlay_indices.append(QPersistentModelIndex(incoming_proxy))
+        self._compare_layers.append(layer)
+        if len(self._compare_overlay_indices) == 2:
+            self._compare_split_ratio_y = 0.5
+        self._compare_reveal_timer.stop()
+        self._compare_reveal_progress = 1.0
+        self._update_compare_overlay_geometry()
         return True
 
     def replace_compare_right(self, incoming_index) -> bool:
@@ -596,28 +818,21 @@ class ImageViewer(QWidget):
         if not self._compare_mode_active:
             base_proxy = self._normalize_proxy_index(self.proxy_image_index)
             return self.enter_compare_mode(base_proxy, incoming_proxy, keep_split_ratio=True)
+        if self._compare_overlay_count() <= 0:
+            return self.add_compare_layer(incoming_proxy)
+        previous_proxy = self._compare_overlay_indices[0]
+        self._compare_overlay_indices[0] = QPersistentModelIndex(incoming_proxy)
+        reset_reveal = self._compare_overlay_count() <= 1
+        if self._refresh_compare_overlay_pixmap(reset_reveal=reset_reveal):
+            return True
+        self._compare_overlay_indices[0] = previous_proxy
+        self._refresh_compare_overlay_pixmap(reset_reveal=False)
+        return False
 
-        base_item = self.current_image_item
-        overlay_item = self._compare_overlay_item
-        if base_item is None or overlay_item is None:
-            return False
-
-        base_pixmap = base_item.pixmap()
-        incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
-        if base_pixmap.isNull() or incoming_pixmap.isNull():
-            return False
-
-        incoming_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
-            base_pixmap.size(),
-            incoming_pixmap,
-        )
-        overlay_item.setPixmap(incoming_pixmap)
-        self._compare_overlay_offset = overlay_offset
-        self._compare_right_index = QPersistentModelIndex(incoming_proxy)
-        self._compare_reveal_progress = 0.0
-        self._update_compare_overlay_geometry()
-        self._compare_reveal_timer.start()
-        return True
+    def get_compare_image_count(self) -> int:
+        if not self._compare_mode_active:
+            return 0
+        return 1 + self._compare_overlay_count()
 
     def get_content_aspect_ratio(self) -> float | None:
         """Return current loaded media ratio from actual rendered pixmap."""
@@ -899,6 +1114,10 @@ class ImageViewer(QWidget):
             pass
         try:
             self._compare_reveal_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._compare_cursor_sync_timer.stop()
         except Exception:
             pass
         try:
