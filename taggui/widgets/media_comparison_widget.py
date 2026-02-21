@@ -4,7 +4,14 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QResizeEvent
 from PySide6.QtWidgets import QMenu, QPushButton, QWidget
 
-from widgets.image_viewer import ImageViewer
+from utils.settings import DEFAULT_SETTINGS, settings
+from widgets.image_viewer import (
+    COMPARE_FIT_MODE_FILL,
+    COMPARE_FIT_MODE_OPTIONS,
+    COMPARE_FIT_MODE_PRESERVE,
+    COMPARE_FIT_MODE_STRETCH,
+    ImageViewer,
+)
 from widgets.video_controls import VideoControlsWidget
 from widgets.video_sync_coordinator import VideoSyncCoordinator
 
@@ -45,6 +52,18 @@ class MediaComparisonWidget(QWidget):
         self._pan_sync_source: ImageViewer | None = None
         self._close_button_margin_px = 8
         self._close_hover_zone_px = 56
+        self._video_fit_transform_stamp: dict[int, tuple] = {}
+        video_compare_fit_mode = str(
+            settings.value(
+                'video_compare_fit_mode',
+                defaultValue=DEFAULT_SETTINGS.get('video_compare_fit_mode', COMPARE_FIT_MODE_PRESERVE),
+                type=str,
+            )
+            or COMPARE_FIT_MODE_PRESERVE
+        ).strip().lower()
+        if video_compare_fit_mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
+            video_compare_fit_mode = COMPARE_FIT_MODE_PRESERVE
+        self._video_compare_fit_mode = video_compare_fit_mode
 
         self._model_a = model_a
         self._model_b = model_b
@@ -52,13 +71,17 @@ class MediaComparisonWidget(QWidget):
         self.viewer_a = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
         self.viewer_a.setParent(self)
         self.viewer_a.set_scene_padding(0)
+        self.viewer_a.view.setBackgroundBrush(Qt.GlobalColor.black)
 
         self.viewer_b = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
         self._viewer_b_clip = QWidget(self)
         self._viewer_b_clip.setObjectName("mediaComparisonClip")
         self._viewer_b_clip.setMouseTracking(True)
+        self._viewer_b_clip.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._viewer_b_clip.setStyleSheet("background-color: rgb(12, 12, 12);")
         self.viewer_b.setParent(self._viewer_b_clip)
         self.viewer_b.set_scene_padding(0)
+        self.viewer_b.view.setBackgroundBrush(Qt.GlobalColor.black)
 
         self._divider_widget = QWidget(self)
         self._divider_widget.setStyleSheet("background-color: rgba(255, 255, 255, 220);")
@@ -109,6 +132,114 @@ class MediaComparisonWidget(QWidget):
 
     def viewers(self) -> list[ImageViewer]:
         return [self.viewer_a, self.viewer_b]
+
+    def get_video_compare_fit_mode(self) -> str:
+        mode = str(getattr(self, "_video_compare_fit_mode", COMPARE_FIT_MODE_PRESERVE) or COMPARE_FIT_MODE_PRESERVE).strip().lower()
+        if mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
+            return COMPARE_FIT_MODE_PRESERVE
+        return mode
+
+    def get_video_compare_fit_mode_options(self):
+        return tuple(COMPARE_FIT_MODE_OPTIONS)
+
+    def set_video_compare_fit_mode(self, mode: str, *, persist: bool = True) -> bool:
+        mode = str(mode or COMPARE_FIT_MODE_PRESERVE).strip().lower()
+        if mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
+            return False
+        changed = mode != self.get_video_compare_fit_mode()
+        self._video_compare_fit_mode = mode
+        if persist:
+            settings.setValue('video_compare_fit_mode', mode)
+        self._apply_video_compare_fit_mode(force=True)
+        return changed
+
+    def _apply_video_compare_fit_mode_to_viewer(self, viewer: ImageViewer):
+        try:
+            player = getattr(viewer, "video_player", None)
+            if player is None:
+                return
+            setter = getattr(player, "set_display_fit_mode", None)
+            if callable(setter):
+                setter(self.get_video_compare_fit_mode())
+        except Exception:
+            return
+
+    def _apply_video_compare_fit_transform_to_viewer(self, viewer: ImageViewer, *, force: bool = False):
+        try:
+            if not bool(getattr(viewer, "_is_video_loaded", False)):
+                self._video_fit_transform_stamp.pop(id(viewer), None)
+                return
+            view = getattr(viewer, "view", None)
+            scene = getattr(viewer, "scene", None)
+            if view is None or scene is None:
+                return
+            viewport_rect = view.viewport().rect()
+            scene_rect = scene.sceneRect()
+            if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+                return
+            if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+                return
+
+            mode = self.get_video_compare_fit_mode()
+            stamp = (
+                mode,
+                int(viewport_rect.width()),
+                int(viewport_rect.height()),
+                int(round(float(scene_rect.width()))),
+                int(round(float(scene_rect.height()))),
+                bool(getattr(viewer, "is_zoom_to_fit", False)),
+            )
+            previous_stamp = self._video_fit_transform_stamp.get(id(viewer))
+            if (not force) and previous_stamp == stamp:
+                return
+            if (not force) and not bool(getattr(viewer, "is_zoom_to_fit", False)):
+                # User manually zoomed/panned; avoid snapping back while scrubbing split.
+                self._video_fit_transform_stamp[id(viewer)] = stamp
+                return
+
+            if mode == COMPARE_FIT_MODE_PRESERVE:
+                viewer.zoom_fit()
+            elif mode == COMPARE_FIT_MODE_FILL:
+                scale_x = float(viewport_rect.width()) / float(scene_rect.width())
+                scale_y = float(viewport_rect.height()) / float(scene_rect.height())
+                target_scale = max(scale_x, scale_y)
+                if target_scale <= 0.0:
+                    return
+                viewer._apply_uniform_zoom_scale(
+                    float(target_scale * 1.0004),
+                    zoom_to_fit_state=True,
+                    focus_scene_pos=scene_rect.center(),
+                    anchor_view_pos=None,
+                )
+            else:
+                # Stretch requires non-uniform scaling, so apply directly.
+                scale_x = float(viewport_rect.width()) / float(scene_rect.width())
+                scale_y = float(viewport_rect.height()) / float(scene_rect.height())
+                if scale_x <= 0.0 or scale_y <= 0.0:
+                    return
+                view.resetTransform()
+                view.scale(float(scale_x), float(scale_y))
+                view.centerOn(scene_rect.center())
+                viewer.is_zoom_to_fit = True
+                player = getattr(viewer, "video_player", None)
+                if player is not None:
+                    try:
+                        player.sync_external_surface_geometry()
+                    except Exception:
+                        pass
+                    try:
+                        player.set_view_transformed(False)
+                    except Exception:
+                        pass
+
+            self._video_fit_transform_stamp[id(viewer)] = stamp
+        except Exception:
+            return
+
+    def _apply_video_compare_fit_mode(self, *, force: bool = False):
+        for viewer in (self.viewer_a, self.viewer_b):
+            self._apply_video_compare_fit_mode_to_viewer(viewer)
+            self._apply_video_compare_fit_transform_to_viewer(viewer, force=force)
 
     def _shared_controls_widget(self) -> VideoControlsWidget | None:
         controls = getattr(self, "_shared_controls", None)
@@ -163,6 +294,7 @@ class MediaComparisonWidget(QWidget):
                 self.viewer_b.load_image(self._model_b)
         except Exception:
             pass
+        self._apply_video_compare_fit_mode(force=True)
         self._update_split_layout()
         self._schedule_auto_sync()
 
@@ -236,9 +368,18 @@ class MediaComparisonWidget(QWidget):
 
     def _show_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
+        fit_mode_map = {}
         close_action = menu.addAction("Close comparison")
         resync_action = None
         if self._both_videos_ready():
+            fit_mode_menu = menu.addMenu("Compare Fit Mode")
+            current_mode = self.get_video_compare_fit_mode()
+            for mode, label in self.get_video_compare_fit_mode_options():
+                action = fit_mode_menu.addAction(str(label))
+                action.setCheckable(True)
+                action.setChecked(str(mode) == str(current_mode))
+                fit_mode_map[action] = str(mode)
+            menu.addSeparator()
             resync_action = menu.addAction("Resync compared videos")
 
         close_all_action = None
@@ -251,6 +392,8 @@ class MediaComparisonWidget(QWidget):
         selected = menu.exec(global_pos)
         if selected is close_action:
             self.close()
+        elif selected in fit_mode_map:
+            self.set_video_compare_fit_mode(fit_mode_map[selected], persist=True)
         elif selected is resync_action:
             self._maybe_start_video_sync(force_restart=True)
         elif selected is close_all_action and callable(close_all):
@@ -559,6 +702,7 @@ class MediaComparisonWidget(QWidget):
 
         self._suppress_viewer_controls(self.viewer_a)
         self._suppress_viewer_controls(self.viewer_b)
+        self._apply_video_compare_fit_mode(force=False)
         self._position_shared_controls()
         self._reposition_overlay_controls()
         self._apply_audio_focus_from_split()
@@ -1099,6 +1243,23 @@ class MediaComparisonWidget(QWidget):
                 max(float(target_scene.left()), min(float(target_scene.right()), float(target_focus.x()))),
                 max(float(target_scene.top()), min(float(target_scene.bottom()), float(target_focus.y()))),
             )
+
+            mode = self.get_video_compare_fit_mode()
+            if mode == COMPARE_FIT_MODE_STRETCH:
+                source_transform = source_viewer.view.transform()
+                scale_x = abs(float(source_transform.m11()))
+                scale_y = abs(float(source_transform.m22()))
+                if scale_x <= 0.0 or scale_y <= 0.0:
+                    return
+                target_viewer.view.resetTransform()
+                target_viewer.view.scale(float(scale_x), float(scale_y))
+                target_viewer.view.centerOn(target_focus)
+                target_viewer.is_zoom_to_fit = bool(getattr(source_viewer, "is_zoom_to_fit", False))
+                try:
+                    target_viewer.video_player.sync_external_surface_geometry()
+                except Exception:
+                    pass
+                return
 
             target_scale = abs(float(source_viewer.view.transform().m11()))
             if target_scale <= 0.0:

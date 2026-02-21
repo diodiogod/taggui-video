@@ -37,6 +37,15 @@ cv2.setLogLevel(0)
 mpv = MPV_PYTHON_MODULE
 vlc = VLC_PYTHON_MODULE
 
+VIDEO_DISPLAY_FIT_PRESERVE = 'preserve'
+VIDEO_DISPLAY_FIT_FILL = 'fill'
+VIDEO_DISPLAY_FIT_STRETCH = 'stretch'
+VIDEO_DISPLAY_FIT_MODES = {
+    VIDEO_DISPLAY_FIT_PRESERVE,
+    VIDEO_DISPLAY_FIT_FILL,
+    VIDEO_DISPLAY_FIT_STRETCH,
+}
+
 
 class MpvGlWidget(QOpenGLWidget):
     """QOpenGLWidget that renders MPV frames via the libmpv render API.
@@ -164,6 +173,7 @@ class VideoPlayerWidget(QWidget):
         self.is_playing = False
         self.current_frame = 0
         self.playback_speed = 1.0
+        self._display_fit_mode = VIDEO_DISPLAY_FIT_PRESERVE
 
         # Loop state
         self.loop_enabled = False
@@ -949,6 +959,7 @@ class VideoPlayerWidget(QWidget):
         self._mpv_vo_ready = True
         # Apply loop settings.
         self._apply_mpv_loop_settings()
+        self._apply_mpv_display_fit_mode()
         # Flush any pending seek.
         if self._mpv_seek_pending_ms is not None:
             self._flush_mpv_seek()
@@ -1058,6 +1069,115 @@ class VideoPlayerWidget(QWidget):
         except Exception:
             pass
 
+    def _normalize_display_fit_mode(self, mode: str) -> str:
+        candidate = str(mode or VIDEO_DISPLAY_FIT_PRESERVE).strip().lower()
+        if candidate not in VIDEO_DISPLAY_FIT_MODES:
+            return VIDEO_DISPLAY_FIT_PRESERVE
+        return candidate
+
+    def get_display_fit_mode(self) -> str:
+        return self._normalize_display_fit_mode(getattr(self, "_display_fit_mode", VIDEO_DISPLAY_FIT_PRESERVE))
+
+    def _apply_qt_video_fit_mode(self):
+        item = self._get_live_video_item()
+        if item is None:
+            return
+        mode = self.get_display_fit_mode()
+        aspect_mode = Qt.AspectRatioMode.KeepAspectRatio
+        if mode == VIDEO_DISPLAY_FIT_FILL:
+            aspect_mode = Qt.AspectRatioMode.KeepAspectRatioByExpanding
+        elif mode == VIDEO_DISPLAY_FIT_STRETCH:
+            aspect_mode = Qt.AspectRatioMode.IgnoreAspectRatio
+        try:
+            item.setAspectRatioMode(aspect_mode)
+        except Exception:
+            pass
+
+    def _apply_mpv_display_fit_mode(self):
+        if self.mpv_player is None:
+            return
+        mode = self.get_display_fit_mode()
+        try:
+            if mode == VIDEO_DISPLAY_FIT_STRETCH:
+                self._mpv_set_property('keepaspect', False)
+                self._mpv_set_property('panscan', 0.0)
+            elif mode == VIDEO_DISPLAY_FIT_FILL:
+                self._mpv_set_property('keepaspect', True)
+                self._mpv_set_property('panscan', 1.0)
+            else:
+                self._mpv_set_property('keepaspect', True)
+                self._mpv_set_property('panscan', 0.0)
+        except Exception:
+            pass
+
+    def _apply_vlc_display_fit_mode(self):
+        if self.vlc_player is None:
+            return
+        mode = self.get_display_fit_mode()
+
+        try:
+            self.vlc_player.video_set_scale(0.0)
+        except Exception:
+            pass
+        try:
+            self.vlc_player.video_set_aspect_ratio(None)
+        except Exception:
+            pass
+
+        if mode == VIDEO_DISPLAY_FIT_STRETCH:
+            try:
+                rect = QRect()
+                if self.vlc_widget is not None:
+                    rect = QRect(self.vlc_widget.geometry())
+                if rect.width() > 1 and rect.height() > 1:
+                    ratio_str = f"{int(rect.width())}:{int(rect.height())}"
+                    self.vlc_player.video_set_aspect_ratio(ratio_str.encode("utf-8"))
+            except Exception:
+                pass
+            return
+
+        if mode == VIDEO_DISPLAY_FIT_FILL:
+            try:
+                item = self._get_live_pixmap_item()
+                pixmap = item.pixmap() if item is not None else None
+                if pixmap is None or pixmap.isNull():
+                    return
+                source_h = float(pixmap.height())
+                source_w = float(pixmap.width())
+                if source_w <= 0.0 or source_h <= 0.0:
+                    return
+                source_ratio = source_w / source_h
+
+                rect = QRect()
+                if self.vlc_widget is not None:
+                    rect = QRect(self.vlc_widget.geometry())
+                if rect.width() <= 1 or rect.height() <= 1:
+                    return
+                target_ratio = float(rect.width()) / float(rect.height())
+                if target_ratio <= 0.0:
+                    return
+
+                if target_ratio > source_ratio:
+                    scale = target_ratio / source_ratio
+                else:
+                    scale = source_ratio / target_ratio
+                self.vlc_player.video_set_scale(max(1.0, float(scale)))
+            except Exception:
+                pass
+
+    def _apply_display_fit_mode(self):
+        self._apply_qt_video_fit_mode()
+        self._apply_mpv_display_fit_mode()
+        self._apply_vlc_display_fit_mode()
+
+    def set_display_fit_mode(self, mode: str):
+        normalized = self._normalize_display_fit_mode(mode)
+        if normalized == self.get_display_fit_mode():
+            return
+        self._display_fit_mode = normalized
+        self._apply_display_fit_mode()
+        self.sync_external_surface_geometry()
+
     def _rebind_vlc_output_target(self):
         """Re-apply native output target and autoscale after geometry changes."""
         if self.vlc_player is None or self.vlc_widget is None:
@@ -1072,14 +1192,7 @@ class VideoPlayerWidget(QWidget):
                 self.vlc_player.set_xwindow(wid)
         except Exception:
             pass
-        try:
-            self.vlc_player.video_set_scale(0.0)
-        except Exception:
-            pass
-        try:
-            self.vlc_player.video_set_aspect_ratio(None)
-        except Exception:
-            pass
+        self._apply_vlc_display_fit_mode()
 
     def _set_vlc_paused(self, paused: bool):
         if self.vlc_player is None:
@@ -2062,6 +2175,7 @@ class VideoPlayerWidget(QWidget):
 
         self.video_item = QGraphicsVideoItem()
         self.video_item.setZValue(0)
+        self._apply_qt_video_fit_mode()
 
         # Add to same scene as pixmap_item
         try:
@@ -2100,6 +2214,7 @@ class VideoPlayerWidget(QWidget):
             self.video_item.setSize(video_size)
             self._update_mpv_geometry_from_pixmap()
             self._update_vlc_geometry_from_pixmap()
+        self._apply_qt_video_fit_mode()
 
         # Hide video item initially (show pixmap with first frame)
         self.video_item.hide()

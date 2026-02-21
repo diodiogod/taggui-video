@@ -50,10 +50,10 @@ class CompareDropFeedbackOverlay(QWidget):
 
     def _state_color(self) -> QColor:
         if self._state == "blocked":
-            return QColor(255, 84, 84, 255)
+            return QColor(255, 78, 78, 255)
         if self._state == "ready":
-            return QColor(96, 238, 152, 255)
-        return QColor(74, 202, 255, 255)
+            return QColor(88, 255, 170, 255)
+        return QColor(64, 220, 255, 255)
 
     def _draw_progress_border(self, painter: QPainter, rect: QRect, ratio: float, color: QColor):
         ratio = max(0.0, min(1.0, ratio))
@@ -88,15 +88,37 @@ class CompareDropFeedbackOverlay(QWidget):
             painter.drawLine(start, mid)
             remain = 0.0
 
-        pen = QPen(color, 3.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
+        glow_pen = QPen(QColor(color.red(), color.green(), color.blue(), 205), 12.0)
+        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(glow_pen)
 
         p1 = QPointF(x1, y1)
         p2 = QPointF(x2, y1)
         p3 = QPointF(x2, y2)
         p4 = QPointF(x1, y2)
+        draw_segment(p1, p2)
+        draw_segment(p2, p3)
+        draw_segment(p3, p4)
+        draw_segment(p4, p1)
+
+        remain = perimeter * ratio
+        neon_pen = QPen(QColor(color.red(), color.green(), color.blue(), 255), 5.4)
+        neon_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        neon_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(neon_pen)
+
+        draw_segment(p1, p2)
+        draw_segment(p2, p3)
+        draw_segment(p3, p4)
+        draw_segment(p4, p1)
+
+        remain = perimeter * ratio
+        core_pen = QPen(QColor(255, 255, 255, 250), 1.8)
+        core_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        core_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(core_pen)
+
         draw_segment(p1, p2)
         draw_segment(p2, p3)
         draw_segment(p3, p4)
@@ -112,13 +134,18 @@ class CompareDropFeedbackOverlay(QWidget):
         base = self._state_color()
 
         # Soft pulse background.
-        fill_alpha = 42 if self._state != "blocked" else 52
+        fill_alpha = 54 if self._state != "blocked" else 64
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(base.red(), base.green(), base.blue(), fill_alpha))
         painter.drawRoundedRect(rect, 10, 10)
 
-        # Base border.
-        base_pen = QPen(QColor(base.red(), base.green(), base.blue(), 150), 2.0)
+        # Outer halo + base border.
+        halo_pen = QPen(QColor(base.red(), base.green(), base.blue(), 92), 7.5)
+        painter.setPen(halo_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 10, 10)
+
+        base_pen = QPen(QColor(base.red(), base.green(), base.blue(), 188), 2.8)
         painter.setPen(base_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect, 10, 10)
@@ -132,6 +159,6 @@ class CompareDropFeedbackOverlay(QWidget):
         )
 
         if self._state == "ready":
-            ready_pen = QPen(QColor(255, 255, 255, 225), 1.5)
+            ready_pen = QPen(QColor(255, 255, 255, 240), 1.7)
             painter.setPen(ready_pen)
             painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 8, 8)
