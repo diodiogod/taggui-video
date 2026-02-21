@@ -1909,13 +1909,28 @@ class MainWindow(QMainWindow):
         if succeeded:
             if pair_kind == "image":
                 self.set_active_viewer(target_viewer)
+            windows_to_close = []
             if source.get("kind") == "window":
                 source_window = source.get("window")
-                if source_window is not None and source_window is not target_window:
-                    try:
-                        source_window.close()
-                    except Exception:
-                        pass
+                if source_window is not None and (
+                    pair_kind == "video" or source_window is not target_window
+                ):
+                    windows_to_close.append(source_window)
+            if pair_kind == "video" and target_window is not None:
+                windows_to_close.append(target_window)
+
+            closed_ids = set()
+            for window in windows_to_close:
+                try:
+                    if window is None:
+                        continue
+                    key = id(window)
+                    if key in closed_ids:
+                        continue
+                    closed_ids.add(key)
+                    window.close()
+                except Exception:
+                    continue
 
         self._clear_compare_drag_session()
         return bool(succeeded)
@@ -2005,12 +2020,38 @@ class MainWindow(QMainWindow):
         if compare_active:
             menu = QMenu(self)
             exit_action = menu.addAction("Exit compare mode")
+            fit_mode_map = {}
+            fit_mode_menu = menu.addMenu("Compare Fit Mode")
+            current_mode = None
+            get_mode = getattr(self.image_viewer, "get_compare_fit_mode", None)
+            if callable(get_mode):
+                try:
+                    current_mode = get_mode()
+                except Exception:
+                    current_mode = None
+            get_options = getattr(self.image_viewer, "get_compare_fit_mode_options", None)
+            if callable(get_options):
+                try:
+                    for mode, label in get_options():
+                        action = fit_mode_menu.addAction(str(label))
+                        action.setCheckable(True)
+                        action.setChecked(str(mode) == str(current_mode))
+                        fit_mode_map[action] = str(mode)
+                except Exception:
+                    pass
             menu.addSeparator()
             spawn_action = menu.addAction("Spawn Floating Viewer")
             global_pos = view.mapToGlobal(pos) if view is not None else QCursor.pos()
             selected = menu.exec(global_pos)
             if selected is exit_action:
                 self.image_viewer.exit_compare_mode(reset_split=False)
+            elif selected in fit_mode_map:
+                setter = getattr(self.image_viewer, "set_compare_fit_mode", None)
+                if callable(setter):
+                    try:
+                        setter(fit_mode_map[selected], persist=True)
+                    except Exception:
+                        pass
             elif selected is spawn_action:
                 self.spawn_floating_viewer()
             return

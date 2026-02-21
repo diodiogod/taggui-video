@@ -1,5 +1,5 @@
 import re
-from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint,
+from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
@@ -15,6 +15,15 @@ from widgets.video_controls import VideoControlsWidget
 from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
 from widgets.marking_view import ImageGraphicsView
+
+COMPARE_FIT_MODE_PRESERVE = 'preserve'
+COMPARE_FIT_MODE_FILL = 'fill'
+COMPARE_FIT_MODE_STRETCH = 'stretch'
+COMPARE_FIT_MODE_OPTIONS = (
+    (COMPARE_FIT_MODE_PRESERVE, 'Preserve Aspect Ratio'),
+    (COMPARE_FIT_MODE_FILL, 'Fill (Crop)'),
+    (COMPARE_FIT_MODE_STRETCH, 'Stretch (Distorts)'),
+)
 
 
 def pil_to_qimage(pil_image):
@@ -86,6 +95,18 @@ class ImageViewer(QWidget):
         self._compare_clip_item = None
         self._compare_divider_item = None
         self._compare_last_viewer_x = None
+        self._compare_overlay_offset = QPointF(0.0, 0.0)
+        compare_fit_mode = str(
+            settings.value(
+                'compare_fit_mode',
+                defaultValue=DEFAULT_SETTINGS.get('compare_fit_mode', COMPARE_FIT_MODE_PRESERVE),
+                type=str,
+            )
+            or COMPARE_FIT_MODE_PRESERVE
+        ).strip().lower()
+        if compare_fit_mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
+            compare_fit_mode = COMPARE_FIT_MODE_PRESERVE
+        self._compare_fit_mode = compare_fit_mode
         self._compare_divider_overlay = QWidget(self)
         self._compare_divider_overlay.setObjectName("imageViewerCompareDivider")
         self._compare_divider_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -236,6 +257,77 @@ class ImageViewer(QWidget):
             except Exception:
                 pass
             setattr(self, attr, None)
+        self._compare_overlay_offset = QPointF(0.0, 0.0)
+
+    def get_compare_fit_mode(self) -> str:
+        mode = str(getattr(self, "_compare_fit_mode", COMPARE_FIT_MODE_PRESERVE) or COMPARE_FIT_MODE_PRESERVE).strip().lower()
+        if mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
+            return COMPARE_FIT_MODE_PRESERVE
+        return mode
+
+    def get_compare_fit_mode_options(self):
+        return tuple(COMPARE_FIT_MODE_OPTIONS)
+
+    def set_compare_fit_mode(self, mode: str, *, persist: bool = True) -> bool:
+        mode = str(mode or COMPARE_FIT_MODE_PRESERVE).strip().lower()
+        if mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
+            return False
+        changed = mode != self.get_compare_fit_mode()
+        self._compare_fit_mode = mode
+        if persist:
+            settings.setValue('compare_fit_mode', mode)
+        if self._compare_mode_active:
+            self._refresh_compare_overlay_pixmap(reset_reveal=False)
+        return changed
+
+    def _prepare_compare_overlay_pixmap(self, base_size: QSize, incoming_pixmap: QPixmap):
+        if base_size.width() <= 0 or base_size.height() <= 0 or incoming_pixmap.isNull():
+            return incoming_pixmap, QPointF(0.0, 0.0)
+
+        mode = self.get_compare_fit_mode()
+        if mode == COMPARE_FIT_MODE_STRETCH:
+            scaled = incoming_pixmap.scaled(
+                base_size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            return scaled, QPointF(0.0, 0.0)
+
+        aspect_mode = (
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            if mode == COMPARE_FIT_MODE_FILL
+            else Qt.AspectRatioMode.KeepAspectRatio
+        )
+        scaled = incoming_pixmap.scaled(
+            base_size,
+            aspect_mode,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        offset_x = (float(base_size.width()) - float(scaled.width())) * 0.5
+        offset_y = (float(base_size.height()) - float(scaled.height())) * 0.5
+        return scaled, QPointF(offset_x, offset_y)
+
+    def _refresh_compare_overlay_pixmap(self, *, reset_reveal: bool):
+        if not self._compare_mode_active:
+            return
+        overlay_item = self._compare_overlay_item
+        base_item = self.current_image_item
+        incoming_proxy = self._normalize_proxy_index(self._compare_right_index)
+        if overlay_item is None or base_item is None or not incoming_proxy.isValid():
+            return
+
+        base_pixmap = base_item.pixmap()
+        incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
+        if base_pixmap.isNull() or incoming_pixmap.isNull():
+            return
+
+        prepared_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(base_pixmap.size(), incoming_pixmap)
+        overlay_item.setPixmap(prepared_pixmap)
+        self._compare_overlay_offset = overlay_offset
+        if reset_reveal:
+            self._compare_reveal_progress = 0.0
+            self._compare_reveal_timer.start()
+        self._update_compare_overlay_geometry()
 
     def _tick_compare_reveal(self):
         if not self._compare_mode_active:
@@ -262,7 +354,7 @@ class ImageViewer(QWidget):
             return
         base_pos = base_item.pos()
         clip_item.setPos(base_pos)
-        overlay_item.setPos(0, 0)
+        overlay_item.setPos(self._compare_overlay_offset)
 
         progress = max(0.0, min(1.0, float(self._compare_reveal_progress)))
         split_ratio = max(0.0, min(1.0, float(self._compare_split_ratio)))
@@ -438,13 +530,10 @@ class ImageViewer(QWidget):
         if base_pixmap.isNull() or incoming_pixmap.isNull():
             return False
 
-        target_size = base_pixmap.size()
-        if incoming_pixmap.size() != target_size:
-            incoming_pixmap = incoming_pixmap.scaled(
-                target_size,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        incoming_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
+            base_pixmap.size(),
+            incoming_pixmap,
+        )
 
         self._compare_reveal_timer.stop()
         self._clear_compare_scene_items()
@@ -472,6 +561,7 @@ class ImageViewer(QWidget):
         self._compare_overlay_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self._compare_overlay_item.setZValue(3.0)
         self._compare_overlay_item.setParentItem(self._compare_clip_item)
+        self._compare_overlay_offset = overlay_offset
         self._compare_divider_item = None
 
         self._update_compare_overlay_geometry()
@@ -496,13 +586,12 @@ class ImageViewer(QWidget):
         if base_pixmap.isNull() or incoming_pixmap.isNull():
             return False
 
-        if incoming_pixmap.size() != base_pixmap.size():
-            incoming_pixmap = incoming_pixmap.scaled(
-                base_pixmap.size(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        incoming_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
+            base_pixmap.size(),
+            incoming_pixmap,
+        )
         overlay_item.setPixmap(incoming_pixmap)
+        self._compare_overlay_offset = overlay_offset
         self._compare_right_index = QPersistentModelIndex(incoming_proxy)
         self._compare_reveal_progress = 0.0
         self._update_compare_overlay_geometry()

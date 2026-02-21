@@ -28,6 +28,7 @@ _MAX_BARRIER_MS = 800
 
 # Extra ms added to longest duration for the stall watchdog.
 _STALL_TIMEOUT_MS = 1500
+_SYNC_DEBUG = False
 
 _SYNC_ICON_STYLE = """
     QLabel {
@@ -40,6 +41,11 @@ _SYNC_ICON_STYLE = """
         font-weight: bold;
     }
 """
+
+
+def _sync_log(message: str):
+    if _SYNC_DEBUG:
+        print(message)
 
 
 class _PlayerEntry:
@@ -326,9 +332,9 @@ class VideoSyncCoordinator(QObject):
         if (settled and all_ready) or timed_out:
             elapsed = (time.monotonic() - self._barrier_start_monotonic) * 1000.0
             if timed_out and not (settled and all_ready):
-                print(f"[SYNC] Barrier timed out after {elapsed:.0f}ms — firing anyway")
+                _sync_log(f"[SYNC] Barrier timed out after {elapsed:.0f}ms - firing anyway")
             else:
-                print(f"[SYNC] Barrier passed after {elapsed:.0f}ms")
+                _sync_log(f"[SYNC] Barrier passed after {elapsed:.0f}ms")
             self._poll_timer.stop()
             self._fire_play_all()
 
@@ -341,18 +347,21 @@ class VideoSyncCoordinator(QObject):
         sender = self.sender()
         idx = next((i for i, e in enumerate(self._entries) if e.player is sender), -1)
         already = self._entries[idx].finished if idx >= 0 else "?"
-        print(f"[SYNC] playback_finished player={idx} already_finished={already} state={self._state} count={self._finished_count+1}/{len(self._entries)}")
+        _sync_log(
+            f"[SYNC] playback_finished player={idx} already_finished={already} "
+            f"state={self._state} count={self._finished_count+1}/{len(self._entries)}"
+        )
         if self._state != self._STATE_RUNNING:
             return
         if idx >= 0 and self._entries[idx].finished:
-            print(f"[SYNC] duplicate finished from player={idx} — ignoring")
+            _sync_log(f"[SYNC] duplicate finished from player={idx} - ignoring")
             return
         self._finished_count += 1
         if idx >= 0:
             self._entries[idx].finished = True
 
         if self._finished_count >= len(self._entries):
-            print(f"[SYNC] all finished — beginning barrier")
+            _sync_log("[SYNC] all finished - beginning barrier")
             self._watchdog_timer.stop()
             self._state = self._STATE_BARRIER
             self._begin_barrier()
@@ -364,7 +373,7 @@ class VideoSyncCoordinator(QObject):
             return
         stalled = [e for e in self._entries if not e.finished]
         if stalled:
-            print(f"[SYNC] Watchdog: {len(stalled)} player(s) stalled — forcing restart")
+            _sync_log(f"[SYNC] Watchdog: {len(stalled)} player(s) stalled - forcing restart")
         self._state = self._STATE_BARRIER
         self._begin_barrier()
 
@@ -378,10 +387,10 @@ class VideoSyncCoordinator(QObject):
         for entry in self._entries:
             entry.finished = False
         self._play_started_monotonic = time.monotonic()
-        print(f"[SYNC] firing play on {len(self._entries)} players")
+        _sync_log(f"[SYNC] firing play on {len(self._entries)} players")
         for entry in self._entries:
             entry.fire_play()
         watchdog_ms = int(self._longest_duration_ms + _STALL_TIMEOUT_MS)
         if watchdog_ms > 0:
             self._watchdog_timer.start(watchdog_ms)
-        print(f"[SYNC] watchdog set for {watchdog_ms}ms")
+        _sync_log(f"[SYNC] watchdog set for {watchdog_ms}ms")

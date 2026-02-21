@@ -686,11 +686,30 @@ class FloatingViewerWindow(QWidget):
     def _show_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
         exit_compare_action = None
+        fit_mode_map = {}
         checker = getattr(self.viewer, "is_compare_mode_active", None)
         if callable(checker):
             try:
                 if checker():
                     exit_compare_action = menu.addAction("Exit compare mode")
+                    fit_mode_menu = menu.addMenu("Compare Fit Mode")
+                    current_mode = None
+                    get_mode = getattr(self.viewer, "get_compare_fit_mode", None)
+                    if callable(get_mode):
+                        try:
+                            current_mode = get_mode()
+                        except Exception:
+                            current_mode = None
+                    get_options = getattr(self.viewer, "get_compare_fit_mode_options", None)
+                    if callable(get_options):
+                        try:
+                            for mode, label in get_options():
+                                action = fit_mode_menu.addAction(str(label))
+                                action.setCheckable(True)
+                                action.setChecked(str(mode) == str(current_mode))
+                                fit_mode_map[action] = str(mode)
+                        except Exception:
+                            pass
                     menu.addSeparator()
             except Exception:
                 exit_compare_action = None
@@ -699,6 +718,13 @@ class FloatingViewerWindow(QWidget):
         selected = menu.exec(global_pos)
         if exit_compare_action is not None and selected is exit_compare_action:
             self.compare_exit_requested.emit(self.viewer)
+        elif selected in fit_mode_map:
+            setter = getattr(self.viewer, "set_compare_fit_mode", None)
+            if callable(setter):
+                try:
+                    setter(fit_mode_map[selected], persist=True)
+                except Exception:
+                    pass
         elif selected is sync_action:
             self.sync_video_requested.emit()
         elif selected is close_all_action:
