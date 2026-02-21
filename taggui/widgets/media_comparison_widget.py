@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QResizeEvent
 from PySide6.QtWidgets import QMenu, QPushButton, QWidget
 
@@ -22,11 +22,11 @@ except Exception:
 
 
 class MediaComparisonWidget(QWidget):
-    """Frameless A/B comparison window for image or video media."""
+    """Frameless comparison window for video media (2-way with optional 3rd layer)."""
 
     closing = Signal()
 
-    def __init__(self, model_a, model_b, proxy_image_list_model, parent=None):
+    def __init__(self, model_a, model_b, proxy_image_list_model, parent=None, model_c=None):
         super().__init__(
             parent,
             Qt.WindowType.Window | Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
@@ -37,9 +37,10 @@ class MediaComparisonWidget(QWidget):
         self.setMouseTracking(True)
 
         self.split_position = 0.5
+        self.split_position_y = 0.5
         self._closed = False
         self._manual_seek_active = False
-        self._audio_focus_side = None  # "a" or "b"
+        self._audio_focus_side = None  # "a", "b", or "c"
         self._window_drag_active = False
         self._window_drag_button = Qt.MouseButton.NoButton
         self._window_drag_offset = QPoint()
@@ -53,6 +54,7 @@ class MediaComparisonWidget(QWidget):
         self._close_button_margin_px = 8
         self._close_hover_zone_px = 56
         self._video_fit_transform_stamp: dict[int, tuple] = {}
+        self._proxy_image_list_model = proxy_image_list_model
         video_compare_fit_mode = str(
             settings.value(
                 'video_compare_fit_mode',
@@ -64,9 +66,17 @@ class MediaComparisonWidget(QWidget):
         if video_compare_fit_mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
             video_compare_fit_mode = COMPARE_FIT_MODE_PRESERVE
         self._video_compare_fit_mode = video_compare_fit_mode
+        self._video_multi_compare_enabled = bool(
+            settings.value(
+                'video_multi_compare_experimental',
+                defaultValue=DEFAULT_SETTINGS.get('video_multi_compare_experimental', True),
+                type=bool,
+            )
+        )
 
-        self._model_a = model_a
-        self._model_b = model_b
+        self._model_a = QPersistentModelIndex(model_a) if hasattr(model_a, "isValid") and model_a.isValid() else QPersistentModelIndex()
+        self._model_b = QPersistentModelIndex(model_b) if hasattr(model_b, "isValid") and model_b.isValid() else QPersistentModelIndex()
+        self._model_c = QPersistentModelIndex(model_c) if hasattr(model_c, "isValid") and model_c.isValid() else QPersistentModelIndex()
 
         self.viewer_a = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
         self.viewer_a.setParent(self)
@@ -83,9 +93,23 @@ class MediaComparisonWidget(QWidget):
         self.viewer_b.set_scene_padding(0)
         self.viewer_b.view.setBackgroundBrush(Qt.GlobalColor.black)
 
+        self.viewer_c = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
+        self._viewer_c_clip = QWidget(self)
+        self._viewer_c_clip.setObjectName("mediaComparisonClipBottom")
+        self._viewer_c_clip.setMouseTracking(True)
+        self._viewer_c_clip.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._viewer_c_clip.setStyleSheet("background-color: rgb(12, 12, 12);")
+        self.viewer_c.setParent(self._viewer_c_clip)
+        self.viewer_c.set_scene_padding(0)
+        self.viewer_c.view.setBackgroundBrush(Qt.GlobalColor.black)
+        self._viewer_c_clip.hide()
+
         self._divider_widget = QWidget(self)
         self._divider_widget.setStyleSheet("background-color: rgba(255, 255, 255, 220);")
         self._divider_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._divider_widget_h = QWidget(self)
+        self._divider_widget_h.setStyleSheet("background-color: rgba(255, 255, 255, 220);")
+        self._divider_widget_h.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self._close_button = QPushButton("X", self)
         self._close_button.setObjectName("floatingViewerClose")
@@ -122,7 +146,9 @@ class MediaComparisonWidget(QWidget):
 
         self.viewer_a.lower()
         self._viewer_b_clip.raise_()
+        self._viewer_c_clip.raise_()
         self._divider_widget.raise_()
+        self._divider_widget_h.raise_()
         self._apply_overlay_style()
         self._reposition_overlay_controls()
 
@@ -131,7 +157,93 @@ class MediaComparisonWidget(QWidget):
         QTimer.singleShot(0, self._deferred_load)
 
     def viewers(self) -> list[ImageViewer]:
-        return [self.viewer_a, self.viewer_b]
+        return [self.viewer_a, self.viewer_b, self.viewer_c]
+
+    def _active_viewers(self) -> list[ImageViewer]:
+        viewers = [self.viewer_a, self.viewer_b]
+        if self._has_third_layer():
+            viewers.append(self.viewer_c)
+        return viewers
+
+    def _normalize_proxy_index(self, index_like) -> QModelIndex:
+        try:
+            if index_like is None:
+                return QModelIndex()
+            if isinstance(index_like, QPersistentModelIndex):
+                if not index_like.isValid():
+                    return QModelIndex()
+                model = index_like.model()
+                row = index_like.row()
+                col = index_like.column()
+            else:
+                if not hasattr(index_like, "isValid") or not index_like.isValid():
+                    return QModelIndex()
+                model = index_like.model()
+                row = index_like.row()
+                col = index_like.column()
+            if model is None or model is not self._proxy_image_list_model:
+                return QModelIndex()
+            if row < 0 or row >= model.rowCount() or col < 0:
+                return QModelIndex()
+            return model.index(row, col)
+        except Exception:
+            return QModelIndex()
+
+    def _is_video_index(self, proxy_index: QModelIndex) -> bool:
+        if not proxy_index.isValid():
+            return False
+        try:
+            image = proxy_index.data(Qt.ItemDataRole.UserRole)
+            return bool(image is not None and bool(getattr(image, "is_video", False)))
+        except Exception:
+            return False
+
+    def _has_third_layer(self) -> bool:
+        return self._normalize_proxy_index(self._model_c).isValid()
+
+    def get_primary_proxy_index(self) -> QModelIndex:
+        return self._normalize_proxy_index(getattr(self.viewer_a, "proxy_image_index", QModelIndex()))
+
+    def get_video_multi_compare_enabled(self) -> bool:
+        return bool(getattr(self, "_video_multi_compare_enabled", False))
+
+    def set_video_multi_compare_enabled(self, enabled: bool, *, persist: bool = True) -> bool:
+        enabled = bool(enabled)
+        changed = enabled != self.get_video_multi_compare_enabled()
+        self._video_multi_compare_enabled = enabled
+        if persist:
+            settings.setValue("video_multi_compare_experimental", enabled)
+        return changed
+
+    def can_add_video_layer(self) -> bool:
+        if self._closed:
+            return False
+        if not self.get_video_multi_compare_enabled():
+            return False
+        if self._has_third_layer():
+            return False
+        return True
+
+    def add_video_layer(self, incoming_index) -> bool:
+        if not self.can_add_video_layer():
+            return False
+        incoming_proxy = self._normalize_proxy_index(incoming_index)
+        if not incoming_proxy.isValid() or not self._is_video_index(incoming_proxy):
+            return False
+        self._model_c = QPersistentModelIndex(incoming_proxy)
+        try:
+            self.viewer_c.load_image(incoming_proxy)
+        except Exception:
+            self._model_c = QPersistentModelIndex()
+            return False
+
+        self.split_position_y = max(0.0, min(1.0, float(self.split_position_y)))
+        self._refresh_event_filters()
+        self._apply_video_compare_fit_mode(force=True)
+        self._update_split_layout()
+        self._schedule_auto_sync()
+        self._update_split_from_global_cursor()
+        return True
 
     def get_video_compare_fit_mode(self) -> str:
         mode = str(getattr(self, "_video_compare_fit_mode", COMPARE_FIT_MODE_PRESERVE) or COMPARE_FIT_MODE_PRESERVE).strip().lower()
@@ -237,7 +349,7 @@ class MediaComparisonWidget(QWidget):
             return
 
     def _apply_video_compare_fit_mode(self, *, force: bool = False):
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             self._apply_video_compare_fit_mode_to_viewer(viewer)
             self._apply_video_compare_fit_transform_to_viewer(viewer, force=force)
 
@@ -288,10 +400,12 @@ class MediaComparisonWidget(QWidget):
 
     def _deferred_load(self):
         try:
-            if self._model_a is not None:
+            if self._normalize_proxy_index(self._model_a).isValid():
                 self.viewer_a.load_image(self._model_a)
-            if self._model_b is not None:
+            if self._normalize_proxy_index(self._model_b).isValid():
                 self.viewer_b.load_image(self._model_b)
+            if self._normalize_proxy_index(self._model_c).isValid():
+                self.viewer_c.load_image(self._model_c)
         except Exception:
             pass
         self._apply_video_compare_fit_mode(force=True)
@@ -308,8 +422,16 @@ class MediaComparisonWidget(QWidget):
                 yield widget
 
     def _refresh_event_filters(self):
-        widgets: list[QWidget] = [self, self.viewer_a, self._viewer_b_clip, self.viewer_b, self._close_button]
-        for viewer in (self.viewer_a, self.viewer_b):
+        widgets: list[QWidget] = [
+            self,
+            self.viewer_a,
+            self._viewer_b_clip,
+            self.viewer_b,
+            self._viewer_c_clip,
+            self.viewer_c,
+            self._close_button,
+        ]
+        for viewer in self.viewers():
             view = getattr(viewer, "view", None)
             if view is not None:
                 widgets.append(view)
@@ -331,14 +453,33 @@ class MediaComparisonWidget(QWidget):
         self.split_position = split
         self._update_split_layout()
 
+    def _set_split_position_y(self, split: float):
+        split = max(0.0, min(1.0, float(split)))
+        if abs(split - float(self.split_position_y)) < 1e-4:
+            return
+        self.split_position_y = split
+        self._update_split_layout()
+
     def _update_split_from_global_cursor(self):
         if self._window_drag_active or self._resize_active or self._pan_sync_active:
             return
-        if self.width() <= 0:
+        if self.width() <= 0 or self.height() <= 0:
             return
         local_pos = self.mapFromGlobal(QCursor.pos())
-        split = float(local_pos.x()) / float(max(1, self.width()))
-        self._set_split_position(split)
+        split_x = float(local_pos.x()) / float(max(1, self.width()))
+        split_x = max(0.0, min(1.0, float(split_x)))
+        changed = False
+        if abs(split_x - float(self.split_position)) >= 1e-4:
+            self.split_position = split_x
+            changed = True
+        if self._has_third_layer():
+            split_y = float(local_pos.y()) / float(max(1, self.height()))
+            split_y = max(0.0, min(1.0, float(split_y)))
+            if abs(split_y - float(self.split_position_y)) >= 1e-4:
+                self.split_position_y = split_y
+                changed = True
+        if changed:
+            self._update_split_layout()
 
     def _event_global_pos(self, event, watched: QWidget | None = None) -> QPoint:
         try:
@@ -371,7 +512,11 @@ class MediaComparisonWidget(QWidget):
         fit_mode_map = {}
         close_action = menu.addAction("Close comparison")
         resync_action = None
+        multi_compare_action = menu.addAction("Experimental: Allow 3-video compare")
+        multi_compare_action.setCheckable(True)
+        multi_compare_action.setChecked(self.get_video_multi_compare_enabled())
         if self._both_videos_ready():
+            menu.addSeparator()
             fit_mode_menu = menu.addMenu("Compare Fit Mode")
             current_mode = self.get_video_compare_fit_mode()
             for mode, label in self.get_video_compare_fit_mode_options():
@@ -392,6 +537,8 @@ class MediaComparisonWidget(QWidget):
         selected = menu.exec(global_pos)
         if selected is close_action:
             self.close()
+        elif selected is multi_compare_action:
+            self.set_video_multi_compare_enabled(not self.get_video_multi_compare_enabled(), persist=True)
         elif selected in fit_mode_map:
             self.set_video_compare_fit_mode(fit_mode_map[selected], persist=True)
         elif selected is resync_action:
@@ -681,27 +828,49 @@ class MediaComparisonWidget(QWidget):
         width = max(1, self.width())
         height = max(1, self.height())
         split_x = max(0, min(width, int(round(float(width) * float(self.split_position)))))
+        has_third = self._has_third_layer()
+        split_y = max(0, min(height, int(round(float(height) * float(self.split_position_y)))))
 
         self.viewer_a.setGeometry(0, 0, width, height)
         clip_width = max(0, width - split_x)
-        self._viewer_b_clip.setGeometry(split_x, 0, clip_width, height)
+        top_height = split_y if has_third else height
+        self._viewer_b_clip.setGeometry(split_x, 0, clip_width, top_height)
         self.viewer_b.setGeometry(-split_x, 0, width, height)
+        if has_third:
+            bottom_height = max(0, height - split_y)
+            self._viewer_c_clip.setGeometry(0, split_y, width, bottom_height)
+            self.viewer_c.setGeometry(0, -split_y, width, height)
+        else:
+            self._viewer_c_clip.setGeometry(0, 0, 0, 0)
+            self.viewer_c.setGeometry(0, 0, width, height)
 
-        if clip_width <= 0:
+        if clip_width <= 0 or top_height <= 0:
             self._viewer_b_clip.hide()
         else:
             self._viewer_b_clip.show()
             self._viewer_b_clip.raise_()
+        if has_third and (height - split_y) > 0:
+            self._viewer_c_clip.show()
+            self._viewer_c_clip.raise_()
+        else:
+            self._viewer_c_clip.hide()
 
         if split_x <= 0 or split_x >= width:
             self._divider_widget.hide()
         else:
-            self._divider_widget.setGeometry(max(0, split_x - 1), 0, 3, height)
+            divider_h = top_height if has_third else height
+            self._divider_widget.setGeometry(max(0, split_x - 1), 0, 3, max(1, divider_h))
             self._divider_widget.show()
             self._divider_widget.raise_()
+        if not has_third or split_y <= 0 or split_y >= height:
+            self._divider_widget_h.hide()
+        else:
+            self._divider_widget_h.setGeometry(0, max(0, split_y - 1), width, 3)
+            self._divider_widget_h.show()
+            self._divider_widget_h.raise_()
 
-        self._suppress_viewer_controls(self.viewer_a)
-        self._suppress_viewer_controls(self.viewer_b)
+        for viewer in self.viewers():
+            self._suppress_viewer_controls(viewer)
         self._apply_video_compare_fit_mode(force=False)
         self._position_shared_controls()
         self._reposition_overlay_controls()
@@ -719,7 +888,10 @@ class MediaComparisonWidget(QWidget):
             return False
 
     def _both_videos_ready(self) -> bool:
-        return self._is_video_ready(self.viewer_a) and self._is_video_ready(self.viewer_b)
+        viewers = self._active_viewers()
+        if len(viewers) < 2:
+            return False
+        return all(self._is_video_ready(viewer) for viewer in viewers)
 
     def _viewer_duration_ms(self, viewer: ImageViewer) -> float:
         try:
@@ -815,9 +987,10 @@ class MediaComparisonWidget(QWidget):
         self._apply_audio_focus_from_split()
 
     def _select_master_viewer(self):
-        dur_a = self._viewer_duration_ms(self.viewer_a)
-        dur_b = self._viewer_duration_ms(self.viewer_b)
-        selected = self.viewer_a if dur_a >= dur_b else self.viewer_b
+        candidates = self._active_viewers()
+        if not candidates:
+            return
+        selected = max(candidates, key=self._viewer_duration_ms)
         if self._master_viewer is selected:
             return
         self._connect_master_signals(selected)
@@ -849,7 +1022,7 @@ class MediaComparisonWidget(QWidget):
         return max(0.0, min(1.0, float(master_frame) / float(max_frame)))
 
     def _any_video_playing(self) -> bool:
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 if bool(getattr(viewer.video_player, "is_playing", False)):
                     return True
@@ -858,14 +1031,14 @@ class MediaComparisonWidget(QWidget):
         return False
 
     def _pause_both_players(self):
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 viewer.video_player.pause()
             except Exception:
                 continue
 
     def _play_both_players(self):
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 viewer.video_player.play()
             except Exception:
@@ -908,7 +1081,7 @@ class MediaComparisonWidget(QWidget):
 
         try:
             self._sync_coordinator = VideoSyncCoordinator(
-                [self.viewer_a, self.viewer_b],
+                self._active_viewers(),
                 parent=self,
                 show_sync_icon=False,
             )
@@ -954,7 +1127,7 @@ class MediaComparisonWidget(QWidget):
         self._manual_seek_active = True
 
         ratio = self._ratio_from_master_frame(int(master_frame))
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 target = self._frame_for_ratio(viewer, ratio)
                 viewer.video_player.seek_to_frame(target)
@@ -1017,7 +1190,7 @@ class MediaComparisonWidget(QWidget):
     def _on_shared_stop_requested(self):
         self._stop_video_sync()
         self._manual_seek_active = False
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 viewer.video_player.stop()
             except Exception:
@@ -1030,7 +1203,7 @@ class MediaComparisonWidget(QWidget):
             pass
 
     def _on_shared_speed_changed(self, speed: float):
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 viewer.video_player.set_playback_speed(float(speed))
             except Exception:
@@ -1038,7 +1211,7 @@ class MediaComparisonWidget(QWidget):
 
     def _on_shared_mute_toggled(self, muted: bool):
         if bool(muted):
-            for viewer in (self.viewer_a, self.viewer_b):
+            for viewer in self._active_viewers():
                 try:
                     viewer.video_player.set_muted(True)
                 except Exception:
@@ -1046,26 +1219,43 @@ class MediaComparisonWidget(QWidget):
             return
         self._apply_audio_focus_from_split()
 
-    def _resolve_audio_focus_side(self) -> str:
-        split = float(self.split_position)
-        if split > 0.5:
-            return "a"
-        if split < 0.5:
-            return "b"
-        # Exact 50/50 midpoint: keep previous focus to avoid jitter.
-        return self._audio_focus_side or "a"
+    def _resolve_audio_focus_viewer(self) -> tuple[str, ImageViewer]:
+        split_x = max(0.0, min(1.0, float(self.split_position)))
+        if not self._has_third_layer():
+            if split_x > 0.5:
+                return ("a", self.viewer_a)
+            if split_x < 0.5:
+                return ("b", self.viewer_b)
+            if self._audio_focus_side == "b":
+                return ("b", self.viewer_b)
+            return ("a", self.viewer_a)
+
+        split_y = max(0.0, min(1.0, float(self.split_position_y)))
+        areas = {
+            "a": split_x * split_y,
+            "b": (1.0 - split_x) * split_y,
+            "c": (1.0 - split_y),
+        }
+        best_side = max(areas, key=areas.get)
+        top_two = sorted(areas.values(), reverse=True)
+        if len(top_two) >= 2 and abs(top_two[0] - top_two[1]) < 1e-6:
+            if self._audio_focus_side in {"a", "b", "c"}:
+                best_side = str(self._audio_focus_side)
+        if best_side == "b":
+            return ("b", self.viewer_b)
+        if best_side == "c":
+            return ("c", self.viewer_c)
+        return ("a", self.viewer_a)
 
     def _apply_audio_side(self, side: str):
-        primary = self.viewer_a if side == "a" else self.viewer_b
-        secondary = self.viewer_b if side == "a" else self.viewer_a
-        try:
-            primary.video_player.set_muted(False)
-        except Exception:
-            pass
-        try:
-            secondary.video_player.set_muted(True)
-        except Exception:
-            pass
+        side = str(side or "a").lower()
+        for key, viewer in (("a", self.viewer_a), ("b", self.viewer_b), ("c", self.viewer_c)):
+            if key == "c" and not self._has_third_layer():
+                continue
+            try:
+                viewer.video_player.set_muted(key != side)
+            except Exception:
+                continue
 
     def _apply_audio_focus_from_split(self):
         if not self._both_videos_ready():
@@ -1078,7 +1268,7 @@ class MediaComparisonWidget(QWidget):
         except Exception:
             is_muted = True
         if is_muted:
-            for viewer in (self.viewer_a, self.viewer_b):
+            for viewer in self._active_viewers():
                 try:
                     viewer.video_player.set_muted(True)
                 except Exception:
@@ -1087,8 +1277,8 @@ class MediaComparisonWidget(QWidget):
             return
 
         # Audio focus follows the dominant side of the split.
-        # A for >50%, B for <50%; midpoint keeps prior side.
-        side = self._resolve_audio_focus_side()
+        # 2-way: A/B by dominant width. 3-way: A/B/C by dominant area.
+        side, _viewer = self._resolve_audio_focus_viewer()
         self._apply_audio_side(side)
         self._audio_focus_side = side
 
@@ -1123,9 +1313,13 @@ class MediaComparisonWidget(QWidget):
                 return self.viewer_b
             if current is self.viewer_b:
                 return self.viewer_b
+            if current is self._viewer_c_clip:
+                return self.viewer_c
+            if current is self.viewer_c:
+                return self.viewer_c
             current = current.parentWidget()
 
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self._active_viewers():
             try:
                 for surface in self._iter_video_surface_widgets(viewer):
                     if watched is surface:
@@ -1189,15 +1383,10 @@ class MediaComparisonWidget(QWidget):
         return source_viewer
 
     def _sync_pan_state_from_source(self, source_viewer: ImageViewer):
-        target_viewer = self.viewer_b if source_viewer is self.viewer_a else self.viewer_a
         try:
             source_scene = source_viewer.scene.sceneRect()
-            target_scene = target_viewer.scene.sceneRect()
             if source_scene.width() <= 0 or source_scene.height() <= 0:
                 return
-            if target_scene.width() <= 0 or target_scene.height() <= 0:
-                return
-
             source_viewport = source_viewer.view.viewport()
             source_center_scene = source_viewer.view.mapToScene(source_viewport.rect().center())
             rel_x = (float(source_center_scene.x()) - float(source_scene.left())) / float(source_scene.width())
@@ -1205,26 +1394,31 @@ class MediaComparisonWidget(QWidget):
             rel_x = max(0.0, min(1.0, rel_x))
             rel_y = max(0.0, min(1.0, rel_y))
 
-            target_center = QPointF(
-                float(target_scene.left()) + (float(target_scene.width()) * rel_x),
-                float(target_scene.top()) + (float(target_scene.height()) * rel_y),
-            )
-            target_viewer.view.centerOn(target_center)
-            try:
-                target_viewer.video_player.sync_external_surface_geometry()
-            except Exception:
-                pass
+            for target_viewer in self._active_viewers():
+                if target_viewer is source_viewer:
+                    continue
+                try:
+                    target_scene = target_viewer.scene.sceneRect()
+                    if target_scene.width() <= 0 or target_scene.height() <= 0:
+                        continue
+                    target_center = QPointF(
+                        float(target_scene.left()) + (float(target_scene.width()) * rel_x),
+                        float(target_scene.top()) + (float(target_scene.height()) * rel_y),
+                    )
+                    target_viewer.view.centerOn(target_center)
+                    try:
+                        target_viewer.video_player.sync_external_surface_geometry()
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
         except Exception:
             return
 
     def _sync_zoom_state_from_source(self, source_viewer: ImageViewer):
-        target_viewer = self.viewer_b if source_viewer is self.viewer_a else self.viewer_a
         try:
             source_scene = source_viewer.scene.sceneRect()
-            target_scene = target_viewer.scene.sceneRect()
             if source_scene.width() <= 0 or source_scene.height() <= 0:
-                return
-            if target_scene.width() <= 0 or target_scene.height() <= 0:
                 return
 
             source_viewport = source_viewer.view.viewport()
@@ -1235,42 +1429,49 @@ class MediaComparisonWidget(QWidget):
             rel_x = max(0.0, min(1.0, rel_x))
             rel_y = max(0.0, min(1.0, rel_y))
 
-            target_focus = QPointF(
-                float(target_scene.left()) + (float(target_scene.width()) * rel_x),
-                float(target_scene.top()) + (float(target_scene.height()) * rel_y),
-            )
-            target_focus = QPointF(
-                max(float(target_scene.left()), min(float(target_scene.right()), float(target_focus.x()))),
-                max(float(target_scene.top()), min(float(target_scene.bottom()), float(target_focus.y()))),
-            )
-
             mode = self.get_video_compare_fit_mode()
-            if mode == COMPARE_FIT_MODE_STRETCH:
-                source_transform = source_viewer.view.transform()
-                scale_x = abs(float(source_transform.m11()))
-                scale_y = abs(float(source_transform.m22()))
-                if scale_x <= 0.0 or scale_y <= 0.0:
+            for target_viewer in self._active_viewers():
+                if target_viewer is source_viewer:
+                    continue
+                target_scene = target_viewer.scene.sceneRect()
+                if target_scene.width() <= 0 or target_scene.height() <= 0:
+                    continue
+
+                target_focus = QPointF(
+                    float(target_scene.left()) + (float(target_scene.width()) * rel_x),
+                    float(target_scene.top()) + (float(target_scene.height()) * rel_y),
+                )
+                target_focus = QPointF(
+                    max(float(target_scene.left()), min(float(target_scene.right()), float(target_focus.x()))),
+                    max(float(target_scene.top()), min(float(target_scene.bottom()), float(target_focus.y()))),
+                )
+
+                if mode == COMPARE_FIT_MODE_STRETCH:
+                    source_transform = source_viewer.view.transform()
+                    scale_x = abs(float(source_transform.m11()))
+                    scale_y = abs(float(source_transform.m22()))
+                    if scale_x <= 0.0 or scale_y <= 0.0:
+                        return
+                    target_viewer.view.resetTransform()
+                    target_viewer.view.scale(float(scale_x), float(scale_y))
+                    target_viewer.view.centerOn(target_focus)
+                    target_viewer.is_zoom_to_fit = bool(getattr(source_viewer, "is_zoom_to_fit", False))
+                    try:
+                        target_viewer.video_player.sync_external_surface_geometry()
+                    except Exception:
+                        pass
+                    continue
+
+                target_scale = abs(float(source_viewer.view.transform().m11()))
+                if target_scale <= 0.0:
                     return
-                target_viewer.view.resetTransform()
-                target_viewer.view.scale(float(scale_x), float(scale_y))
-                target_viewer.view.centerOn(target_focus)
-                target_viewer.is_zoom_to_fit = bool(getattr(source_viewer, "is_zoom_to_fit", False))
-                try:
-                    target_viewer.video_player.sync_external_surface_geometry()
-                except Exception:
-                    pass
-                return
 
-            target_scale = abs(float(source_viewer.view.transform().m11()))
-            if target_scale <= 0.0:
-                return
-
-            target_viewer._apply_uniform_zoom_scale(
-                float(target_scale),
-                zoom_to_fit_state=bool(getattr(source_viewer, "is_zoom_to_fit", False)),
-                focus_scene_pos=target_focus,
-                anchor_view_pos=None,
-            )
+                target_viewer._apply_uniform_zoom_scale(
+                    float(target_scale),
+                    zoom_to_fit_state=bool(getattr(source_viewer, "is_zoom_to_fit", False)),
+                    focus_scene_pos=target_focus,
+                    anchor_view_pos=None,
+                )
         except Exception:
             return
 
@@ -1560,7 +1761,7 @@ class MediaComparisonWidget(QWidget):
         self._stop_video_sync()
         self._disconnect_master_signals()
 
-        for viewer in (self.viewer_a, self.viewer_b):
+        for viewer in self.viewers():
             try:
                 player = getattr(viewer, "video_player", None)
                 if player is not None:
@@ -1572,6 +1773,7 @@ class MediaComparisonWidget(QWidget):
         try:
             self.viewer_a.deleteLater()
             self.viewer_b.deleteLater()
+            self.viewer_c.deleteLater()
             controls = self._shared_controls_widget()
             self._shared_controls = None
             if controls is not None:

@@ -47,6 +47,7 @@ DEFAULT_SETTINGS = {
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
     'compare_fit_mode': 'preserve',  # preserve, fill, stretch (image compare overlay mode)
     'video_compare_fit_mode': 'preserve',  # preserve, fill, stretch (video compare window mode)
+    'video_multi_compare_experimental': True,  # Allow adding a 3rd video layer in compare window
     'video_playback_backend': 'qt_hybrid',  # qt_hybrid, mpv_experimental, vlc_experimental
     # GPU preferences
     'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving

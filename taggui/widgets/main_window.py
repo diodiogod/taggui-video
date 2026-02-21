@@ -1757,6 +1757,35 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 continue
 
+        for order, window in enumerate(list(getattr(self, "_comparison_windows", []))):
+            try:
+                if not window.isVisible():
+                    continue
+                rect = window.frameGeometry()
+                if not rect.contains(global_pos):
+                    continue
+                primary_index_getter = getattr(window, "get_primary_proxy_index", None)
+                target_viewer = getattr(window, "viewer_a", None)
+                if callable(primary_index_getter):
+                    try:
+                        primary_index = self._normalize_spawn_proxy_index(primary_index_getter())
+                        if not primary_index.isValid():
+                            continue
+                    except Exception:
+                        continue
+                key = f"comparison:{id(window)}"
+                candidates.append(CompareTargetCandidate(key=key, kind="floating", order=order))
+                candidate_map[key] = {
+                    "key": key,
+                    "kind": "comparison",
+                    "window": None,
+                    "comparison_window": window,
+                    "viewer": target_viewer,
+                    "global_rect": QRect(rect),
+                }
+            except RuntimeError:
+                continue
+
         if bool(getattr(self, "_main_viewer_visible", True)):
             main_rect = self._viewer_global_rect(self.image_viewer)
             if main_rect.isValid() and main_rect.contains(global_pos):
@@ -1838,7 +1867,20 @@ class MainWindow(QMainWindow):
 
         source_index = self._resolve_compare_source_proxy_index()
         target_index = self._resolve_compare_target_proxy_index(target.get("viewer"))
-        blocked = not self._is_compare_pair_allowed(source_index, target_index)
+        target_comparison = target.get("comparison_window")
+        if target_comparison is not None:
+            source_kind = self._media_kind_for_index(source_index)
+            blocked = source_kind != "video"
+            if not blocked:
+                can_add = getattr(target_comparison, "can_add_video_layer", None)
+                if callable(can_add):
+                    try:
+                        blocked = not bool(can_add())
+                    except Exception:
+                        blocked = True
+        else:
+            pair_kind = self._compare_pair_kind(source_index, target_index)
+            blocked = pair_kind is None
         state = self._compare_drag_coordinator.update_target(target.get("key"), blocked=blocked)
         self._compare_drag_last_target = target
         if state.get("state") == "none":
@@ -1880,22 +1922,49 @@ class MainWindow(QMainWindow):
         source_index = self._resolve_compare_source_proxy_index()
         target_index = self._resolve_compare_target_proxy_index(target_viewer)
         pair_kind = self._compare_pair_kind(source_index, target_index)
+        target_comparison = target.get("comparison_window")
+        if pair_kind is None and target_comparison is not None:
+            source_kind = self._media_kind_for_index(source_index)
+            if source_kind == "video":
+                pair_kind = "video"
+                primary_getter = getattr(target_comparison, "get_primary_proxy_index", None)
+                if callable(primary_getter):
+                    try:
+                        primary_index = self._normalize_spawn_proxy_index(primary_getter())
+                        if primary_index.isValid():
+                            target_index = primary_index
+                    except Exception:
+                        pass
         if pair_kind is None:
             self._clear_compare_drag_session()
             return False
 
         succeeded = False
+        merged_into_existing_video_compare = False
         if pair_kind == "video":
-            reference_widget = target_window if target_window is not None else target_viewer
-            try:
-                comp_window = self.spawn_media_comparison_from_indices(
-                    target_index,
-                    source_index,
-                    reference_widget=reference_widget,
+            if target_comparison is not None:
+                adder = getattr(target_comparison, "add_video_layer", None)
+                try:
+                    if callable(adder):
+                        succeeded = bool(adder(source_index))
+                        merged_into_existing_video_compare = bool(succeeded)
+                except Exception:
+                    succeeded = False
+            elif not succeeded:
+                reference_widget = (
+                    target_window
+                    if target_window is not None
+                    else (target.get("comparison_window") if target.get("comparison_window") is not None else target_viewer)
                 )
-                succeeded = comp_window is not None
-            except Exception:
-                succeeded = False
+                try:
+                    comp_window = self.spawn_media_comparison_from_indices(
+                        target_index,
+                        source_index,
+                        reference_widget=reference_widget,
+                    )
+                    succeeded = comp_window is not None
+                except Exception:
+                    succeeded = False
         else:
             checker = getattr(target_viewer, "is_compare_mode_active", None)
             try:
@@ -1930,7 +1999,11 @@ class MainWindow(QMainWindow):
                     pair_kind == "video" or source_window is not target_window
                 ):
                     windows_to_close.append(source_window)
-            if pair_kind == "video" and target_window is not None:
+            if (
+                pair_kind == "video"
+                and target_window is not None
+                and not merged_into_existing_video_compare
+            ):
                 windows_to_close.append(target_window)
 
             closed_ids = set()
