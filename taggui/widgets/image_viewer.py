@@ -293,6 +293,27 @@ class ImageViewer(QWidget):
             )
             return scaled, QPointF(0.0, 0.0)
 
+        if mode == COMPARE_FIT_MODE_PRESERVE:
+            scaled = incoming_pixmap.scaled(
+                base_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            offset_x = (float(base_size.width()) - float(scaled.width())) * 0.5
+            offset_y = (float(base_size.height()) - float(scaled.height())) * 0.5
+
+            # Compose onto an opaque matte so the background image does not
+            # bleed through preserve-mode bars while scrubbing compare split.
+            matte_color = self.view.palette().color(self.view.viewport().backgroundRole())
+            matte_color.setAlpha(255)
+            composed = QPixmap(base_size)
+            composed.fill(matte_color)
+            painter = QPainter(composed)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawPixmap(int(round(offset_x)), int(round(offset_y)), scaled)
+            painter.end()
+            return composed, QPointF(0.0, 0.0)
+
         aspect_mode = (
             Qt.AspectRatioMode.KeepAspectRatioByExpanding
             if mode == COMPARE_FIT_MODE_FILL
