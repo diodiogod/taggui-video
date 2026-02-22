@@ -1631,8 +1631,8 @@ class VideoPlayerWidget(QWidget):
 
         gl_widget.frame_painted.connect(_on_first_frame)
 
-        # Safety net: if the frame never arrives (e.g. video stays paused),
-        # reveal after a short timeout so the UI doesn't stay blank forever.
+        # Safety net: if frame_painted never arrives (widget is hidden until reveal),
+        # reveal after the requested delay so startup latency stays bounded.
         def _reveal_timeout():
             if not gl_widget._emit_frame_painted:
                 return  # already revealed via frame_painted
@@ -1643,7 +1643,8 @@ class VideoPlayerWidget(QWidget):
                 pass
             self._set_mpv_visible(True)
 
-        QTimer.singleShot(300, _reveal_timeout)
+        fallback_ms = max(40, int(delay_ms))
+        QTimer.singleShot(fallback_ms, _reveal_timeout)
 
     def _try_reveal_mpv_surface(self):
         if not self._mpv_pending_reveal:
