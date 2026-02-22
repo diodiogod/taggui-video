@@ -481,7 +481,8 @@ class VideoPlayerWidget(QWidget):
             self.mpv_geometry_timer.stop()
             try:
                 if self.mpv_widget:
-                    self.mpv_widget.setGeometry(-8, -8, 4, 4)
+                    self.mpv_widget.hide()
+                    self.mpv_widget.setGeometry(0, 0, 1, 1)
             except RuntimeError:
                 pass
             try:
@@ -496,6 +497,7 @@ class VideoPlayerWidget(QWidget):
             try:
                 if self.mpv_widget:
                     self.mpv_widget.raise_()
+                    self.mpv_widget.show()
             except RuntimeError:
                 pass
             try:
