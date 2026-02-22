@@ -1165,13 +1165,26 @@ class MainWindow(QMainWindow):
         """Show controls for one active viewer and hide controls for all others."""
         if active_viewer is None:
             return
+        global_pos = QCursor.pos()
         for viewer in self._iter_all_viewers():
             try:
                 if not getattr(viewer, '_is_video_loaded', False):
                     continue
                 if viewer is active_viewer:
                     if viewer.video_controls_auto_hide:
-                        viewer._show_controls_temporarily()
+                        pointer_in_zone = False
+                        try:
+                            pointer_in_zone = bool(viewer.is_pointer_in_controls_zone(global_pos))
+                        except Exception:
+                            pointer_in_zone = False
+                        if pointer_in_zone:
+                            viewer._show_controls_temporarily()
+                        else:
+                            viewer._controls_hide_timer.stop()
+                            viewer.video_controls.setVisible(False)
+                            viewer._controls_visible = False
+                            if hasattr(viewer, '_controls_hover_inside'):
+                                viewer._controls_hover_inside = False
                     else:
                         viewer._show_controls_permanent()
                 else:
@@ -1764,15 +1777,7 @@ class MainWindow(QMainWindow):
                 rect = window.frameGeometry()
                 if not rect.contains(global_pos):
                     continue
-                primary_index_getter = getattr(window, "get_primary_proxy_index", None)
                 target_viewer = getattr(window, "viewer_a", None)
-                if callable(primary_index_getter):
-                    try:
-                        primary_index = self._normalize_spawn_proxy_index(primary_index_getter())
-                        if not primary_index.isValid():
-                            continue
-                    except Exception:
-                        continue
                 key = f"comparison:{id(window)}"
                 candidates.append(CompareTargetCandidate(key=key, kind="floating", order=order))
                 candidate_map[key] = {

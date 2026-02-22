@@ -1282,9 +1282,7 @@ class ImageViewer(QWidget):
         """Apply control ownership/show-hide behavior from one hover position."""
         if viewer_pos is None or not self._is_video_loaded:
             return
-        controls_rect = self.video_controls.geometry()
-        detection_rect = controls_rect.adjusted(-20, -20, 20, 20)
-        in_controls_zone = detection_rect.contains(viewer_pos)
+        in_controls_zone = self._controls_detection_rect().contains(viewer_pos)
 
         if in_controls_zone:
             host = self._resolve_main_window_host()
@@ -1312,6 +1310,21 @@ class ImageViewer(QWidget):
                 self._show_controls_permanent()
         else:
             self._controls_hover_inside = False
+
+    def _controls_detection_rect(self) -> QRect:
+        controls_rect = self.video_controls.geometry()
+        return controls_rect.adjusted(-20, -20, 20, 20)
+
+    def is_pointer_in_controls_zone(self, global_pos: QPoint | None = None) -> bool:
+        if not self._is_video_loaded:
+            return False
+        try:
+            if global_pos is None:
+                global_pos = QCursor.pos()
+            viewer_pos = self.mapFromGlobal(global_pos)
+            return bool(self._controls_detection_rect().contains(viewer_pos))
+        except Exception:
+            return False
 
     def eventFilter(self, watched, event):
         self._refresh_video_surface_event_filters()

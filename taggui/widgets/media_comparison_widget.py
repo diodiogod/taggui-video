@@ -22,11 +22,11 @@ except Exception:
 
 
 class MediaComparisonWidget(QWidget):
-    """Frameless comparison window for video media (2-way with optional 3rd layer)."""
+    """Frameless comparison window for video media (2-way with optional 3rd/4th layers)."""
 
     closing = Signal()
 
-    def __init__(self, model_a, model_b, proxy_image_list_model, parent=None, model_c=None):
+    def __init__(self, model_a, model_b, proxy_image_list_model, parent=None, model_c=None, model_d=None):
         super().__init__(
             parent,
             Qt.WindowType.Window | Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
@@ -40,7 +40,7 @@ class MediaComparisonWidget(QWidget):
         self.split_position_y = 0.5
         self._closed = False
         self._manual_seek_active = False
-        self._audio_focus_side = None  # "a", "b", or "c"
+        self._audio_focus_side = None  # "a", "b", "c", or "d"
         self._window_drag_active = False
         self._window_drag_button = Qt.MouseButton.NoButton
         self._window_drag_offset = QPoint()
@@ -77,6 +77,7 @@ class MediaComparisonWidget(QWidget):
         self._model_a = QPersistentModelIndex(model_a) if hasattr(model_a, "isValid") and model_a.isValid() else QPersistentModelIndex()
         self._model_b = QPersistentModelIndex(model_b) if hasattr(model_b, "isValid") and model_b.isValid() else QPersistentModelIndex()
         self._model_c = QPersistentModelIndex(model_c) if hasattr(model_c, "isValid") and model_c.isValid() else QPersistentModelIndex()
+        self._model_d = QPersistentModelIndex(model_d) if hasattr(model_d, "isValid") and model_d.isValid() else QPersistentModelIndex()
 
         self.viewer_a = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
         self.viewer_a.setParent(self)
@@ -104,6 +105,17 @@ class MediaComparisonWidget(QWidget):
         self.viewer_c.view.setBackgroundBrush(Qt.GlobalColor.black)
         self._viewer_c_clip.hide()
 
+        self.viewer_d = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
+        self._viewer_d_clip = QWidget(self)
+        self._viewer_d_clip.setObjectName("mediaComparisonClipBottomRight")
+        self._viewer_d_clip.setMouseTracking(True)
+        self._viewer_d_clip.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._viewer_d_clip.setStyleSheet("background-color: rgb(12, 12, 12);")
+        self.viewer_d.setParent(self._viewer_d_clip)
+        self.viewer_d.set_scene_padding(0)
+        self.viewer_d.view.setBackgroundBrush(Qt.GlobalColor.black)
+        self._viewer_d_clip.hide()
+
         self._divider_widget = QWidget(self)
         self._divider_widget.setStyleSheet("background-color: rgba(255, 255, 255, 220);")
         self._divider_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -125,6 +137,19 @@ class MediaComparisonWidget(QWidget):
         self._shared_controls.set_loop_persistence_scope("compare_shared")
         self._shared_controls.hide()
         self._shared_controls_auto_geometry: QRect | None = None
+        always_show_controls = bool(
+            settings.value(
+                'video_always_show_controls',
+                defaultValue=DEFAULT_SETTINGS.get('video_always_show_controls', False),
+                type=bool,
+            )
+        )
+        self._shared_controls_auto_hide = not always_show_controls
+        self._shared_controls_visible = False
+        self._shared_controls_hover_inside = False
+        self._shared_controls_hide_timer = QTimer(self)
+        self._shared_controls_hide_timer.setSingleShot(True)
+        self._shared_controls_hide_timer.timeout.connect(self._hide_shared_controls)
         self._configure_shared_controls_ui()
         self._connect_shared_controls()
 
@@ -143,10 +168,15 @@ class MediaComparisonWidget(QWidget):
         self._refresh_filter_timer.setInterval(300)
         self._refresh_filter_timer.timeout.connect(self._refresh_event_filters)
         self._refresh_filter_timer.start()
+        self._split_cursor_sync_timer = QTimer(self)
+        self._split_cursor_sync_timer.setInterval(16)
+        self._split_cursor_sync_timer.timeout.connect(self._poll_split_cursor_sync)
+        self._split_cursor_sync_timer.start()
 
         self.viewer_a.lower()
         self._viewer_b_clip.raise_()
         self._viewer_c_clip.raise_()
+        self._viewer_d_clip.raise_()
         self._divider_widget.raise_()
         self._divider_widget_h.raise_()
         self._apply_overlay_style()
@@ -157,12 +187,14 @@ class MediaComparisonWidget(QWidget):
         QTimer.singleShot(0, self._deferred_load)
 
     def viewers(self) -> list[ImageViewer]:
-        return [self.viewer_a, self.viewer_b, self.viewer_c]
+        return [self.viewer_a, self.viewer_b, self.viewer_c, self.viewer_d]
 
     def _active_viewers(self) -> list[ImageViewer]:
         viewers = [self.viewer_a, self.viewer_b]
         if self._has_third_layer():
             viewers.append(self.viewer_c)
+        if self._has_fourth_layer():
+            viewers.append(self.viewer_d)
         return viewers
 
     def _normalize_proxy_index(self, index_like) -> QModelIndex:
@@ -201,6 +233,9 @@ class MediaComparisonWidget(QWidget):
     def _has_third_layer(self) -> bool:
         return self._normalize_proxy_index(self._model_c).isValid()
 
+    def _has_fourth_layer(self) -> bool:
+        return self._normalize_proxy_index(self._model_d).isValid()
+
     def get_primary_proxy_index(self) -> QModelIndex:
         return self._normalize_proxy_index(getattr(self.viewer_a, "proxy_image_index", QModelIndex()))
 
@@ -220,7 +255,7 @@ class MediaComparisonWidget(QWidget):
             return False
         if not self.get_video_multi_compare_enabled():
             return False
-        if self._has_third_layer():
+        if self._has_fourth_layer():
             return False
         return True
 
@@ -230,11 +265,22 @@ class MediaComparisonWidget(QWidget):
         incoming_proxy = self._normalize_proxy_index(incoming_index)
         if not incoming_proxy.isValid() or not self._is_video_index(incoming_proxy):
             return False
-        self._model_c = QPersistentModelIndex(incoming_proxy)
+        load_viewer = None
+        if not self._has_third_layer():
+            self._model_c = QPersistentModelIndex(incoming_proxy)
+            load_viewer = self.viewer_c
+        elif not self._has_fourth_layer():
+            self._model_d = QPersistentModelIndex(incoming_proxy)
+            load_viewer = self.viewer_d
+        if load_viewer is None:
+            return False
         try:
-            self.viewer_c.load_image(incoming_proxy)
+            load_viewer.load_image(incoming_proxy)
         except Exception:
-            self._model_c = QPersistentModelIndex()
+            if load_viewer is self.viewer_c:
+                self._model_c = QPersistentModelIndex()
+            elif load_viewer is self.viewer_d:
+                self._model_d = QPersistentModelIndex()
             return False
 
         self.split_position_y = max(0.0, min(1.0, float(self.split_position_y)))
@@ -385,6 +431,19 @@ class MediaComparisonWidget(QWidget):
                 widget.hide()
         controls.timeline_slider.setToolTip("Seek both compared videos")
 
+    def _stabilize_shared_controls_layout(self):
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return
+        # Re-apply compare-specific visibility after any internal layout/scaling pass.
+        self._configure_shared_controls_ui()
+        try:
+            stabilize = getattr(controls, "_stabilize_after_geometry_change", None)
+            if callable(stabilize):
+                stabilize()
+        except Exception:
+            pass
+
     def _connect_shared_controls(self):
         c = self._shared_controls_widget()
         if c is None:
@@ -406,6 +465,8 @@ class MediaComparisonWidget(QWidget):
                 self.viewer_b.load_image(self._model_b)
             if self._normalize_proxy_index(self._model_c).isValid():
                 self.viewer_c.load_image(self._model_c)
+            if self._normalize_proxy_index(self._model_d).isValid():
+                self.viewer_d.load_image(self._model_d)
         except Exception:
             pass
         self._apply_video_compare_fit_mode(force=True)
@@ -429,8 +490,13 @@ class MediaComparisonWidget(QWidget):
             self.viewer_b,
             self._viewer_c_clip,
             self.viewer_c,
+            self._viewer_d_clip,
+            self.viewer_d,
             self._close_button,
         ]
+        controls = self._shared_controls_widget()
+        if controls is not None:
+            widgets.append(controls)
         for viewer in self.viewers():
             view = getattr(viewer, "view", None)
             if view is not None:
@@ -481,6 +547,16 @@ class MediaComparisonWidget(QWidget):
         if changed:
             self._update_split_layout()
 
+    def _poll_split_cursor_sync(self):
+        if self._closed:
+            try:
+                self._split_cursor_sync_timer.stop()
+            except Exception:
+                pass
+            return
+        self._update_split_from_global_cursor()
+        self._update_overlay_hover_from_global_pos(QCursor.pos())
+
     def _event_global_pos(self, event, watched: QWidget | None = None) -> QPoint:
         try:
             return event.globalPosition().toPoint()
@@ -512,7 +588,7 @@ class MediaComparisonWidget(QWidget):
         fit_mode_map = {}
         close_action = menu.addAction("Close comparison")
         resync_action = None
-        multi_compare_action = menu.addAction("Experimental: Allow 3-video compare")
+        multi_compare_action = menu.addAction("Experimental: Allow 3/4-video compare")
         multi_compare_action.setCheckable(True)
         multi_compare_action.setChecked(self.get_video_multi_compare_enabled())
         if self._both_videos_ready():
@@ -650,6 +726,7 @@ class MediaComparisonWidget(QWidget):
     def _update_overlay_hover_from_global_pos(self, global_pos: QPoint):
         local_pos = self.mapFromGlobal(global_pos)
         self._show_close_button(self._is_in_close_hover_zone(local_pos))
+        self._update_shared_controls_hover_from_global_pos(global_pos)
 
     def _resize_zone_from_local_pos(self, local_pos: QPoint):
         if not self.rect().contains(local_pos):
@@ -783,26 +860,140 @@ class MediaComparisonWidget(QWidget):
 
     def _position_shared_controls(self):
         controls = self._shared_controls_widget()
-        if controls is None or not controls.isVisible():
+        if controls is None:
             return
-        width = max(1, self.width())
-        target_width = max(460, min(1100, int(width * 0.74)))
-        target_height = max(100, int(controls.sizeHint().height()))
-        x_pos = max(0, (width - target_width) // 2)
-        y_pos = 10
-        target_geometry = QRect(x_pos, y_pos, target_width, target_height)
+        target_geometry = self._shared_controls_target_geometry()
+        if not target_geometry.isValid():
+            return
         current_geometry = QRect(controls.geometry())
         # If user dragged/resized shared controls, do not snap back to defaults.
         if (
             self._shared_controls_auto_geometry is not None
             and current_geometry != self._shared_controls_auto_geometry
         ):
-            controls.raise_()
+            if controls.isVisible():
+                controls.raise_()
             return
+        geometry_changed = current_geometry != target_geometry
         if current_geometry != target_geometry:
             controls.setGeometry(target_geometry)
         self._shared_controls_auto_geometry = QRect(controls.geometry())
-        controls.raise_()
+        if geometry_changed:
+            self._stabilize_shared_controls_layout()
+        if controls.isVisible():
+            controls.raise_()
+
+    def _shared_controls_target_geometry(self) -> QRect:
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return QRect()
+        width = max(1, int(self.width()))
+        height = max(1, int(self.height()))
+        target_width = max(460, min(1100, int(width * 0.74)))
+        try:
+            target_width = max(target_width, int(controls.minimum_runtime_width()))
+        except Exception:
+            pass
+        target_width = max(1, min(width, int(target_width)))
+        target_height = max(100, int(controls.sizeHint().height()))
+        target_height = max(1, min(height, int(target_height)))
+        x_pos = max(0, (width - target_width) // 2)
+        y_pos = min(10, max(0, height - target_height))
+        return QRect(x_pos, y_pos, target_width, target_height)
+
+    def _shared_controls_detection_rect(self) -> QRect:
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return QRect()
+        rect = QRect(controls.geometry())
+        if rect.width() <= 1 or rect.height() <= 1:
+            if self._shared_controls_auto_geometry is not None:
+                rect = QRect(self._shared_controls_auto_geometry)
+        if rect.width() <= 1 or rect.height() <= 1:
+            rect = self._shared_controls_target_geometry()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return QRect()
+        return rect.adjusted(-20, -20, 20, 20)
+
+    def _show_shared_controls_temporarily(self):
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return
+        self._position_shared_controls()
+        try:
+            controls.show()
+            controls.raise_()
+        except Exception:
+            return
+        self._stabilize_shared_controls_layout()
+        self._shared_controls_visible = True
+        self._shared_controls_hide_timer.stop()
+        self._shared_controls_hide_timer.start(800)
+
+    def _show_shared_controls_permanent(self):
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return
+        self._shared_controls_hide_timer.stop()
+        self._position_shared_controls()
+        try:
+            controls.show()
+            controls.raise_()
+        except Exception:
+            return
+        self._stabilize_shared_controls_layout()
+        self._shared_controls_visible = True
+
+    def _hide_shared_controls(self, force: bool = False):
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return
+        if not force:
+            if not self._shared_controls_auto_hide:
+                return
+            try:
+                if bool(getattr(controls, "_resizing", False)) or bool(getattr(controls, "_dragging", False)):
+                    self._shared_controls_hide_timer.stop()
+                    self._shared_controls_hide_timer.start(250)
+                    return
+            except Exception:
+                pass
+            if self._pointer_over_shared_controls():
+                self._shared_controls_hide_timer.stop()
+                self._shared_controls_hide_timer.start(250)
+                return
+        self._shared_controls_hide_timer.stop()
+        try:
+            controls.hide()
+        except Exception:
+            return
+        self._shared_controls_visible = False
+        self._shared_controls_hover_inside = False
+
+    def _update_shared_controls_hover_from_global_pos(self, global_pos: QPoint):
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return
+        if not self._both_videos_ready():
+            self._hide_shared_controls(force=True)
+            return
+        if not self._shared_controls_auto_hide:
+            if self._shared_controls_visible:
+                self._position_shared_controls()
+            else:
+                self._show_shared_controls_permanent()
+            return
+        try:
+            local_pos = self.mapFromGlobal(global_pos)
+        except Exception:
+            local_pos = QPoint(-1, -1)
+        in_zone = self._shared_controls_detection_rect().contains(local_pos)
+        over_controls = self._pointer_over_shared_controls()
+        if in_zone or over_controls:
+            self._shared_controls_hover_inside = True
+            self._show_shared_controls_temporarily()
+        else:
+            self._shared_controls_hover_inside = False
 
     def _suppress_viewer_controls(self, viewer: ImageViewer):
         try:
@@ -829,6 +1020,7 @@ class MediaComparisonWidget(QWidget):
         height = max(1, self.height())
         split_x = max(0, min(width, int(round(float(width) * float(self.split_position)))))
         has_third = self._has_third_layer()
+        has_fourth = self._has_fourth_layer()
         split_y = max(0, min(height, int(round(float(height) * float(self.split_position_y)))))
 
         self.viewer_a.setGeometry(0, 0, width, height)
@@ -838,11 +1030,20 @@ class MediaComparisonWidget(QWidget):
         self.viewer_b.setGeometry(-split_x, 0, width, height)
         if has_third:
             bottom_height = max(0, height - split_y)
-            self._viewer_c_clip.setGeometry(0, split_y, width, bottom_height)
+            bottom_left_width = split_x if has_fourth else width
+            self._viewer_c_clip.setGeometry(0, split_y, bottom_left_width, bottom_height)
             self.viewer_c.setGeometry(0, -split_y, width, height)
         else:
             self._viewer_c_clip.setGeometry(0, 0, 0, 0)
             self.viewer_c.setGeometry(0, 0, width, height)
+        if has_fourth:
+            bottom_height = max(0, height - split_y)
+            right_width = max(0, width - split_x)
+            self._viewer_d_clip.setGeometry(split_x, split_y, right_width, bottom_height)
+            self.viewer_d.setGeometry(-split_x, -split_y, width, height)
+        else:
+            self._viewer_d_clip.setGeometry(0, 0, 0, 0)
+            self.viewer_d.setGeometry(0, 0, width, height)
 
         if clip_width <= 0 or top_height <= 0:
             self._viewer_b_clip.hide()
@@ -854,11 +1055,16 @@ class MediaComparisonWidget(QWidget):
             self._viewer_c_clip.raise_()
         else:
             self._viewer_c_clip.hide()
+        if has_fourth and (height - split_y) > 0 and (width - split_x) > 0:
+            self._viewer_d_clip.show()
+            self._viewer_d_clip.raise_()
+        else:
+            self._viewer_d_clip.hide()
 
         if split_x <= 0 or split_x >= width:
             self._divider_widget.hide()
         else:
-            divider_h = top_height if has_third else height
+            divider_h = height if has_fourth else (top_height if has_third else height)
             self._divider_widget.setGeometry(max(0, split_x - 1), 0, 3, max(1, divider_h))
             self._divider_widget.show()
             self._divider_widget.raise_()
@@ -982,8 +1188,11 @@ class MediaComparisonWidget(QWidget):
             controls.set_exact_frame_resolver(resolver if callable(resolver) else None)
 
         controls.set_playing(bool(getattr(player, "is_playing", False)))
-        controls.show()
         self._position_shared_controls()
+        if self._shared_controls_auto_hide:
+            self._hide_shared_controls(force=True)
+        else:
+            self._show_shared_controls_permanent()
         self._apply_audio_focus_from_split()
 
     def _select_master_viewer(self):
@@ -1231,26 +1440,38 @@ class MediaComparisonWidget(QWidget):
             return ("a", self.viewer_a)
 
         split_y = max(0.0, min(1.0, float(self.split_position_y)))
-        areas = {
-            "a": split_x * split_y,
-            "b": (1.0 - split_x) * split_y,
-            "c": (1.0 - split_y),
-        }
+        if not self._has_fourth_layer():
+            areas = {
+                "a": split_x * split_y,
+                "b": (1.0 - split_x) * split_y,
+                "c": (1.0 - split_y),
+            }
+        else:
+            areas = {
+                "a": split_x * split_y,
+                "b": (1.0 - split_x) * split_y,
+                "c": split_x * (1.0 - split_y),
+                "d": (1.0 - split_x) * (1.0 - split_y),
+            }
         best_side = max(areas, key=areas.get)
         top_two = sorted(areas.values(), reverse=True)
         if len(top_two) >= 2 and abs(top_two[0] - top_two[1]) < 1e-6:
-            if self._audio_focus_side in {"a", "b", "c"}:
+            if self._audio_focus_side in {"a", "b", "c", "d"}:
                 best_side = str(self._audio_focus_side)
         if best_side == "b":
             return ("b", self.viewer_b)
         if best_side == "c":
             return ("c", self.viewer_c)
+        if best_side == "d":
+            return ("d", self.viewer_d)
         return ("a", self.viewer_a)
 
     def _apply_audio_side(self, side: str):
         side = str(side or "a").lower()
-        for key, viewer in (("a", self.viewer_a), ("b", self.viewer_b), ("c", self.viewer_c)):
+        for key, viewer in (("a", self.viewer_a), ("b", self.viewer_b), ("c", self.viewer_c), ("d", self.viewer_d)):
             if key == "c" and not self._has_third_layer():
+                continue
+            if key == "d" and not self._has_fourth_layer():
                 continue
             try:
                 viewer.video_player.set_muted(key != side)
@@ -1277,7 +1498,7 @@ class MediaComparisonWidget(QWidget):
             return
 
         # Audio focus follows the dominant side of the split.
-        # 2-way: A/B by dominant width. 3-way: A/B/C by dominant area.
+        # 2-way: A/B by dominant width. 3/4-way: dominant quadrant/region area.
         side, _viewer = self._resolve_audio_focus_viewer()
         self._apply_audio_side(side)
         self._audio_focus_side = side
@@ -1317,6 +1538,10 @@ class MediaComparisonWidget(QWidget):
                 return self.viewer_c
             if current is self.viewer_c:
                 return self.viewer_c
+            if current is self._viewer_d_clip:
+                return self.viewer_d
+            if current is self.viewer_d:
+                return self.viewer_d
             current = current.parentWidget()
 
         for viewer in self._active_viewers():
@@ -1758,6 +1983,14 @@ class MediaComparisonWidget(QWidget):
         self._closed = True
         self._refresh_filter_timer.stop()
         self._sync_bootstrap_timer.stop()
+        try:
+            self._shared_controls_hide_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._split_cursor_sync_timer.stop()
+        except Exception:
+            pass
         self._stop_video_sync()
         self._disconnect_master_signals()
 
@@ -1774,6 +2007,7 @@ class MediaComparisonWidget(QWidget):
             self.viewer_a.deleteLater()
             self.viewer_b.deleteLater()
             self.viewer_c.deleteLater()
+            self.viewer_d.deleteLater()
             controls = self._shared_controls_widget()
             self._shared_controls = None
             if controls is not None:
