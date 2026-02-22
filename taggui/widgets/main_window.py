@@ -414,6 +414,10 @@ class MainWindow(QMainWindow):
         self._compare_drop_overlay = CompareDropFeedbackOverlay()
         self._compare_drag_source = None
         self._compare_drag_last_target = None
+        self._compare_drag_poll_timer = QTimer(self)
+        self._compare_drag_poll_timer.setSingleShot(False)
+        self._compare_drag_poll_timer.setInterval(16)
+        self._compare_drag_poll_timer.timeout.connect(self._poll_compare_drag_cursor)
         self._active_viewer = self.image_viewer
         self._sync_coordinator: VideoSyncCoordinator | None = None
         self._exclusive_video_controls_visibility = True
@@ -1810,6 +1814,10 @@ class MainWindow(QMainWindow):
         return candidate_map.get(best.key)
 
     def _clear_compare_drag_session(self):
+        try:
+            self._compare_drag_poll_timer.stop()
+        except Exception:
+            pass
         self._compare_drag_coordinator.cancel_drag()
         self._compare_drag_source = None
         self._compare_drag_last_target = None
@@ -1856,7 +1864,27 @@ class MainWindow(QMainWindow):
         self._compare_drag_last_target = None
         self._compare_drag_coordinator.begin_drag(key)
         self.update_compare_drag_cursor(global_pos if global_pos is not None else QCursor.pos())
+        try:
+            self._compare_drag_poll_timer.start()
+        except Exception:
+            pass
         return True
+
+    def _poll_compare_drag_cursor(self):
+        if not self._compare_drag_coordinator.active:
+            try:
+                self._compare_drag_poll_timer.stop()
+            except Exception:
+                pass
+            return
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
+        if source.get("kind") != "window":
+            try:
+                self._compare_drag_poll_timer.stop()
+            except Exception:
+                pass
+            return
+        self.update_compare_drag_cursor(QCursor.pos())
 
     def update_compare_drag_cursor(self, global_pos: QPoint | None):
         if not self._compare_drag_coordinator.active:
@@ -3463,22 +3491,18 @@ class MainWindow(QMainWindow):
 
         try:
             left_dock = self.image_list
+            right_dock_map = {
+                "image_tags_editor": self.image_tags_editor,
+                "all_tags_editor": self.all_tags_editor,
+                "auto_captioner": self.auto_captioner,
+                "auto_markings": self.auto_markings,
+            }
             right_docks = [
-                self.image_tags_editor,
-                self.all_tags_editor,
-                self.auto_captioner,
-                self.auto_markings,
+                right_dock_map["image_tags_editor"],
+                right_dock_map["all_tags_editor"],
+                right_dock_map["auto_captioner"],
+                right_dock_map["auto_markings"],
             ]
-
-            # Keep docking areas deterministic before visibility changes.
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
-            for dock in right_docks:
-                self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-
-            # Keep right-side tools grouped as tabs for easy switching.
-            self.tabifyDockWidget(self.image_tags_editor, self.all_tags_editor)
-            self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
-            self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
 
             visibility = {
             "media_viewer": {
@@ -3531,6 +3555,11 @@ class MainWindow(QMainWindow):
             },
             }[workspace_id]
 
+            # Keep docking areas deterministic before visibility changes.
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
+            for dock in right_docks:
+                self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
             toolbar = getattr(self.toolbar_manager, 'toolbar', None)
             if toolbar is not None:
                 toolbar.setVisible(visibility["toolbar"])
@@ -3540,6 +3569,26 @@ class MainWindow(QMainWindow):
             self.all_tags_editor.setVisible(visibility["all_tags_editor"])
             self.auto_captioner.setVisible(visibility["auto_captioner"])
             self.auto_markings.setVisible(visibility["auto_markings"])
+
+            # Keep right-side tools grouped as tabs, but only tabify widgets
+            # that are visible in this workspace to avoid unstable hidden-dock
+            # tabification paths in Qt on Windows.
+            visible_right_docks = [
+                dock
+                for key, dock in right_dock_map.items()
+                if bool(visibility.get(key, False))
+            ]
+            for dock in visible_right_docks:
+                try:
+                    if dock.isFloating():
+                        dock.setFloating(False)
+                except Exception:
+                    continue
+            for prev_dock, next_dock in zip(visible_right_docks, visible_right_docks[1:]):
+                try:
+                    self.tabifyDockWidget(prev_dock, next_dock)
+                except Exception:
+                    continue
 
             # Workspace-level main viewer behavior:
             # - Media Viewer always restores anchored viewer.

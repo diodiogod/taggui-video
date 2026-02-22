@@ -1,5 +1,10 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
+try:
+    from shiboken6 import isValid as _shiboken_is_valid
+except Exception:
+    _shiboken_is_valid = None
+
 
 class _SpawnDragArrowOverlay(QWidget):
     """Top-level transparent overlay that draws a directional drag arrow."""
@@ -468,8 +473,7 @@ class ImageListViewGeometryMixin:
 
             # Re-center selected item when switching to ListMode
             if previous_mode != QListView.ViewMode.ListMode:
-                QTimer.singleShot(0, lambda: self.scrollTo(
-                    self.currentIndex(), QAbstractItemView.ScrollHint.PositionAtCenter))
+                QTimer.singleShot(0, self._scroll_current_index_to_center_safe)
         else:
             # Small thumbnails: masonry grid view (Pinterest-style)
             self.use_masonry = True
@@ -1075,6 +1079,47 @@ class ImageListViewGeometryMixin:
             super().updateGeometries()
 
 
+    def _normalize_scroll_index(self, index) -> QModelIndex:
+        """Return a model-owned index safe to pass into Qt scroll APIs."""
+        model = self.model()
+        if model is None:
+            return QModelIndex()
+        if index is None or not hasattr(index, "isValid"):
+            return QModelIndex()
+        try:
+            persistent = QPersistentModelIndex(index)
+        except Exception:
+            return QModelIndex()
+        if not persistent.isValid():
+            return QModelIndex()
+        try:
+            # Reject stale indices from old/different models to avoid Qt crashes.
+            if persistent.model() is not model:
+                return QModelIndex()
+        except Exception:
+            return QModelIndex()
+        try:
+            row = int(persistent.row())
+            col = int(persistent.column())
+        except Exception:
+            return QModelIndex()
+        if row < 0 or row >= int(model.rowCount()):
+            return QModelIndex()
+        col_count = max(1, int(model.columnCount()))
+        if col < 0 or col >= col_count:
+            col = 0
+        try:
+            resolved = model.index(row, col)
+        except Exception:
+            return QModelIndex()
+        return resolved if resolved.isValid() else QModelIndex()
+
+    def _scroll_current_index_to_center_safe(self):
+        idx = self._normalize_scroll_index(self.currentIndex())
+        if not idx.isValid():
+            return
+        self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+
     def scrollTo(self, index, hint=None):
         """Override scrollTo to use masonry positions instead of Qt's row-based layout.
 
@@ -1086,21 +1131,36 @@ class ImageListViewGeometryMixin:
         if hint is None:
             hint = QAbstractItemView.ScrollHint.EnsureVisible
 
-        if not (self.use_masonry and self._masonry_items and index.isValid()):
-            super().scrollTo(index, hint)
+        if _shiboken_is_valid is not None:
+            try:
+                if not _shiboken_is_valid(self):
+                    return
+            except Exception:
+                return
+
+        safe_index = self._normalize_scroll_index(index)
+        if not safe_index.isValid():
+            return
+
+        if not (self.use_masonry and self._masonry_items):
+            try:
+                super().scrollTo(safe_index, hint)
+            except Exception:
+                # Ignore transient model/layout churn during view-mode switches.
+                pass
             return
 
         # Map proxy row → global index → masonry rect.
-        global_idx = index.row()
+        global_idx = safe_index.row()
         source_model = (
             self.model().sourceModel()
             if hasattr(self.model(), 'sourceModel')
             else self.model()
         )
         if source_model and hasattr(source_model, 'get_global_index_for_row'):
-            global_idx = source_model.get_global_index_for_row(index.row())
+            global_idx = source_model.get_global_index_for_row(safe_index.row())
         elif source_model and getattr(source_model, '_paginated_mode', False):
-            global_idx = self._map_row_to_global_index_safely(index.row())
+            global_idx = self._map_row_to_global_index_safely(safe_index.row())
 
         rect = self._get_masonry_item_rect(global_idx)
         if not rect.isValid():
