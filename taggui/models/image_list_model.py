@@ -2561,13 +2561,22 @@ class ImageListModel(QAbstractListModel):
             # Don't use thumbnail.availableSizes() - that returns the 512px generation size
             # Instead, calculate based on the actual image dimensions
             dimensions = image.crop.size().toTuple() if image.crop else image.dimensions
-            if not dimensions:
-                return QSize(self.image_list_image_width,
-                             self.image_list_image_width)
-            width, height = dimensions
+            base_width = int(self.image_list_image_width) if self.image_list_image_width else 512
+            if not dimensions or len(dimensions) < 2:
+                return QSize(base_width, base_width)
+
+            width, height = dimensions[0], dimensions[1]
+            try:
+                width = int(width) if width is not None else 0
+                height = int(height) if height is not None else 0
+            except Exception:
+                width, height = 0, 0
+
+            if width <= 0 or height <= 0:
+                return QSize(base_width, base_width)
+
             # Scale the dimensions to the image width.
-            return QSize(self.image_list_image_width,
-                         int(self.image_list_image_width * min(height / width, 3)))
+            return QSize(base_width, int(base_width * min(height / width, 3)))
         if role == Qt.ItemDataRole.ToolTipRole:
             path = image.path.relative_to(settings.value('directory_path', type=str))
             dimensions = f'{image.dimensions[0]}:{image.dimensions[1]}'

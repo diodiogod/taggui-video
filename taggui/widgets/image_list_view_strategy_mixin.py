@@ -567,7 +567,7 @@ class ImageListViewStrategyMixin:
             sb = self.verticalScrollBar()
         if source_model is None:
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-        if not (self._scrollbar_dragging and self._use_local_anchor_masonry(source_model)):
+        if not (self.use_masonry and self._scrollbar_dragging and self._use_local_anchor_masonry(source_model)):
             return False
         if self._strict_range_guard:
             return False
@@ -608,7 +608,7 @@ class ImageListViewStrategyMixin:
     def _on_scrollbar_slider_moved(self, position):
         """Track drag fraction in strict mode before Qt can clamp range."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-        if not (self._scrollbar_dragging and self._use_local_anchor_masonry(source_model)):
+        if not (self.use_masonry and self._scrollbar_dragging and self._use_local_anchor_masonry(source_model)):
             return
         baseline = self._strict_canonical_domain_max(source_model)
         pos = max(0, min(int(position), baseline))
@@ -618,7 +618,7 @@ class ImageListViewStrategyMixin:
     def _on_scrollbar_range_changed(self, _min_v, max_v):
         """Prevent strict drag range collapse caused by Qt relayout updates."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
-        if not (self._scrollbar_dragging and self._use_local_anchor_masonry(source_model)):
+        if not (self.use_masonry and self._scrollbar_dragging and self._use_local_anchor_masonry(source_model)):
             return
         baseline = max(1, int(getattr(self, "_drag_scroll_max_baseline", 0) or 0))
         if baseline > 1 and int(max_v) < baseline:

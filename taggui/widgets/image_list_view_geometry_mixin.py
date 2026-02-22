@@ -1087,25 +1087,32 @@ class ImageListViewGeometryMixin:
         if index is None or not hasattr(index, "isValid"):
             return QModelIndex()
         try:
-            persistent = QPersistentModelIndex(index)
-        except Exception:
-            return QModelIndex()
-        if not persistent.isValid():
-            return QModelIndex()
-        try:
-            # Reject stale indices from old/different models to avoid Qt crashes.
-            if persistent.model() is not model:
+            # Never construct QPersistentModelIndex from a possibly stale Qt index:
+            # this path has triggered native access violations during startup restore.
+            if not index.isValid():
                 return QModelIndex()
         except Exception:
             return QModelIndex()
         try:
-            row = int(persistent.row())
-            col = int(persistent.column())
+            # Reject stale indices from old/different models to avoid Qt crashes.
+            idx_model = index.model()
+            if idx_model is not model:
+                return QModelIndex()
         except Exception:
             return QModelIndex()
-        if row < 0 or row >= int(model.rowCount()):
+        try:
+            row = int(index.row())
+            col = int(index.column())
+        except Exception:
             return QModelIndex()
-        col_count = max(1, int(model.columnCount()))
+        try:
+            row_count = int(model.rowCount())
+            col_count = int(model.columnCount())
+        except Exception:
+            return QModelIndex()
+        if row < 0 or row >= row_count:
+            return QModelIndex()
+        col_count = max(1, col_count)
         if col < 0 or col >= col_count:
             col = 0
         try:
@@ -1142,8 +1149,20 @@ class ImageListViewGeometryMixin:
         if not safe_index.isValid():
             return
 
+        # During model reset/layout churn, skip Qt scroll calls to avoid transient
+        # C++ crashes from stale indices delivered by deferred restore callbacks.
+        if getattr(self, "_model_resetting", False):
+            return
+
         if not (self.use_masonry and self._masonry_items):
             try:
+                model = self.model()
+                if model is None:
+                    return
+                if safe_index.model() is not model:
+                    return
+                if safe_index.row() < 0 or safe_index.row() >= int(model.rowCount()):
+                    return
                 super().scrollTo(safe_index, hint)
             except Exception:
                 # Ignore transient model/layout churn during view-mode switches.

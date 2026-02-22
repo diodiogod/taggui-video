@@ -195,10 +195,16 @@ class ImageDelegate(QStyledItemDelegate):
                 # Regular icon mode (not masonry)
                 icon_size = parent_view.iconSize()
                 return QSize(icon_size.width() + 10, icon_size.height() + 10)
-        # In ListMode, height should match the icon height for proper scaling with zoom
-        icon_size = self.parent().iconSize()
-        # Use the icon height (width dimension is stretched) plus text padding
-        return QSize(400, icon_size.width() + 4)  # 400px width is arbitrary, height scales with icon
+
+            # In ListMode, keep a classic list row: thumbnail at left + text at right.
+            # Preserve zoom-driven row height while allowing style-driven width.
+            base_hint = super().sizeHint(option, index)
+            icon_size = parent_view.iconSize()
+            row_height = max(base_hint.height(), icon_size.width() + 4)
+            row_width = max(base_hint.width(), 320)
+            return QSize(row_width, row_height)
+
+        return super().sizeHint(option, index)
 
     def paint(self, painter, option, index):
         # Validate painter state before any painting operations
@@ -218,40 +224,48 @@ class ImageDelegate(QStyledItemDelegate):
         except (RuntimeError, AttributeError):
             return
 
-        # MASONRY/GRID PAINTING LOGIC
-        # Always paint the icon filling the entire rect provided by the layout.
-        # We ignore QListView.ViewMode because our masonry layout controls the rects.
-        
-        # 1. Paint selection/focus background
-        if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(option.rect, option.palette.highlight())
+        parent_view = self.parent() if isinstance(self.parent(), QListView) else None
+        list_mode = (
+            parent_view is not None
+            and parent_view.viewMode() == QListView.ViewMode.ListMode
+            and not (hasattr(parent_view, "use_masonry") and parent_view.use_masonry)
+        )
+
+        if list_mode:
+            # Use native delegate paint in list mode so thumbnail/text layout matches
+            # the classic TagGUI behavior (icon left, filename/tags on the right).
+            try:
+                list_option = QStyleOptionViewItem(option)
+                self.initStyleOption(list_option, index)
+                list_option.displayAlignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                list_option.decorationAlignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                list_option.textElideMode = Qt.TextElideMode.ElideRight
+                super().paint(painter, list_option, index)
+            except RuntimeError:
+                return
         else:
-            painter.fillRect(option.rect, option.palette.base())
+            # MASONRY/GRID PAINTING LOGIC
+            # Always paint the icon filling the entire rect provided by the layout.
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(option.rect, option.palette.highlight())
+            else:
+                painter.fillRect(option.rect, option.palette.base())
 
-        # 2. Paint the icon/thumbnail (DecorationRole)
-        try:
-            icon = index.data(Qt.ItemDataRole.DecorationRole)
-            if icon and not icon.isNull():
-                icon.paint(painter, option.rect, Qt.AlignmentFlag.AlignCenter)
-        except RuntimeError:
-            return
+            try:
+                icon = index.data(Qt.ItemDataRole.DecorationRole)
+                if icon and not icon.isNull():
+                    icon.paint(painter, option.rect, Qt.AlignmentFlag.AlignCenter)
+            except RuntimeError:
+                return
 
-        # 3. Paint text (if needed) - Overlay at bottom or tooltips?
-        # The original code painted text "after" the icon in ListMode, or "none" in IconMode.
-        # In masonry, we usually want just the image. The text is in the tooltip.
-        # If text overlay is desired, uncomment below:
-        # text = index.data(Qt.ItemDataRole.DisplayRole)
-        # if text:
-        #     ... text painting logic ...
-        
         # Paint custom labels if any
-            if painter.isActive():
-                p_index = QPersistentModelIndex(index)
-                if p_index.isValid() and p_index in self.labels:
-                    label_text = self.labels[p_index]
-                    painter.setBrush(QColor(255, 255, 255, 163))
-                    painter.drawRect(option.rect)
-                    painter.drawText(option.rect, label_text, Qt.AlignCenter)
+        if painter.isActive():
+            p_index = QPersistentModelIndex(index)
+            if p_index.isValid() and p_index in self.labels:
+                label_text = self.labels[p_index]
+                painter.setBrush(QColor(255, 255, 255, 163))
+                painter.drawRect(option.rect)
+                painter.drawText(option.rect, label_text, Qt.AlignCenter)
 
         # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)

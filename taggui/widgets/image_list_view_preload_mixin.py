@@ -249,6 +249,16 @@ class ImageListViewPreloadMixin:
     def _on_scrollbar_pressed(self):
         """Called when user starts dragging scrollbar."""
         import time
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+
+        # In plain List/Icon mode (non-masonry), keep native Qt scrollbar dragging.
+        # Do not enter masonry strict-domain drag handling.
+        if not self.use_masonry:
+            self._scrollbar_dragging = True
+            if source_model:
+                source_model._pause_thumbnail_loading = True
+            return
+
         self._scrollbar_dragging = True
         # Drag-jump must not change selected identity unless user clicks.
         locked = getattr(self, '_selected_global_index', None)
@@ -256,12 +266,11 @@ class ImageListViewPreloadMixin:
         # Keep lock long-lived; explicit click/keyboard re-anchor releases it.
         self._selected_global_lock_until = time.time() + 120.0
         # Cancel any running enrichment so it restarts scoped to the new location
-        source_model_pre = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        source_model_pre = source_model
         if source_model_pre and hasattr(source_model_pre, '_enrichment_cancelled'):
             source_model_pre._enrichment_cancelled.set()
         self._enrich_first_refresh_done = False
         sb = self.verticalScrollBar()
-        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
         old_max = max(1, int(sb.maximum()))
         old_pos = max(0, int(sb.sliderPosition()))
         strict_mode = self._use_local_anchor_masonry(source_model)
@@ -323,6 +332,18 @@ class ImageListViewPreloadMixin:
         """Called when user releases scrollbar."""
         import time
         self._scrollbar_dragging = False
+        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+
+        # In plain List/Icon mode (non-masonry), keep native Qt scrollbar behavior.
+        if not self.use_masonry:
+            self._last_stable_scroll_value = self.verticalScrollBar().value()
+            if source_model:
+                source_model._pause_thumbnail_loading = False
+            self.viewport().update()
+            self._idle_preload_timer.stop()
+            self._idle_preload_timer.start(100)
+            return
+
         # Keep lock through post-release relayout/page-load bursts.
         self._selected_global_lock_until = max(
             float(getattr(self, '_selected_global_lock_until', 0.0) or 0.0),
@@ -330,7 +351,6 @@ class ImageListViewPreloadMixin:
         )
         self._last_stable_scroll_value = self.verticalScrollBar().value()
         sb = self.verticalScrollBar()
-        source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
         strategy = self._get_masonry_strategy(source_model) if source_model else "full_compat"
         release_fraction = 0.0
         max_v = sb.maximum()

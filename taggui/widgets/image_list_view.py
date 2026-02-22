@@ -370,6 +370,10 @@ class ImageListView(
 
     def _should_prompt_page_jump_from_scroll_click(self, event) -> bool:
         """Return True when click is on scrollbar groove (not handle/buttons)."""
+        # Keep plain List mode native scrollbar interactions (track/page-step + drag).
+        if not getattr(self, "use_masonry", False):
+            return False
+
         sb = self.verticalScrollBar()
         if sb.maximum() <= 0:
             return False
