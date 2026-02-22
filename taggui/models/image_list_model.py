@@ -642,6 +642,7 @@ class ImageListModel(QAbstractListModel):
         self._page_load_order: list = []  # LRU tracking
         self._loading_pages: set = set()  # Pages currently being loaded
         self._page_load_lock = threading.RLock()
+        self._protected_page_window: tuple[int, int] | None = None
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
         self._sort_field = 'mtime'
@@ -1059,6 +1060,18 @@ class ImageListModel(QAbstractListModel):
         # print(f"[PAGE request] Requesting Page {page_num}")
         self._page_executor.submit(self._load_page_async, page_num)
 
+    def set_page_protection_window(self, start_page: int, end_page: int):
+        """Protect active page window from LRU eviction churn."""
+        try:
+            s = int(start_page)
+            e = int(end_page)
+        except Exception:
+            return
+        if s > e:
+            s, e = e, s
+        with self._page_load_lock:
+            self._protected_page_window = (s, e)
+
     def _load_page_sync(self, page_num: int):
         """Load a page synchronously (for initial load)."""
         if not self._db:
@@ -1318,13 +1331,39 @@ class ImageListModel(QAbstractListModel):
         """Evict old pages (called on main thread via QTimer)."""
         evicted_any = False
         with self._page_load_lock:
+            protected = getattr(self, "_protected_page_window", None)
+            if (
+                not isinstance(protected, tuple)
+                or len(protected) != 2
+                or not isinstance(protected[0], int)
+                or not isinstance(protected[1], int)
+            ):
+                protected = None
             while len(self._pages) > self.MAX_PAGES_IN_MEMORY:
-                oldest_page = self._page_load_order.pop(0)
-                if oldest_page in self._pages:
+                victim_order_idx = None
+                if protected is not None:
+                    p_start, p_end = protected
+                    for i, page_num in enumerate(self._page_load_order):
+                        if page_num in self._pages and not (p_start <= int(page_num) <= p_end):
+                            victim_order_idx = i
+                            break
+
+                if victim_order_idx is None:
+                    # Fallback: evict oldest valid page if all are protected or no hint exists.
+                    for i, page_num in enumerate(self._page_load_order):
+                        if page_num in self._pages:
+                            victim_order_idx = i
+                            break
+
+                if victim_order_idx is None:
+                    break
+
+                victim_page = self._page_load_order.pop(victim_order_idx)
+                if victim_page in self._pages:
                     # Cancel pending thumbnail loads for evicted page
-                    self._cancel_page_thumbnails(oldest_page)
-                    del self._pages[oldest_page]
-                    # print(f"[PAGE] Evicted page {oldest_page}, {len(self._pages)} pages remain")
+                    self._cancel_page_thumbnails(victim_page)
+                    del self._pages[victim_page]
+                    # print(f"[PAGE] Evicted page {victim_page}, {len(self._pages)} pages remain")
                     evicted_any = True
 
         # If pages were evicted, notify masonry that pages changed (avoid layoutChanged crash!)

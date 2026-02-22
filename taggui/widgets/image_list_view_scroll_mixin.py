@@ -565,6 +565,8 @@ class ImageListViewScrollMixin:
         start_page = max(0, current_page - buffer_pages)
         end_page = min((source_model._total_count + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE - 1,
                        current_page + buffer_pages)
+        if hasattr(source_model, 'set_page_protection_window'):
+            source_model.set_page_protection_window(start_page, end_page)
 
         # Trigger page loads for this range using DEBOUNCER
         if hasattr(source_model, 'ensure_pages_for_range'):

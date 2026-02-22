@@ -557,6 +557,19 @@ class ImageListViewPreloadMixin:
             self._low_queue = []       # Far buffer - load with low priority
             self._scroll_direction = None  # Track scroll direction for predictive loading
 
+        # Jumping across pages (e.g., drag release to distant region) can leave
+        # stale queue contents that keep preloading old far pages. Reset queue
+        # ownership when page changes significantly.
+        current_page = int(getattr(self, '_current_page', 0) or 0)
+        queue_anchor_page = getattr(self, '_queue_anchor_page', None)
+        if (queue_anchor_page is None) or (abs(int(queue_anchor_page) - current_page) > 1):
+            self._urgent_queue = []
+            self._high_queue = []
+            self._low_queue = []
+            self._pagination_preload_queue = []
+            self._pagination_loaded_items = set()
+        self._queue_anchor_page = current_page
+
         # Build multi-priority preload queues if empty OR if we scrolled far away
         # Check if current visible area overlaps with what's already queued
         needs_rebuild = not self._urgent_queue and not self._high_queue and not self._low_queue

@@ -149,7 +149,24 @@ class ImageListViewGeometryMixin:
             self._queue_building = False
             return
 
-        visible_indices = [item['index'] for item in visible_items]
+        # Ignore virtual spacer items (-2/-3) used by strict/windowed masonry.
+        # Using them here corrupts queue centering and can preload far pages.
+        visible_indices = []
+        for item in visible_items:
+            idx = item.get('index', -1)
+            if isinstance(idx, int) and 0 <= idx < total_count:
+                visible_indices.append(idx)
+
+        # If only spacers are visible (rare edge frames), fall back to current page.
+        if not visible_indices:
+            page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+            current_page = int(getattr(self, '_current_page', 0) or 0)
+            center_idx = max(0, min(total_count - 1, (current_page * page_size) + (page_size // 2)))
+            half_span = max(20, page_size // 12)
+            start = max(0, center_idx - half_span)
+            end = min(total_count - 1, center_idx + half_span)
+            visible_indices = list(range(start, end + 1))
+
         min_visible = min(visible_indices)
         max_visible = max(visible_indices)
         mid_visible = (min_visible + max_visible) // 2

@@ -1005,8 +1005,49 @@ class ImageListViewStrategyMixin:
                     self._check_and_enrich_loaded_pages()
                     return
 
+            # Prepend-extension guard: when pages are inserted above current
+            # window, masonry y-coordinates shift downward. Preserve viewport
+            # ownership by compensating scroll against a stable anchor item.
+            anchor_global = None
+            old_anchor_y = None
+            if strict_mode:
+                try:
+                    anchor_global = getattr(self, '_selected_global_index', None)
+                    if not (isinstance(anchor_global, int) and anchor_global >= 0):
+                        sb_val = int(self.verticalScrollBar().value())
+                        top_item = None
+                        for _it in (self._masonry_items or []):
+                            _idx = int(_it.get('index', -1))
+                            if _idx < 0:
+                                continue
+                            _y = int(_it.get('y', 0))
+                            if _y <= sb_val + 24:
+                                if top_item is None or _y > int(top_item.get('y', 0)):
+                                    top_item = _it
+                        if top_item is None and self._masonry_items:
+                            real_items = [it for it in self._masonry_items if int(it.get('index', -1)) >= 0]
+                            if real_items:
+                                top_item = min(real_items, key=lambda it: abs(int(it.get('y', 0)) - sb_val))
+                        if top_item is not None:
+                            anchor_global = int(top_item.get('index', -1))
+
+                    if isinstance(anchor_global, int) and anchor_global >= 0:
+                        old_map = getattr(self, '_masonry_index_map', None)
+                        old_item = old_map.get(anchor_global) if isinstance(old_map, dict) else None
+                        if old_item is None:
+                            for _it in (self._masonry_items or []):
+                                if int(_it.get('index', -1)) == anchor_global:
+                                    old_item = _it
+                                    break
+                        if old_item is not None:
+                            old_anchor_y = int(old_item.get('y', 0))
+                except Exception:
+                    anchor_global = None
+                    old_anchor_y = None
+
             # Try incremental extend for each new page
             extended = []
+            extended_up = False
             for page_num in sorted(new_pages):
                 if incremental.can_extend_down(page_num):
                     if self._try_incremental_extend(page_num, source_model, direction="down"):
@@ -1014,6 +1055,7 @@ class ImageListViewStrategyMixin:
                 elif incremental.can_extend_up(page_num):
                     if self._try_incremental_extend(page_num, source_model, direction="up"):
                         extended.append(page_num)
+                        extended_up = True
 
             if extended:
                 # Purge far pages from cache to respect memory limits
@@ -1022,6 +1064,26 @@ class ImageListViewStrategyMixin:
                 # Assemble items from cache (no worker needed)
                 self._masonry_items = incremental.assemble_items()
                 self._masonry_index_map = None
+                if strict_mode and extended_up and isinstance(anchor_global, int) and old_anchor_y is not None:
+                    try:
+                        new_anchor_item = None
+                        for _it in (self._masonry_items or []):
+                            if int(_it.get('index', -1)) == anchor_global:
+                                new_anchor_item = _it
+                                break
+                        if new_anchor_item is not None:
+                            new_anchor_y = int(new_anchor_item.get('y', 0))
+                            delta_y = new_anchor_y - int(old_anchor_y)
+                            if abs(delta_y) > 1:
+                                sb = self.verticalScrollBar()
+                                target_val = max(0, min(int(sb.value()) + int(delta_y), int(sb.maximum())))
+                                prev_block = sb.blockSignals(True)
+                                try:
+                                    sb.setValue(target_val)
+                                finally:
+                                    sb.blockSignals(prev_block)
+                    except Exception:
+                        pass
                 self.viewport().update()
                 self._check_and_enrich_loaded_pages()
                 return
