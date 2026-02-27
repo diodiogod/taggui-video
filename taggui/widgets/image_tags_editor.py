@@ -199,6 +199,7 @@ class ImageTagsEditor(QDockWidget):
         self.image_index = None
         self._pending_descriptive_tags: list[str] | None = None
         self._descriptive_dirty = False
+        self._descriptive_sync_delay_ms = 450
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
@@ -276,6 +277,9 @@ class ImageTagsEditor(QDockWidget):
         self.descriptive_text_edit.textChanged.connect(self.on_descriptive_text_changed)
         self.descriptive_text_edit.hide()
         self.descriptive_text_edit.installEventFilter(self)
+        self._descriptive_sync_timer = QTimer(self)
+        self._descriptive_sync_timer.setSingleShot(True)
+        self._descriptive_sync_timer.timeout.connect(self._apply_pending_descriptive_sync)
 
         self.token_count_label = QLabel()
         # A container widget is required to use a layout with a `QDockWidget`.
@@ -333,6 +337,16 @@ class ImageTagsEditor(QDockWidget):
             return text.split(self.tag_separator)
         return []
 
+    def _read_caption_text_from_disk(self, image: Image) -> str | None:
+        """Read the sidecar caption text exactly as stored on disk."""
+        text_file_path = image.path.with_suffix('.txt')
+        if not text_file_path.exists():
+            return None
+        try:
+            return text_file_path.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            return None
+
     def _apply_pending_descriptive_sync(self):
         """Apply staged descriptive-text edits to the tag list model."""
         if not self._descriptive_dirty or self._pending_descriptive_tags is None:
@@ -345,6 +359,8 @@ class ImageTagsEditor(QDockWidget):
 
     def _flush_descriptive_sync(self):
         """Force-apply staged descriptive edits immediately."""
+        if self._descriptive_sync_timer.isActive():
+            self._descriptive_sync_timer.stop()
         self._apply_pending_descriptive_sync()
 
     @Slot()
@@ -371,21 +387,38 @@ class ImageTagsEditor(QDockWidget):
         if image is None:
             self.image_tag_list_model.setStringList([])
             return
+        caption_text = self._read_caption_text_from_disk(image)
+        tags_from_source = (
+            self._tags_from_descriptive_text(caption_text)
+            if caption_text is not None
+            else image.tags
+        )
+        # Keep the in-memory image tags aligned with the sidecar source of truth.
+        if image.tags != tags_from_source:
+            image.tags = tags_from_source
         # If the string list already contains the image's tags, do not reload
         # them. This is the case when the tags are edited directly through the
         # image tags editor. Removing this check breaks the functionality of
         # reordering multiple tags at the same time because it gets interrupted
         # after one tag is moved.
         current_string_list = self.image_tag_list_model.stringList()
-        if current_string_list == image.tags:
+        if current_string_list == tags_from_source:
+            if self.descriptive_mode_checkbox.isChecked() and caption_text is not None:
+                self.descriptive_text_edit.blockSignals(True)
+                self.descriptive_text_edit.setPlainText(caption_text)
+                self.descriptive_text_edit.blockSignals(False)
             return
-        self.image_tag_list_model.setStringList(image.tags)
+        self.image_tag_list_model.setStringList(tags_from_source)
         self.count_tokens()
         self._pending_descriptive_tags = None
         self._descriptive_dirty = False
         # Update descriptive text if in descriptive mode
         if self.descriptive_mode_checkbox.isChecked():
-            tags_text = self.tag_separator.join(image.tags)
+            tags_text = (
+                caption_text
+                if caption_text is not None
+                else self.tag_separator.join(tags_from_source)
+            )
             self.descriptive_text_edit.blockSignals(True)
             self.descriptive_text_edit.setPlainText(tags_text)
             self.descriptive_text_edit.blockSignals(False)
@@ -417,10 +450,18 @@ class ImageTagsEditor(QDockWidget):
         if descriptive_mode:
             self._pending_descriptive_tags = None
             self._descriptive_dirty = False
+            self._descriptive_sync_timer.stop()
             # Switch to descriptive mode
-            # Convert tag list to comma-separated text
-            tags_text = self.tag_separator.join(
-                self.image_tag_list_model.stringList())
+            # Prefer exact sidecar caption text to avoid any model-order drift.
+            tags_text = self.tag_separator.join(self.image_tag_list_model.stringList())
+            if self.image_index and self.image_index.isValid():
+                proxy_index = self.proxy_image_list_model.mapFromSource(self.image_index)
+                image: Image = self.proxy_image_list_model.data(
+                    proxy_index, Qt.ItemDataRole.UserRole)
+                if image is not None:
+                    caption_text = self._read_caption_text_from_disk(image)
+                    if caption_text is not None:
+                        tags_text = caption_text
             # Block signals to avoid triggering textChanged
             self.descriptive_text_edit.blockSignals(True)
             self.descriptive_text_edit.setPlainText(tags_text)
@@ -457,6 +498,8 @@ class ImageTagsEditor(QDockWidget):
         tags = self._tags_from_descriptive_text(text)
         self._pending_descriptive_tags = tags
         self._descriptive_dirty = True
+        # Keep other caption views coherent while avoiding per-keystroke churn.
+        self._descriptive_sync_timer.start(self._descriptive_sync_delay_ms)
 
     def eventFilter(self, watched, event):
         if (watched is self.descriptive_text_edit

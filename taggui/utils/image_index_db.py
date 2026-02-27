@@ -885,7 +885,13 @@ class ImageIndexDB:
         try:
             with self._db_lock:
                 cursor = self.conn.cursor()
-                cursor.execute('SELECT tag FROM image_tags WHERE image_id = ?', (image_id,))
+                # Keep the original caption/tag sequence as inserted in DB.
+                # Without explicit ordering SQLite may return rows via index order
+                # (e.g. lexicographic tag order), which scrambles descriptive text.
+                cursor.execute(
+                    'SELECT tag FROM image_tags WHERE image_id = ? ORDER BY rowid ASC',
+                    (image_id,),
+                )
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f'Database tag query error: {e}')
@@ -909,7 +915,7 @@ class ImageIndexDB:
                     cursor.execute(f'''
                         SELECT image_id, tag FROM image_tags
                         WHERE image_id IN ({placeholders})
-                        ORDER BY image_id
+                        ORDER BY image_id, rowid
                     ''', tuple(batch))
 
                     for row in cursor.fetchall():
