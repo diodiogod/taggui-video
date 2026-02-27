@@ -34,6 +34,7 @@ class DescriptiveTextEdit(QPlainTextEdit):
         spell_check_enabled = settings.value('spell_check_enabled', defaultValue=True, type=bool)
         self.spell_highlighter = SpellHighlighter(self.document())
         self.spell_highlighter.set_enabled(spell_check_enabled)
+        self._spell_check_user_enabled = spell_check_enabled
 
         # Load custom dictionary from settings (stored as list, converted to set)
         custom_dict_list = settings.value('spell_check_custom_dictionary', [], type=list)
@@ -57,6 +58,15 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         # Non-blocking spell suggestion popup
         self._spell_popup = None
+
+        # Keep typing smooth on large prompts: suspend expensive spell highlighting
+        # while the user is actively typing, then re-enable shortly after idle.
+        self._typing_spell_resume_timer = QTimer(self)
+        self._typing_spell_resume_timer.setSingleShot(True)
+        self._typing_spell_resume_timer.timeout.connect(
+            self._resume_spell_highlighting_after_typing
+        )
+        self.textChanged.connect(self._on_text_changed_for_spell_performance)
 
         # Initialize zoom level from settings
         self.min_zoom = 50  # Percent
@@ -309,6 +319,21 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
         self._spell_popup = popup
 
+    def _on_text_changed_for_spell_performance(self):
+        if not self._spell_check_user_enabled:
+            return
+        if self.spell_highlighter.enabled:
+            # Suspend without rehighlighting now; resume once typing settles.
+            self.spell_highlighter.enabled = False
+        self._typing_spell_resume_timer.start(450)
+
+    def _resume_spell_highlighting_after_typing(self):
+        if not self._spell_check_user_enabled:
+            return
+        if not self.spell_highlighter.enabled:
+            self.spell_highlighter.enabled = True
+            self.spell_highlighter.rehighlight()
+
     def _replace_word_at_range(self, start: int, end: int, replacement: str):
         """Replace text in the given range with replacement."""
         cursor = self.textCursor()
@@ -461,7 +486,15 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
     def set_spell_check_enabled(self, enabled: bool):
         """Enable or disable spell checking."""
+        self._spell_check_user_enabled = enabled
+        self._typing_spell_resume_timer.stop()
         self.spell_highlighter.set_enabled(enabled)
+
+    def focusOutEvent(self, event):
+        # Ensure pending spell highlighting is applied when leaving the editor.
+        self._typing_spell_resume_timer.stop()
+        self._resume_spell_highlighting_after_typing()
+        super().focusOutEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
         """Handle Ctrl+scroll wheel for zooming text size."""
@@ -497,5 +530,6 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
     def cleanup(self):
         """Clean up resources before deletion."""
+        self._typing_spell_resume_timer.stop()
         if self.grammar_checker:
             self.grammar_checker.close()

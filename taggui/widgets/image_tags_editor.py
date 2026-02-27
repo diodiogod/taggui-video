@@ -1,6 +1,6 @@
-from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
+from PySide6.QtCore import (QEvent, QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
-from PySide6.QtGui import QKeyEvent, QIcon, QFont, QWheelEvent
+from PySide6.QtGui import QCloseEvent, QKeyEvent, QIcon, QFont, QWheelEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
                                QPushButton, QStyle, QToolButton, QVBoxLayout, QWidget)
@@ -197,6 +197,8 @@ class ImageTagsEditor(QDockWidget):
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.image_index = None
+        self._pending_descriptive_tags: list[str] | None = None
+        self._descriptive_dirty = False
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
@@ -273,6 +275,7 @@ class ImageTagsEditor(QDockWidget):
         self.descriptive_text_edit.setPlaceholderText('Enter descriptive text with commas...')
         self.descriptive_text_edit.textChanged.connect(self.on_descriptive_text_changed)
         self.descriptive_text_edit.hide()
+        self.descriptive_text_edit.installEventFilter(self)
 
         self.token_count_label = QLabel()
         # A container widget is required to use a layout with a `QDockWidget`.
@@ -312,8 +315,10 @@ class ImageTagsEditor(QDockWidget):
 
     @Slot()
     def count_tokens(self):
-        caption = self.tag_separator.join(
-            self.image_tag_list_model.stringList())
+        caption = self.tag_separator.join(self.image_tag_list_model.stringList())
+        self._set_token_count_from_caption(caption)
+
+    def _set_token_count_from_caption(self, caption: str):
         # Subtract 2 for the `<|startoftext|>` and `<|endoftext|>` tokens.
         caption_token_count = len(self.tokenizer(caption).input_ids) - 2
         if caption_token_count > MAX_TOKEN_COUNT:
@@ -322,6 +327,25 @@ class ImageTagsEditor(QDockWidget):
             self.token_count_label.setStyleSheet('')
         self.token_count_label.setText(f'{caption_token_count} / '
                                        f'{MAX_TOKEN_COUNT} Tokens')
+
+    def _tags_from_descriptive_text(self, text: str) -> list[str]:
+        if text:
+            return text.split(self.tag_separator)
+        return []
+
+    def _apply_pending_descriptive_sync(self):
+        """Apply staged descriptive-text edits to the tag list model."""
+        if not self._descriptive_dirty or self._pending_descriptive_tags is None:
+            return
+        tags = self._pending_descriptive_tags
+        self._pending_descriptive_tags = None
+        self._descriptive_dirty = False
+        if tags != self.image_tag_list_model.stringList():
+            self.image_tag_list_model.setStringList(tags)
+
+    def _flush_descriptive_sync(self):
+        """Force-apply staged descriptive edits immediately."""
+        self._apply_pending_descriptive_sync()
 
     @Slot()
     def select_first_tag(self):
@@ -337,6 +361,8 @@ class ImageTagsEditor(QDockWidget):
 
     @Slot()
     def load_image_tags(self, proxy_image_index: QModelIndex):
+        # Persist pending edits for the previous image before switching index.
+        self._flush_descriptive_sync()
         self.image_index = self.proxy_image_list_model.mapToSource(
             proxy_image_index)
         image: Image = self.proxy_image_list_model.data(
@@ -355,6 +381,8 @@ class ImageTagsEditor(QDockWidget):
             return
         self.image_tag_list_model.setStringList(image.tags)
         self.count_tokens()
+        self._pending_descriptive_tags = None
+        self._descriptive_dirty = False
         # Update descriptive text if in descriptive mode
         if self.descriptive_mode_checkbox.isChecked():
             tags_text = self.tag_separator.join(image.tags)
@@ -387,6 +415,8 @@ class ImageTagsEditor(QDockWidget):
     def toggle_display_mode(self, descriptive_mode: bool):
         """Switch between tag list view and descriptive text view."""
         if descriptive_mode:
+            self._pending_descriptive_tags = None
+            self._descriptive_dirty = False
             # Switch to descriptive mode
             # Convert tag list to comma-separated text
             tags_text = self.tag_separator.join(
@@ -406,12 +436,12 @@ class ImageTagsEditor(QDockWidget):
         else:
             # Switch to tag mode
             # Sync descriptive text back to tags before hiding
-            text = self.descriptive_text_edit.toPlainText()
-            if text:
-                tags = text.split(self.tag_separator)
-            else:
-                tags = []
-            self.image_tag_list_model.setStringList(tags)
+            self._flush_descriptive_sync()
+            tags = self._tags_from_descriptive_text(
+                self.descriptive_text_edit.toPlainText()
+            )
+            if tags != self.image_tag_list_model.stringList():
+                self.image_tag_list_model.setStringList(tags)
             # Hide text edit and grammar button, show tag list and input
             self.descriptive_text_edit.hide()
             self.grammar_check_button.hide()
@@ -420,15 +450,20 @@ class ImageTagsEditor(QDockWidget):
 
     @Slot()
     def on_descriptive_text_changed(self):
-        """Sync changes from descriptive text back to tag list model."""
+        """Stage descriptive text changes for later sync."""
         if not self.descriptive_mode_checkbox.isChecked():
             return
         text = self.descriptive_text_edit.toPlainText()
-        # Split by separator to get tags
-        # Don't strip or filter - preserve exact user input
-        if text:
-            tags = text.split(self.tag_separator)
-        else:
-            tags = []
-        # Update the model - this will trigger dataChanged and save to disk
-        self.image_tag_list_model.setStringList(tags)
+        tags = self._tags_from_descriptive_text(text)
+        self._pending_descriptive_tags = tags
+        self._descriptive_dirty = True
+
+    def eventFilter(self, watched, event):
+        if (watched is self.descriptive_text_edit
+                and event.type() == QEvent.Type.FocusOut):
+            self._flush_descriptive_sync()
+        return super().eventFilter(watched, event)
+
+    def closeEvent(self, event: QCloseEvent):
+        self._flush_descriptive_sync()
+        super().closeEvent(event)
