@@ -278,7 +278,15 @@ class ImageListViewPreloadMixin:
                 page_size = int(getattr(source_model, 'PAGE_SIZE', 0) or 0)
                 total_pages = max(1, (total_items + page_size - 1) // page_size) if page_size > 0 else 1
                 cur_page = int(getattr(self, '_current_page', 0) or 0)
-                if total_items > 0 and page_size > 0 and 0 <= cur_page < total_pages:
+                # For tiny datasets (2 pages or fewer), preserve the exact
+                # thumb position. Page-based quantization makes any drag inside
+                # page 0 snap back to the top as soon as the gesture starts.
+                if (
+                    total_items > 0
+                    and page_size > 0
+                    and total_pages > 2
+                    and 0 <= cur_page < total_pages
+                ):
                     # Item-based fraction for consistency with masonry coordinates.
                     ratio = max(0.0, min(1.0, (cur_page * page_size) / max(1, total_items)))
             except Exception:
@@ -358,6 +366,8 @@ class ImageListViewPreloadMixin:
             total_items = getattr(source_model, '_total_count', 0)
             if total_items > 0:
                 total_pages = max(1, (total_items + source_model.PAGE_SIZE - 1) // source_model.PAGE_SIZE)
+                precise_small_drag = strategy == "windowed_strict" and total_pages <= 2
+                raw_release_fraction = max(0.0, min(1.0, slider_pos / max(1, baseline_max)))
                 if strategy == "windowed_strict":
                     slider_target_page = self._strict_page_from_position(slider_pos, source_model)
                 else:
@@ -367,8 +377,12 @@ class ImageListViewPreloadMixin:
                     else:
                         slider_target_page = max(0, min(total_pages - 1, int(slider_target_page)))
                 if strategy == "windowed_strict":
-                    # Item-based fraction for consistency with masonry coordinates.
-                    release_fraction = max(0.0, min(1.0, (slider_target_page * source_model.PAGE_SIZE) / max(1, total_items)))
+                    if precise_small_drag:
+                        # Preserve exact drag position for tiny datasets.
+                        release_fraction = raw_release_fraction
+                    else:
+                        # Item-based fraction for consistency with masonry coordinates.
+                        release_fraction = max(0.0, min(1.0, (slider_target_page * source_model.PAGE_SIZE) / max(1, total_items)))
                 elif total_pages > 1:
                     release_fraction = slider_target_page / (total_pages - 1)
                 self._drag_target_page = slider_target_page
@@ -392,6 +406,12 @@ class ImageListViewPreloadMixin:
                 elif top_intent:
                     self._drag_release_anchor_idx = 0
                     self._stick_to_edge = "top"
+                elif precise_small_drag:
+                    self._drag_release_anchor_idx = max(
+                        0,
+                        min(total_items - 1, int(round(raw_release_fraction * (total_items - 1)))),
+                    )
+                    self._stick_to_edge = None
                 elif self._drag_target_page is not None and hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
                     page_anchor = max(0, int(self._drag_target_page))
                     self._drag_release_anchor_idx = max(0, min(total_items - 1, page_anchor * source_model.PAGE_SIZE))
@@ -415,8 +435,12 @@ class ImageListViewPreloadMixin:
                 if hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
                     self._current_page = self._drag_release_anchor_idx // source_model.PAGE_SIZE
                     # Lock owner briefly so async range updates cannot steal page ownership.
-                    self._release_page_lock_page = int(self._current_page)
-                    self._release_page_lock_until = time.time() + (4.0 if strategy == "windowed_strict" else 0.0)
+                    if precise_small_drag and not (bottom_intent or top_intent):
+                        self._release_page_lock_page = None
+                        self._release_page_lock_until = 0.0
+                    else:
+                        self._release_page_lock_page = int(self._current_page)
+                        self._release_page_lock_until = time.time() + (4.0 if strategy == "windowed_strict" else 0.0)
                     # Eagerly request the target window immediately on release so strict
                     # mode does not paint an empty "loading target" frame for long.
                     try:
@@ -459,6 +483,8 @@ class ImageListViewPreloadMixin:
                                 )
                         elif top_intent:
                             target_slider = 0
+                        elif precise_small_drag:
+                            target_slider = slider_pos
                         else:
                             target_slider = int(round(page_fraction * baseline_max))
                         sb.setRange(0, baseline_max)
