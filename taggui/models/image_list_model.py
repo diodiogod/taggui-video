@@ -1097,16 +1097,12 @@ class ImageListModel(QAbstractListModel):
             # Check for cancellation
             with self._page_load_lock:
                 if page_num not in self._loading_pages:
-                    # print(f"[ASYNC_LOAD] ABORT: Page {page_num} cancelled")
                     return
 
-            # print(f"[ASYNC_LOAD] Starting load for Page {page_num} (Thread: {threading.current_thread().name})")
             if not self._db:
-                # print(f"[ASYNC_LOAD] ABORT: No database connection for Page {page_num}")
                 return
 
             images = self._load_images_from_db(page_num)
-            # print(f"[ASYNC_LOAD] Loaded {len(images)} images from DB for Page {page_num}")
             self._store_page(page_num, images)
             # print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
 
@@ -1136,7 +1132,6 @@ class ImageListModel(QAbstractListModel):
             bindings=self._filter_bindings,
             random_seed=self._random_seed
         )
-
         images = []
         image_ids = [row['id'] for row in rows]
         tags_map = self._db.get_tags_for_images(image_ids)
@@ -1144,8 +1139,6 @@ class ImageListModel(QAbstractListModel):
         for row in rows:
             file_path = self._directory_path / row['file_name']
             img_id = row['id']
-            
-            # Get tags from DB map (much faster than file I/O)
             tags = tags_map.get(img_id, [])
 
             # Skip files that no longer exist on disk (deleted outside app
@@ -2287,6 +2280,15 @@ class ImageListModel(QAbstractListModel):
     def _flush_thumbnail_updates(self):
         """Emit batched dataChanged for all pending thumbnail updates."""
         if not self._pending_thumbnail_updates:
+            return
+
+        # In paginated masonry mode, never emit dataChanged for thumbnail updates.
+        # The custom paintEvent reads image.thumbnail directly on every viewport.update(),
+        # so dataChanged is redundant and harmful — it causes QSortFilterProxyModel to
+        # re-evaluate all 1274 rows and triggers QListView::doItemsLayout(), which iterates
+        # every row calling sizeHintForIndex(). That's 800ms-1300ms of frozen event loop.
+        if self._paginated_mode:
+            self._pending_thumbnail_updates.clear()
             return
 
         # Emit single dataChanged for contiguous ranges (more efficient than individual)
@@ -4340,7 +4342,6 @@ class ImageListModel(QAbstractListModel):
                 db = ImageIndexDB(directory_path)
                 if db.enabled:
                     # Small delay to let initial load finish completely
-                    import time
                     time.sleep(2.0)
                     db.backfill_missing_metadata(directory_path)
                     db.close()

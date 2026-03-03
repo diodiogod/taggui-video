@@ -25,9 +25,12 @@ class ImageListViewScrollMixin:
         # Just let the preload continue from where it left off
         # Queues will self-correct as items get loaded
 
-        # Trigger preload immediately (no delay)
+        # Delay preload slightly so a fast follow-up wheel event can arrive
+        # before the preload batch runs. start(0) fired synchronously on the
+        # same event-loop iteration, blocking the next scroll for ~100-200ms
+        # while QPixmap.fromImage() converted pending futures on the main thread.
         self._idle_preload_timer.stop()
-        self._idle_preload_timer.start(0)  # Immediate start - no delay
+        self._idle_preload_timer.start(150)  # 150ms grace window for next wheel tick
 
         # Ensure one repaint after wheel-scroll throttle ends. Without this,
         # the last throttled frame can leave viewport stale/blank until click.

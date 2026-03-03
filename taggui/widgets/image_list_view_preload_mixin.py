@@ -55,13 +55,11 @@ class ImageListViewPreloadMixin:
         try:
             # Verify model is still valid before updating UI
             if not self.model():
-                print(f"[MASONRY] Skipping UI update - model invalid")
                 return
-            
+
             # Allow empty items for buffered mode (to set scrollbar range)
-            if not self._masonry_items and not (hasattr(self.model(), 'sourceModel') and 
+            if not self._masonry_items and not (hasattr(self.model(), 'sourceModel') and
                                               getattr(self.model().sourceModel(), '_paginated_mode', False)):
-                print(f"[MASONRY] Skipping UI update - items empty (normal mode)")
                 return
 
             # Check if buffered pagination mode
@@ -79,9 +77,6 @@ class ImageListViewPreloadMixin:
                 self.updateGeometries()
                 # Force repaint to show new items (clears "stuck" persistence)
                 self.viewport().update()
-
-            # elapsed = (time.time() - t1) * 1000
-            # print(f"[{timestamp}] ✓ UI UPDATE DONE in {elapsed:.0f}ms")
         except Exception as e:
             print(f"[MASONRY] scheduleDelayedItemsLayout crashed: {e}")
             import traceback
@@ -599,15 +594,17 @@ class ImageListViewPreloadMixin:
         # Determine batch sizes based on scroll state
         if self._scrollbar_dragging or self._mouse_scrolling:
             # During active scrolling: prioritize visible and a tiny near-buffer.
-            # This reduces temporary empty spots while still keeping UI responsive.
-            urgent_batch = 10   # Visible items
-            high_batch = 3      # Small near-buffer
-            low_batch = 0       # Pause far buffer
+            urgent_batch = 10
+            high_batch = 3
+            low_batch = 0
         else:
-            # Idle state: Larger batches (6 workers can process these quickly)
-            urgent_batch = 20   # Moderate loading of visible
-            high_batch = 15     # Fast loading of near buffer
-            low_batch = 10      # Moderate loading of far buffer
+            # Post-scroll idle: keep batches small so the event loop stays
+            # responsive to a fast follow-up wheel event. QPixmap.fromImage()
+            # (called inside data(DecorationRole)) runs on the main thread and
+            # each call costs ~2-5ms; large batches sum to visible stutter.
+            urgent_batch = 8
+            high_batch = 6
+            low_batch = 4
 
         # Process queues in priority order
         def process_queue(queue, batch_size):
@@ -637,15 +634,14 @@ class ImageListViewPreloadMixin:
 
         # Continue preloading if any queue has items
         if self._urgent_queue or self._high_queue or self._low_queue:
-            # Adaptive cadence: slower during scroll to reduce main thread overhead
             if self._scrollbar_dragging or self._mouse_scrolling:
-                cadence = 45   # Faster refills during scroll
+                cadence = 45
             elif self._urgent_queue:
-                cadence = 30   # 30ms for urgent when idle (fast)
+                cadence = 50   # yield 50ms so wheel events can arrive between batches
             elif self._high_queue:
-                cadence = 50   # 50ms for high priority when idle
+                cadence = 80
             else:
-                cadence = 100  # 100ms for low priority
+                cadence = 120
             self._idle_preload_timer.start(cadence)
 
         # Evict thumbnails far from current view (keep VRAM under control)

@@ -356,7 +356,8 @@ class ImageListViewCalculationMixin:
                 return
 
             if source_model and hasattr(source_model, "_paginated_mode") and source_model._paginated_mode:
-                if not self._prepare_buffered_window_items(ctx):
+                _prep_ok = self._prepare_buffered_window_items(ctx)
+                if not _prep_ok:
                     return
             else:
                 self._log_flow("MASONRY", f"Calc start (normal mode): items={len(ctx.items_data)}")

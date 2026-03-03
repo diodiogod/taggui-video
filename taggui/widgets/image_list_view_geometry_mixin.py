@@ -845,7 +845,6 @@ class ImageListViewGeometryMixin:
         if self.use_masonry:
             if getattr(self, '_skip_next_resize_recalc', False):
                 self._skip_next_resize_recalc = False
-                print("[RESIZE] Skipped stale queued recalc after user click")
                 return
             import time
             if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
@@ -870,7 +869,6 @@ class ImageListViewGeometryMixin:
                 self._resize_anchor_page = None
                 self._resize_anchor_until = 0.0
 
-            print("[RESIZE] Window resize finished, recalculating masonry...")
             # In strict paginated mode, explicit page/global anchoring above is
             # more stable than recentering via possibly stale proxy row index.
             self._recenter_after_layout = not strict_paginated

@@ -1308,11 +1308,17 @@ class ImageIndexDB:
             print(f"[DB] Backfilling metadata for {len(rows)} images...")
             updates = []
             
-            for row in rows:
+            for i_row, row in enumerate(rows):
                 img_id = row[0]
                 file_name = row[1]
                 full_path = directory_path / file_name
-                
+
+                # Yield GIL every 10 files so the main thread's event loop stays
+                # responsive. Without this, 1000+ stat() calls hold the GIL for
+                # 1-2 seconds, freezing scroll input.
+                if i_row > 0 and i_row % 10 == 0:
+                    time.sleep(0.002)
+
                 try:
                     stat = full_path.stat()
                     size = stat.st_size
@@ -1320,7 +1326,7 @@ class ImageIndexDB:
                     # Standardize extension logic
                     suffix = full_path.suffix.lower()
                     ftype = suffix.lstrip('.') if suffix else ''
-                    
+
                     updates.append((size, ftype, ctime, img_id))
                 except (OSError, FileNotFoundError):
                     # File might have been deleted, skip or mark?

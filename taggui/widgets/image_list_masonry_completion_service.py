@@ -644,7 +644,7 @@ class MasonryCompletionService:
                         model_for_error._enrichment_paused.clear()
 
             QTimer.singleShot(0, apply_and_signal)
-        
+
             if not v._preload_complete:
                 v._idle_preload_timer.start(100)
 

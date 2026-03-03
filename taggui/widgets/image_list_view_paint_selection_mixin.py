@@ -52,7 +52,9 @@ class ImageListViewPaintSelectionMixin:
                 expanded_viewport = viewport_rect.adjusted(0, -buffer, 0, buffer)
 
                 # Use masonry layout to get only visible items (OPTIMIZATION!)
+                _t_vis0 = time.time()
                 visible_items = self._get_masonry_visible_items(expanded_viewport)
+                _t_vis1 = time.time()
 
                 # Keep page loading aligned with what is actually visible.
                 # Paint-time fallback exists only for blind-spot recovery during drag jumps.
@@ -342,15 +344,19 @@ class ImageListViewPaintSelectionMixin:
                     items_painted += 1
 
                 # Commit painted snapshot so click handler uses it.
-                # Also record the scroll offset used during this paint so the
-                # click handler can convert viewport coords correctly even if
-                # updateGeometries() changed the scroll value since this paint.
                 import time as _time_mod
                 self._painted_hit_regions = painted_hit_regions
                 self._painted_hit_regions_time = _time_mod.time()
                 self._painted_hit_regions_scroll_offset = scroll_offset
 
                 painter.end()
+
+                # Slow-frame diagnostic
+                _total_ms = (time.time() - paint_start) * 1000
+                if _total_ms > 16:
+                    _vis_ms = (_t_vis1 - _t_vis0) * 1000
+                    _draw_ms = _total_ms - _vis_ms - (_t_vis0 - paint_start) * 1000
+                    print(f"[PAINT-SLOW] {_total_ms:.0f}ms | vis_query={_vis_ms:.1f}ms draw={_draw_ms:.1f}ms items={items_painted}")
             except Exception as e:
                 # Catch any crashes during masonry painting to prevent segfaults
                 print(f"[PAINT ERROR] Masonry paint crashed: {e}")

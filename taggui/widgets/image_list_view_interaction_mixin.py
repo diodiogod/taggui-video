@@ -223,11 +223,7 @@ class ImageListViewInteractionMixin:
                         else:
                             index = src_idx
                         if index.isValid():
-                            _cur_scroll = int(self.verticalScrollBar().value())
-                            _snap_s = int(getattr(self, '_painted_hit_regions_scroll_offset', 0) or 0)
-                            _used_snap = painted and painted_age < 2.0
-                            _delta = _cur_scroll - _snap_s if _used_snap else 0
-                            print(f"[CLICK-HIT] global={clicked_global} proxy_row={index.row()} scroll={_cur_scroll} snap_scroll={_snap_s} delta={_delta} used_snap={_used_snap}")
+                            pass
                     else:
                         # If target page is not loaded yet, request it and ignore this click.
                         if hasattr(source_model, 'ensure_pages_for_range'):
