@@ -23,22 +23,15 @@ class ImageListViewCalculationMixin:
         source_model = self.model().sourceModel() if hasattr(self.model(), "sourceModel") else self.model()
         strategy = self._get_masonry_strategy(source_model) if source_model else "full_compat"
         strict_mode = strategy == "windowed_strict"
-        column_width = self.current_thumbnail_size
-        spacing = 2
-        viewport_width = self.viewport().width()
-        # viewport().width() is already the drawable area (excluding scrollbars),
-        # so only apply explicit masonry side padding here.
-        horizontal_padding = int(getattr(self, "_masonry_horizontal_padding", 0) or 0)
-        avail_width = viewport_width - horizontal_padding
-        num_columns = max(1, avail_width // (column_width + spacing))
+        metrics = self._get_masonry_column_metrics()
         return MasonryContext(
             source_model=source_model,
             strategy=strategy,
             strict_mode=strict_mode,
-            column_width=column_width,
-            spacing=spacing,
-            viewport_width=viewport_width,
-            num_columns=num_columns,
+            column_width=int(metrics["column_width"]),
+            spacing=int(metrics["spacing"]),
+            viewport_width=int(metrics["viewport_width"]),
+            num_columns=int(metrics["num_columns"]),
         )
 
     def _clear_enrichment_pause(self, source_model):
@@ -96,9 +89,9 @@ class ImageListViewCalculationMixin:
             if ctx.avg_h < 1:
                 ctx.avg_h = 100.0
 
-        horizontal_padding = int(getattr(self, "_masonry_horizontal_padding", 0) or 0)
-        ctx.avail_width = ctx.viewport_width - horizontal_padding
-        ctx.num_cols_est = max(1, ctx.avail_width // (ctx.column_width + ctx.spacing))
+        metrics = self._get_masonry_column_metrics()
+        ctx.avail_width = int(metrics["avail_width"])
+        ctx.num_cols_est = int(metrics["num_columns"])
 
         if ctx.strict_mode and (not ctx.full_layout_mode) and hasattr(source_model, "_pages"):
             loaded_pages_now = set(source_model._pages.keys())

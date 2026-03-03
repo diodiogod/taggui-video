@@ -12,6 +12,29 @@ class StrictScrollDomainService:
             return model.sourceModel()
         return model
 
+    def _get_column_metrics(self) -> dict[str, int]:
+        if hasattr(self._view, "_get_masonry_column_metrics"):
+            try:
+                return self._view._get_masonry_column_metrics()
+            except Exception:
+                pass
+        spacing = 2
+        viewport_width = max(1, int(self._view.viewport().width()))
+        col_w = max(16, int(self._view.current_thumbnail_size))
+        horizontal_padding = max(0, int(getattr(self._view, "_masonry_horizontal_padding", 0) or 0))
+        sb_width = max(15, int(self._view.verticalScrollBar().width() or 0))
+        avail_width = max(1, viewport_width - horizontal_padding - sb_width - 24)
+        num_cols = max(1, avail_width // (col_w + spacing))
+        return {
+            "column_width": col_w,
+            "spacing": spacing,
+            "viewport_width": viewport_width,
+            "horizontal_padding": horizontal_padding,
+            "scrollbar_width": sb_width,
+            "avail_width": avail_width,
+            "num_columns": num_cols,
+        }
+
     def get_strict_virtual_avg_height(self) -> float:
         """Return a stable virtual row height used by strict windowed masonry."""
         value = float(getattr(self._view, "_strict_virtual_avg_height", 0.0) or 0.0)
@@ -48,12 +71,8 @@ class StrictScrollDomainService:
             if total_items <= 0:
                 return max(1, int(self._view.verticalScrollBar().maximum()))
 
-            spacing = 2
-            viewport_width = max(1, int(self._view.viewport().width()))
-            col_w = max(16, int(self._view.current_thumbnail_size))
-            sb_width = self._view.verticalScrollBar().width() if self._view.verticalScrollBar().isVisible() else 15
-            avail_width = viewport_width - sb_width - 24
-            num_cols = max(1, avail_width // (col_w + spacing))
+            metrics = self._get_column_metrics()
+            num_cols = int(metrics["num_columns"])
 
             import math
             rows = max(1, math.ceil(total_items / num_cols))
@@ -104,14 +123,8 @@ class StrictScrollDomainService:
                 return max(1, int(self._view.verticalScrollBar().maximum()))
 
             import math
-            spacing = 2
-            viewport_width = max(1, int(self._view.viewport().width()))
-            col_w = max(16, int(self._view.current_thumbnail_size))
-            # Match masonry's column calculation (subtracts scrollbar + margins).
-            # Always assume scrollbar visible to prevent column count drift.
-            sb_width = self._view.verticalScrollBar().width() if self._view.verticalScrollBar().isVisible() else 15
-            avail_width = viewport_width - sb_width - 24
-            num_cols = max(1, avail_width // (col_w + spacing))
+            metrics = self._get_column_metrics()
+            num_cols = int(metrics["num_columns"])
             rows = max(1, math.ceil(total_items / num_cols))
             # Keep canonical domain aligned with the avg_h used to build masonry items.
             avg_h = float(getattr(self._view, "_strict_masonry_avg_h", 0.0) or 0.0)

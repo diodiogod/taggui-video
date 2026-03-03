@@ -68,18 +68,29 @@ class MasonryCompletionService:
             # 4. CALIBRATION & ESTIMATION
             avg_height = getattr(v, '_stable_avg_item_height', 100.0)
             import math
+            metrics = (
+                v._get_masonry_column_metrics()
+                if hasattr(v, "_get_masonry_column_metrics")
+                else None
+            )
+            if metrics:
+                column_width = int(metrics["column_width"])
+                spacing = int(metrics["spacing"])
+                num_columns = int(metrics["num_columns"])
+            else:
+                column_width = v.current_thumbnail_size
+                spacing = 2
+                horizontal_padding = int(getattr(v, "_masonry_horizontal_padding", 0) or 0)
+                sb_width = max(15, int(v.verticalScrollBar().width() or 0))
+                avail_w = v.viewport().width() - horizontal_padding - sb_width - 24
+                num_columns = max(1, avail_w // (column_width + spacing))
         
             if v._masonry_items:
                 # Real data refined average (row-based, not item-based).
                 # Dividing by item count severely underestimates virtual height in multi-column grids.
                 chunk_items = len([it for it in v._masonry_items if it.get('index', -1) >= 0])
                 if chunk_items > 0 and total_height_chunk > 0:
-                    column_width_for_avg = v.current_thumbnail_size
-                    spacing_for_avg = 2
-                    viewport_width_for_avg = v.viewport().width()
-                    horizontal_padding = int(getattr(v, "_masonry_horizontal_padding", 0) or 0)
-                    avail_w_for_avg = viewport_width_for_avg - horizontal_padding
-                    num_columns_for_avg = max(1, avail_w_for_avg // (column_width_for_avg + spacing_for_avg))
+                    num_columns_for_avg = max(1, int(num_columns))
                     chunk_rows = max(1, math.ceil(chunk_items / num_columns_for_avg))
                     if strict_mode:
                         # In strict/windowed mode, total_height_chunk includes the
@@ -123,15 +134,7 @@ class MasonryCompletionService:
             if math.isnan(avg_height):
                 avg_height = v._get_strict_virtual_avg_height() if strict_mode else 100.0
 
-            # Calculate actual columns to fix estimation error
-            # (Previously assumed 1 column, causing massive overestimation with many columns)
-            column_width = v.current_thumbnail_size
-            spacing = 2
-            viewport_width = v.viewport().width()
-            horizontal_padding = int(getattr(v, "_masonry_horizontal_padding", 0) or 0)
-            avail_w2 = viewport_width - horizontal_padding
-            num_columns = max(1, avail_w2 // (column_width + spacing))
-        
+            # Use the same stable column math as the worker/domain paths.
             estimated_rows = math.ceil(total_items / num_columns)
             v._masonry_total_height = int(estimated_rows * avg_height)
             v._masonry_total_height = max(v._masonry_total_height, estimated_rows * 10)

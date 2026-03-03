@@ -253,6 +253,19 @@ class ImageListViewInteractionMixin:
                     event.accept()
                     return
 
+                # A deliberate thumbnail click should override stale scroll-edge
+                # ownership from earlier top/bottom navigation. Otherwise the
+                # next resize can snap back to page 1 or the tail instead of
+                # recentering the clicked item.
+                self._stick_to_edge = None
+                self._pending_edge_snap = None
+                self._pending_edge_snap_until = 0.0
+                self._release_page_lock_page = None
+                self._release_page_lock_until = 0.0
+                self._drag_release_anchor_active = False
+                self._drag_release_anchor_idx = None
+                self._drag_release_anchor_until = 0.0
+
                 # Check modifiers
                 modifiers = event.modifiers()
 

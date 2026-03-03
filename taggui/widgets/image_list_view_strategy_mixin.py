@@ -46,14 +46,19 @@ class ImageListViewStrategyMixin:
             sb = self.verticalScrollBar()
             sb_val = int(sb.value())
             sb_max = int(sb.maximum())
-            near_bottom = sb_max > 0 and sb_val >= int(sb_max * 0.80)
-            near_top = sb_val <= 2
-            current_page = int(getattr(self, '_current_page', 0) or 0)
-            # Preserve edge intent through zoom/resize relayout.
-            if anchor_page >= last_page and (near_bottom or current_page >= max(0, last_page - 1)):
+            edge_tol = max(2, int(sb.singleStep()) + 8)
+            near_bottom = sb_max > 0 and sb_val >= max(0, sb_max - edge_tol)
+            near_top = sb_val <= edge_tol
+            # Preserve edge intent only when the viewport is physically near
+            # that edge right now. Being on page 0/last page is not enough;
+            # otherwise clicking image 200 on page 0 gets reinterpreted as
+            # "pin to top" and resize snaps back to page 1.
+            if anchor_page >= last_page and near_bottom:
                 self._stick_to_edge = "bottom"
-            elif anchor_page <= 0 and (near_top or current_page <= 1):
+            elif anchor_page <= 0 and near_top:
                 self._stick_to_edge = "top"
+            elif getattr(self, '_stick_to_edge', None) in {"top", "bottom"}:
+                self._stick_to_edge = None
         except Exception:
             pass
         # Do NOT set _release_page_lock here.  That lock snaps scroll to the
@@ -61,6 +66,35 @@ class ImageListViewStrategyMixin:
         # user's viewport position during zoom.  The resize anchor +
         # _ensure_selected_anchor_if_needed handle post-zoom centering instead.
         return True
+
+    def _get_masonry_column_metrics(self) -> dict[str, int]:
+        """Return stable width/column math shared by all masonry code paths."""
+        spacing = 2
+        column_width = max(16, int(getattr(self, "current_thumbnail_size", 0) or 16))
+        viewport_width = max(1, int(self.viewport().width()))
+        horizontal_padding = max(0, int(getattr(self, "_masonry_horizontal_padding", 0) or 0))
+        sb = self.verticalScrollBar()
+        try:
+            sb_width = int(sb.width())
+        except Exception:
+            sb_width = 0
+        # Reserve a stable scrollbar/gutter width even when the bar is hidden.
+        # This prevents relayout paths from flipping between adjacent column
+        # counts while the splitter or workspace width is near a threshold.
+        sb_width = max(15, sb_width)
+        avail_width = max(1, viewport_width - horizontal_padding - sb_width - 24)
+        num_columns = max(1, avail_width // (column_width + spacing))
+        content_width = max(column_width, (num_columns * (column_width + spacing)) - spacing)
+        return {
+            "column_width": column_width,
+            "spacing": spacing,
+            "viewport_width": viewport_width,
+            "horizontal_padding": horizontal_padding,
+            "scrollbar_width": sb_width,
+            "avail_width": avail_width,
+            "num_columns": num_columns,
+            "content_width": content_width,
+        }
 
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
@@ -781,12 +815,10 @@ class ImageListViewStrategyMixin:
             # Compute masonry synchronously
             page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
             total_items = int(getattr(source_model, '_total_count', 0) or 0)
-            col_w = self.current_thumbnail_size
-            spacing = 2
-            sb = self.verticalScrollBar()
-            sb_width = sb.width() if sb.isVisible() else 15
-            avail_width = self.viewport().width() - sb_width - 24
-            num_cols = max(1, avail_width // (col_w + spacing))
+            metrics = self._get_masonry_column_metrics()
+            col_w = int(metrics["column_width"])
+            spacing = int(metrics["spacing"])
+            num_cols = int(metrics["num_columns"])
 
             items_data = []
             for p in range(ws, we + 1):
