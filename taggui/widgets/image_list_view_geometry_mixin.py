@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from PySide6.QtCore import Property
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -100,24 +101,67 @@ class _DragIndicatorWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._transition_progress = 0.0
+
+    def get_transition_progress(self) -> float:
+        try:
+            return max(0.0, min(1.0, float(self._transition_progress)))
+        except Exception:
+            return 0.0
+
+    def set_transition_progress(self, value):
+        try:
+            progress = float(value)
+        except Exception:
+            progress = 0.0
+        progress = max(0.0, min(1.0, progress))
+        if abs(progress - float(getattr(self, "_transition_progress", 0.0) or 0.0)) <= 1e-4:
+            return
+        self._transition_progress = progress
+        self.update()
+
+    def reset_transition_progress(self):
+        self.set_transition_progress(0.0)
+
+    transitionProgress = Property(float, get_transition_progress, set_transition_progress)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        progress = self.get_transition_progress()
+
+        fill_fade_progress = min(1.0, max(0.0, progress / 0.24))
+        background_alpha = int(round(200 * max(0.0, 1.0 - fill_fade_progress)))
+        background_radius = max(2.0, 6.0 - (progress * 2.2))
+        border_alpha = max(64, int(round(255 - (progress * 185))))
+        border_width = max(0.55, 2.0 - (progress * 1.35))
+        border_radius = max(1.5, 5.0 - (progress * 1.8))
+        glow_alpha = max(0, int(round(100 * max(0.0, 1.0 - (progress * 1.7)))))
+        glow_width = max(0.0, 1.0 - (progress * 0.85))
+        glow_inset = 3 + int(round(progress * 2.0))
+        glow_radius = max(1.0, 3.0 - (progress * 1.5))
 
         # Semi-transparent dark background
-        painter.setBrush(QColor(40, 40, 40, 200))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(self.rect(), 6, 6)
+        if background_alpha > 0:
+            painter.setBrush(QColor(40, 40, 40, background_alpha))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(self.rect(), background_radius, background_radius)
 
         # Bright border
-        painter.setPen(QPen(QColor(100, 180, 255), 2))
+        border_pen = QPen(QColor(100, 180, 255, border_alpha))
+        border_pen.setWidthF(border_width)
+        painter.setPen(border_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 5, 5)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), border_radius, border_radius)
 
         # Inner glow
-        painter.setPen(QPen(QColor(150, 200, 255, 100), 1))
-        painter.drawRoundedRect(self.rect().adjusted(3, 3, -3, -3), 3, 3)
+        if glow_alpha > 0 and glow_width > 0.05:
+            glow_pen = QPen(QColor(150, 200, 255, glow_alpha))
+            glow_pen.setWidthF(glow_width)
+            painter.setPen(glow_pen)
+            glow_rect = self.rect().adjusted(glow_inset, glow_inset, -glow_inset, -glow_inset)
+            if glow_rect.width() > 0 and glow_rect.height() > 0:
+                painter.drawRoundedRect(glow_rect, glow_radius, glow_radius)
 
 
 class ImageListViewGeometryMixin:
@@ -543,20 +587,61 @@ class ImageListViewGeometryMixin:
     ):
         """Spawn one floating viewer from resolved proxy index."""
         if not live_index.isValid():
-            return
-        try:
-            self._flash_drag_drop_preview(source_pixmap)
-        except Exception:
-            pass
+            hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
+            if callable(hide_ghost):
+                hide_ghost()
+            return False
+        spawn_point = spawn_global_pos if spawn_global_pos is not None else QCursor.pos()
         main_window = self.window()
-        if main_window and hasattr(main_window, 'spawn_floating_viewer_at'):
-            try:
-                main_window.spawn_floating_viewer_at(
-                    target_index=live_index,
-                    spawn_global_pos=spawn_global_pos if spawn_global_pos is not None else QCursor.pos(),
-                )
-            except Exception as e:
-                print(f"[DRAG-SPAWN] Spawn warning: {e}")
+        if not (main_window and hasattr(main_window, 'spawn_floating_viewer_at')):
+            hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
+            if callable(hide_ghost):
+                hide_ghost()
+            return False
+
+        drag_spawn_size_fraction = 0.40
+        preview_started = False
+        try:
+            preview_rect = QRect()
+            if hasattr(main_window, "_get_initial_floating_size"):
+                try:
+                    spawn_w, spawn_h = main_window._get_initial_floating_size(
+                        live_index,
+                        aspect_ratio_override=None,
+                        size_fraction=drag_spawn_size_fraction,
+                    )
+                    preview_rect = QRect(
+                        spawn_point.x() - spawn_w // 2,
+                        spawn_point.y() - spawn_h // 2,
+                        spawn_w,
+                        spawn_h,
+                    )
+                except Exception:
+                    preview_rect = QRect()
+            if preview_rect.isValid():
+                try:
+                    preview_started = bool(
+                        self._flash_drag_drop_preview(
+                            preview_rect,
+                            fallback_size=self._pixmap_logical_size(source_pixmap),
+                        )
+                    )
+                except Exception:
+                    preview_started = False
+            main_window.spawn_floating_viewer_at(
+                target_index=live_index,
+                spawn_global_pos=spawn_point,
+                initial_size_fraction=drag_spawn_size_fraction,
+            )
+            return True
+        except Exception as e:
+            print(f"[DRAG-SPAWN] Spawn warning: {e}")
+            return False
+        finally:
+            if not preview_started:
+                hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
+                if callable(hide_ghost):
+                    hide_ghost()
 
     def _build_spawn_drag_source_pixmap(self, model_index: QModelIndex) -> QPixmap:
         """Build a best-effort thumbnail pixmap for drag ghost/preview."""
@@ -580,6 +665,23 @@ class ImageListViewGeometryMixin:
             source_pixmap.fill(Qt.GlobalColor.transparent)
         return source_pixmap
 
+    def _pixmap_logical_size(self, pixmap: QPixmap) -> QSize:
+        """Return display-space size for a pixmap, honoring device-pixel ratio."""
+        if pixmap is None or pixmap.isNull():
+            return QSize()
+        try:
+            logical_size = pixmap.deviceIndependentSize()
+            return QSize(
+                max(1, int(round(logical_size.width()))),
+                max(1, int(round(logical_size.height()))),
+            )
+        except Exception:
+            dpr = max(1.0, float(pixmap.devicePixelRatio() or 1.0))
+            return QSize(
+                max(1, int(round(pixmap.width() / dpr))),
+                max(1, int(round(pixmap.height() / dpr))),
+            )
+
     def _show_spawn_drag_ghost(self, model_index: QModelIndex):
         """Show drag indicator sized to match thumbnail."""
         if not model_index.isValid():
@@ -594,8 +696,15 @@ class ImageListViewGeometryMixin:
             self._spawn_drag_ghost_widget = ghost
 
         # Size to match the thumbnail
-        ghost.resize(source_pixmap.size())
-        self._spawn_drag_ghost_size = source_pixmap.size()
+        ghost_size = self._pixmap_logical_size(source_pixmap)
+        if not ghost_size.isValid():
+            ghost_size = source_pixmap.size()
+        ghost.resize(ghost_size)
+        self._spawn_drag_ghost_size = QSize(ghost_size)
+        try:
+            ghost.reset_transition_progress()
+        except Exception:
+            pass
         ghost.show()
         ghost.raise_()
         self._update_spawn_drag_ghost_pos()
@@ -617,6 +726,10 @@ class ImageListViewGeometryMixin:
     def _hide_spawn_drag_ghost(self):
         ghost = getattr(self, "_spawn_drag_ghost_widget", None)
         if ghost is not None:
+            try:
+                ghost.reset_transition_progress()
+            except Exception:
+                pass
             ghost.hide()
 
     def _show_spawn_drag_arrow(self, start_global: QPoint, end_global: QPoint):
@@ -645,7 +758,7 @@ class ImageListViewGeometryMixin:
     ):
         """Spawn directly at cursor from one explicit index (no Qt drag loop)."""
         if not model_index.isValid():
-            return
+            return False
         dragged_index = QPersistentModelIndex(model_index)
         dragged_path = None
         try:
@@ -657,7 +770,11 @@ class ImageListViewGeometryMixin:
         source_pixmap = self._build_spawn_drag_source_pixmap(model_index)
 
         live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
-        self._spawn_floating_from_drag_index(live_index, source_pixmap, spawn_global_pos=spawn_global_pos)
+        return self._spawn_floating_from_drag_index(
+            live_index,
+            source_pixmap,
+            spawn_global_pos=spawn_global_pos,
+        )
 
     def _start_spawn_drag_for_index(self, model_index: QModelIndex, supportedActions: Qt.DropAction):
         """Start drag/spawn flow from one explicit index (selection-independent)."""
@@ -730,69 +847,50 @@ class ImageListViewGeometryMixin:
         # Keep Qt override behavior, but route through explicit-index path.
         self._start_spawn_drag_for_index(indices[0], supportedActions)
 
-    def _flash_drag_drop_preview(self, pixmap: QPixmap):
-        """Show a short glow/fade animation at drop position using drag ghost."""
-        if pixmap is None or pixmap.isNull():
-            return
+    def _flash_drag_drop_preview(self, target_rect: QRect, fallback_size: QSize | None = None):
+        """Animate the current drag-frame overlay into the spawned viewer footprint."""
+        if not target_rect.isValid():
+            return False
 
         from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup
-        from PySide6.QtWidgets import QLabel, QGraphicsOpacityEffect
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
 
-        source_dpr = max(1.0, float(pixmap.devicePixelRatio() or 1.0))
-        try:
-            logical_size = pixmap.deviceIndependentSize()
-            source_logical_w = max(1, int(round(logical_size.width())))
-            source_logical_h = max(1, int(round(logical_size.height())))
-        except Exception:
-            source_logical_w = max(1, int(round(pixmap.width() / source_dpr)))
-            source_logical_h = max(1, int(round(pixmap.height() / source_dpr)))
+        overlay = getattr(self, "_spawn_drag_ghost_widget", None)
+        overlay_owned = False
+        start_rect = QRect()
+        if overlay is not None:
+            try:
+                if overlay.isVisible():
+                    start_rect = QRect(overlay.geometry())
+            except RuntimeError:
+                overlay = None
+                start_rect = QRect()
+        if overlay is None:
+            overlay = _DragIndicatorWidget(None)
+            overlay_owned = True
 
-        frame_inset = 2
-        framed_logical_w = source_logical_w + (frame_inset * 2)
-        framed_logical_h = source_logical_h + (frame_inset * 2)
-        framed_pixmap = QPixmap(
-            max(1, int(round(framed_logical_w * source_dpr))),
-            max(1, int(round(framed_logical_h * source_dpr))),
-        )
-        framed_pixmap.setDevicePixelRatio(source_dpr)
-        framed_pixmap.fill(Qt.GlobalColor.transparent)
-        framed_rect = QRect(0, 0, framed_logical_w, framed_logical_h)
-        framed_painter = QPainter(framed_pixmap)
-        framed_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        framed_painter.drawPixmap(frame_inset, frame_inset, pixmap)
-        framed_painter.setPen(QPen(QColor(255, 255, 255, 180), 1))
-        framed_painter.drawRect(framed_rect.adjusted(0, 0, -1, -1))
-        framed_painter.end()
+        if not start_rect.isValid():
+            start_size = fallback_size if isinstance(fallback_size, QSize) else QSize()
+            start_w = max(1, int(start_size.width()))
+            start_h = max(1, int(start_size.height()))
+            if start_w <= 1 and start_h <= 1:
+                start_w = max(40, min(target_rect.width(), 96))
+                start_h = max(40, min(target_rect.height(), 96))
+            center_pos = target_rect.center()
+            start_rect = QRect(
+                center_pos.x() - start_w // 2,
+                center_pos.y() - start_h // 2,
+                start_w,
+                start_h,
+            )
+            overlay.setGeometry(start_rect)
 
-        overlay = QLabel(
-            None,
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
-        )
-        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        overlay.setPixmap(framed_pixmap)
-        overlay.resize(framed_logical_w, framed_logical_h)
-
-        center_pos = QCursor.pos()
-        start_rect = QRect(
-            center_pos.x() - framed_logical_w // 2,
-            center_pos.y() - framed_logical_h // 2,
-            framed_logical_w,
-            framed_logical_h,
-        )
-        grow_w = int(framed_logical_w * 1.12)
-        grow_h = int(framed_logical_h * 1.12)
-        grown_rect = QRect(
-            center_pos.x() - grow_w // 2,
-            center_pos.y() - grow_h // 2,
-            grow_w,
-            grow_h,
-        )
-        overlay.setGeometry(start_rect)
         overlay.show()
+        overlay.raise_()
+        try:
+            overlay.reset_transition_progress()
+        except Exception:
+            pass
 
         opacity_effect = QGraphicsOpacityEffect(overlay)
         overlay.setGraphicsEffect(opacity_effect)
@@ -800,20 +898,27 @@ class ImageListViewGeometryMixin:
         animation_group = QParallelAnimationGroup(self)
 
         fade_animation = QPropertyAnimation(opacity_effect, b"opacity")
-        fade_animation.setDuration(160)
+        fade_animation.setDuration(230)
         fade_animation.setStartValue(1.0)
+        fade_animation.setKeyValueAt(0.78, 1.0)
         fade_animation.setEndValue(0.0)
-        fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        fade_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         scale_animation = QPropertyAnimation(overlay, b"geometry")
-        scale_animation.setDuration(160)
+        scale_animation.setDuration(230)
         scale_animation.setStartValue(start_rect)
-        scale_animation.setKeyValueAt(0.35, grown_rect)
-        scale_animation.setEndValue(start_rect)
-        scale_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        scale_animation.setEndValue(target_rect)
+        scale_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        style_animation = QPropertyAnimation(overlay, b"transitionProgress")
+        style_animation.setDuration(230)
+        style_animation.setStartValue(0.0)
+        style_animation.setEndValue(1.0)
+        style_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         animation_group.addAnimation(fade_animation)
         animation_group.addAnimation(scale_animation)
+        animation_group.addAnimation(style_animation)
         if not hasattr(self, "_active_drag_preview_animations"):
             self._active_drag_preview_animations = []
         self._active_drag_preview_animations.append(animation_group)
@@ -824,10 +929,22 @@ class ImageListViewGeometryMixin:
                     self._active_drag_preview_animations.remove(animation_group)
             except Exception:
                 pass
-            overlay.deleteLater()
+            try:
+                overlay.setGraphicsEffect(None)
+            except Exception:
+                pass
+            try:
+                overlay.reset_transition_progress()
+            except Exception:
+                pass
+            if overlay_owned:
+                overlay.deleteLater()
+            else:
+                overlay.hide()
 
         animation_group.finished.connect(_cleanup)
         animation_group.start()
+        return True
 
 
     def resizeEvent(self, event):

@@ -47,8 +47,6 @@ class ImageListViewInteractionMixin:
         if hasattr(self, "_spawn_drag_poll_timer"):
             self._spawn_drag_poll_timer.stop()
         hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
-        if callable(hide_ghost):
-            hide_ghost()
         host = self.window()
         active_index = QPersistentModelIndex(getattr(self, "_spawn_drag_active_index", QPersistentModelIndex()))
         self._spawn_drag_active = False
@@ -61,7 +59,10 @@ class ImageListViewInteractionMixin:
             except Exception:
                 compare_handled = False
         if compare_handled:
+            if callable(hide_ghost):
+                hide_ghost()
             return
+        spawn_started = False
         if should_spawn and active_index.isValid():
             try:
                 live_index = self.model().index(active_index.row(), active_index.column())
@@ -70,7 +71,14 @@ class ImageListViewInteractionMixin:
             if live_index.isValid():
                 spawn_direct = getattr(self, "_spawn_floating_for_index_at_cursor", None)
                 if callable(spawn_direct):
-                    spawn_direct(live_index, spawn_global_pos=self._spawn_drag_last_global_pos)
+                    try:
+                        spawn_started = bool(
+                            spawn_direct(live_index, spawn_global_pos=self._spawn_drag_last_global_pos)
+                        )
+                    except Exception:
+                        spawn_started = False
+        if not spawn_started and callable(hide_ghost):
+            hide_ghost()
         if host is not None and hasattr(host, "cancel_compare_drag"):
             try:
                 host.cancel_compare_drag()

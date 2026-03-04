@@ -411,7 +411,7 @@ class MainWindow(QMainWindow):
         self._comparison_windows = []
         self._floating_viewer_spawn_count = 0
         self._compare_drag_coordinator = CompareDragCoordinator(hold_seconds=1.0)
-        self._compare_drop_overlay = CompareDropFeedbackOverlay()
+        self._compare_drop_overlay = CompareDropFeedbackOverlay(self)
         self._compare_drag_source = None
         self._compare_drag_last_target = None
         self._compare_drag_poll_timer = QTimer(self)
@@ -1638,10 +1638,17 @@ class MainWindow(QMainWindow):
         self,
         proxy_index: QModelIndex,
         aspect_ratio_override: float | None = None,
+        size_fraction: float | None = None,
     ) -> tuple[int, int]:
         """Calculate initial spawned-window size preserving media ratio."""
-        base_w = max(420, int(self.width() * 0.45))
-        base_h = max(280, int(self.height() * 0.45))
+        try:
+            base_fraction = float(size_fraction) if size_fraction is not None else 0.45
+        except Exception:
+            base_fraction = 0.45
+        base_fraction = max(0.2, min(base_fraction, 0.9))
+
+        base_w = max(420, int(self.width() * base_fraction))
+        base_h = max(280, int(self.height() * base_fraction))
 
         aspect_ratio = aspect_ratio_override
         if not aspect_ratio or aspect_ratio <= 0:
@@ -1891,6 +1898,7 @@ class MainWindow(QMainWindow):
             return
         if global_pos is None:
             global_pos = QCursor.pos()
+        source = self._compare_drag_source if isinstance(self._compare_drag_source, dict) else {}
         target = self._resolve_compare_drop_target(global_pos)
         if target is None:
             self._compare_drag_last_target = None
@@ -1919,15 +1927,29 @@ class MainWindow(QMainWindow):
         if state.get("state") == "none":
             self._compare_drop_overlay.hide_feedback()
             return
+        state_name = state.get("state", "none")
+        progress = state.get("progress", 0.0)
         rect = target.get("global_rect")
         if isinstance(rect, QRect) and rect.isValid():
+            occlusion_rect = None
+            if source.get("kind") == "window" and state_name != "ready":
+                source_window = source.get("window")
+                if isinstance(source_window, QWidget):
+                    try:
+                        if source_window.isVisible():
+                            source_rect = source_window.frameGeometry()
+                            if source_rect.isValid():
+                                occlusion_rect = QRect(source_rect)
+                    except RuntimeError:
+                        occlusion_rect = None
             self._compare_drop_overlay.show_feedback(
                 rect,
-                state=state.get("state", "none"),
-                progress=state.get("progress", 0.0),
+                state=state_name,
+                progress=progress,
+                occlusion_global_rect=occlusion_rect,
             )
-        else:
-            self._compare_drop_overlay.hide_feedback()
+            return
+        self._compare_drop_overlay.hide_feedback()
 
     def release_compare_drag(self, global_pos: QPoint | None) -> bool:
         if not self._compare_drag_coordinator.active:
@@ -2311,7 +2333,12 @@ class MainWindow(QMainWindow):
         self._sync_coordinator = VideoSyncCoordinator(loaded_video_viewers, parent=self)
         self._sync_coordinator.start()
 
-    def spawn_floating_viewer_at(self, target_index=None, spawn_global_pos: QPoint | None = None):
+    def spawn_floating_viewer_at(
+        self,
+        target_index=None,
+        spawn_global_pos: QPoint | None = None,
+        initial_size_fraction: float | None = None,
+    ):
         """Create a floating viewer for a specific index and optional global position."""
         source_viewer = self.get_active_viewer()
         source_video_state = self._capture_viewer_video_state(source_viewer)
@@ -2349,6 +2376,7 @@ class MainWindow(QMainWindow):
         spawn_w, spawn_h = self._get_initial_floating_size(
             target_proxy_index,
             aspect_ratio_override=None,
+            size_fraction=initial_size_fraction,
         )
         window.resize(spawn_w, spawn_h)
 
