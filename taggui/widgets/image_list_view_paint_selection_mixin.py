@@ -6,6 +6,86 @@ class ImageListViewPaintSelectionMixin:
         if self.use_masonry and self._drag_preview_mode:
             super().paintEvent(event)
             return
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        if self.model() and self._virtual_list_is_active(source_model):
+            self._painting = True
+            try:
+                painter = QPainter(self.viewport())
+                painter.fillRect(self.viewport().rect(), self.palette().base())
+
+                total_items = int(getattr(source_model, '_total_count', 0) or 0)
+                if total_items <= 0:
+                    return
+
+                row_height = max(1, self._virtual_list_row_height())
+                scroll_offset = int(self.verticalScrollBar().value())
+                viewport_height = max(1, int(self.viewport().height()))
+                first_visible = max(0, scroll_offset // row_height)
+                last_visible = min(
+                    total_items - 1,
+                    (scroll_offset + viewport_height + row_height - 1) // row_height,
+                )
+                self._ensure_virtual_list_visible_range_loaded(source_model=source_model)
+
+                delegate = self.itemDelegate()
+                selected_globals = set(getattr(self, "_selected_global_rows_cache", set()))
+                stable_selected_global = getattr(self, "_selected_global_index", None)
+                if isinstance(stable_selected_global, int) and stable_selected_global >= 0:
+                    selected_globals.add(int(stable_selected_global))
+                current_global = int(getattr(self, "_current_global_row_cache", -1))
+                if current_global < 0 and isinstance(stable_selected_global, int) and stable_selected_global >= 0:
+                    current_global = int(stable_selected_global)
+
+                for global_idx in range(first_visible, last_visible + 1):
+                    row_rect = QRect(
+                        0,
+                        (global_idx * row_height) - scroll_offset,
+                        max(1, int(self.viewport().width())),
+                        row_height,
+                    )
+                    proxy_idx = self._proxy_index_from_global(global_idx)
+                    if not proxy_idx.isValid():
+                        painter.save()
+                        painter.setPen(Qt.GlobalColor.lightGray)
+                        painter.drawText(
+                            row_rect.adjusted(12, 0, -12, 0),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            "Loading...",
+                        )
+                        painter.restore()
+                        continue
+
+                    try:
+                        option = self.viewOptions()
+                    except Exception:
+                        option = QStyleOptionViewItem()
+                        option.palette = self.palette()
+                        option.font = self.font()
+                    option.rect = row_rect
+                    option.widget = self.viewport()
+                    option.decorationSize = self.iconSize()
+                    option.showDecorationSelected = True
+                    option.state |= (
+                        QStyle.StateFlag.State_Enabled
+                        | QStyle.StateFlag.State_Active
+                    )
+                    if global_idx in selected_globals:
+                        option.state |= QStyle.StateFlag.State_Selected
+                    else:
+                        option.state &= ~QStyle.StateFlag.State_Selected
+                    if global_idx == current_global and self.hasFocus():
+                        option.state |= QStyle.StateFlag.State_HasFocus
+                    else:
+                        option.state &= ~QStyle.StateFlag.State_HasFocus
+
+                    delegate.paint(painter, option, proxy_idx)
+                return
+            finally:
+                self._painting = False
         # THROTTLE painting during active scrolling to prevent UI blocking
         # Skip paint if we painted too recently (< 16ms ago = faster than 60fps)
         if self.use_masonry:

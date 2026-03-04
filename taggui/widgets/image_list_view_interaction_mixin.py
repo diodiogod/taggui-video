@@ -155,6 +155,120 @@ class ImageListViewInteractionMixin:
             source_model._enrichment_timer.stop()
             # Will resume after 500ms idle (see mouseReleaseEvent)
 
+        virtual_list_active = bool(
+            hasattr(self, '_virtual_list_is_active') and self._virtual_list_is_active(source_model)
+        )
+        if virtual_list_active:
+            if event.button() == Qt.MouseButton.LeftButton:
+                index = self.indexAt(event.pos())
+                if index.isValid():
+                    model = self.model()
+                    if model is None:
+                        event.accept()
+                        return
+                    row = int(index.row())
+                    if 0 <= row < int(model.rowCount()):
+                        index = model.index(row, 0)
+                    else:
+                        event.accept()
+                        return
+                    if not index.isValid():
+                        event.accept()
+                        return
+
+                    self._selected_global_lock_until = 0.0
+                    self._selected_global_lock_value = None
+                    self._user_click_selection_frozen_until = 0.0
+                    clicked_global = -1
+                    try:
+                        row_height = max(1, int(self._virtual_list_row_height()))
+                        scroll_offset = int(self.verticalScrollBar().value())
+                        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+                        guessed = (int(event.pos().y()) + scroll_offset) // row_height
+                        if 0 <= guessed < total_items:
+                            clicked_global = int(guessed)
+                    except Exception:
+                        clicked_global = -1
+                    if clicked_global < 0:
+                        try:
+                            clicked_global = int(self._proxy_index_to_global_index(index))
+                        except Exception:
+                            clicked_global = -1
+
+                    sel_model = self.selectionModel()
+                    modifiers = event.modifiers()
+                    if sel_model is not None:
+                        # Prevent Qt's native auto-scroll-to-current in virtual-list mode.
+                        self._suppress_virtual_auto_scroll_once = True
+                        if modifiers & Qt.ControlModifier:
+                            was_selected = sel_model.isSelected(index)
+                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                            sel_model.select(
+                                index,
+                                QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
+                            )
+                        elif modifiers & Qt.ShiftModifier:
+                            current = self.currentIndex()
+                            if current.isValid():
+                                start_row = min(current.row(), index.row())
+                                end_row = max(current.row(), index.row())
+                                selection = QItemSelection()
+                                for item_row in range(start_row, end_row + 1):
+                                    item_index = model.index(item_row, 0)
+                                    selection.select(item_index, item_index)
+                                sel_model.select(selection, QItemSelectionModel.Select)
+                                sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                            else:
+                                sel_model.setCurrentIndex(
+                                    index,
+                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                                )
+                        else:
+                            sel_model.setCurrentIndex(
+                                    index,
+                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                                )
+                        # If Qt skipped scrollTo for this selection mutation, clear the guard.
+                        QTimer.singleShot(
+                            0,
+                            lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                        )
+                    else:
+                        self._suppress_virtual_auto_scroll_once = True
+                        self.setCurrentIndex(index)
+                        QTimer.singleShot(
+                            0,
+                            lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                        )
+
+                    try:
+                        current_global = self._current_global_from_current_index(source_model)
+                        if isinstance(current_global, int) and current_global >= 0:
+                            self._selected_global_index = int(current_global)
+                            self._current_global_row_cache = int(current_global)
+                            if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                                self._selected_global_rows_cache = {int(current_global)}
+                        elif clicked_global >= 0:
+                            self._selected_global_index = int(clicked_global)
+                            self._current_global_row_cache = int(clicked_global)
+                            if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                                self._selected_global_rows_cache = {int(clicked_global)}
+                    except Exception:
+                        if clicked_global >= 0:
+                            self._selected_global_index = int(clicked_global)
+                            self._current_global_row_cache = int(clicked_global)
+                            if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                                self._selected_global_rows_cache = {int(clicked_global)}
+                    self._current_proxy_row_cache = int(index.row())
+                    if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                        self._selected_rows_cache = {int(index.row())}
+                    self._last_stable_scroll_value = int(self.verticalScrollBar().value())
+                    import time as _time_mod
+                    self._user_click_selection_frozen_until = _time_mod.time() + 1.5
+                event.accept()
+                return
+            return super().mousePressEvent(event)
+
         if self.use_masonry and self._masonry_items:
             # Explicit click means user is choosing a new selection identity.
             self._selected_global_lock_until = 0.0
@@ -1343,6 +1457,35 @@ class ImageListViewInteractionMixin:
         # Reset timer - will fire 150ms after last scroll event
         self._mouse_scroll_timer.stop()
         self._mouse_scroll_timer.start(150)  # Shorter delay for faster resume
+
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        virtual_list_active = bool(
+            hasattr(self, "_virtual_list_is_active")
+            and self._virtual_list_is_active(source_model)
+        )
+        if virtual_list_active:
+            delta = event.angleDelta().y()
+            if delta == 0 and hasattr(event, "pixelDelta"):
+                try:
+                    delta = int(event.pixelDelta().y())
+                except Exception:
+                    delta = 0
+            if delta != 0:
+                sb = self.verticalScrollBar()
+                row_height = max(1, int(self._virtual_list_row_height()))
+                scroll_step = max(24, row_height // 2)
+                steps = float(delta) / 120.0 if abs(delta) >= 120 else float(delta) / float(scroll_step)
+                scroll_amount = int(round(steps * scroll_step))
+                target_value = max(0, min(int(sb.maximum()), int(sb.value()) - scroll_amount))
+                if target_value != int(sb.value()):
+                    sb.setValue(target_value)
+                self._last_stable_scroll_value = int(sb.value())
+            event.accept()
+            return
 
         # Normal scroll behavior - but boost scroll speed in IconMode
         if self.viewMode() == QListView.ViewMode.IconMode:

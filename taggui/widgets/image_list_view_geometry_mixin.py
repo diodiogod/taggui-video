@@ -467,17 +467,36 @@ class ImageListViewGeometryMixin:
     def _apply_startup_view_mode_seed(self):
         """Seed startup mode before hysteresis logic runs."""
         saved_mode = str(settings.value("image_list_view_mode", "", type=str) or "").strip().lower()
+        model = self.model()
+        source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        paginated_source = bool(
+            source_model
+            and hasattr(source_model, "_paginated_mode")
+            and source_model._paginated_mode
+        )
         if saved_mode == "list":
-            self.setViewMode(QListView.ViewMode.ListMode)
+            self.use_virtual_list = paginated_source
+            self.setViewMode(
+                QListView.ViewMode.IconMode
+                if paginated_source
+                else QListView.ViewMode.ListMode
+            )
             return
         if saved_mode == "icon":
+            self.use_virtual_list = False
             self.setViewMode(QListView.ViewMode.IconMode)
             return
 
         threshold = int(getattr(self, "column_switch_threshold", 150) or 150)
         if int(getattr(self, "current_thumbnail_size", 0) or 0) >= threshold:
-            self.setViewMode(QListView.ViewMode.ListMode)
+            self.use_virtual_list = paginated_source
+            self.setViewMode(
+                QListView.ViewMode.IconMode
+                if paginated_source
+                else QListView.ViewMode.ListMode
+            )
         else:
+            self.use_virtual_list = False
             self.setViewMode(QListView.ViewMode.IconMode)
 
 
@@ -485,7 +504,8 @@ class ImageListViewGeometryMixin:
         """Persist active mode so startup hysteresis can use the right prior mode."""
         mode_value = (
             "list"
-            if self.viewMode() == QListView.ViewMode.ListMode
+            if bool(getattr(self, "use_virtual_list", False))
+            or self.viewMode() == QListView.ViewMode.ListMode
             else "icon"
         )
         try:
@@ -500,46 +520,102 @@ class ImageListViewGeometryMixin:
         """Switch between single column (ListMode) and multi-column (IconMode) based on thumbnail size."""
         import time
         previous_mode = self.viewMode()
+        previous_virtual_list = bool(getattr(self, "use_virtual_list", False))
         now = time.time()
         hysteresis = int(getattr(self, "_view_mode_hysteresis_px", 30) or 30)
         cooldown_s = float(getattr(self, "_view_mode_switch_cooldown_s", 0.35) or 0.35)
         threshold = int(getattr(self, "column_switch_threshold", 150) or 150)
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        paginated_source = bool(
+            source_model
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+        )
 
         # Use hysteresis to avoid rapid toggling around threshold.
-        if previous_mode == QListView.ViewMode.ListMode:
+        was_list_state = bool(
+            previous_virtual_list or previous_mode == QListView.ViewMode.ListMode
+        )
+        if was_list_state:
             switch_to_list = self.current_thumbnail_size > max(self.min_thumbnail_size, threshold - hysteresis)
         else:
             switch_to_list = self.current_thumbnail_size >= threshold
-
-        desired_mode = QListView.ViewMode.ListMode if switch_to_list else QListView.ViewMode.IconMode
-        if desired_mode != previous_mode:
-            if (now - float(getattr(self, "_last_view_mode_switch_time", 0.0) or 0.0)) < cooldown_s:
+        switch_to_virtual_list = bool(switch_to_list and paginated_source)
+        desired_qt_mode = (
+            QListView.ViewMode.IconMode
+            if (switch_to_virtual_list or not switch_to_list)
+            else QListView.ViewMode.ListMode
+        )
+        mode_state_changed = (
+            desired_qt_mode != previous_mode
+            or previous_virtual_list != switch_to_virtual_list
+        )
+        if mode_state_changed:
+            force_virtual_enable = bool(
+                switch_to_virtual_list and not previous_virtual_list
+            )
+            if (
+                (not force_virtual_enable)
+                and (now - float(getattr(self, "_last_view_mode_switch_time", 0.0) or 0.0)) < cooldown_s
+            ):
                 # Keep current mode during cooldown to avoid unsafe mode churn.
-                self.use_masonry = (previous_mode == QListView.ViewMode.IconMode)
+                self.use_virtual_list = previous_virtual_list
+                self.use_masonry = (
+                    previous_mode == QListView.ViewMode.IconMode
+                    and not previous_virtual_list
+                )
                 self._persist_current_view_mode()
                 return
             self._last_view_mode_switch_time = now
 
         if switch_to_list:
-            # Large thumbnails: single column list view
+            # Large thumbnails: native list for in-memory datasets, virtual
+            # fixed-row list for paginated datasets.
+            self.use_virtual_list = switch_to_virtual_list
             self.use_masonry = False
-            if previous_mode != QListView.ViewMode.ListMode:
-                self._invalidate_pending_masonry_for_mode_switch()
-                self.setViewMode(QListView.ViewMode.ListMode)
-            self.setFlow(QListView.Flow.TopToBottom)
-            self.setResizeMode(QListView.ResizeMode.Adjust)
-            self.setWrapping(False)
-            self.setSpacing(0)
-            self.setGridSize(QSize(-1, -1))  # Reset grid size to default
+            if switch_to_virtual_list:
+                if previous_mode != QListView.ViewMode.IconMode or not previous_virtual_list:
+                    self._invalidate_pending_masonry_for_mode_switch()
+                if previous_mode != QListView.ViewMode.IconMode:
+                    self.setViewMode(QListView.ViewMode.IconMode)
+                self.setFlow(QListView.Flow.TopToBottom)
+                self.setResizeMode(QListView.ResizeMode.Fixed)
+                self.setWrapping(False)
+                self.setSpacing(0)
+                self.setGridSize(QSize(-1, -1))
+                # Initialize fixed-row virtual scrollbar domain immediately.
+                # Without this, Qt can keep a temporary loaded-row range until a
+                # later layout event, which looks like a ~4k "fake end" that
+                # then expands while scrolling.
+                self.updateGeometries()
+                if previous_mode != QListView.ViewMode.IconMode or not previous_virtual_list:
+                    QTimer.singleShot(0, self._scroll_current_index_to_center_safe)
+                self.viewport().update()
+            else:
+                if previous_mode != QListView.ViewMode.ListMode or previous_virtual_list:
+                    self._invalidate_pending_masonry_for_mode_switch()
+                if previous_mode != QListView.ViewMode.ListMode:
+                    self.setViewMode(QListView.ViewMode.ListMode)
+                self.setFlow(QListView.Flow.TopToBottom)
+                self.setResizeMode(QListView.ResizeMode.Adjust)
+                self.setWrapping(False)
+                self.setSpacing(0)
+                self.setGridSize(QSize(-1, -1))  # Reset grid size to default
 
-            # Re-center selected item when switching to ListMode
-            if previous_mode != QListView.ViewMode.ListMode:
-                QTimer.singleShot(0, self._scroll_current_index_to_center_safe)
+                # Re-center selected item when switching to ListMode
+                if previous_mode != QListView.ViewMode.ListMode or previous_virtual_list:
+                    QTimer.singleShot(0, self._scroll_current_index_to_center_safe)
         else:
             # Small thumbnails: masonry grid view (Pinterest-style)
+            self.use_virtual_list = False
             self.use_masonry = True
-            if previous_mode != QListView.ViewMode.IconMode:
+            if previous_mode != QListView.ViewMode.IconMode or previous_virtual_list:
                 self._invalidate_pending_masonry_for_mode_switch()
+            if previous_mode != QListView.ViewMode.IconMode:
                 self.setViewMode(QListView.ViewMode.IconMode)
             self.setFlow(QListView.Flow.LeftToRight)
             self.setResizeMode(QListView.ResizeMode.Fixed)
@@ -556,6 +632,76 @@ class ImageListViewGeometryMixin:
             self.viewport().update()
 
         self._persist_current_view_mode()
+
+    def _virtual_list_is_active(self, source_model=None) -> bool:
+        """Return True when paginated list mode should use custom virtual scrolling."""
+        if bool(getattr(self, "use_masonry", False)):
+            return False
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        paginated = bool(
+            source_model
+            and hasattr(source_model, "_paginated_mode")
+            and source_model._paginated_mode
+        )
+        if not paginated:
+            return False
+        # Accept either explicit virtual-list flag or native ListMode fallback.
+        # This prevents transient mode-state mismatches from dropping back to
+        # rowCount-based native scrollbar math in paginated folders.
+        return bool(
+            getattr(self, "use_virtual_list", False)
+            or self.viewMode() == QListView.ViewMode.ListMode
+        )
+
+    def _virtual_list_row_height(self) -> int:
+        """Fixed row height for virtual list mode."""
+        try:
+            icon_width = int(self.iconSize().width())
+        except Exception:
+            icon_width = int(getattr(self, "current_thumbnail_size", 96) or 96)
+        return max(48, icon_width + 4)
+
+    def _virtual_list_total_height(self, source_model=None) -> int:
+        """Total virtual content height for paginated list mode."""
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if not source_model:
+            return 0
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            return 0
+        return total_items * self._virtual_list_row_height()
+
+    def _ensure_virtual_list_visible_range_loaded(self, source_model=None, extra_rows: int | None = None):
+        """Request the currently visible virtual-list rows plus a small buffer."""
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if not self._virtual_list_is_active(source_model):
+            return
+        if not source_model or not hasattr(source_model, "ensure_pages_for_range"):
+            return
+
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            return
+
+        row_height = max(1, self._virtual_list_row_height())
+        viewport_height = max(1, int(self.viewport().height()))
+        scroll_offset = max(0, int(self.verticalScrollBar().value()))
+        start_row = max(0, scroll_offset // row_height)
+        end_row = min(
+            total_items - 1,
+            (scroll_offset + viewport_height + row_height - 1) // row_height,
+        )
+        if extra_rows is None:
+            extra_rows = max(6, viewport_height // row_height)
+        start_row = max(0, start_row - int(extra_rows))
+        end_row = min(total_items - 1, end_row + int(extra_rows))
+        source_model.ensure_pages_for_range(start_row, end_row)
 
 
     def _resolve_live_spawn_index(self, dragged_index: QPersistentModelIndex, dragged_path) -> QModelIndex:
@@ -1039,8 +1185,29 @@ class ImageListViewGeometryMixin:
 
         # If we have a huge height calculated, assume buffered mode even if check fails transiently
         force_buffered = hasattr(self, '_masonry_total_height') and self._masonry_total_height > 50000
-    
+
         # print(f"[TEMP_DEBUG] UpdateGeom: is_buffered={is_buffered}, force={force_buffered}, height={getattr(self, '_masonry_total_height', '?')}")
+
+        if is_buffered and self._virtual_list_is_active(source_model):
+            sb = self.verticalScrollBar()
+            old_value = int(sb.value())
+            viewport_height = max(1, int(self.viewport().height()))
+            correct_max = max(0, self._virtual_list_total_height(source_model) - viewport_height)
+            prev_block = sb.blockSignals(True)
+            try:
+                sb.setSingleStep(max(8, self._virtual_list_row_height() // 3))
+                sb.setPageStep(viewport_height)
+                sb.setRange(0, correct_max)
+                # Virtual list is exact fixed-row math; preserve current scroll
+                # position directly and only clamp to the valid range.
+                target_value = old_value
+                sb.setValue(max(0, min(target_value, correct_max)))
+            finally:
+                sb.blockSignals(prev_block)
+            self._last_stable_scroll_value = int(sb.value())
+            self._ensure_virtual_list_visible_range_loaded(source_model=source_model)
+            self.viewport().update()
+            return
 
         if (is_buffered or force_buffered) and self.use_masonry:
             # Buffered mode: preserve our manually-set scrollbar range
@@ -1270,6 +1437,36 @@ class ImageListViewGeometryMixin:
             return QModelIndex()
         return resolved if resolved.isValid() else QModelIndex()
 
+    def _proxy_index_to_global_index(self, index) -> int:
+        """Map a proxy index to a stable global index in paginated mode."""
+        safe_index = self._normalize_scroll_index(index)
+        if not safe_index.isValid():
+            return -1
+
+        model = self.model()
+        if model is None:
+            return -1
+        source_model = model.sourceModel() if hasattr(model, "sourceModel") else model
+
+        try:
+            source_index = model.mapToSource(safe_index) if hasattr(model, "mapToSource") else safe_index
+        except Exception:
+            source_index = QModelIndex()
+        if not source_index.isValid():
+            return -1
+
+        if source_model and hasattr(source_model, "get_global_index_for_row"):
+            try:
+                mapped = source_model.get_global_index_for_row(source_index.row())
+                return int(mapped) if isinstance(mapped, int) and mapped >= 0 else -1
+            except Exception:
+                return -1
+
+        try:
+            return int(source_index.row())
+        except Exception:
+            return -1
+
     def _scroll_current_index_to_center_safe(self):
         idx = self._normalize_scroll_index(self.currentIndex())
         if not idx.isValid():
@@ -1301,6 +1498,63 @@ class ImageListViewGeometryMixin:
         # During model reset/layout churn, skip Qt scroll calls to avoid transient
         # C++ crashes from stale indices delivered by deferred restore callbacks.
         if getattr(self, "_model_resetting", False):
+            return
+
+        if self._virtual_list_is_active():
+            if bool(getattr(self, "_suppress_virtual_auto_scroll_once", False)):
+                if hint in (
+                    QAbstractItemView.ScrollHint.EnsureVisible,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                ):
+                    self._suppress_virtual_auto_scroll_once = False
+                    return
+            global_idx = self._proxy_index_to_global_index(safe_index)
+            if global_idx < 0:
+                return
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), 'sourceModel')
+                else self.model()
+            )
+            row_height = self._virtual_list_row_height()
+            item_top = global_idx * row_height
+            item_bot = item_top + row_height
+            sb = self.verticalScrollBar()
+            scroll_val = int(sb.value())
+            viewport_h = max(1, int(self.viewport().height()))
+            virtual_max = max(0, self._virtual_list_total_height(source_model) - viewport_h)
+            if sb.maximum() != virtual_max:
+                prev_block = sb.blockSignals(True)
+                try:
+                    sb.setRange(0, virtual_max)
+                finally:
+                    sb.blockSignals(prev_block)
+
+            if hint == QAbstractItemView.ScrollHint.EnsureVisible:
+                if item_top >= scroll_val and item_bot <= scroll_val + viewport_h:
+                    return
+                if item_top < scroll_val:
+                    new_val = max(0, min(item_top, virtual_max))
+                    self._last_stable_scroll_value = new_val
+                    sb.setValue(new_val)
+                elif item_bot > scroll_val + viewport_h:
+                    new_val = max(0, min(item_bot - viewport_h, virtual_max))
+                    self._last_stable_scroll_value = new_val
+                    sb.setValue(new_val)
+            elif hint == QAbstractItemView.ScrollHint.PositionAtCenter:
+                target = max(0, item_top - max(0, (viewport_h - row_height) // 2))
+                new_val = max(0, min(target, virtual_max))
+                self._last_stable_scroll_value = new_val
+                sb.setValue(new_val)
+            elif hint == QAbstractItemView.ScrollHint.PositionAtTop:
+                new_val = max(0, min(item_top, virtual_max))
+                self._last_stable_scroll_value = new_val
+                sb.setValue(new_val)
+            elif hint == QAbstractItemView.ScrollHint.PositionAtBottom:
+                new_val = max(0, min(item_bot - viewport_h, virtual_max))
+                self._last_stable_scroll_value = new_val
+                sb.setValue(new_val)
+            self._ensure_virtual_list_visible_range_loaded()
             return
 
         if not (self.use_masonry and self._masonry_items):
@@ -1363,6 +1617,18 @@ class ImageListViewGeometryMixin:
         """Return the visual rectangle for an index, using masonry positions."""
         if self.use_masonry and self._drag_preview_mode:
             return super().visualRect(index)
+        if self._virtual_list_is_active() and index.isValid():
+            global_idx = self._proxy_index_to_global_index(index)
+            if global_idx < 0:
+                return QRect()
+            row_height = self._virtual_list_row_height()
+            scroll_offset = int(self.verticalScrollBar().value())
+            return QRect(
+                0,
+                (global_idx * row_height) - scroll_offset,
+                max(1, int(self.viewport().width())),
+                row_height,
+            )
         if self.use_masonry and self._masonry_items and index.isValid():
             # In masonry mode, we map rows to global indices
             global_idx = index.row()
@@ -1394,6 +1660,26 @@ class ImageListViewGeometryMixin:
         """
         if self.use_masonry and self._drag_preview_mode:
             return super().indexAt(point)
+        if self._virtual_list_is_active():
+            if point.x() < 0 or point.x() > self.viewport().width():
+                return QModelIndex()
+            source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+            total_items = int(getattr(source_model, '_total_count', 0) or 0) if source_model else 0
+            if total_items <= 0:
+                return QModelIndex()
+            row_height = max(1, self._virtual_list_row_height())
+            scroll_offset = int(self.verticalScrollBar().value())
+            global_idx = (int(point.y()) + scroll_offset) // row_height
+            if global_idx < 0 or global_idx >= total_items:
+                return QModelIndex()
+            proxy_idx = self._proxy_index_from_global(global_idx)
+            if proxy_idx.isValid():
+                return proxy_idx
+            self._ensure_virtual_list_visible_range_loaded(
+                source_model=source_model,
+                extra_rows=max(4, int(self.viewport().height()) // row_height),
+            )
+            return QModelIndex()
         if self.use_masonry and self._masonry_items:
             import time as _t
             source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()

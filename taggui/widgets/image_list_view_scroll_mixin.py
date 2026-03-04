@@ -47,10 +47,14 @@ class ImageListViewScrollMixin:
 
     def scrollContentsBy(self, dx, dy):
         """Handle scrolling and update viewport."""
-        super().scrollContentsBy(dx, dy)
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        virtual_list_active = bool(
+            hasattr(self, '_virtual_list_is_active') and self._virtual_list_is_active(source_model)
+        )
+        if not virtual_list_active:
+            super().scrollContentsBy(dx, dy)
 
         # Notify model that scrolling started (defer cache writes)
-        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
         if source_model and hasattr(source_model, 'set_scrolling_state'):
             source_model.set_scrolling_state(True)
 
@@ -91,6 +95,9 @@ class ImageListViewScrollMixin:
             if not self._preload_complete:
                 self._idle_preload_timer.stop()
                 self._idle_preload_timer.start(500)  # 500ms after scrolling stops
+        elif virtual_list_active:
+            self._ensure_virtual_list_visible_range_loaded(source_model=source_model)
+            self.viewport().update()
 
     def _enforce_strict_tail_hard_stop(self, source_model=None, *, reason: str) -> bool:
         """Clamp strict scroll to real tail when the last masonry item is known."""
@@ -144,6 +151,17 @@ class ImageListViewScrollMixin:
             return
 
         if not hasattr(source_model, '_total_count') or source_model._total_count == 0:
+            return
+
+        # Virtual fixed-row list mode must not use strict masonry ownership/page-domain
+        # logic. That logic rewrites scrollbar range/value (canonical sync), which causes
+        # thumb drift/jumps in list mode.
+        virtual_list_active = bool(
+            hasattr(self, '_virtual_list_is_active')
+            and self._virtual_list_is_active(source_model)
+        )
+        if virtual_list_active:
+            self._ensure_virtual_list_visible_range_loaded(source_model=source_model)
             return
 
         strategy = self._get_masonry_strategy(source_model)

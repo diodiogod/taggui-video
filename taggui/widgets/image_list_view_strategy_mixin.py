@@ -339,19 +339,23 @@ class ImageListViewStrategyMixin:
             source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
         if not source_model or not hasattr(source_model, "get_loaded_row_for_global_index"):
             return False
+        virtual_list_active = bool(
+            hasattr(self, "_virtual_list_is_active") and self._virtual_list_is_active(source_model)
+        )
         if getattr(self, "_model_resetting", False):
             return False
         if hasattr(source_model, "_loading_pages"):
             try:
-                load_lock = getattr(source_model, "_page_load_lock", None)
-                if load_lock is not None:
-                    with load_lock:
-                        if source_model._loading_pages:
-                            self._schedule_rebind_current_index_to_selected_global()
-                            return False
-                elif source_model._loading_pages:
-                    self._schedule_rebind_current_index_to_selected_global()
-                    return False
+                if not virtual_list_active:
+                    load_lock = getattr(source_model, "_page_load_lock", None)
+                    if load_lock is not None:
+                        with load_lock:
+                            if source_model._loading_pages:
+                                self._schedule_rebind_current_index_to_selected_global()
+                                return False
+                    elif source_model._loading_pages:
+                        self._schedule_rebind_current_index_to_selected_global()
+                        return False
             except Exception:
                 pass
 
@@ -385,11 +389,42 @@ class ImageListViewStrategyMixin:
         # If already on the same proxy row, no rebind needed.
         current = self.currentIndex()
         if current.isValid() and current.row() == target_row:
+            if virtual_list_active:
+                self._selected_rows_cache = {int(target_row)}
+                self._selected_global_rows_cache = {int(target_global)}
+                self._current_proxy_row_cache = int(target_row)
+                self._current_global_row_cache = int(target_global)
+                self.viewport().update()
+                return True
             return False
 
         # Guard against stale mapping windows during rapid buffered updates.
         if proxy_model and target_row >= proxy_model.rowCount():
             return False
+
+        if virtual_list_active:
+            sel_model = self.selectionModel()
+            if sel_model is not None:
+                self._suppress_virtual_auto_scroll_once = True
+                prev_block = sel_model.blockSignals(True)
+                try:
+                    sel_model.setCurrentIndex(
+                        proxy_idx,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    )
+                finally:
+                    sel_model.blockSignals(prev_block)
+                self._suppress_virtual_auto_scroll_once = False
+            else:
+                self._suppress_virtual_auto_scroll_once = True
+                self.setCurrentIndex(proxy_idx)
+                self._suppress_virtual_auto_scroll_once = False
+            self._selected_rows_cache = {int(target_row)}
+            self._selected_global_rows_cache = {int(target_global)}
+            self._current_proxy_row_cache = int(target_row)
+            self._current_global_row_cache = int(target_global)
+            self.viewport().update()
+            return True
 
         # Rebind mutation was a startup crash source on some Windows/PySide builds.
         # Keep global target tracking, but avoid forcing current-index mutation here.
@@ -463,7 +498,28 @@ class ImageListViewStrategyMixin:
 
     def _schedule_rebind_current_index_to_selected_global(self):
         """Queue a single rebind attempt on the next event-loop tick."""
-        return
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        if not (
+            hasattr(self, "_virtual_list_is_active")
+            and self._virtual_list_is_active(source_model)
+        ):
+            return
+        if bool(getattr(self, "_rebind_selected_global_pending", False)):
+            return
+        self._rebind_selected_global_pending = True
+
+        def _run_rebind():
+            self._rebind_selected_global_pending = False
+            try:
+                self._rebind_current_index_to_selected_global(source_model=source_model)
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _run_rebind)
 
     def _get_restore_anchor_scroll_value(self, source_model=None, domain_max=None):
         """Resolve restore-time scroll anchor from target global index (fallback: target page)."""
@@ -521,6 +577,9 @@ class ImageListViewStrategyMixin:
         sb = self.verticalScrollBar()
         max_v = sb.maximum()
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        virtual_list_active = bool(
+            hasattr(self, '_virtual_list_is_active') and self._virtual_list_is_active(source_model)
+        )
         if self._scrollbar_dragging and self._use_local_anchor_masonry(source_model):
             baseline = self._strict_canonical_domain_max(source_model)
             slider_pos = max(0, min(int(sb.sliderPosition()), baseline))
@@ -575,6 +634,12 @@ class ImageListViewStrategyMixin:
                             self._current_page = 0
                 except Exception:
                     pass
+
+        if virtual_list_active:
+            # In virtual fixed-row list mode, always track latest scrollbar
+            # value so follow-up geometry passes cannot replay stale offsets.
+            self._last_stable_scroll_value = max(0, int(value))
+            return
 
         # Only record if scrollbar is "healthy" (not collapsed)
         # If internal height is huge (22M) but scrollbar max is tiny (195k), we are collapsed.
@@ -953,10 +1018,42 @@ class ImageListViewStrategyMixin:
         item positions). Falls back to full recalc only when necessary (jump, resize,
         enrichment, or no prior cache).
         """
+        source_model = self.proxy_image_list_model.sourceModel()
+        if (
+            hasattr(self, "_virtual_list_is_active")
+            and self._virtual_list_is_active(source_model)
+        ):
+            sb = self.verticalScrollBar()
+            current_scroll = int(sb.value())
+            viewport_h = max(1, int(self.viewport().height()))
+            expected_max = max(
+                0,
+                int(self._virtual_list_total_height(source_model)) - viewport_h,
+            )
+            if int(sb.maximum()) != expected_max:
+                prev_block = sb.blockSignals(True)
+                try:
+                    sb.setSingleStep(max(8, self._virtual_list_row_height() // 3))
+                    sb.setPageStep(viewport_h)
+                    sb.setRange(0, expected_max)
+                    sb.setValue(max(0, min(current_scroll, expected_max)))
+                finally:
+                    sb.blockSignals(prev_block)
+                current_scroll = int(sb.value())
+            self._ensure_virtual_list_visible_range_loaded(source_model=source_model)
+            self._rebind_current_index_to_selected_global(source_model=source_model)
+            target_scroll = max(0, min(current_scroll, int(sb.maximum())))
+            if int(sb.value()) != target_scroll:
+                prev_block = sb.blockSignals(True)
+                try:
+                    sb.setValue(target_scroll)
+                finally:
+                    sb.blockSignals(prev_block)
+            self._last_stable_scroll_value = int(sb.value())
+            self.viewport().update()
+            return
         if not self.use_masonry:
             return
-
-        source_model = self.proxy_image_list_model.sourceModel()
         is_paginated = (
             source_model
             and hasattr(source_model, '_paginated_mode')

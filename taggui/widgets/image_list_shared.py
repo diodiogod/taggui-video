@@ -183,6 +183,10 @@ class ImageDelegate(QStyledItemDelegate):
         # Check if parent is using masonry layout
         if isinstance(self.parent(), QListView):
             parent_view = self.parent()
+            virtual_list_mode = bool(
+                hasattr(parent_view, "use_virtual_list")
+                and parent_view.use_virtual_list
+            )
             if (hasattr(parent_view, '_drag_preview_mode') and parent_view._drag_preview_mode):
                 icon_size = parent_view.iconSize()
                 return QSize(icon_size.width() + 6, icon_size.width() + 6)
@@ -191,7 +195,7 @@ class ImageDelegate(QStyledItemDelegate):
                 rect = parent_view._get_masonry_item_rect(index.row())
                 if rect.isValid():
                     return rect.size()
-            elif parent_view.viewMode() == QListView.ViewMode.IconMode:
+            elif parent_view.viewMode() == QListView.ViewMode.IconMode and not virtual_list_mode:
                 # Regular icon mode (not masonry)
                 icon_size = parent_view.iconSize()
                 return QSize(icon_size.width() + 10, icon_size.height() + 10)
@@ -227,8 +231,11 @@ class ImageDelegate(QStyledItemDelegate):
         parent_view = self.parent() if isinstance(self.parent(), QListView) else None
         list_mode = (
             parent_view is not None
-            and parent_view.viewMode() == QListView.ViewMode.ListMode
             and not (hasattr(parent_view, "use_masonry") and parent_view.use_masonry)
+            and (
+                parent_view.viewMode() == QListView.ViewMode.ListMode
+                or (hasattr(parent_view, "use_virtual_list") and parent_view.use_virtual_list)
+            )
         )
 
         if list_mode:

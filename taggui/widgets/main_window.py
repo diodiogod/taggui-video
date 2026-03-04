@@ -3246,6 +3246,15 @@ class MainWindow(QMainWindow):
         """Ignore selection churn caused by buffered page remaps during/after drag jumps."""
         view = self.image_list.list_view
         source_model = self.image_list_model
+        paginated = bool(
+            hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+        )
+        virtual_list_active = bool(
+            paginated
+            and hasattr(view, '_virtual_list_is_active')
+            and view._virtual_list_is_active(source_model)
+        )
 
         # Thumbnail click-drag gesture is in progress: defer main-viewer update
         # until release decides if it was a click or a drag.
@@ -3257,9 +3266,8 @@ class MainWindow(QMainWindow):
             view._suppress_selection_commit_until_release = False
 
         if not (
-            view.use_masonry
-            and hasattr(source_model, '_paginated_mode')
-            and source_model._paginated_mode
+            paginated
+            and (view.use_masonry or virtual_list_active)
         ):
             return False
 
@@ -3279,6 +3287,15 @@ class MainWindow(QMainWindow):
 
         release_active = now < float(getattr(view, '_drag_release_anchor_until', 0.0) or 0.0)
         loading_pages = bool(getattr(source_model, '_loading_pages', set()))
+        if virtual_list_active:
+            mapped = self._proxy_index_to_global_rank(proxy_image_index)
+            if mapped < 0:
+                return True
+            # In fixed-row virtual list mode, the stable global selection owns
+            # the viewer while paginated rows are being remapped underneath.
+            if loading_pages and int(mapped) != int(selected_global):
+                return True
+            return False
         if not (release_active or loading_pages):
             return False
 

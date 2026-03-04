@@ -3219,22 +3219,51 @@ class ImageListModel(QAbstractListModel):
                 self.background_validation_progress.emit(label, current, maximum, done)
                 return True
 
-            current_rel_map = {
-                _normalize_relative_path(rel_path): rel_path
-                for rel_path in cached_rel_paths
-            }
+            norm_to_cached_paths = {}
+            for rel_path in cached_rel_paths:
+                normalized = _normalize_relative_path(rel_path)
+                norm_to_cached_paths.setdefault(normalized, []).append(rel_path)
+
+            current_rel_map = {}
+            duplicate_db_paths = []
+            for normalized, rel_variants in norm_to_cached_paths.items():
+                unique_variants = sorted(set(rel_variants))
+                current_rel_map[normalized] = unique_variants[0]
+                if len(unique_variants) > 1:
+                    duplicate_db_paths.extend(unique_variants[1:])
             current_rel_paths = set(current_rel_map.keys())
             stored_dir_mtimes = db.get_directory_signatures()
 
             if stored_dir_mtimes:
                 changed_roots = get_changed_directory_roots(directory_path, stored_dir_mtimes)
                 if not changed_roots:
-                    print("[CACHE] Background validation complete: no directory changes detected")
-                    self._queue_path_validation_result({
-                        'generation': generation,
-                        'directory_path': directory_path,
-                        'changes_detected': False,
-                    })
+                    duplicate_db_paths = sorted(set(duplicate_db_paths))
+                    if duplicate_db_paths:
+                        db.remove_images_by_paths(duplicate_db_paths)
+                        print(
+                            "[CACHE] Background validation: removed "
+                            f"{len(duplicate_db_paths):,} duplicate index entries"
+                        )
+                        self._queue_path_validation_result({
+                            'generation': generation,
+                            'directory_path': directory_path,
+                            'changes_detected': True,
+                            'added_count': 0,
+                            'removed_count': len(duplicate_db_paths),
+                            'precomputed_rel_paths': {
+                                current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
+                                for rel_path in current_rel_paths
+                            },
+                            'db_synced': True,
+                        })
+                    else:
+                        print("[CACHE] Background validation complete: no directory changes detected")
+                        self._queue_path_validation_result({
+                            'generation': generation,
+                            'directory_path': directory_path,
+                            'changes_detected': False,
+                        })
+                    _emit_progress("", -1, 0, True)
                     return
 
                 if len(changed_roots) == 1 and changed_roots[0] == "":
@@ -3293,6 +3322,9 @@ class ImageListModel(QAbstractListModel):
                 current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
                 for rel_path in removed_rel_paths
             ]
+            if duplicate_db_paths:
+                removed_db_paths.extend(duplicate_db_paths)
+            removed_db_paths = sorted(set(removed_db_paths))
             merged_native_paths = {
                 current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
                 for rel_path in merged_rel_paths
@@ -3305,7 +3337,7 @@ class ImageListModel(QAbstractListModel):
 
             db.replace_directory_signatures(merged_dir_mtimes)
 
-            changes_detected = bool(added_rel_paths or removed_rel_paths)
+            changes_detected = bool(added_rel_paths or removed_db_paths)
             if not changes_detected:
                 print("[CACHE] Background validation complete: image list unchanged")
 
@@ -3316,7 +3348,7 @@ class ImageListModel(QAbstractListModel):
                 'directory_path': directory_path,
                 'changes_detected': changes_detected,
                 'added_count': len(added_rel_paths),
-                'removed_count': len(removed_rel_paths),
+                'removed_count': len(removed_db_paths),
                 'precomputed_rel_paths': merged_native_paths if changes_detected else None,
                 'db_synced': changes_detected,
             })
@@ -3400,7 +3432,7 @@ class ImageListModel(QAbstractListModel):
                 dialog.setLabelText(f"{label}\nFiles: {int(count):,}")
             QApplication.processEvents()
 
-        cached_count = len(cached_paths)
+        cached_count = len({_normalize_relative_path(rel_path) for rel_path in cached_paths})
         precomputed_count = len(precomputed_rel_paths) if precomputed_rel_paths is not None else None
         threshold_value = int(pagination_threshold)
         paginated_from_precomputed = (
@@ -3974,8 +4006,19 @@ class ImageListModel(QAbstractListModel):
 
         # Don't load Image objects - keep self.images empty for paginated mode
         self.images = []
-        # Sync total count with DB (handling skipped files)
-        self._total_count = self._db.get_image_count()
+        # Prefer authoritative preindexed count (from cache snapshot/refresh)
+        # over raw DB COUNT(*), which may include stale duplicate path variants.
+        db_count = int(self._db.get_image_count())
+        if preindexed_count is not None:
+            expected_count = max(0, int(preindexed_count))
+            self._total_count = expected_count
+            if db_count != expected_count:
+                print(
+                    "[PAGINATION] Count mismatch detected "
+                    f"(DB={db_count:,}, index={expected_count:,}); using index count"
+                )
+        else:
+            self._total_count = db_count
         self._pages = {}  # Will be populated on-demand
 
         self.endResetModel()

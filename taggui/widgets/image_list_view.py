@@ -46,6 +46,8 @@ class ImageListView(
 
         # Clear delegate labels when model resets to avoid painting stale indexes
         source_model.modelReset.connect(self.delegate.clear_labels)
+        # Re-evaluate List/Icon compatibility after each directory load/reset.
+        source_model.modelReset.connect(self._update_view_mode)
 
         # Disable updates during model reset to prevent paint errors
         # Use source model signals since proxy may not forward modelAboutToBeReset
@@ -82,6 +84,7 @@ class ImageListView(
 
         # Masonry layout for icon mode
         self.use_masonry = False
+        self.use_virtual_list = False
         self._masonry_calculating = False  # Re-entry guard for layout calculation
         self._masonry_calc_future = None  # Multiprocessing future
         self._masonry_executor = ThreadPoolExecutor(max_workers=1)  # Single worker thread (ProcessPoolExecutor fails on Windows with heavy threading)
@@ -187,7 +190,9 @@ class ImageListView(
         self._painted_hit_regions_time = 0.0
         self._painted_hit_regions_scroll_offset = 0  # Scroll offset when snapshot was captured
         self._selected_rows_cache: set[int] = set()
+        self._selected_global_rows_cache: set[int] = set()
         self._current_proxy_row_cache = -1
+        self._current_global_row_cache = -1
         self._model_resetting = False
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
@@ -206,6 +211,7 @@ class ImageListView(
         self._spawn_drag_ghost_size = QSize(0, 0)
         self._spawn_drag_arrow_overlay = None
         self._active_drag_preview_animations = []
+        self._suppress_virtual_auto_scroll_once = False
         self._strict_domain_service = StrictScrollDomainService(self)
         self._masonry_lifecycle_service = MasonryLifecycleService(self)
         self._masonry_submission_service = MasonrySubmissionService(self)
@@ -332,17 +338,33 @@ class ImageListView(
     @Slot(QItemSelection, QItemSelection)
     def _on_selection_changed_cache(self, selected: QItemSelection, deselected: QItemSelection):
         """Maintain a paint-safe snapshot of selected proxy rows."""
+        virtual_list_active = bool(
+            hasattr(self, "_virtual_list_is_active") and self._virtual_list_is_active()
+        )
+        model = self.model()
         try:
             for sel_range in deselected:
                 if sel_range.left() <= 0 <= sel_range.right():
                     self._selected_rows_cache.difference_update(
                         range(sel_range.top(), sel_range.bottom() + 1)
                     )
+                    if virtual_list_active and model is not None:
+                        for row in range(sel_range.top(), sel_range.bottom() + 1):
+                            proxy_index = model.index(row, 0)
+                            global_idx = self._proxy_index_to_global_index(proxy_index)
+                            if global_idx >= 0:
+                                self._selected_global_rows_cache.discard(int(global_idx))
             for sel_range in selected:
                 if sel_range.left() <= 0 <= sel_range.right():
                     self._selected_rows_cache.update(
                         range(sel_range.top(), sel_range.bottom() + 1)
                     )
+                    if virtual_list_active and model is not None:
+                        for row in range(sel_range.top(), sel_range.bottom() + 1):
+                            proxy_index = model.index(row, 0)
+                            global_idx = self._proxy_index_to_global_index(proxy_index)
+                            if global_idx >= 0:
+                                self._selected_global_rows_cache.add(int(global_idx))
         except Exception:
             # Keep stale cache rather than risking crashes in selection internals.
             pass
@@ -350,10 +372,46 @@ class ImageListView(
     @Slot(QModelIndex, QModelIndex)
     def _on_current_changed_cache(self, current: QModelIndex, previous: QModelIndex):
         """Cache current proxy row for paint without touching selection model."""
+        virtual_list_active = bool(
+            hasattr(self, "_virtual_list_is_active") and self._virtual_list_is_active()
+        )
+        if virtual_list_active:
+            try:
+                source_model = (
+                    self.model().sourceModel()
+                    if self.model() and hasattr(self.model(), "sourceModel")
+                    else self.model()
+                )
+                mapped_global = (
+                    self._proxy_index_to_global_index(current)
+                    if current.isValid()
+                    else -1
+                )
+                stable_global = getattr(self, "_selected_global_index", None)
+                loading_pages = bool(getattr(source_model, "_loading_pages", set()))
+                if (
+                    loading_pages
+                    and isinstance(stable_global, int)
+                    and stable_global >= 0
+                    and mapped_global >= 0
+                    and int(mapped_global) != int(stable_global)
+                ):
+                    return
+            except Exception:
+                pass
         try:
             self._current_proxy_row_cache = current.row() if current.isValid() else -1
         except Exception:
             self._current_proxy_row_cache = -1
+        if virtual_list_active:
+            try:
+                self._current_global_row_cache = (
+                    self._proxy_index_to_global_index(current)
+                    if current.isValid()
+                    else -1
+                )
+            except Exception:
+                self._current_global_row_cache = -1
 
     def eventFilter(self, obj, event):
         """Intercept scrollbar track clicks to offer quick page jump popup."""
@@ -409,7 +467,9 @@ class ImageListView(
     @Slot()
     def _clear_selection_cache(self):
         self._selected_rows_cache.clear()
+        self._selected_global_rows_cache.clear()
         self._current_proxy_row_cache = -1
+        self._current_global_row_cache = -1
 
     @Slot()
     def _on_model_about_to_reset(self):
@@ -484,6 +544,10 @@ class ImageListView(
                 if proxy_model and hasattr(proxy_model, "sourceModel")
                 else proxy_model
             )
+            virtual_list_active = bool(
+                hasattr(self, "_virtual_list_is_active")
+                and self._virtual_list_is_active(source_model)
+            )
             # During/after drag-jump, keep stable selected global until a
             # deliberate user action (click/keyboard navigation) releases it.
             lock_until = float(getattr(self, '_selected_global_lock_until', 0.0) or 0.0)
@@ -533,11 +597,29 @@ class ImageListView(
             else:
                 global_idx = src_idx.row()
             if isinstance(global_idx, int) and global_idx >= 0:
+                prev_global = getattr(self, '_selected_global_index', None)
+                if (
+                    virtual_list_active
+                    and isinstance(prev_global, int)
+                    and prev_global >= 0
+                ):
+                    # In virtual list mode, currentIndex is still a volatile
+                    # loaded-row handle. During page-window churn, do not let a
+                    # remapped proxy row replace the stable selected global.
+                    if int(global_idx) != int(prev_global):
+                        if (
+                            loading_pages_nonempty
+                            or (
+                                previous.isValid()
+                                and current.isValid()
+                                and current.row() == previous.row()
+                            )
+                        ):
+                            return
                 # Buffered remap guard: while pages are still loading, ignore
                 # suspicious large jumps that are not explicit user intent.
                 if self.use_masonry and loading_pages_nonempty and source_model and hasattr(source_model, 'PAGE_SIZE'):
                     try:
-                        prev_global = getattr(self, '_selected_global_index', None)
                         page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
                         if isinstance(prev_global, int) and prev_global >= 0:
                             if abs(int(global_idx) - int(prev_global)) > max(1000, page_size * 2):
