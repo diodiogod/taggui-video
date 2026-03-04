@@ -1392,7 +1392,7 @@ class ImageListViewInteractionMixin:
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
-        if event.modifiers() == Qt.ControlModifier:
+        if event.modifiers() & Qt.ControlModifier:
             import time
             # Ctrl+wheel can arrive without keyboard focus; keep arrows working after zoom.
             self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -1401,6 +1401,21 @@ class ImageListViewInteractionMixin:
                 if self.model() and hasattr(self.model(), 'sourceModel')
                 else self.model()
             )
+            anchor_global = None
+            if (
+                hasattr(self, "_virtual_list_is_active")
+                and self._virtual_list_is_active(source_model)
+            ):
+                candidate = getattr(self, "_selected_global_index", None)
+                if isinstance(candidate, int) and candidate >= 0:
+                    anchor_global = int(candidate)
+                else:
+                    try:
+                        mapped = self._current_global_from_current_index(source_model)
+                        if isinstance(mapped, int) and mapped >= 0:
+                            anchor_global = int(mapped)
+                    except Exception:
+                        anchor_global = None
             # A prior click may have set _skip_next_resize_recalc.  Clear it so
             # the zoom's own resize timer fires properly with scroll anchoring.
             self._skip_next_resize_recalc = False
@@ -1434,6 +1449,20 @@ class ImageListViewInteractionMixin:
                     # Debounce: recalculate and re-center after user stops zooming
                     self._resize_timer.stop()
                     self._resize_timer.start(420)
+                else:
+                    updated_source_model = (
+                        self.model().sourceModel()
+                        if self.model() and hasattr(self.model(), 'sourceModel')
+                        else self.model()
+                    )
+                    if (
+                        hasattr(self, "_virtual_list_is_active")
+                        and self._virtual_list_is_active(updated_source_model)
+                        and hasattr(self, "_scroll_selected_global_to_center_safe")
+                    ):
+                        if isinstance(anchor_global, int) and anchor_global >= 0:
+                            self._selected_global_index = int(anchor_global)
+                        self._scroll_selected_global_to_center_safe()
 
                 # Save to settings
                 settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)

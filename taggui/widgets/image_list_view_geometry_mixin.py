@@ -593,7 +593,7 @@ class ImageListViewGeometryMixin:
                 # then expands while scrolling.
                 self.updateGeometries()
                 if previous_mode != QListView.ViewMode.IconMode or not previous_virtual_list:
-                    QTimer.singleShot(0, self._scroll_current_index_to_center_safe)
+                    QTimer.singleShot(0, self._scroll_selected_global_to_center_safe)
                 self.viewport().update()
             else:
                 if previous_mode != QListView.ViewMode.ListMode or previous_virtual_list:
@@ -1472,6 +1472,58 @@ class ImageListViewGeometryMixin:
         if not idx.isValid():
             return
         self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def _scroll_selected_global_to_center_safe(self):
+        """Center virtual-list viewport on stable selected global index."""
+        model = self.model()
+        source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if not self._virtual_list_is_active(source_model):
+            self._scroll_current_index_to_center_safe()
+            return
+
+        total_items = int(getattr(source_model, "_total_count", 0) or 0) if source_model else 0
+        if total_items <= 0:
+            return
+
+        target_global = getattr(self, "_selected_global_index", None)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            target_global = self._proxy_index_to_global_index(self.currentIndex())
+        if not isinstance(target_global, int) or target_global < 0:
+            return
+
+        target_global = max(0, min(int(target_global), total_items - 1))
+        row_height = max(1, self._virtual_list_row_height())
+        viewport_h = max(1, int(self.viewport().height()))
+        virtual_max = max(0, (total_items * row_height) - viewport_h)
+        target_scroll = max(
+            0,
+            min(
+                (target_global * row_height) - max(0, (viewport_h - row_height) // 2),
+                virtual_max,
+            ),
+        )
+
+        sb = self.verticalScrollBar()
+        prev_block = sb.blockSignals(True)
+        try:
+            if int(sb.maximum()) != virtual_max:
+                sb.setRange(0, virtual_max)
+            sb.setValue(int(target_scroll))
+        finally:
+            sb.blockSignals(prev_block)
+        self._last_stable_scroll_value = int(sb.value())
+
+        if source_model and hasattr(source_model, "ensure_pages_for_range"):
+            try:
+                source_model.ensure_pages_for_range(int(target_global), int(target_global))
+            except Exception:
+                pass
+        if hasattr(self, "_rebind_current_index_to_selected_global"):
+            try:
+                self._rebind_current_index_to_selected_global(source_model=source_model)
+            except Exception:
+                pass
+        self.viewport().update()
 
     def scrollTo(self, index, hint=None):
         """Override scrollTo to use masonry positions instead of Qt's row-based layout.
