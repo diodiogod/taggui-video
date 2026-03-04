@@ -738,13 +738,30 @@ class ImageListViewGeometryMixin:
         from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup
         from PySide6.QtWidgets import QLabel, QGraphicsOpacityEffect
 
-        framed_pixmap = QPixmap(pixmap.width() + 4, pixmap.height() + 4)
+        source_dpr = max(1.0, float(pixmap.devicePixelRatio() or 1.0))
+        try:
+            logical_size = pixmap.deviceIndependentSize()
+            source_logical_w = max(1, int(round(logical_size.width())))
+            source_logical_h = max(1, int(round(logical_size.height())))
+        except Exception:
+            source_logical_w = max(1, int(round(pixmap.width() / source_dpr)))
+            source_logical_h = max(1, int(round(pixmap.height() / source_dpr)))
+
+        frame_inset = 2
+        framed_logical_w = source_logical_w + (frame_inset * 2)
+        framed_logical_h = source_logical_h + (frame_inset * 2)
+        framed_pixmap = QPixmap(
+            max(1, int(round(framed_logical_w * source_dpr))),
+            max(1, int(round(framed_logical_h * source_dpr))),
+        )
+        framed_pixmap.setDevicePixelRatio(source_dpr)
         framed_pixmap.fill(Qt.GlobalColor.transparent)
+        framed_rect = QRect(0, 0, framed_logical_w, framed_logical_h)
         framed_painter = QPainter(framed_pixmap)
         framed_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        framed_painter.drawPixmap(2, 2, pixmap)
+        framed_painter.drawPixmap(frame_inset, frame_inset, pixmap)
         framed_painter.setPen(QPen(QColor(255, 255, 255, 180), 1))
-        framed_painter.drawRect(framed_pixmap.rect().adjusted(0, 0, -1, -1))
+        framed_painter.drawRect(framed_rect.adjusted(0, 0, -1, -1))
         framed_painter.end()
 
         overlay = QLabel(
@@ -757,17 +774,17 @@ class ImageListViewGeometryMixin:
         overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         overlay.setPixmap(framed_pixmap)
-        overlay.resize(framed_pixmap.size())
+        overlay.resize(framed_logical_w, framed_logical_h)
 
         center_pos = QCursor.pos()
         start_rect = QRect(
-            center_pos.x() - framed_pixmap.width() // 2,
-            center_pos.y() - framed_pixmap.height() // 2,
-            framed_pixmap.width(),
-            framed_pixmap.height(),
+            center_pos.x() - framed_logical_w // 2,
+            center_pos.y() - framed_logical_h // 2,
+            framed_logical_w,
+            framed_logical_h,
         )
-        grow_w = int(framed_pixmap.width() * 1.12)
-        grow_h = int(framed_pixmap.height() * 1.12)
+        grow_w = int(framed_logical_w * 1.12)
+        grow_h = int(framed_logical_h * 1.12)
         grown_rect = QRect(
             center_pos.x() - grow_w // 2,
             center_pos.y() - grow_h // 2,
@@ -783,15 +800,15 @@ class ImageListViewGeometryMixin:
         animation_group = QParallelAnimationGroup(self)
 
         fade_animation = QPropertyAnimation(opacity_effect, b"opacity")
-        fade_animation.setDuration(220)
+        fade_animation.setDuration(160)
         fade_animation.setStartValue(1.0)
         fade_animation.setEndValue(0.0)
         fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         scale_animation = QPropertyAnimation(overlay, b"geometry")
-        scale_animation.setDuration(220)
+        scale_animation.setDuration(160)
         scale_animation.setStartValue(start_rect)
-        scale_animation.setKeyValueAt(0.45, grown_rect)
+        scale_animation.setKeyValueAt(0.35, grown_rect)
         scale_animation.setEndValue(start_rect)
         scale_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
