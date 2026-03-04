@@ -1143,6 +1143,7 @@ class MainWindow(QMainWindow):
             _ = target.view
         except RuntimeError:
             target = self.image_viewer
+        self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
             if self._exclusive_video_controls_visibility:
                 self._sync_active_viewer_controls_visibility(target)
@@ -1164,6 +1165,23 @@ class MainWindow(QMainWindow):
         if self._exclusive_video_controls_visibility:
             self._sync_active_viewer_controls_visibility(target)
         self.refresh_video_controls_performance_profile()
+
+    def _promote_floating_window_for_viewer(self, viewer: ImageViewer | None):
+        """Track floating-window activation order so later entries are topmost."""
+        target_viewer = viewer
+        promoted_window = None
+        live_windows = []
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                if window.viewer is target_viewer:
+                    promoted_window = window
+                    continue
+                live_windows.append(window)
+            except RuntimeError:
+                continue
+        if promoted_window is not None:
+            live_windows.append(promoted_window)
+        self._floating_viewers = live_windows
 
     def _sync_active_viewer_controls_visibility(self, active_viewer: ImageViewer | None):
         """Show controls for one active viewer and hide controls for all others."""
@@ -1820,6 +1838,58 @@ class MainWindow(QMainWindow):
             return None
         return candidate_map.get(best.key)
 
+    def _compare_feedback_occlusion_rects(self, target: dict | None, source: dict | None, *, state_name: str) -> list[QRect]:
+        """Return overlay holes that should hide compare feedback under foreground windows."""
+        if state_name == "ready":
+            return []
+
+        occlusion_rects: list[QRect] = []
+        seen_keys: set[tuple[int, int, int, int]] = set()
+        target_rect = target.get("global_rect") if isinstance(target, dict) else None
+        target_window = target.get("window") if isinstance(target, dict) else None
+        target_kind = str(target.get("kind") or "") if isinstance(target, dict) else ""
+        source_kind = str(source.get("kind") or "") if isinstance(source, dict) else ""
+
+        if isinstance(target_rect, QRect) and target_rect.isValid() and target_kind == "floating" and isinstance(target_window, QWidget):
+            passed_target = False
+            live_windows = []
+            for window in list(getattr(self, '_floating_viewers', [])):
+                try:
+                    if not window.isVisible():
+                        continue
+                    live_windows.append(window)
+                    if window is target_window:
+                        passed_target = True
+                        continue
+                    if not passed_target:
+                        continue
+                    rect = window.frameGeometry()
+                    if rect.isValid() and rect.intersects(target_rect):
+                        key = (rect.x(), rect.y(), rect.width(), rect.height())
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        occlusion_rects.append(QRect(rect))
+                except RuntimeError:
+                    continue
+            self._floating_viewers = live_windows
+
+        if source_kind == "window":
+            source_window = source.get("window")
+            if isinstance(source_window, QWidget):
+                try:
+                    if source_window.isVisible():
+                        source_rect = source_window.frameGeometry()
+                        if source_rect.isValid():
+                            key = (source_rect.x(), source_rect.y(), source_rect.width(), source_rect.height())
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                occlusion_rects.append(QRect(source_rect))
+                except RuntimeError:
+                    pass
+
+        return occlusion_rects
+
     def _clear_compare_drag_session(self):
         try:
             self._compare_drag_poll_timer.stop()
@@ -1931,22 +2001,16 @@ class MainWindow(QMainWindow):
         progress = state.get("progress", 0.0)
         rect = target.get("global_rect")
         if isinstance(rect, QRect) and rect.isValid():
-            occlusion_rect = None
-            if source.get("kind") == "window" and state_name != "ready":
-                source_window = source.get("window")
-                if isinstance(source_window, QWidget):
-                    try:
-                        if source_window.isVisible():
-                            source_rect = source_window.frameGeometry()
-                            if source_rect.isValid():
-                                occlusion_rect = QRect(source_rect)
-                    except RuntimeError:
-                        occlusion_rect = None
+            occlusion_rects = self._compare_feedback_occlusion_rects(
+                target,
+                source,
+                state_name=state_name,
+            )
             self._compare_drop_overlay.show_feedback(
                 rect,
                 state=state_name,
                 progress=progress,
-                occlusion_global_rect=occlusion_rect,
+                occlusion_global_rects=occlusion_rects,
             )
             return
         self._compare_drop_overlay.hide_feedback()

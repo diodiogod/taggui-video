@@ -128,14 +128,14 @@ class CompareDropFeedbackOverlay(QWidget):
         self._state = "none"
         self._progress = 0.0
         self._margin_px = 8
-        self._occlusion_rect_local = QRect()
+        self._occlusion_region_local = QRegion()
         self.hide()
 
     def hide_feedback(self):
         self._state = "none"
         self._progress = 0.0
         self._target_rect_local = QRect()
-        self._occlusion_rect_local = QRect()
+        self._occlusion_region_local = QRegion()
         self.hide()
 
     def show_feedback(
@@ -144,7 +144,7 @@ class CompareDropFeedbackOverlay(QWidget):
         *,
         state: str,
         progress: float,
-        occlusion_global_rect: QRect | None = None,
+        occlusion_global_rects: list[QRect] | None = None,
     ):
         if target_global_rect is None or not target_global_rect.isValid():
             self.hide_feedback()
@@ -157,11 +157,14 @@ class CompareDropFeedbackOverlay(QWidget):
         self._target_rect_local = QRect(margin, margin, target_global_rect.width(), target_global_rect.height())
         self._state = str(state or "none")
         self._progress = max(0.0, min(1.0, float(progress)))
-        if isinstance(occlusion_global_rect, QRect) and occlusion_global_rect.isValid():
+        self._occlusion_region_local = QRegion()
+        for occlusion_global_rect in list(occlusion_global_rects or []):
+            if not isinstance(occlusion_global_rect, QRect) or not occlusion_global_rect.isValid():
+                continue
             local_top_left = occlusion_global_rect.topLeft() - framed.topLeft()
-            self._occlusion_rect_local = QRect(local_top_left, occlusion_global_rect.size())
-        else:
-            self._occlusion_rect_local = QRect()
+            self._occlusion_region_local = self._occlusion_region_local.united(
+                QRegion(QRect(local_top_left, occlusion_global_rect.size()))
+            )
         self.show()
         self.raise_()
         self.update()
@@ -172,8 +175,8 @@ class CompareDropFeedbackOverlay(QWidget):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if self._occlusion_rect_local.isValid():
-            clip_region = QRegion(self.rect()).subtracted(QRegion(self._occlusion_rect_local))
+        if not self._occlusion_region_local.isEmpty():
+            clip_region = QRegion(self.rect()).subtracted(self._occlusion_region_local)
             painter.setClipRegion(clip_region)
         rect = self._target_rect_local.adjusted(1, 1, -1, -1)
         _paint_feedback(
