@@ -24,6 +24,7 @@ from utils.video.playback_backend import (
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox)
 from utils.grammar_checker import GrammarCheckMode
+from utils.image_index_db import ImageIndexDB
 from utils.thumbnail_cache import get_thumbnail_cache
 
 
@@ -332,12 +333,12 @@ class SettingsDialog(QDialog):
         grid_layout = QGridLayout()
 
         # Enable dimension cache
-        grid_layout.addWidget(QLabel('Enable dimension cache (.taggui_index.db)'), 0, 0,
+        grid_layout.addWidget(QLabel('Enable dimension cache (.taggui/index.db)'), 0, 0,
                               Qt.AlignmentFlag.AlignRight)
         enable_dimension_cache_check_box = SettingsBigCheckBox(
             key='enable_dimension_cache')
         enable_dimension_cache_check_box.setToolTip(
-            'Cache image dimensions in .taggui_index.db files for instant folder reloads')
+            'Cache image dimensions in per-folder .taggui/index.db bundles for instant folder reloads')
         grid_layout.addWidget(enable_dimension_cache_check_box, 0, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
@@ -382,7 +383,7 @@ class SettingsDialog(QDialog):
         # Clear current directory cache button
         self.clear_current_button = QPushButton('Clear Current Directory Cache')
         self.clear_current_button.setToolTip(
-            'Delete dimension cache (.taggui_index.db) and thumbnails for the currently loaded directory only')
+            'Delete the image index database (.taggui/index.db) and thumbnails for the currently loaded directory only')
         self.clear_current_button.clicked.connect(self.clear_current_directory_cache)
 
         # Size label and calculate button for current directory
@@ -427,7 +428,7 @@ class SettingsDialog(QDialog):
         # Clear all databases button
         self.clear_all_db_button = QPushButton('Clear All Image Index Databases')
         self.clear_all_db_button.setToolTip(
-            'Delete all .taggui_index.db files from all previously opened directories. '
+            'Delete all .taggui/index.db bundles from all previously opened directories. '
             'Use this if databases are corrupted or to free disk space.')
         self.clear_all_db_button.setStyleSheet('QPushButton { color: #d32f2f; }')  # Red text
         self.clear_all_db_button.clicked.connect(self.clear_all_databases)
@@ -788,39 +789,39 @@ class SettingsDialog(QDialog):
                 self.calc_current_size_button.setEnabled(True)
                 return
 
-            if not thumbnail_cache.enabled or not thumbnail_cache.cache_dir.exists():
-                self.clear_current_size_label.setText('(empty)')
-                self.calc_current_size_button.setEnabled(True)
-                return
-
             try:
-                from models.image_list_model import get_file_paths
-                image_suffixes_string = settings.value(
-                    'image_list_file_formats',
-                    defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-                image_suffixes = []
-                for suffix in image_suffixes_string.split(','):
-                    suffix = suffix.strip().lower()
-                    if not suffix.startswith('.'):
-                        suffix = '.' + suffix
-                    image_suffixes.append(suffix)
+                dir_cache_size = ImageIndexDB.total_database_bundle_size(
+                    current_dir, include_legacy=True)
 
-                file_paths = get_file_paths(current_dir)
-                image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
+                if thumbnail_cache.enabled and thumbnail_cache.cache_dir.exists():
+                    from models.image_list_model import get_file_paths
+                    image_suffixes_string = settings.value(
+                        'image_list_file_formats',
+                        defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+                    image_suffixes = []
+                    for suffix in image_suffixes_string.split(','):
+                        suffix = suffix.strip().lower()
+                        if not suffix.startswith('.'):
+                            suffix = '.' + suffix
+                        image_suffixes.append(suffix)
 
-                dir_cache_size = 0
-                for image_path in image_paths:
-                    try:
-                        mtime = image_path.stat().st_mtime
-                        cache_key = thumbnail_cache._get_cache_key(image_path, mtime, 512)
-                        cache_path = thumbnail_cache._get_cache_path(cache_key)
-                        if cache_path.exists():
-                            dir_cache_size += cache_path.stat().st_size
-                    except Exception:
-                        pass
+                    file_paths = get_file_paths(current_dir)
+                    image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
 
-                cache_size_str = self._format_size(dir_cache_size)
-                self.clear_current_size_label.setText(cache_size_str)
+                    for image_path in image_paths:
+                        try:
+                            mtime = image_path.stat().st_mtime
+                            cache_key = thumbnail_cache._get_cache_key(image_path, mtime, 512)
+                            cache_path = thumbnail_cache._get_cache_path(cache_key)
+                            if cache_path.exists():
+                                dir_cache_size += cache_path.stat().st_size
+                        except Exception:
+                            pass
+
+                if dir_cache_size > 0:
+                    self.clear_current_size_label.setText(self._format_size(dir_cache_size))
+                else:
+                    self.clear_current_size_label.setText('(empty)')
             except Exception:
                 self.clear_current_size_label.setText('(error)')
             finally:
@@ -867,17 +868,19 @@ class SettingsDialog(QDialog):
             try:
                 recent_dirs = settings.value('recent_directories', [], type=list)
                 total_db_size = 0
-                db_count = 0
+                bundle_count = 0
 
                 for dir_path_str in recent_dirs:
-                    db_path = Path(dir_path_str) / '.taggui_index.db'
-                    if db_path.exists():
-                        total_db_size += db_path.stat().st_size
-                        db_count += 1
+                    dir_path = Path(dir_path_str)
+                    bundle_size = ImageIndexDB.total_database_bundle_size(
+                        dir_path, include_legacy=True)
+                    if bundle_size > 0:
+                        total_db_size += bundle_size
+                        bundle_count += 1
 
-                if db_count > 0:
+                if bundle_count > 0:
                     size_str = self._format_size(total_db_size)
-                    self.clear_all_db_size_label.setText(f"{size_str} ({db_count} files)")
+                    self.clear_all_db_size_label.setText(f"{size_str} ({bundle_count} bundles)")
                 else:
                     self.clear_all_db_size_label.setText('(no databases found)')
             except Exception:
@@ -1145,7 +1148,7 @@ class SettingsDialog(QDialog):
             self,
             'Confirm Clear Current Directory Cache',
             f'This will delete:\n\n'
-            f'• Dimension cache (.taggui_index.db)\n'
+            f'• Image index database (.taggui/index.db)\n'
             f'• All thumbnails for images in:\n'
             f'  {current_dir}\n\n'
             f'Cache will be rebuilt when you reload this directory.\n\n'
@@ -1167,15 +1170,14 @@ class SettingsDialog(QDialog):
                     image_list_model = main_window.image_list_model
                     if hasattr(image_list_model, '_db') and image_list_model._db:
                         image_list_model._db.close()
+                        image_list_model._db = None
                         print("[CACHE] Closed database connection before deletion")
             except Exception as e:
                 print(f"[CACHE] Warning: couldn't close DB connection: {e}")
 
-            # Delete dimension cache database
-            db_path = current_dir / '.taggui_index.db'
-            if db_path.exists():
-                db_path.unlink()
-                deleted_count += 1
+            # Delete image index database bundle (new location + legacy fallback)
+            deleted_count += len(ImageIndexDB.delete_database_bundle(
+                current_dir, include_legacy=True))
 
             # Delete thumbnails for this directory
             # We need to delete cached thumbnails that match files in this directory
@@ -1311,7 +1313,7 @@ class SettingsDialog(QDialog):
 
     @Slot()
     def clear_all_databases(self):
-        """Clear all .taggui_index.db files from all recent directories."""
+        """Clear all image index database bundles from all recent directories."""
         # Get list of recent directories
         recent_dirs = settings.value('recent_directories', [], type=list)
 
@@ -1323,18 +1325,22 @@ class SettingsDialog(QDialog):
             )
             return
 
-        # Find all database files
-        db_files = []
+        # Find all directories that have a database bundle
+        db_dirs = []
         for dir_path_str in recent_dirs:
-            db_path = Path(dir_path_str) / '.taggui_index.db'
-            if db_path.exists():
-                db_files.append(db_path)
+            dir_path = Path(dir_path_str)
+            bundle_paths = [
+                path for path in ImageIndexDB.all_bundle_paths(dir_path, include_legacy=True)
+                if path.exists()
+            ]
+            if bundle_paths:
+                db_dirs.append((dir_path, bundle_paths))
 
-        if not db_files:
+        if not db_dirs:
             QMessageBox.information(
                 self,
                 'No Databases Found',
-                'No .taggui_index.db files found in recent directories.'
+                'No image index databases found in recent directories.'
             )
             return
 
@@ -1342,9 +1348,9 @@ class SettingsDialog(QDialog):
         reply = QMessageBox.question(
             self,
             'Confirm Clear All Image Index Databases',
-            f'This will permanently delete {len(db_files)} database file(s):\n\n'
-            f'{chr(10).join([f"• {db.parent.name}/.taggui_index.db" for db in db_files[:5]])}'
-            f'{f"{chr(10)}...and {len(db_files) - 5} more" if len(db_files) > 5 else ""}\n\n'
+            f'This will permanently delete {len(db_dirs)} database bundle(s):\n\n'
+            f'{chr(10).join([f"• {dir_path.name}/.taggui/index.db" for dir_path, _ in db_dirs[:5]])}'
+            f'{f"{chr(10)}...and {len(db_dirs) - 5} more" if len(db_dirs) > 5 else ""}\n\n'
             f'Databases will be rebuilt when you open these directories.\n\n'
             f'Continue?',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1355,19 +1361,48 @@ class SettingsDialog(QDialog):
             return
 
         try:
-            deleted_count = 0
+            deleted_files = 0
+            deleted_bundles = 0
             failed_count = 0
+            current_loaded_dir = None
+            db_dir_set = {dir_path for dir_path, _ in db_dirs}
+            current_db_in_use = False
 
-            for db_path in db_files:
-                try:
-                    db_path.unlink()
-                    deleted_count += 1
-                except Exception:
+            try:
+                main_window = self.parent()
+                if hasattr(main_window, 'directory_path') and main_window.directory_path:
+                    current_loaded_dir = Path(main_window.directory_path)
+                if hasattr(main_window, 'image_list_model'):
+                    image_list_model = main_window.image_list_model
+                    if (
+                        current_loaded_dir is not None
+                        and current_loaded_dir in db_dir_set
+                        and hasattr(image_list_model, '_db')
+                        and image_list_model._db
+                    ):
+                        current_db_in_use = True
+            except Exception:
+                pass
+
+            for dir_path, bundle_paths in db_dirs:
+                if current_db_in_use and current_loaded_dir is not None and dir_path == current_loaded_dir:
+                    failed_count += 1
+                    continue
+                removed = ImageIndexDB.delete_database_bundle(
+                    dir_path, include_legacy=True)
+                if removed:
+                    deleted_bundles += 1
+                    deleted_files += len(removed)
+                remaining = [path for path in bundle_paths if path.exists()]
+                if remaining:
                     failed_count += 1
 
-            message = f'Successfully deleted {deleted_count} database file(s).'
+            message = (
+                f'Successfully deleted {deleted_bundles} database bundle(s) '
+                f'({deleted_files} file(s)).'
+            )
             if failed_count > 0:
-                message += f'\n{failed_count} file(s) could not be deleted (may be in use).'
+                message += f'\n{failed_count} bundle(s) could not be fully deleted (may be in use).'
 
             QMessageBox.information(
                 self,

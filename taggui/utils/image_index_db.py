@@ -1,6 +1,7 @@
 """Database caching for image dimensions and metadata to speed up directory loading."""
 
 import sqlite3
+import shutil
 import time
 import threading
 from pathlib import Path
@@ -14,6 +15,79 @@ DB_VERSION = 6  # Increment to allow NULLs in width/height (v6)
 class ImageIndexDB:
     """SQLite database for caching image dimensions and metadata."""
 
+    DB_DIR_NAME = '.taggui'
+    DB_FILE_NAME = 'index.db'
+    LEGACY_DB_NAME = '.taggui_index.db'
+    BUNDLE_SUFFIXES = ('', '-wal', '-shm')
+    INTERNAL_DIR_NAMES = {DB_DIR_NAME, '.taggui_profiles'}
+
+    @classmethod
+    def db_dir_path(cls, directory_path: Path) -> Path:
+        return Path(directory_path) / cls.DB_DIR_NAME
+
+    @classmethod
+    def db_base_path(cls, directory_path: Path) -> Path:
+        return cls.db_dir_path(directory_path) / cls.DB_FILE_NAME
+
+    @classmethod
+    def legacy_db_base_path(cls, directory_path: Path) -> Path:
+        return Path(directory_path) / cls.LEGACY_DB_NAME
+
+    @classmethod
+    def bundle_paths_for_base(cls, base_path: Path) -> list[Path]:
+        base_str = str(base_path)
+        return [Path(base_str + suffix) for suffix in cls.BUNDLE_SUFFIXES]
+
+    @classmethod
+    def active_bundle_paths(cls, directory_path: Path) -> list[Path]:
+        return cls.bundle_paths_for_base(cls.db_base_path(directory_path))
+
+    @classmethod
+    def legacy_bundle_paths(cls, directory_path: Path) -> list[Path]:
+        return cls.bundle_paths_for_base(cls.legacy_db_base_path(directory_path))
+
+    @classmethod
+    def all_bundle_paths(cls, directory_path: Path, include_legacy: bool = True) -> list[Path]:
+        paths = cls.active_bundle_paths(directory_path)
+        if include_legacy:
+            paths.extend(cls.legacy_bundle_paths(directory_path))
+        return paths
+
+    @classmethod
+    def delete_database_bundle(cls, directory_path: Path, include_legacy: bool = True) -> list[Path]:
+        """Delete current DB bundle files (and optional legacy bundle files)."""
+        removed: list[Path] = []
+        for path in cls.all_bundle_paths(directory_path, include_legacy=include_legacy):
+            if not path.exists():
+                continue
+            try:
+                path.unlink()
+                removed.append(path)
+            except Exception:
+                continue
+
+        db_dir = cls.db_dir_path(directory_path)
+        try:
+            if db_dir.exists() and db_dir.is_dir() and not any(db_dir.iterdir()):
+                db_dir.rmdir()
+        except Exception:
+            pass
+
+        return removed
+
+    @classmethod
+    def total_database_bundle_size(cls, directory_path: Path, include_legacy: bool = True) -> int:
+        """Return total bytes used by the DB bundle for one dataset directory."""
+        total_size = 0
+        for path in cls.all_bundle_paths(directory_path, include_legacy=include_legacy):
+            if not path.exists():
+                continue
+            try:
+                total_size += path.stat().st_size
+            except Exception:
+                continue
+        return total_size
+
     def __init__(self, directory_path: Path):
         """Initialize database for given directory."""
         # Check if caching is enabled
@@ -21,7 +95,10 @@ class ImageIndexDB:
                                      defaultValue=DEFAULT_SETTINGS['enable_dimension_cache'],
                                      type=bool)
 
-        self.db_path = directory_path / '.taggui_index.db'
+        self._directory_path = Path(directory_path)
+        self.db_dir = self.db_dir_path(self._directory_path)
+        self.db_path = self.db_base_path(self._directory_path)
+        self.legacy_db_path = self.legacy_db_base_path(self._directory_path)
         self.conn = None
 
         # Lock for thread-safe DB access (multiple worker threads)
@@ -66,6 +143,7 @@ class ImageIndexDB:
         """Create database and tables if they don't exist."""
         try:
             with ImageIndexDB._init_lock:
+                self._prepare_db_location()
                 self.conn = sqlite3.connect(str(self.db_path), timeout=60.0, check_same_thread=False)  # Increased timeout for migrations
                 self.conn.row_factory = sqlite3.Row  # Access columns by name
 
@@ -126,6 +204,14 @@ class ImageIndexDB:
                         tag TEXT NOT NULL,
                         PRIMARY KEY (image_id, tag),
                         FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                    )
+                ''')
+
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS directories (
+                        dir_path TEXT PRIMARY KEY,
+                        mtime REAL NOT NULL,
+                        scanned_at REAL NOT NULL
                     )
                 ''')
 
@@ -226,11 +312,39 @@ class ImageIndexDB:
                 try: self.conn.close() 
                 except: pass
             try:
-                if self.db_path.exists():
-                    self.db_path.unlink()
+                self.delete_database_bundle(self._directory_path, include_legacy=False)
                 self._init_db()  # Retry
             except Exception:
                 pass
+
+    def _prepare_db_location(self):
+        """Ensure the DB folder exists and migrate a legacy root-level DB if needed."""
+        self.db_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.db_path.exists():
+            return
+
+        legacy_bundle = [path for path in self.bundle_paths_for_base(self.legacy_db_path) if path.exists()]
+        if not legacy_bundle:
+            return
+
+        moved_any = False
+        legacy_base_name = self.legacy_db_path.name
+        new_base_name = self.db_path.name
+
+        for src in legacy_bundle:
+            suffix = src.name[len(legacy_base_name):]
+            dst = self.db_path.with_name(new_base_name + suffix)
+            if dst.exists():
+                continue
+            try:
+                src.rename(dst)
+            except OSError:
+                shutil.move(str(src), str(dst))
+            moved_any = True
+
+        if moved_any:
+            print(f"[DB] Migrated legacy index to {self.DB_DIR_NAME}/{self.DB_FILE_NAME}")
 
     def get_cached_info(self, file_name: str, mtime: float) -> Optional[dict]:
         """
@@ -441,8 +555,57 @@ class ImageIndexDB:
         if new_files_count > 0:
              print(f"[DB] Bulk inserted {new_files_count:,} new files")
 
-        # Trigger maintenance (metadata backfill + dimension repair)
-        self.run_maintenance(directory_path)
+    def bulk_insert_relative_paths(self, rel_paths: List[str], directory_path: Path,
+                                   progress_callback=None):
+        """
+        Bulk insert file records from relative paths.
+        Intended for incremental refreshes where the caller already knows which
+        paths are new, avoiding a full DB path-set load.
+        """
+        if not self.enabled or not self.conn or not rel_paths:
+            return
+
+        files_data = []
+        now = time.time()
+        total_files = len(rel_paths)
+        new_files_count = 0
+
+        for i, rel_path in enumerate(rel_paths):
+            try:
+                full_path = directory_path / rel_path
+                stat = full_path.stat()
+                mtime = stat.st_mtime
+                ctime = stat.st_ctime
+                file_size = stat.st_size
+            except (OSError, FileNotFoundError, ValueError):
+                continue
+
+            suffix = full_path.suffix.lower()
+            is_video = suffix in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
+            file_type = suffix.lstrip('.') if suffix else ''
+
+            files_data.append((
+                rel_path,
+                None, None, 1.0,  # Placeholder dims
+                int(is_video),
+                None, None, None,  # Video metadata
+                mtime, 0.0, now,
+                file_size, file_type, ctime
+            ))
+            new_files_count += 1
+
+            if len(files_data) >= 5000:
+                self._bulk_insert_chunk(files_data)
+                files_data = []
+
+            if (i + 1) % 10000 == 0 and progress_callback:
+                progress_callback(i + 1, total_files)
+
+        if files_data:
+            self._bulk_insert_chunk(files_data)
+
+        if new_files_count > 0:
+            print(f"[DB] Bulk inserted {new_files_count:,} new files")
 
 
     def run_maintenance(self, directory_path: Path):
@@ -874,6 +1037,53 @@ class ImageIndexDB:
                 self.conn.commit()
         except sqlite3.Error:
             return
+
+    def get_directory_signatures(self) -> Dict[str, float]:
+        """Return stored directory mtimes keyed by relative directory path."""
+        if not self._ensure_connection():
+            return {}
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT dir_path, mtime FROM directories')
+                rows = cursor.fetchall()
+                return {
+                    str(row['dir_path'] if isinstance(row, sqlite3.Row) else row[0]).replace('\\', '/'): (
+                        float(row['mtime']) if isinstance(row, sqlite3.Row) else float(row[1])
+                    )
+                    for row in rows
+                }
+        except sqlite3.Error:
+            return {}
+
+    def replace_directory_signatures(self, dir_mtimes: Dict[str, float]):
+        """Replace the persisted directory signature snapshot."""
+        if not self._ensure_connection():
+            return
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute('DELETE FROM directories')
+
+                if dir_mtimes:
+                    now = time.time()
+                    rows = [
+                        (str(dir_path).replace('\\', '/'), float(mtime), now)
+                        for dir_path, mtime in sorted(dir_mtimes.items())
+                    ]
+                    cursor.executemany(
+                        '''
+                        INSERT INTO directories (dir_path, mtime, scanned_at)
+                        VALUES (?, ?, ?)
+                        ''',
+                        rows,
+                    )
+
+                self.conn.commit()
+        except sqlite3.Error as e:
+            print(f'Database directory signature write error: {e}')
 
     # ========== Tag Management ==========
 

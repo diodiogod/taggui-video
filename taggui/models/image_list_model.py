@@ -187,6 +187,12 @@ def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
     print(f"[SCAN] Scanning directory: {directory_path}")
     count = 0
     for path in directory_path.rglob("*"):  # Use rglob for recursive search
+        try:
+            rel_parts = path.relative_to(directory_path).parts
+        except ValueError:
+            rel_parts = path.parts
+        if any(_should_skip_internal_dir_name(part) for part in rel_parts):
+            continue
         # Accept regular files or symlinks (for organized workflows and test datasets)
         if path.is_file() or path.is_symlink():
             file_paths.add(path)
@@ -233,6 +239,8 @@ def get_directory_tree_stats(directory_path: Path, progress_callback=None) -> tu
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
+                    if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
+                        continue
                     try:
                         stat = entry.stat(follow_symlinks=False)
                     except OSError:
@@ -261,6 +269,239 @@ def get_directory_tree_stats(directory_path: Path, progress_callback=None) -> tu
             pass
 
     return file_count, max_mtime
+
+
+def _relative_child_path(parent_rel: str, child_name: str) -> str:
+    """Build a normalized relative path for a child entry."""
+    return child_name if not parent_rel else f"{parent_rel}/{child_name}"
+
+
+def _normalize_relative_path(rel_path: str) -> str:
+    """Normalize stored relative paths for internal comparisons."""
+    return str(rel_path).replace("\\", "/")
+
+
+def _to_native_relative_path(rel_path: str) -> str:
+    """Convert an internal normalized relative path back to the host OS style."""
+    return str(Path(_normalize_relative_path(rel_path)))
+
+
+def _should_skip_internal_dir_name(name: str) -> bool:
+    """Return True for TagGUI-managed internal directories inside datasets."""
+    return str(name) in ImageIndexDB.INTERNAL_DIR_NAMES
+
+
+def _path_is_within_subtree(rel_path: str, subtree_rel: str) -> bool:
+    """Return True when rel_path belongs to subtree_rel (or subtree_rel is root)."""
+    rel_path = _normalize_relative_path(rel_path)
+    subtree_rel = _normalize_relative_path(subtree_rel)
+    if not subtree_rel:
+        return True
+    return rel_path == subtree_rel or rel_path.startswith(f"{subtree_rel}/")
+
+
+def scan_directory_snapshot(
+    directory_path: Path,
+    progress_callback=None,
+) -> tuple[set[Path], tuple[int, float], dict[str, float]]:
+    """
+    Scan the full tree once and return:
+    - all file paths
+    - (file_count, max_mtime_seen)
+    - directory mtimes keyed by relative directory path
+    """
+    import os
+    import stat as stat_module
+
+    file_paths: set[Path] = set()
+    dir_mtimes: dict[str, float] = {}
+    file_count = 0
+    max_mtime = 0.0
+    stack = [(directory_path, "")]
+
+    print(f"[SCAN] Scanning directory: {directory_path}")
+
+    while stack:
+        current_path, rel_dir = stack.pop()
+
+        try:
+            dir_stat = current_path.stat()
+            dir_mtime = float(getattr(dir_stat, "st_mtime", 0.0) or 0.0)
+        except OSError:
+            continue
+
+        dir_mtimes[rel_dir] = dir_mtime
+        if dir_mtime > max_mtime:
+            max_mtime = dir_mtime
+
+        child_dirs: list[tuple[Path, str]] = []
+        try:
+            with os.scandir(current_path) as entries:
+                for entry in entries:
+                    if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+
+                    entry_mtime = float(getattr(entry_stat, "st_mtime", 0.0) or 0.0)
+                    if entry_mtime > max_mtime:
+                        max_mtime = entry_mtime
+
+                    mode = getattr(entry_stat, "st_mode", 0)
+                    if stat_module.S_ISDIR(mode):
+                        child_dirs.append(
+                            (Path(entry.path), _relative_child_path(rel_dir, entry.name))
+                        )
+                        continue
+
+                    if stat_module.S_ISREG(mode) or entry.is_symlink():
+                        file_paths.add(Path(entry.path))
+                        file_count += 1
+                        if progress_callback and file_count % 20000 == 0:
+                            try:
+                                progress_callback(file_count)
+                            except Exception:
+                                pass
+                        if file_count % 100000 == 0:
+                            print(f"[SCAN] Found {file_count:,} files...")
+        except OSError:
+            continue
+
+        stack.extend(reversed(child_dirs))
+
+    if progress_callback:
+        try:
+            progress_callback(file_count)
+        except Exception:
+            pass
+
+    print(f"[SCAN] Scan complete: {file_count:,} total files found")
+    return file_paths, (file_count, max_mtime), dir_mtimes
+
+
+def get_changed_directory_roots(
+    directory_path: Path,
+    stored_dir_mtimes: dict[str, float],
+) -> list[str]:
+    """Return the minimal set of changed directory roots using stored directory mtimes."""
+    if not stored_dir_mtimes:
+        return [""]
+
+    changed_roots: list[str] = []
+    ordered_dirs = sorted(
+        stored_dir_mtimes.keys(),
+        key=lambda rel_dir: (rel_dir.count("/") if rel_dir else -1, rel_dir),
+    )
+
+    for rel_dir in ordered_dirs:
+        if changed_roots and any(
+            _path_is_within_subtree(rel_dir, changed_root)
+            for changed_root in changed_roots
+        ):
+            continue
+
+        current_path = directory_path if not rel_dir else directory_path / rel_dir
+        try:
+            current_mtime = float(getattr(current_path.stat(), "st_mtime", 0.0) or 0.0)
+        except OSError:
+            changed_roots.append(rel_dir)
+            if not rel_dir:
+                break
+            continue
+
+        stored_mtime = float(stored_dir_mtimes.get(rel_dir, 0.0) or 0.0)
+        if abs(current_mtime - stored_mtime) > 0.001:
+            changed_roots.append(rel_dir)
+            if not rel_dir:
+                break
+
+    return changed_roots
+
+
+def scan_image_paths_in_subtrees(
+    directory_path: Path,
+    subtree_roots: list[str],
+    image_suffixes: set[str],
+    progress_callback=None,
+) -> tuple[set[str], dict[str, float]]:
+    """Scan image files and directory mtimes for the specified subtree roots."""
+    import os
+    import stat as stat_module
+
+    image_rel_paths: set[str] = set()
+    dir_mtimes: dict[str, float] = {}
+    image_count = 0
+
+    if not subtree_roots:
+        return image_rel_paths, dir_mtimes
+
+    print(f"[SCAN] Refreshing {len(subtree_roots)} changed directory subtree(s)...")
+
+    stack = []
+    for subtree_rel in sorted(set(subtree_roots)):
+        subtree_path = directory_path if not subtree_rel else directory_path / subtree_rel
+        stack.append((subtree_path, subtree_rel))
+
+    while stack:
+        current_path, rel_dir = stack.pop()
+
+        try:
+            dir_stat = current_path.stat()
+            dir_mtimes[rel_dir] = float(getattr(dir_stat, "st_mtime", 0.0) or 0.0)
+        except OSError:
+            continue
+
+        child_dirs: list[tuple[Path, str]] = []
+        try:
+            with os.scandir(current_path) as entries:
+                for entry in entries:
+                    if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+
+                    mode = getattr(entry_stat, "st_mode", 0)
+                    if stat_module.S_ISDIR(mode):
+                        child_dirs.append(
+                            (Path(entry.path), _relative_child_path(rel_dir, entry.name))
+                        )
+                        continue
+
+                    if not (stat_module.S_ISREG(mode) or entry.is_symlink()):
+                        continue
+
+                    suffix = Path(entry.name).suffix.lower()
+                    if suffix not in image_suffixes:
+                        continue
+
+                    image_rel_paths.add(_relative_child_path(rel_dir, entry.name))
+                    image_count += 1
+
+                    if progress_callback and image_count % 20000 == 0:
+                        try:
+                            progress_callback(image_count)
+                        except Exception:
+                            pass
+
+                    if image_count % 100000 == 0:
+                        print(f"[SCAN] Found {image_count:,} image files...")
+        except OSError:
+            continue
+
+        stack.extend(reversed(child_dirs))
+
+    if progress_callback:
+        try:
+            progress_callback(image_count)
+        except Exception:
+            pass
+
+    print(f"[SCAN] Refresh complete: {image_count:,} image files found")
+    return image_rel_paths, dir_mtimes
 
 
 def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict | None, QImage | None]:
@@ -593,6 +834,7 @@ class ImageListModel(QAbstractListModel):
     # cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
     dimensions_updated = Signal()  # Emitted when aspect ratios change (no layout invalidation)
+    background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
 
@@ -645,6 +887,12 @@ class ImageListModel(QAbstractListModel):
         self._protected_page_window: tuple[int, int] | None = None
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
+        self._path_validation_generation = 0
+        self._pending_path_validation_result = None
+        self._path_validation_lock = threading.Lock()
+        self._background_validation_dialog = None
+        self._paginated_maintenance_lock = threading.Lock()
+        self._paginated_maintenance_running = False
         self._sort_field = 'mtime'
         self._sort_dir = 'DESC'
         self._filter_sql = ""       # Combined SQL passed to DB calls
@@ -745,6 +993,7 @@ class ImageListModel(QAbstractListModel):
 
         # Connect page_loaded signal to handler (for pagination mode)
         self.page_loaded.connect(self._on_page_loaded_signal)
+        self.background_validation_progress.connect(self._on_background_validation_progress)
         self._flow_log_last: dict[str, float] = {}
         self._dimensions_update_timer = QTimer(self)
         self._dimensions_update_timer.setSingleShot(True)
@@ -778,6 +1027,48 @@ class ImageListModel(QAbstractListModel):
             self._flow_log_last[throttle_key] = now
         ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
         print(f"[{ts}][TRACE][{component}][{level}] {message}")
+
+    def _close_background_validation_progress(self):
+        """Close the non-modal validation progress dialog if it exists."""
+        dialog = self._background_validation_dialog
+        if dialog is None:
+            return
+        self._background_validation_dialog = None
+        dialog.close()
+        dialog.deleteLater()
+
+    @Slot(str, int, int, bool)
+    def _on_background_validation_progress(self, label: str, current: int,
+                                           maximum: int, done: bool):
+        """Update a non-modal progress window for background cache validation."""
+        from PySide6.QtWidgets import QProgressDialog
+
+        if done:
+            self._close_background_validation_progress()
+            return
+
+        dialog = self._background_validation_dialog
+        if dialog is None:
+            dialog = QProgressDialog(label, "", 0, 0)
+            dialog.setWindowTitle("Validating Folder")
+            dialog.setWindowModality(Qt.NonModal)
+            dialog.setCancelButton(None)
+            dialog.setMinimumDuration(0)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.show()
+            self._background_validation_dialog = dialog
+
+        if maximum > 0:
+            dialog.setRange(0, max(1, int(maximum)))
+            dialog.setValue(max(0, min(int(current), dialog.maximum())))
+        else:
+            dialog.setRange(0, 0)
+
+        if current >= 0:
+            dialog.setLabelText(f"{label}\nFiles: {int(current):,}")
+        else:
+            dialog.setLabelText(label)
 
     def _schedule_dimensions_updated(self):
         """Coalesce frequent dimension updates into one masonry refresh signal."""
@@ -2856,7 +3147,191 @@ class ImageListModel(QAbstractListModel):
 
         self._load_executor.submit(enrich_worker)
 
-    def load_directory(self, directory_path: Path):
+    def _should_use_cached_paginated_bootstrap(self, cached_count: int) -> bool:
+        """Use cached-image bootstrap only when the folder will enter paginated mode."""
+        pagination_threshold = settings.value(
+            'pagination_threshold',
+            defaultValue=DEFAULT_SETTINGS['pagination_threshold'],
+            type=int,
+        )
+        return pagination_threshold == 0 or int(cached_count) >= int(pagination_threshold)
+
+    def _queue_path_validation_result(self, result: dict):
+        """Store a background path-validation result and apply it on the UI thread."""
+        with self._path_validation_lock:
+            self._pending_path_validation_result = result
+
+        QMetaObject.invokeMethod(
+            self,
+            "_apply_pending_path_validation",
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    @Slot()
+    def _apply_pending_path_validation(self):
+        """Apply the latest completed background path-validation result."""
+        with self._path_validation_lock:
+            result = self._pending_path_validation_result
+            self._pending_path_validation_result = None
+
+        if not result:
+            return
+
+        if result.get('generation') != self._path_validation_generation:
+            return
+
+        directory_path = result.get('directory_path')
+        if not isinstance(directory_path, Path):
+            return
+
+        if self._directory_path != directory_path:
+            return
+
+        if not result.get('changes_detected'):
+            return
+
+        added_count = int(result.get('added_count', 0) or 0)
+        removed_count = int(result.get('removed_count', 0) or 0)
+        print(f"[CACHE] Applying background refresh (+{added_count:,} / -{removed_count:,})")
+
+        self.load_directory(
+            directory_path,
+            precomputed_rel_paths=result.get('precomputed_rel_paths'),
+            skip_background_validation=True,
+            db_synced=bool(result.get('db_synced')),
+        )
+
+    def _validate_cached_paths_in_background(
+        self,
+        directory_path: Path,
+        cached_rel_paths: list[str],
+        image_suffixes: list[str],
+        generation: int,
+    ):
+        """Validate cached paths without blocking startup, then queue a fast refresh if needed."""
+        db = None
+        try:
+            db = ImageIndexDB(directory_path)
+
+            def _emit_progress(label: str, current: int, maximum: int, done: bool):
+                if generation != self._path_validation_generation:
+                    return False
+                self.background_validation_progress.emit(label, current, maximum, done)
+                return True
+
+            current_rel_map = {
+                _normalize_relative_path(rel_path): rel_path
+                for rel_path in cached_rel_paths
+            }
+            current_rel_paths = set(current_rel_map.keys())
+            stored_dir_mtimes = db.get_directory_signatures()
+
+            if stored_dir_mtimes:
+                changed_roots = get_changed_directory_roots(directory_path, stored_dir_mtimes)
+                if not changed_roots:
+                    print("[CACHE] Background validation complete: no directory changes detected")
+                    self._queue_path_validation_result({
+                        'generation': generation,
+                        'directory_path': directory_path,
+                        'changes_detected': False,
+                    })
+                    return
+
+                if len(changed_roots) == 1 and changed_roots[0] == "":
+                    print("[CACHE] Background validation: root directory changed, rescanning indexed images")
+                    progress_maximum = len(current_rel_paths)
+                    progress_label = "Validating folder changes..."
+                else:
+                    print(
+                        f"[CACHE] Background validation: {len(changed_roots)} changed directory subtree(s)"
+                    )
+                    progress_maximum = 0
+                    progress_label = "Validating changed folders..."
+            else:
+                changed_roots = [""]
+                print("[CACHE] Background validation: no directory signatures yet, scanning all indexed images")
+                progress_maximum = len(current_rel_paths)
+                progress_label = "Validating folder changes..."
+
+            _emit_progress(progress_label, 0, progress_maximum, False)
+
+            refreshed_rel_paths, refreshed_dir_mtimes = scan_image_paths_in_subtrees(
+                directory_path,
+                changed_roots,
+                set(image_suffixes),
+                progress_callback=lambda count: _emit_progress(
+                    progress_label,
+                    int(count),
+                    int(progress_maximum),
+                    False,
+                ),
+            )
+
+            merged_rel_paths = {
+                rel_path for rel_path in current_rel_paths
+                if not any(
+                    _path_is_within_subtree(rel_path, changed_root)
+                    for changed_root in changed_roots
+                )
+            }
+            merged_rel_paths.update(refreshed_rel_paths)
+
+            merged_dir_mtimes = {
+                rel_dir: mtime
+                for rel_dir, mtime in stored_dir_mtimes.items()
+                if not any(
+                    _path_is_within_subtree(rel_dir, changed_root)
+                    for changed_root in changed_roots
+                )
+            }
+            merged_dir_mtimes.update(refreshed_dir_mtimes)
+
+            added_rel_paths = sorted(merged_rel_paths - current_rel_paths)
+            removed_rel_paths = sorted(current_rel_paths - merged_rel_paths)
+            added_db_paths = [_to_native_relative_path(rel_path) for rel_path in added_rel_paths]
+            removed_db_paths = [
+                current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
+                for rel_path in removed_rel_paths
+            ]
+            merged_native_paths = {
+                current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
+                for rel_path in merged_rel_paths
+            }
+
+            if removed_db_paths:
+                db.remove_images_by_paths(removed_db_paths)
+            if added_db_paths:
+                db.bulk_insert_relative_paths(added_db_paths, directory_path)
+
+            db.replace_directory_signatures(merged_dir_mtimes)
+
+            changes_detected = bool(added_rel_paths or removed_rel_paths)
+            if not changes_detected:
+                print("[CACHE] Background validation complete: image list unchanged")
+
+            _emit_progress(progress_label, len(refreshed_rel_paths), progress_maximum, True)
+
+            self._queue_path_validation_result({
+                'generation': generation,
+                'directory_path': directory_path,
+                'changes_detected': changes_detected,
+                'added_count': len(added_rel_paths),
+                'removed_count': len(removed_rel_paths),
+                'precomputed_rel_paths': merged_native_paths if changes_detected else None,
+                'db_synced': changes_detected,
+            })
+
+        except Exception as e:
+            if generation == self._path_validation_generation:
+                self.background_validation_progress.emit("", -1, 0, True)
+            print(f"[CACHE] Background validation failed: {e}")
+        finally:
+            if db is not None:
+                db.close()
+
+    def load_directory(self, directory_path: Path, *, precomputed_rel_paths=None,
+                       skip_background_validation: bool = False,
+                       db_synced: bool = False):
         from PySide6.QtWidgets import QProgressDialog, QApplication, QMessageBox
         from PySide6.QtCore import Qt
         from utils.settings import settings, DEFAULT_SETTINGS
@@ -2865,13 +3340,36 @@ class ImageListModel(QAbstractListModel):
         # Load all metadata first, THEN reset the model (keeps old images visible during loading)
         error_messages: list[str] = []
         new_images = []  # Build new image list without clearing old one
+        self._directory_path = directory_path
+        self._path_validation_generation += 1
+        load_generation = self._path_validation_generation
+        with self._path_validation_lock:
+            self._pending_path_validation_result = None
+        self._close_background_validation_progress()
 
         # Try to load file paths from DB cache first (much faster for large folders)
         from utils.image_index_db import ImageIndexDB
         db = ImageIndexDB(directory_path)
         cached_paths = db.get_all_paths()
         cache_stats = None
+        dir_mtimes = None
         scan_progress = None
+
+        pagination_threshold = settings.value(
+            'pagination_threshold',
+            defaultValue=DEFAULT_SETTINGS['pagination_threshold'],
+            type=int
+        )
+
+        image_suffixes_string = settings.value(
+            'image_list_file_formats',
+            defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
+        image_suffixes = []
+        for suffix in image_suffixes_string.split(','):
+            suffix = suffix.strip().lower()
+            if not suffix.startswith('.'):
+                suffix = '.' + suffix
+            image_suffixes.append(suffix)
 
         def _ensure_scan_progress():
             nonlocal scan_progress
@@ -2902,11 +3400,51 @@ class ImageListModel(QAbstractListModel):
                 dialog.setLabelText(f"{label}\nFiles: {int(count):,}")
             QApplication.processEvents()
 
+        cached_count = len(cached_paths)
+        precomputed_count = len(precomputed_rel_paths) if precomputed_rel_paths is not None else None
+        threshold_value = int(pagination_threshold)
+        paginated_from_precomputed = (
+            precomputed_count is not None
+            and (threshold_value == 0 or precomputed_count >= threshold_value)
+        )
+
+        if paginated_from_precomputed:
+            print(f"[CACHE] Reusing precomputed index for {precomputed_count:,} files")
+            db.close()
+            self._load_directory_paginated(
+                directory_path,
+                image_paths=None,
+                file_paths=None,
+                db_synced=True,
+                preindexed_count=precomputed_count,
+            )
+            return
+
+        if cached_count > 1000 and self._should_use_cached_paginated_bootstrap(cached_count):
+            print(f"[CACHE] Using {cached_count:,} cached file paths (background validation scheduled)")
+            db.close()
+            self._load_directory_paginated(
+                directory_path,
+                image_paths=None,
+                file_paths=None,
+                db_synced=True,
+                preindexed_count=cached_count,
+            )
+            if not skip_background_validation:
+                print("[CACHE] Starting background validation...")
+                self._load_executor.submit(
+                    self._validate_cached_paths_in_background,
+                    directory_path,
+                    list(cached_paths),
+                    list(image_suffixes),
+                    load_generation,
+                )
+            return
+
         try:
-            if cached_paths and len(cached_paths) > 1000:
-                # For very large folders, cached path lists are fast, but must be
-                # validated or newly added files will be missed.
-                cached_count = len(cached_paths)
+            if precomputed_rel_paths is not None:
+                file_paths = {directory_path / rel_path for rel_path in precomputed_rel_paths}
+            elif cached_paths and len(cached_paths) > 1000:
                 _update_scan_progress("Checking folder changes...")
                 fs_count, fs_tree_mtime = get_directory_tree_stats(
                     directory_path,
@@ -2915,7 +3453,6 @@ class ImageListModel(QAbstractListModel):
                         count=c,
                     ),
                 )
-                cache_stats = (fs_count, fs_tree_mtime)
 
                 saved_count_raw = db.get_meta_value('path_cache_file_count')
                 saved_tree_mtime_raw = db.get_meta_value('path_cache_tree_mtime')
@@ -2930,39 +3467,32 @@ class ImageListModel(QAbstractListModel):
                     saved_tree_mtime = None
 
                 stale_reasons = []
-                if fs_count != cached_count:
-                    stale_reasons.append(f"count {cached_count:,}->{fs_count:,}")
                 if saved_count is None or saved_tree_mtime is None:
                     stale_reasons.append("missing signature")
                 else:
-                    if saved_count != cached_count:
-                        stale_reasons.append(f"signature-count {saved_count:,}->{cached_count:,}")
+                    if saved_count != fs_count:
+                        stale_reasons.append(f"count {saved_count:,}->{fs_count:,}")
                     if fs_tree_mtime > (saved_tree_mtime + 0.001):
                         stale_reasons.append("tree-mtime changed")
 
                 if stale_reasons:
                     reason_text = ", ".join(stale_reasons)
                     print(f"[CACHE] Path cache stale ({reason_text}), rescanning filesystem")
-                    _update_scan_progress(
-                        "Rescanning folder files...",
-                        count=0,
-                        maximum=max(1, fs_count),
-                    )
-                    file_paths = get_file_paths(
+                    _update_scan_progress("Rescanning folder files...")
+                    file_paths, cache_stats, dir_mtimes = scan_directory_snapshot(
                         directory_path,
                         progress_callback=lambda c: _update_scan_progress(
                             "Rescanning folder files...",
                             count=c,
-                            maximum=max(1, fs_count),
                         ),
                     )
                 else:
                     print(f"[CACHE] Using {cached_count:,} cached file paths (skipping scan)")
-                    file_paths = {Path(directory_path) / p for p in cached_paths}
+                    file_paths = {directory_path / rel_path for rel_path in cached_paths}
             else:
                 # Full scan needed (first time or small folder)
                 _update_scan_progress("Scanning folder files...")
-                file_paths = get_file_paths(
+                file_paths, cache_stats, dir_mtimes = scan_directory_snapshot(
                     directory_path,
                     progress_callback=lambda c: _update_scan_progress(
                         "Scanning folder files...",
@@ -2970,14 +3500,14 @@ class ImageListModel(QAbstractListModel):
                     ),
                 )
 
-            # Persist signature used for path-cache freshness checks (large folders only).
-            if len(file_paths) > 1000:
+            # Persist signatures only when a real filesystem scan just ran.
+            if cache_stats is not None:
                 try:
-                    if cache_stats is None:
-                        cache_stats = get_directory_tree_stats(directory_path)
                     db.set_meta_value('path_cache_file_count', str(int(cache_stats[0])))
                     db.set_meta_value('path_cache_tree_mtime', f"{float(cache_stats[1]):.6f}")
                     db.set_meta_value('path_cache_updated_at', f"{time.time():.6f}")
+                    if dir_mtimes is not None:
+                        db.replace_directory_signatures(dir_mtimes)
                 except Exception:
                     pass
         finally:
@@ -2985,16 +3515,6 @@ class ImageListModel(QAbstractListModel):
                 scan_progress.close()
                 scan_progress.deleteLater()
                 scan_progress = None
-
-        image_suffixes_string = settings.value(
-            'image_list_file_formats',
-            defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-        image_suffixes = []
-        for suffix in image_suffixes_string.split(','):
-            suffix = suffix.strip().lower()
-            if not suffix.startswith('.'):
-                suffix = '.' + suffix
-            image_suffixes.append(suffix)
         image_paths = list(path for path in file_paths
                            if path.suffix.lower() in image_suffixes)
 
@@ -3016,19 +3536,18 @@ class ImageListModel(QAbstractListModel):
         # Check for pagination mode (based on user setting)
         total_images = len(image_paths)
 
-        # Load pagination threshold from settings (already imported at top)
-        pagination_threshold = settings.value(
-            'pagination_threshold',
-            defaultValue=DEFAULT_SETTINGS['pagination_threshold'],
-            type=int
-        )
-
         if total_images >= pagination_threshold:
             if pagination_threshold == 0:
                 print(f"[PAGINATION] Using paginated mode (always paginate enabled)")
             else:
                 print(f"[PAGINATION] Large folder detected ({total_images} images >= {pagination_threshold} threshold), switching to paginated mode")
-            self._load_directory_paginated(directory_path, image_paths, file_paths)
+            db.close()
+            self._load_directory_paginated(
+                directory_path,
+                image_paths,
+                file_paths,
+                db_synced=db_synced,
+            )
             return
 
         # Normal folder - reset pagination flag
@@ -3366,6 +3885,26 @@ class ImageListModel(QAbstractListModel):
             # Submit background enrichment task
             self._load_executor.submit(enrich_dimensions)
 
+    def _schedule_paginated_maintenance(self, directory_path: Path):
+        """Run paginated DB maintenance in the background after the UI is visible."""
+        with self._paginated_maintenance_lock:
+            if self._paginated_maintenance_running:
+                return
+            self._paginated_maintenance_running = True
+
+        def maintenance_worker():
+            try:
+                db_bg = ImageIndexDB(directory_path)
+                db_bg.run_maintenance(directory_path)
+                db_bg.close()
+            except Exception as e:
+                print(f"[DB] Background maintenance error: {e}")
+            finally:
+                with self._paginated_maintenance_lock:
+                    self._paginated_maintenance_running = False
+
+        self._load_executor.submit(maintenance_worker)
+
     def _resolve_page_memory_limits(self) -> tuple[int, int, int]:
         """Resolve raw + effective paginated page-memory limits from settings."""
         raw_max = settings.value(
@@ -3387,7 +3926,11 @@ class ImageListModel(QAbstractListModel):
         effective_max = max(raw_max, required_min)
         return raw_max, eviction_pages, effective_max
 
-    def _load_directory_paginated(self, directory_path: Path, image_paths: list[Path], file_paths: set[Path]):
+    def _load_directory_paginated(self, directory_path: Path,
+                                  image_paths: list[Path] | None,
+                                  file_paths: set[Path] | None,
+                                  db_synced: bool = False,
+                                  preindexed_count: int | None = None):
         """Load a large directory using buffered virtual pagination (1M+ images).
 
         Strategy: Don't load ANY Image objects upfront. Pages (1000 images each) are loaded
@@ -3397,7 +3940,7 @@ class ImageListModel(QAbstractListModel):
         """
         import time
 
-        total_images = len(image_paths)
+        total_images = int(preindexed_count if preindexed_count is not None else len(image_paths or []))
 
         # Initialize database
         self._directory_path = directory_path
@@ -3416,9 +3959,13 @@ class ImageListModel(QAbstractListModel):
         self._paginated_mode = True
 
         # CRITICAL: Ensure DB is populated with files for paginated access
-        # This is fast (checks existing) and necessary for get_page() to work
-        print(f"[PAGINATION] Ensuring DB is populated for {len(image_paths)} files...")
-        self._db.bulk_insert_files(image_paths, directory_path)
+        # Skip the pass when a background validation already synchronized the DB.
+        if db_synced:
+            print(f"[PAGINATION] Using existing DB index for {total_images:,} files")
+        else:
+            file_count = len(image_paths or [])
+            print(f"[PAGINATION] Ensuring DB is populated for {file_count:,} files...")
+            self._db.bulk_insert_files(image_paths or [], directory_path)
 
         print(f"[PAGINATION] Buffered virtual mode: {total_images} images")
         start_time = time.time()
@@ -3447,6 +3994,10 @@ class ImageListModel(QAbstractListModel):
         # Otherwise proxy.rowCount() returns 0 during masonry calculation
         self._emit_pages_updated()
         self.layoutChanged.emit()
+        QTimer.singleShot(
+            250,
+            lambda path=Path(directory_path): self._schedule_paginated_maintenance(path),
+        )
 
         elapsed = time.time() - start_time
         print(f"================================================================================")
