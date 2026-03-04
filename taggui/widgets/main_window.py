@@ -1784,6 +1784,8 @@ class MainWindow(QMainWindow):
                     continue
                 if not window.isVisible():
                     continue
+                if bool(getattr(window, "_frozen_passthrough_mode", False)):
+                    continue
                 rect = window.frameGeometry()
                 if not rect.contains(global_pos):
                     continue
