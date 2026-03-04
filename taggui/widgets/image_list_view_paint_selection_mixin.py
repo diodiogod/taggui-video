@@ -351,12 +351,6 @@ class ImageListViewPaintSelectionMixin:
 
                 painter.end()
 
-                # Slow-frame diagnostic
-                _total_ms = (time.time() - paint_start) * 1000
-                if _total_ms > 16:
-                    _vis_ms = (_t_vis1 - _t_vis0) * 1000
-                    _draw_ms = _total_ms - _vis_ms - (_t_vis0 - paint_start) * 1000
-                    print(f"[PAINT-SLOW] {_total_ms:.0f}ms | vis_query={_vis_ms:.1f}ms draw={_draw_ms:.1f}ms items={items_painted}")
             except Exception as e:
                 # Catch any crashes during masonry painting to prevent segfaults
                 print(f"[PAINT ERROR] Masonry paint crashed: {e}")

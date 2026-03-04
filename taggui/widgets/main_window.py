@@ -2639,19 +2639,20 @@ class MainWindow(QMainWindow):
             settings.setValue('directory_path', str(self.directory_path))
             self._add_to_recent_directories(str(self.directory_path))
         self._update_main_window_title()
+
+        # Capture folder restore target before model/filter churn can emit
+        # transient currentChanged signals and overwrite the saved selection.
+        if not select_path:
+            folder_saved_path = self._get_folder_last_selected_path(self.directory_path)
+            if folder_saved_path:
+                select_path = folder_saved_path
+
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
 
         # Restore folder-specific sort/media preferences, if present.
         self._apply_folder_view_preferences(self.directory_path)
-
-        # Restore folder-specific last selected image when caller did not
-        # explicitly request a selection.
-        if not select_path:
-            folder_saved_path = self._get_folder_last_selected_path(self.directory_path)
-            if folder_saved_path:
-                select_path = folder_saved_path
 
         # Track unfiltered total right after load to detect media-filter empty states.
         source_total_before_media_filter = (
@@ -2986,14 +2987,35 @@ class MainWindow(QMainWindow):
         else:
             select_index = settings.value(select_index_key, type=int) or 0
 
-        self.load_directory(self.directory_path)
+        select_path = self._get_folder_last_selected_path(self.directory_path)
+        if not select_path and settings.contains('last_selected_path'):
+            select_path = settings.value('last_selected_path', type=str)
+
+        self.load_directory(
+            self.directory_path,
+            select_index=select_index,
+            select_path=select_path,
+        )
         load_session_id = self._load_session_id
         self.image_list.filter_line_edit.setText(filter_text)
-        # If the selected image index is out of bounds due to images being
-        # deleted, select the last image.
-        if select_index >= self.proxy_image_list_model.rowCount():
-            select_index = self.proxy_image_list_model.rowCount() - 1
-        target_index = self.proxy_image_list_model.index(select_index, 0)
+
+        target_index = QModelIndex()
+        if select_path:
+            try:
+                source_row = self.image_list_model.get_index_for_path(Path(select_path))
+                if source_row != -1:
+                    source_index = self.image_list_model.index(source_row, 0)
+                    target_index = self.proxy_image_list_model.mapFromSource(source_index)
+            except Exception:
+                target_index = QModelIndex()
+
+        if not target_index.isValid():
+            # If the selected image index is out of bounds due to images being
+            # deleted, select the last image.
+            if select_index >= self.proxy_image_list_model.rowCount():
+                select_index = self.proxy_image_list_model.rowCount() - 1
+            target_index = self.proxy_image_list_model.index(select_index, 0)
+
         if target_index.isValid():
             self.image_list.list_view.setCurrentIndex(target_index)
 
@@ -3273,7 +3295,16 @@ class MainWindow(QMainWindow):
         index = self.image_list_selection_model.currentIndex()
         if not index.isValid():
             return
+        view = self.image_list.list_view
+        restore_freeze_until = float(
+            getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0
+        )
+        # This is the explicit release-time commit for a deliberate click.
+        # Temporarily bypass the post-click freeze so the clicked item is
+        # actually persisted, then restore the freeze to block later remaps.
+        view._user_click_selection_frozen_until = 0.0
         self.save_image_index(index)
+        view._user_click_selection_frozen_until = restore_freeze_until
         try:
             self.image_list.update_image_index_label(index)
         except Exception:
