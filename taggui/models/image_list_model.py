@@ -1372,15 +1372,15 @@ class ImageListModel(QAbstractListModel):
         self._store_page(page_num, images)
 
     def cancel_pending_loads_except(self, keep_pages: set[int]):
-        """Cancel pending page loads that are not in the keep set."""
-        with self._page_load_lock:
-            # We can't stop running threads, but we can remove pages from the loading set.
-            # The worker thread will check this set and abort if its page is missing.
-            current_loading = list(self._loading_pages)
-            for page_num in current_loading:
-                if page_num not in keep_pages:
-                    self._loading_pages.discard(page_num)
-                    # print(f"[PAGE LOAD] Cancelled load for Page {page_num} (superseded)")
+        """Best-effort load pruning.
+
+        IMPORTANT: Do not mutate `_loading_pages` here.
+        Removing entries races with worker startup and can create infinite
+        re-request loops (page keeps being "triggered" but never stored).
+        """
+        # Intentionally no-op for in-flight pages. ThreadPoolExecutor does not
+        # support safe cancellation once submitted; eviction handles stale pages.
+        return
 
     def _load_page_async(self, page_num: int):
         """Load a page in background thread."""
@@ -1677,24 +1677,58 @@ class ImageListModel(QAbstractListModel):
         """Ensure pages covering the given index range are loaded (throttled for smooth scrolling)."""
         if not self._paginated_mode:
             return
+        total_items = int(getattr(self, "_total_count", 0) or 0)
+        if total_items <= 0:
+            return
+        try:
+            s = int(start_idx)
+            e = int(end_idx)
+        except Exception:
+            return
+        if s > e:
+            s, e = e, s
+        s = max(0, min(s, total_items - 1))
+        e = max(0, min(e, total_items - 1))
 
         # Update pending range and restart timer (debounce)
-        self._pending_page_range = (start_idx, end_idx)
+        self._pending_page_range = (s, e)
         self._page_debouncer.start()
 
     def _process_pending_page_requests(self):
         """Process the latest requested page range (called by debounce timer)."""
         if not self._pending_page_range or not self._paginated_mode:
             return
+        if not self._db:
+            return
 
         start_idx, end_idx = self._pending_page_range
+        total_items = int(getattr(self, "_total_count", 0) or 0)
+        if total_items <= 0:
+            return
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+        start_idx = max(0, min(int(start_idx), total_items - 1))
+        end_idx = max(0, min(int(end_idx), total_items - 1))
+        if end_idx < start_idx:
+            return
+
         start_page = self._get_page_for_index(start_idx)
         end_page = self._get_page_for_index(end_idx)
+        last_page = max(0, (total_items - 1) // self.PAGE_SIZE)
+        start_page = max(0, min(start_page, last_page))
+        end_page = max(0, min(end_page, last_page))
+        if end_page < start_page:
+            return
+
+        # Keep actively requested pages protected from LRU eviction churn.
+        protect_start = max(0, start_page - 1)
+        protect_end = min(last_page, end_page + 1)
+        self.set_page_protection_window(protect_start, protect_end)
         
         # print(f"[PAGINATION] Processing range {start_idx}-{end_idx} (Pages {start_page}-{end_page})")
 
-        # 1. Cleanup: Cancel pending loads that are far outside the current view
-        # Keep current view +/- 2 pages
+        # 1. Compatibility hook: keep_pages currently no-ops for in-flight loads
+        # to avoid cancellation races. Keep call for future queue-based pruning.
         keep_window = set(range(start_page - 2, end_page + 3))
         self.cancel_pending_loads_except(keep_window)
 

@@ -701,6 +701,18 @@ class ImageListViewGeometryMixin:
             extra_rows = max(6, viewport_height // row_height)
         start_row = max(0, start_row - int(extra_rows))
         end_row = min(total_items - 1, end_row + int(extra_rows))
+        if hasattr(source_model, "set_page_protection_window") and hasattr(source_model, "PAGE_SIZE"):
+            try:
+                page_size = max(1, int(source_model.PAGE_SIZE))
+                last_page = max(0, (total_items - 1) // page_size)
+                start_page = max(0, min(start_row // page_size, last_page))
+                end_page = max(0, min(end_row // page_size, last_page))
+                source_model.set_page_protection_window(
+                    max(0, start_page - 1),
+                    min(last_page, end_page + 1),
+                )
+            except Exception:
+                pass
         source_model.ensure_pages_for_range(start_row, end_row)
 
 
