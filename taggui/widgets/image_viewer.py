@@ -903,6 +903,26 @@ class ImageViewer(QWidget):
         except Exception:
             return False
 
+    @staticmethod
+    def _clamp_viewport_point_to_rect(point, rect: QRect) -> QPoint:
+        if point is None or not hasattr(point, "x") or not hasattr(point, "y"):
+            return rect.center()
+        max_x = max(0, rect.width() - 1)
+        max_y = max(0, rect.height() - 1)
+        return QPoint(
+            max(0, min(int(round(point.x())), max_x)),
+            max(0, min(int(round(point.y())), max_y)),
+        )
+
+    @staticmethod
+    def _clamp_scene_point_to_rect(point, rect: QRectF) -> QPointF:
+        if point is None or not hasattr(point, "x") or not hasattr(point, "y"):
+            return rect.center()
+        return QPointF(
+            max(rect.left(), min(float(point.x()), rect.right())),
+            max(rect.top(), min(float(point.y()), rect.bottom())),
+        )
+
     def _apply_uniform_zoom_scale(
         self,
         scale: float,
@@ -916,6 +936,17 @@ class ImageViewer(QWidget):
         scene_rect = self.scene.sceneRect()
         if scene_rect.width() <= 0 or scene_rect.height() <= 0:
             return
+        viewport_rect = self.view.viewport().rect()
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return
+
+        focus_point = scene_rect.center()
+        try:
+            if focus_scene_pos is not None and hasattr(focus_scene_pos, "x") and hasattr(focus_scene_pos, "y"):
+                focus_point = self._clamp_scene_point_to_rect(focus_scene_pos, scene_rect)
+        except Exception:
+            focus_point = scene_rect.center()
+
         self.view.resetTransform()
         self.view.scale(scale, scale)
 
@@ -931,20 +962,17 @@ class ImageViewer(QWidget):
                 and hasattr(anchor_view_pos, "x")
                 and hasattr(anchor_view_pos, "y")
             ):
-                new_scene_at_anchor = self.view.mapToScene(anchor_view_pos)
-                delta = new_scene_at_anchor - focus_scene_pos
-                self.view.translate(delta.x(), delta.y())
+                anchor_point = self._clamp_viewport_point_to_rect(anchor_view_pos, viewport_rect)
+                center_before = self.view.mapToScene(viewport_rect.center())
+                new_scene_at_anchor = self.view.mapToScene(anchor_point)
+                delta = new_scene_at_anchor - focus_point
+                target_center = center_before - delta
+                self.view.centerOn(target_center)
                 anchored = True
         except Exception:
             anchored = False
 
         if not anchored:
-            focus_point = scene_rect.center()
-            try:
-                if focus_scene_pos is not None and hasattr(focus_scene_pos, 'x') and hasattr(focus_scene_pos, 'y'):
-                    focus_point = focus_scene_pos
-            except Exception:
-                focus_point = scene_rect.center()
             self.view.centerOn(focus_point)
 
         MarkingItem.zoom_factor = scale
@@ -1844,31 +1872,39 @@ class ImageViewer(QWidget):
         if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
             return
 
-        anchor_view_pos = viewport.mapFromGlobal(QCursor.pos())
-        if not viewport_rect.contains(anchor_view_pos):
-            try:
-                anchor_view_pos = viewport.mapFromGlobal(event.globalPosition().toPoint())
-            except Exception:
-                try:
-                    anchor_view_pos = event.position().toPoint()
-                except Exception:
-                    anchor_view_pos = viewport_rect.center()
-                if not viewport_rect.contains(anchor_view_pos):
-                    try:
-                        anchor_view_pos = viewport.mapFrom(self.view, anchor_view_pos)
-                    except Exception:
-                        pass
-
-        if not viewport_rect.contains(anchor_view_pos):
-            anchor_view_pos = QPoint(
-                max(0, min(anchor_view_pos.x(), max(0, viewport_rect.width() - 1))),
-                max(0, min(anchor_view_pos.y(), max(0, viewport_rect.height() - 1))),
-            )
-
-        focus_scene_pos = self.view.mapToScene(anchor_view_pos)
         scene_rect = self.scene.sceneRect()
         if scene_rect.width() <= 0 or scene_rect.height() <= 0:
             return
+
+        anchor_view_pos = None
+        try:
+            anchor_view_pos = viewport.mapFromGlobal(event.globalPosition().toPoint())
+        except Exception:
+            anchor_view_pos = None
+
+        if anchor_view_pos is None or not viewport_rect.contains(anchor_view_pos):
+            try:
+                event_pos = event.position().toPoint()
+                candidate = event_pos
+                if not viewport_rect.contains(candidate):
+                    mapped_candidate = viewport.mapFrom(self.view, event_pos)
+                    if viewport_rect.contains(mapped_candidate):
+                        candidate = mapped_candidate
+                anchor_view_pos = candidate
+            except Exception:
+                anchor_view_pos = None
+
+        if anchor_view_pos is None or not viewport_rect.contains(anchor_view_pos):
+            try:
+                anchor_view_pos = viewport.mapFromGlobal(QCursor.pos())
+            except Exception:
+                anchor_view_pos = viewport_rect.center()
+
+        anchor_view_pos = self._clamp_viewport_point_to_rect(anchor_view_pos, viewport_rect)
+        focus_scene_pos = self._clamp_scene_point_to_rect(
+            self.view.mapToScene(anchor_view_pos),
+            scene_rect,
+        )
 
         try:
             current_scale = abs(float(self.view.transform().m11()))
