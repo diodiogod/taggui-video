@@ -522,6 +522,7 @@ class MainWindow(QMainWindow):
 
         # Connect all signals
         self.signal_manager.connect_all_signals()
+        self.sync_zoom_follow_mode_button(self.image_viewer)
         self.app.installEventFilter(self)
 
         # TEMP: Disable status bar to test if it fixes gray space
@@ -1145,6 +1146,7 @@ class MainWindow(QMainWindow):
             target = self.image_viewer
         self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
+            self.sync_zoom_follow_mode_button(target)
             if self._exclusive_video_controls_visibility:
                 self._sync_active_viewer_controls_visibility(target)
             return
@@ -1152,6 +1154,7 @@ class MainWindow(QMainWindow):
 
         active_zoom = -1 if getattr(target, 'is_zoom_to_fit', False) else target.view.transform().m11()
         self.zoom(active_zoom)
+        self.sync_zoom_follow_mode_button(target)
 
         live_windows = []
         for window in list(getattr(self, '_floating_viewers', [])):
@@ -1224,6 +1227,8 @@ class MainWindow(QMainWindow):
         """Bind floating viewer signals to existing main-window slots."""
         viewer.activated.connect(lambda: self.set_active_viewer(viewer))
         viewer.zoom.connect(self.zoom)
+        viewer.zoom_follow_mode_changed.connect(
+            lambda mode, source=viewer: self.sync_zoom_follow_mode_button(source))
         viewer.rating_changed.connect(self.set_rating)
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
         viewer.directory_reload_requested.connect(self.reload_directory)
@@ -2628,6 +2633,35 @@ class MainWindow(QMainWindow):
         else:
             toolbar_mgr.zoom_fit_best_action.setChecked(False)
             toolbar_mgr.zoom_original_action.setChecked(False)
+
+    @Slot()
+    def cycle_active_viewer_zoom_follow_mode(self):
+        target = self.get_active_viewer()
+        try:
+            target.cycle_zoom_follow_mode()
+        except Exception:
+            return
+        self.sync_zoom_follow_mode_button(target)
+
+    def sync_zoom_follow_mode_button(self, viewer: ImageViewer | None = None):
+        toolbar_mgr = getattr(self, 'toolbar_manager', None)
+        if toolbar_mgr is None:
+            return
+        updater = getattr(toolbar_mgr, 'set_zoom_follow_mode_button', None)
+        if not callable(updater):
+            return
+
+        target = viewer or self.get_active_viewer()
+        if target is not self.get_active_viewer():
+            return
+        mode = 'default'
+        try:
+            mode_getter = getattr(target, 'get_zoom_follow_mode', None)
+            if callable(mode_getter):
+                mode = mode_getter()
+        except Exception:
+            mode = 'default'
+        updater(mode)
 
     def load_directory(self, path: Path, select_index: int = 0,
                        save_path_to_settings: bool = False,

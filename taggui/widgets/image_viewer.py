@@ -24,6 +24,14 @@ COMPARE_FIT_MODE_OPTIONS = (
     (COMPARE_FIT_MODE_FILL, 'Fill (Crop)'),
     (COMPARE_FIT_MODE_STRETCH, 'Stretch (Distorts)'),
 )
+ZOOM_FOLLOW_MODE_DEFAULT = 'default'
+ZOOM_FOLLOW_MODE_FIT_LOCK = 'fit_lock'
+ZOOM_FOLLOW_MODE_SCALE_LOCK = 'scale_lock'
+ZOOM_FOLLOW_MODE_OPTIONS = (
+    ZOOM_FOLLOW_MODE_DEFAULT,
+    ZOOM_FOLLOW_MODE_FIT_LOCK,
+    ZOOM_FOLLOW_MODE_SCALE_LOCK,
+)
 
 
 def pil_to_qimage(pil_image):
@@ -40,6 +48,7 @@ class ImageViewer(QWidget):
     """Main widget coordinating image/video display, marking, and zoom functionality."""
 
     zoom = Signal(float, name='zoomChanged')
+    zoom_follow_mode_changed = Signal(str, name='zoomFollowModeChanged')
     marking = Signal(ImageMarking, name='markingToAdd')
     accept_crop_addition = Signal(bool, name='allowAdditionOfCrop')
     crop_changed = Signal(object, name='cropChanged')  # Grid type
@@ -142,6 +151,11 @@ class ImageViewer(QWidget):
         self._floating_double_click_return_scale = None
         self._floating_last_auto_double_click_zoom_scale = None
         self._pending_controls_stabilize = True
+        self._zoom_follow_mode = ZOOM_FOLLOW_MODE_DEFAULT
+        self._zoom_follow_locked_detail_ratio = None
+        self._zoom_follow_anchor_ratio = QPointF(0.5, 0.5)
+        self._zoom_follow_pan_ratio = QPointF(0.5, 0.5)
+        self._suspend_zoom_follow_locked_scale_sync = False
 
         # Timer for auto-hiding controls
         self._controls_hide_timer = QTimer(self)
@@ -903,6 +917,213 @@ class ImageViewer(QWidget):
         except Exception:
             return False
 
+    def get_zoom_follow_mode(self) -> str:
+        mode = str(getattr(self, "_zoom_follow_mode", ZOOM_FOLLOW_MODE_DEFAULT) or ZOOM_FOLLOW_MODE_DEFAULT).strip().lower()
+        if mode not in ZOOM_FOLLOW_MODE_OPTIONS:
+            mode = ZOOM_FOLLOW_MODE_DEFAULT
+        return mode
+
+    def set_zoom_follow_mode(self, mode: str) -> bool:
+        normalized_mode = str(mode or ZOOM_FOLLOW_MODE_DEFAULT).strip().lower()
+        if normalized_mode not in ZOOM_FOLLOW_MODE_OPTIONS:
+            normalized_mode = ZOOM_FOLLOW_MODE_DEFAULT
+        previous_mode = self.get_zoom_follow_mode()
+        changed = normalized_mode != previous_mode
+        if normalized_mode in (ZOOM_FOLLOW_MODE_FIT_LOCK, ZOOM_FOLLOW_MODE_SCALE_LOCK):
+            self._capture_zoom_follow_state_from_current_view()
+        self._zoom_follow_mode = normalized_mode
+        if normalized_mode == ZOOM_FOLLOW_MODE_SCALE_LOCK:
+            try:
+                current_scale = abs(float(self.view.transform().m11()))
+            except Exception:
+                current_scale = abs(float(MarkingItem.zoom_factor or 1.0))
+            scene_rect = self.scene.sceneRect()
+            viewport_rect = self.view.viewport().rect()
+            fit_scale = self._compute_fit_scale(scene_rect, viewport_rect)
+            if current_scale > 0 and isinstance(fit_scale, (int, float)) and float(fit_scale) > 0:
+                self._zoom_follow_locked_detail_ratio = max(
+                    1e-6,
+                    min(1e6, float(current_scale) / float(fit_scale)),
+                )
+            else:
+                self._zoom_follow_locked_detail_ratio = 1.0
+        else:
+            self._zoom_follow_locked_detail_ratio = None
+        if changed:
+            self.zoom_follow_mode_changed.emit(normalized_mode)
+        return changed
+
+    def cycle_zoom_follow_mode(self) -> str:
+        mode_order = list(ZOOM_FOLLOW_MODE_OPTIONS)
+        current_mode = self.get_zoom_follow_mode()
+        try:
+            index = mode_order.index(current_mode)
+        except ValueError:
+            index = 0
+        next_mode = mode_order[(index + 1) % len(mode_order)]
+        self.set_zoom_follow_mode(next_mode)
+        return next_mode
+
+    @staticmethod
+    def _clamp_ratio_component(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    def _axis_center_to_pan_ratio(
+        self,
+        center_value: float,
+        scene_min: float,
+        scene_size: float,
+        viewport_size: float,
+        scale: float,
+    ) -> float:
+        if scene_size <= 0 or viewport_size <= 0 or scale <= 0:
+            return 0.5
+        visible_size = float(viewport_size) / float(scale)
+        if visible_size >= (float(scene_size) - 1e-6):
+            ratio = (float(center_value) - float(scene_min)) / float(scene_size)
+            return self._clamp_ratio_component(ratio)
+        min_center = float(scene_min) + visible_size * 0.5
+        max_center = float(scene_min) + float(scene_size) - visible_size * 0.5
+        span = max_center - min_center
+        if span <= 1e-9:
+            return 0.5
+        return self._clamp_ratio_component((float(center_value) - min_center) / span)
+
+    def _axis_pan_ratio_to_center(
+        self,
+        pan_ratio: float,
+        anchor_ratio: float,
+        scene_min: float,
+        scene_size: float,
+        viewport_size: float,
+        scale: float,
+    ) -> float:
+        if scene_size <= 0 or viewport_size <= 0 or scale <= 0:
+            return float(scene_min)
+        visible_size = float(viewport_size) / float(scale)
+        if visible_size >= (float(scene_size) - 1e-6):
+            return float(scene_min) + float(scene_size) * self._clamp_ratio_component(anchor_ratio)
+        min_center = float(scene_min) + visible_size * 0.5
+        max_center = float(scene_min) + float(scene_size) - visible_size * 0.5
+        return min_center + (max_center - min_center) * self._clamp_ratio_component(pan_ratio)
+
+    def _scene_point_to_anchor_ratio(self, scene_point, scene_rect: QRectF) -> QPointF:
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return QPointF(0.5, 0.5)
+        if scene_point is None or not hasattr(scene_point, "x") or not hasattr(scene_point, "y"):
+            return QPointF(0.5, 0.5)
+        ratio_x = (float(scene_point.x()) - float(scene_rect.left())) / float(scene_rect.width())
+        ratio_y = (float(scene_point.y()) - float(scene_rect.top())) / float(scene_rect.height())
+        return QPointF(
+            self._clamp_ratio_component(ratio_x),
+            self._clamp_ratio_component(ratio_y),
+        )
+
+    def _set_zoom_follow_anchor_from_scene_pos(self, scene_pos):
+        scene_rect = self.scene.sceneRect()
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return
+        if scene_pos is None or not hasattr(scene_pos, "x") or not hasattr(scene_pos, "y"):
+            scene_pos = scene_rect.center()
+        clamped = self._clamp_scene_point_to_rect(scene_pos, scene_rect)
+        ratio = self._scene_point_to_anchor_ratio(clamped, scene_rect)
+        self._zoom_follow_anchor_ratio = ratio
+        self._zoom_follow_pan_ratio = QPointF(
+            self._clamp_ratio_component(float(ratio.x())),
+            self._clamp_ratio_component(float(ratio.y())),
+        )
+
+    def _capture_zoom_follow_state_from_current_view(self):
+        scene_rect = self.scene.sceneRect()
+        viewport_rect = self.view.viewport().rect()
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return
+        scene_center = self.view.mapToScene(viewport_rect.center())
+        clamped_center = self._clamp_scene_point_to_rect(scene_center, scene_rect)
+        self._zoom_follow_anchor_ratio = self._scene_point_to_anchor_ratio(clamped_center, scene_rect)
+        try:
+            scale = abs(float(self.view.transform().m11()))
+        except Exception:
+            scale = abs(float(MarkingItem.zoom_factor or 0))
+        if scale <= 0:
+            scale = 1.0
+        self._zoom_follow_pan_ratio = QPointF(
+            self._axis_center_to_pan_ratio(
+                float(clamped_center.x()),
+                float(scene_rect.left()),
+                float(scene_rect.width()),
+                float(viewport_rect.width()),
+                float(scale),
+            ),
+            self._axis_center_to_pan_ratio(
+                float(clamped_center.y()),
+                float(scene_rect.top()),
+                float(scene_rect.height()),
+                float(viewport_rect.height()),
+                float(scale),
+            ),
+        )
+
+    def _zoom_follow_focus_for_scale(self, scale: float, scene_rect: QRectF, viewport_rect: QRect):
+        anchor_ratio = getattr(self, "_zoom_follow_anchor_ratio", QPointF(0.5, 0.5))
+        pan_ratio = getattr(self, "_zoom_follow_pan_ratio", QPointF(0.5, 0.5))
+        try:
+            pan_x = float(pan_ratio.x())
+            pan_y = float(pan_ratio.y())
+        except Exception:
+            pan_x, pan_y = 0.5, 0.5
+        try:
+            anchor_x = float(anchor_ratio.x())
+            anchor_y = float(anchor_ratio.y())
+        except Exception:
+            anchor_x, anchor_y = 0.5, 0.5
+        focus_x = self._axis_pan_ratio_to_center(
+            pan_x,
+            anchor_x,
+            float(scene_rect.left()),
+            float(scene_rect.width()),
+            float(viewport_rect.width()),
+            float(scale),
+        )
+        focus_y = self._axis_pan_ratio_to_center(
+            pan_y,
+            anchor_y,
+            float(scene_rect.top()),
+            float(scene_rect.height()),
+            float(viewport_rect.height()),
+            float(scale),
+        )
+        return self._clamp_scene_point_to_rect(QPointF(focus_x, focus_y), scene_rect)
+
+    @staticmethod
+    def _compute_fit_scale(scene_rect: QRectF, viewport_rect: QRect, overscan: float = 1.0008):
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return None
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return None
+        fit_scale = min(
+            viewport_rect.width() / scene_rect.width(),
+            viewport_rect.height() / scene_rect.height(),
+        ) * float(overscan)
+        if fit_scale <= 0:
+            return None
+        return float(fit_scale)
+
+    @staticmethod
+    def _compute_fill_scale(scene_rect: QRectF, viewport_rect: QRect, overscan: float = 1.0004):
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return None
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return None
+        fit_w = viewport_rect.width() / scene_rect.width()
+        fit_h = viewport_rect.height() / scene_rect.height()
+        fill_scale = max(fit_w, fit_h) * float(overscan)
+        if fill_scale <= 0:
+            return None
+        return float(fill_scale)
+
     @staticmethod
     def _clamp_viewport_point_to_rect(point, rect: QRect) -> QPoint:
         if point is None or not hasattr(point, "x") or not hasattr(point, "y"):
@@ -982,6 +1203,11 @@ class ImageViewer(QWidget):
     def apply_floating_double_click_zoom(self, scene_anchor_pos=None, view_anchor_pos=None) -> bool:
         """Adaptive double-click zoom behavior for spawned floating viewers."""
         try:
+            follow_mode = self.get_zoom_follow_mode()
+            if (not self.is_spawned_viewer
+                    and follow_mode == ZOOM_FOLLOW_MODE_SCALE_LOCK):
+                self.set_zoom_follow_mode(ZOOM_FOLLOW_MODE_DEFAULT)
+                follow_mode = ZOOM_FOLLOW_MODE_DEFAULT
             scene_rect = self.scene.sceneRect()
             viewport_rect = self.view.viewport().rect()
             if scene_rect.width() <= 0 or scene_rect.height() <= 0:
@@ -1054,6 +1280,11 @@ class ImageViewer(QWidget):
                     anchor_view_pos=view_anchor_pos,
                 )
                 self._floating_last_auto_double_click_zoom_scale = target_scale
+                if not self.is_spawned_viewer:
+                    self._set_zoom_follow_anchor_from_scene_pos(scene_anchor_pos)
+                if (not self.is_spawned_viewer
+                        and follow_mode == ZOOM_FOLLOW_MODE_DEFAULT):
+                    self.set_zoom_follow_mode(ZOOM_FOLLOW_MODE_FIT_LOCK)
                 return True
             if has_top_bottom_bars:
                 target_scale = fit_h * fill_overscan
@@ -1064,6 +1295,11 @@ class ImageViewer(QWidget):
                     anchor_view_pos=view_anchor_pos,
                 )
                 self._floating_last_auto_double_click_zoom_scale = target_scale
+                if not self.is_spawned_viewer:
+                    self._set_zoom_follow_anchor_from_scene_pos(scene_anchor_pos)
+                if (not self.is_spawned_viewer
+                        and follow_mode == ZOOM_FOLLOW_MODE_DEFAULT):
+                    self.set_zoom_follow_mode(ZOOM_FOLLOW_MODE_FIT_LOCK)
                 return True
 
             # If no visible bars and content is pannable (zoomed/cropped), restore fit.
@@ -1080,6 +1316,9 @@ class ImageViewer(QWidget):
                 if should_store_return_scale:
                     self._floating_double_click_return_scale = current_scale
                 self.zoom_fit()
+                if (not self.is_spawned_viewer
+                        and follow_mode == ZOOM_FOLLOW_MODE_FIT_LOCK):
+                    self.set_zoom_follow_mode(ZOOM_FOLLOW_MODE_DEFAULT)
                 return True
 
             # If still unpannable/no-op, do a local configurable detail zoom at click anchor.
@@ -1505,6 +1744,8 @@ class ImageViewer(QWidget):
         if self._viewer_model_resetting:
             return
         proxy_index = self._normalize_proxy_index(proxy_image_index)
+        if is_complete and self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
+            self._capture_zoom_follow_state_from_current_view()
         if self._compare_mode_active:
             self.exit_compare_mode(reset_split=False)
 
@@ -1647,7 +1888,52 @@ class ImageViewer(QWidget):
                 self.current_video_item = None
                 MarkingItem.image_size = image_item.boundingRect().toRect()
 
-            self.zoom_fit()
+            mode = self.get_zoom_follow_mode()
+            if mode == ZOOM_FOLLOW_MODE_FIT_LOCK:
+                scene_rect = self.scene.sceneRect()
+                viewport_rect = self.view.viewport().rect()
+                if scene_rect.width() > 0 and scene_rect.height() > 0 and viewport_rect.width() > 0 and viewport_rect.height() > 0:
+                    fit_w = viewport_rect.width() / scene_rect.width()
+                    fit_h = viewport_rect.height() / scene_rect.height()
+                    target_scale = max(fit_w, fit_h) * 1.0004
+                    anchor_focus = self._zoom_follow_focus_for_scale(target_scale, scene_rect, viewport_rect)
+                    self._apply_uniform_zoom_scale(
+                        max(1e-9, min(16.0, float(target_scale))),
+                        zoom_to_fit_state=False,
+                        focus_scene_pos=anchor_focus,
+                    )
+                else:
+                    self.zoom_fit()
+            elif mode == ZOOM_FOLLOW_MODE_SCALE_LOCK:
+                locked_detail_ratio = getattr(self, "_zoom_follow_locked_detail_ratio", None)
+                scene_rect = self.scene.sceneRect()
+                viewport_rect = self.view.viewport().rect()
+                fit_scale = self._compute_fit_scale(scene_rect, viewport_rect)
+                if (isinstance(fit_scale, (int, float))
+                        and float(fit_scale) > 0
+                        and scene_rect.width() > 0 and scene_rect.height() > 0
+                        and viewport_rect.width() > 0 and viewport_rect.height() > 0):
+                    ratio = 1.0
+                    if isinstance(locked_detail_ratio, (int, float)) and float(locked_detail_ratio) > 0:
+                        ratio = max(1e-6, min(1e6, float(locked_detail_ratio)))
+                    requested_scale = float(fit_scale) * ratio
+                    # Lock mode uses fit as 100% baseline to keep "fully zoomed out"
+                    # consistent across images with different dimensions/aspects.
+                    target_scale = max(requested_scale, float(fit_scale))
+                    anchor_focus = self._zoom_follow_focus_for_scale(target_scale, scene_rect, viewport_rect)
+                    self._suspend_zoom_follow_locked_scale_sync = True
+                    try:
+                        self._apply_uniform_zoom_scale(
+                            max(1e-9, min(16.0, float(target_scale))),
+                            zoom_to_fit_state=False,
+                            focus_scene_pos=anchor_focus,
+                        )
+                    finally:
+                        self._suspend_zoom_follow_locked_scale_sync = False
+                else:
+                    self.zoom_fit()
+            else:
+                self.zoom_fit()
             self.hud_item = ResizeHintHUD(MarkingItem.image_size, image_item)
             if auto_play_after_layout:
                 QTimer.singleShot(0, self.video_player.play)
@@ -1762,6 +2048,20 @@ class ImageViewer(QWidget):
         self.zoom_emit()
 
     def zoom_emit(self):
+        if self.get_zoom_follow_mode() == ZOOM_FOLLOW_MODE_SCALE_LOCK:
+            try:
+                if (not bool(getattr(self, "_suspend_zoom_follow_locked_scale_sync", False))
+                        and float(MarkingItem.zoom_factor) > 0):
+                    scene_rect = self.scene.sceneRect()
+                    viewport_rect = self.view.viewport().rect()
+                    fit_scale = self._compute_fit_scale(scene_rect, viewport_rect)
+                    if isinstance(fit_scale, (int, float)) and float(fit_scale) > 0:
+                        self._zoom_follow_locked_detail_ratio = max(
+                            1e-6,
+                            min(1e6, float(MarkingItem.zoom_factor) / float(fit_scale)),
+                        )
+            except Exception:
+                pass
         ResizeHintHUD.zoom_factor = MarkingItem.zoom_factor
         transform = self.view.transform()
         self.view.setTransform(QTransform(
@@ -1778,6 +2078,8 @@ class ImageViewer(QWidget):
             pass
         for marking in self.marking_items:
             marking.adjust_layout()
+        if self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
+            self._capture_zoom_follow_state_from_current_view()
         if self.is_zoom_to_fit:
             self.zoom.emit(-1)
         else:

@@ -40,6 +40,9 @@ class SignalManager:
             lambda: self.main_window.get_active_viewer().zoom_original())
         toolbar_manager.zoom_out_action.triggered.connect(
             lambda: self.main_window.get_active_viewer().zoom_out())
+        if toolbar_manager.zoom_follow_mode_btn is not None:
+            toolbar_manager.zoom_follow_mode_btn.clicked.connect(
+                self.main_window.cycle_active_viewer_zoom_follow_mode)
 
         toolbar_manager.add_action_group.triggered.connect(
             lambda action: image_viewer.add_marking(
@@ -87,6 +90,8 @@ class SignalManager:
 
         # Rating stars
         image_viewer.rating_changed.connect(self.main_window.set_rating)
+        image_viewer.zoom_follow_mode_changed.connect(
+            lambda mode: self.main_window.sync_zoom_follow_mode_button())
 
     def connect_image_list_signals(self):
         """Connect image list-related signals."""

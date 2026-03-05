@@ -34,6 +34,7 @@ class ToolbarManager:
         self.add_show_labels_action = None
         self.add_show_marking_latent_action = None
         self.always_show_controls_btn = None
+        self.zoom_follow_mode_btn = None
         self.fixed_marker_size_spinbox = None
         self.extract_range_action = None
         self.extract_range_rough_btn = None
@@ -201,6 +202,26 @@ class ToolbarManager:
             }
         """)
         self.toolbar.addWidget(self.always_show_controls_btn)
+
+        # Compact zoom-follow mode cycle button.
+        self.zoom_follow_mode_btn = QPushButton('⊙')
+        self.zoom_follow_mode_btn.setToolTip('Default: Per-image zoom behavior')
+        self.zoom_follow_mode_btn.setFixedSize(32, 32)
+        self.zoom_follow_mode_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 16px;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                border-color: #777;
+                background-color: #353535;
+            }
+        """)
+        self.toolbar.addWidget(self.zoom_follow_mode_btn)
+        self.set_zoom_follow_mode_button('default')
 
         # Fixed marker size spinbox
         marker_size_widget = QWidget()
@@ -389,6 +410,23 @@ class ToolbarManager:
 
         self.delete_marked_btn.setMenu(self.delete_marked_menu)
         self.toolbar.addWidget(self.delete_marked_btn)
+
+    def set_zoom_follow_mode_button(self, mode: str):
+        """Update compact zoom-follow button icon and tooltip."""
+        if self.zoom_follow_mode_btn is None:
+            return
+        normalized = str(mode or 'default').strip().lower()
+        if normalized == 'fit_lock':
+            icon = '⤢'
+            tip = 'Fit Lock: Keep image fitted across image changes'
+        elif normalized == 'scale_lock':
+            icon = '🔒'
+            tip = 'Zoom Lock: Keep same zoom detail across image changes'
+        else:
+            icon = '⊙'
+            tip = 'Default: Per-image zoom behavior'
+        self.zoom_follow_mode_btn.setText(icon)
+        self.zoom_follow_mode_btn.setToolTip(tip)
 
     def _delete_all_marked(self):
         """Delete all marked images."""
