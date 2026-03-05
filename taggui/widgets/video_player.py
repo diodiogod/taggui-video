@@ -233,6 +233,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_reveal_timer.setInterval(16)
         self._vlc_reveal_timer.timeout.connect(self._try_reveal_vlc_surface)
         self._vlc_estimated_position_ms = 0.0
+        self._vlc_has_valid_time_sample = False
         self._vlc_play_started_monotonic = 0.0
         self._vlc_play_base_position_ms = 0.0
         self._vlc_needs_reload = True
@@ -246,6 +247,7 @@ class VideoPlayerWidget(QWidget):
         self._vlc_last_progress_ms = None
         self._vlc_stall_ticks = 0
         self._vlc_last_loop_restart_monotonic = 0.0
+        self._vlc_time_sample_gate_deadline_monotonic = 0.0
         self._vlc_soft_restart_deadline_monotonic = 0.0
         self._vlc_soft_restart_pending = False
         self._vlc_cover_label = None
@@ -253,6 +255,8 @@ class VideoPlayerWidget(QWidget):
         self._opencv_cover_label = None  # QLabel overlay for reverse/OpenCV frames above MPV widget
         self._loop_debug_last_log_monotonic = 0.0
         self._qt_video_source_path = None
+        self._qt_startup_expected_ms = 0.0
+        self._qt_startup_gate_deadline_monotonic = 0.0
         self._refresh_backend_selection()
 
         # QMediaPlayer for smooth playback
@@ -436,9 +440,9 @@ class VideoPlayerWidget(QWidget):
 
         frame_ms = 1000.0 / float(self.fps)
         start_ms = float(frame_bounds[0]) * frame_ms
-        # Set ab-loop-b to the start of end_frame — MPV loops back when it
-        # reaches this timestamp, so end_frame is the last frame displayed.
-        end_ms = float(frame_bounds[1]) * frame_ms
+        # Inclusive end marker: set ab-loop-b to the start of (end_frame + 1)
+        # so end_frame itself is fully presented before wrap.
+        end_ms = float(frame_bounds[1] + 1) * frame_ms
         if end_ms <= start_ms:
             end_ms = start_ms + frame_ms
         return start_ms, end_ms
@@ -450,13 +454,20 @@ class VideoPlayerWidget(QWidget):
         try:
             bounds_ms = self._get_segment_loop_bounds_ms()
             if bounds_ms is None:
-                if not clear_when_inactive:
-                    return True
                 self._mpv_set_property('ab-loop-a', 'no')
                 self._mpv_set_property('ab-loop-b', 'no')
+                # Full-video loop should be delegated to mpv's native loop-file
+                # so the backend decides exact EOF timing.
+                if bool(self.loop_enabled and self.loop_start is None and self.loop_end is None):
+                    self._mpv_set_property('loop-file', 'inf')
+                    return True
+                if not clear_when_inactive:
+                    return True
+                self._mpv_set_property('loop-file', 'no')
                 return True
 
             loop_start_ms, loop_end_ms = bounds_ms
+            self._mpv_set_property('loop-file', 'no')
             self._mpv_set_property('ab-loop-a', f'{(loop_start_ms / 1000.0):.6f}')
             self._mpv_set_property('ab-loop-b', f'{(loop_end_ms / 1000.0):.6f}')
             return True
@@ -802,12 +813,14 @@ class VideoPlayerWidget(QWidget):
         self._hide_vlc_cover_overlay()
         self.vlc_geometry_timer.stop()
         self._vlc_estimated_position_ms = 0.0
+        self._vlc_has_valid_time_sample = False
         self._vlc_play_started_monotonic = 0.0
         self._vlc_play_base_position_ms = 0.0
         self._vlc_needs_reload = True
         self._vlc_end_reached_flag = False
         self._vlc_last_progress_ms = None
         self._vlc_stall_ticks = 0
+        self._vlc_time_sample_gate_deadline_monotonic = 0.0
         self._vlc_soft_restart_deadline_monotonic = 0.0
         self._vlc_soft_restart_pending = False
         self._unbind_vlc_events()
@@ -874,20 +887,23 @@ class VideoPlayerWidget(QWidget):
             # Do NOT call any Qt UI methods here.
             if not self._is_segment_loop_active() or self._vlc_loop_end_guard:
                 return
-            if self.fps <= 0 or self.duration_ms <= 0:
+            if self.fps <= 0:
                 return
             try:
-                pos_ratio = float(self.vlc_player.get_position())
-                if pos_ratio < 0:
-                    return
-                pos_ms = pos_ratio * float(self.duration_ms)
+                pos_ms = float(self.vlc_player.get_time())
+                if pos_ms < 0.0:
+                    pos_ratio = float(self.vlc_player.get_position())
+                    if pos_ratio < 0.0 or self.duration_ms <= 0:
+                        return
+                    pos_ms = pos_ratio * float(self.duration_ms)
                 frame_ms = 1000.0 / float(self.fps)
                 end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
-                loop_end_ms = float(end_frame) * frame_ms
+                loop_out_ms = float(end_frame + 1) * frame_ms
+                loop_trigger_ms = loop_out_ms - max(1.0, frame_ms * 0.05)
                 current_frame_at_event = int(pos_ms / frame_ms)
-                print(f"[LOOP_DBG] pos_ms={pos_ms:.1f} loop_end_ms={loop_end_ms:.1f} "
+                print(f"[LOOP_DBG] pos_ms={pos_ms:.1f} loop_out_ms={loop_out_ms:.1f} "
                       f"frame={current_frame_at_event} end_frame={end_frame}")
-                if pos_ms >= (loop_end_ms - frame_ms):
+                if pos_ms >= loop_trigger_ms:
                     self._vlc_loop_end_guard = True
                     # Pause VLC immediately from this thread to stop overshoot.
                     # The main thread will handle the seek-back and cover display.
@@ -971,6 +987,8 @@ class VideoPlayerWidget(QWidget):
             self._mpv_pending_play_speed = None
             self._mpv_string_command('set', 'speed', str(speed))
             self._mpv_string_command('set', 'pause', 'no')
+            self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms or 0.0)
+            self._mpv_play_started_monotonic = time.monotonic()
             self._begin_mpv_reveal()
 
     @Slot()
@@ -1054,10 +1072,11 @@ class VideoPlayerWidget(QWidget):
             return
         frame_ms = 1000.0 / float(self.fps)
         end_frame = max(0, min(int(self.loop_end), self.total_frames - 1))
-        loop_end_ms = float(end_frame) * frame_ms
-        # Trigger when within 1 frame of loop_end.
-        if pos_ms >= (loop_end_ms - frame_ms):
-            print(f"[LOOP_DBG] POLL TIMER triggered: pos_ms={pos_ms:.1f} loop_end_ms={loop_end_ms:.1f}")
+        loop_out_ms = float(end_frame + 1) * frame_ms
+        loop_trigger_ms = loop_out_ms - max(1.0, frame_ms * 0.05)
+        # Trigger near the transition to end_frame+1 so end_frame is shown.
+        if pos_ms >= loop_trigger_ms:
+            print(f"[LOOP_DBG] POLL TIMER triggered: pos_ms={pos_ms:.1f} loop_out_ms={loop_out_ms:.1f}")
             self._vlc_loop_end_wall_timer.stop()
             self._vlc_loop_end_guard = True
             self._on_vlc_loop_end_crossed()
@@ -1288,6 +1307,8 @@ class VideoPlayerWidget(QWidget):
             self._rebind_vlc_output_target()
             self._vlc_needs_reload = False
             self._vlc_end_reached_flag = False
+            self._vlc_has_valid_time_sample = False
+            self._vlc_time_sample_gate_deadline_monotonic = 0.0
             self._vlc_last_progress_ms = None
             self._vlc_stall_ticks = 0
             self._vlc_soft_restart_deadline_monotonic = 0.0
@@ -1305,12 +1326,37 @@ class VideoPlayerWidget(QWidget):
         try:
             position_ms = int(self.vlc_player.get_time())
             if position_ms >= 0:
+                if (
+                    not self._vlc_has_valid_time_sample
+                    and self.is_playing
+                    and self._is_vlc_forward_active()
+                ):
+                    expected_ms = float(self._vlc_estimated_position_ms or 0.0)
+                    startup_tolerance_ms = max(220.0, abs(float(self.playback_speed)) * 260.0)
+                    close_to_expected = abs(float(position_ms) - expected_ms) <= startup_tolerance_ms
+                    gate_deadline = float(self._vlc_time_sample_gate_deadline_monotonic or 0.0)
+                    gate_expired = gate_deadline > 0.0 and time.monotonic() >= gate_deadline
+                    # During startup/clip switch, VLC can briefly report stale time
+                    # from the previous media item. Ignore those samples unless
+                    # they are plausible for the expected start or timeout elapsed.
+                    if not close_to_expected and not gate_expired:
+                        return float(self._vlc_estimated_position_ms)
+                had_sample = bool(self._vlc_has_valid_time_sample)
+                self._vlc_has_valid_time_sample = True
+                self._vlc_time_sample_gate_deadline_monotonic = 0.0
                 self._vlc_estimated_position_ms = float(position_ms)
+                if (not had_sample) and self.is_playing and self._is_vlc_forward_active():
+                    self._vlc_play_base_position_ms = float(position_ms)
+                    self._vlc_play_started_monotonic = time.monotonic()
                 return float(position_ms)
         except Exception:
             pass
 
         if not self._is_vlc_forward_active() or not self.is_playing:
+            return float(self._vlc_estimated_position_ms)
+        if not self._vlc_has_valid_time_sample:
+            # Startup/restart: don't advance from wall-clock before VLC reports
+            # a valid media timestamp, otherwise looping can trigger too early.
             return float(self._vlc_estimated_position_ms)
 
         speed = max(0.1, float(self.playback_speed))
@@ -1324,6 +1370,8 @@ class VideoPlayerWidget(QWidget):
 
     def _seek_vlc_position_ms(self, position_ms: float):
         self._vlc_estimated_position_ms = float(position_ms)
+        self._vlc_has_valid_time_sample = False
+        self._vlc_time_sample_gate_deadline_monotonic = time.monotonic() + 2.0
         self._vlc_last_progress_ms = float(position_ms)
         self._vlc_stall_ticks = 0
         if self.is_playing and self._is_vlc_forward_active():
@@ -1370,6 +1418,8 @@ class VideoPlayerWidget(QWidget):
         self._vlc_soft_restart_pending = False
         self._vlc_soft_restart_deadline_monotonic = 0.0
         self._vlc_estimated_position_ms = safe_ms
+        self._vlc_has_valid_time_sample = False
+        self._vlc_time_sample_gate_deadline_monotonic = time.monotonic() + 2.0
         self._vlc_play_base_position_ms = safe_ms
         self._vlc_play_started_monotonic = time.monotonic()
         self._vlc_last_progress_ms = safe_ms
@@ -1464,9 +1514,17 @@ class VideoPlayerWidget(QWidget):
         return max(views, key=_score)
 
     def _cancel_mpv_reveal(self):
-        self._mpv_pending_reveal = False
+        self._mpv_pending_reveal = True
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
+
+        def _finalize_reveal():
+            self._mpv_pending_reveal = False
+            if self.is_playing and self._is_mpv_forward_active():
+                # Anchor playback clock when the first frame is actually visible.
+                self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms or 0.0)
+                self._mpv_play_started_monotonic = time.monotonic()
+            self._set_mpv_visible(True)
         gl_widget = getattr(self, 'mpv_widget', None)
         if isinstance(gl_widget, MpvGlWidget):
             gl_widget._emit_frame_painted = False
@@ -1553,10 +1611,8 @@ class VideoPlayerWidget(QWidget):
 
         position_ready = False
         strict_mode = bool(self._vlc_reveal_require_stable)
-        try:
-            backend_pos_ms = float(self.vlc_player.get_time())
-        except Exception:
-            backend_pos_ms = -1.0
+        backend_pos = self._get_vlc_position_ms()
+        backend_pos_ms = float(backend_pos) if backend_pos is not None else -1.0
         state_ready = True
         if strict_mode and vlc is not None:
             try:
@@ -1609,14 +1665,22 @@ class VideoPlayerWidget(QWidget):
         video's first frame — eliminating the flash of the previous video's
         last frame that occurred when revealing immediately.
         """
-        self._mpv_pending_reveal = False
+        self._mpv_pending_reveal = True
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
+
+        def _finalize_reveal():
+            self._mpv_pending_reveal = False
+            if self.is_playing and self._is_mpv_forward_active():
+                # Anchor playback clock when the first frame is actually visible.
+                self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms or 0.0)
+                self._mpv_play_started_monotonic = time.monotonic()
+            self._set_mpv_visible(True)
 
         gl_widget = getattr(self, 'mpv_widget', None)
         if gl_widget is None or not isinstance(gl_widget, MpvGlWidget):
             # No GL widget — reveal immediately (fallback).
-            self._set_mpv_visible(True)
+            _finalize_reveal()
             return
 
         # Arm the one-shot signal and connect a lambda that reveals once fired.
@@ -1627,21 +1691,37 @@ class VideoPlayerWidget(QWidget):
                 gl_widget.frame_painted.disconnect(_on_first_frame)
             except Exception:
                 pass
-            self._set_mpv_visible(True)
+            _finalize_reveal()
 
         gl_widget.frame_painted.connect(_on_first_frame)
 
         # Safety net: if frame_painted never arrives (widget is hidden until reveal),
-        # reveal after the requested delay so startup latency stays bounded.
+        # start showing the widget after the requested delay so frame_painted
+        # can arrive, but keep startup gate active until a real frame is painted.
         def _reveal_timeout():
+            if not self._mpv_pending_reveal:
+                return
             if not gl_widget._emit_frame_painted:
                 return  # already revealed via frame_painted
-            gl_widget._emit_frame_painted = False
             try:
-                gl_widget.frame_painted.disconnect(_on_first_frame)
+                # Make MPV surface visible so the GL paint callback can fire.
+                # Keep _mpv_pending_reveal=True to freeze timeline until first frame.
+                self._set_mpv_visible(True)
             except Exception:
                 pass
-            self._set_mpv_visible(True)
+
+            # Hard fallback: if first-frame signal still doesn't arrive, unstick.
+            def _force_finalize_without_first_frame():
+                if not self._mpv_pending_reveal:
+                    return
+                gl_widget._emit_frame_painted = False
+                try:
+                    gl_widget.frame_painted.disconnect(_on_first_frame)
+                except Exception:
+                    pass
+                _finalize_reveal()
+
+            QTimer.singleShot(2000, _force_finalize_without_first_frame)
 
         fallback_ms = max(40, int(delay_ms))
         QTimer.singleShot(fallback_ms, _reveal_timeout)
@@ -1848,10 +1928,20 @@ class VideoPlayerWidget(QWidget):
     def _get_mpv_position_ms(self) -> float | None:
         if not self._is_mpv_forward_active() or not self.is_playing:
             return float(self._mpv_estimated_position_ms)
+        if (
+            self._mpv_pending_play_speed is not None
+            or self._mpv_pending_reveal
+            or (not self._mpv_ready_for_seeks)
+            or (not self._mpv_vo_ready)
+        ):
+            # Startup/clip switch: keep timeline pinned until the first frame is ready.
+            return float(self._mpv_estimated_position_ms)
 
         speed = max(0.1, float(self.playback_speed))
-        elapsed = max(0.0, time.monotonic() - self._mpv_play_started_monotonic)
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._mpv_play_started_monotonic)
         estimated = self._mpv_play_base_position_ms + (elapsed * 1000.0 * speed)
+        is_full_video_loop = bool(self.loop_enabled and self.loop_start is None and self.loop_end is None)
 
         loop_bounds_ms = self._get_segment_loop_bounds_ms()
         if loop_bounds_ms is not None:
@@ -1859,7 +1949,18 @@ class VideoPlayerWidget(QWidget):
             loop_span_ms = max(1.0, loop_end_ms - loop_start_ms)
             estimated = ((estimated - loop_start_ms) % loop_span_ms) + loop_start_ms
         elif self.duration_ms > 0:
-            estimated = max(0.0, min(float(self.duration_ms), estimated))
+            duration_ms = float(self.duration_ms)
+            if is_full_video_loop and duration_ms > 1.0:
+                # MPV native full-loop playback wraps internally. Keep timeline
+                # in sync by wrapping our estimated position instead of clamping.
+                if estimated >= duration_ms:
+                    estimated = estimated % duration_ms
+                    self._mpv_play_base_position_ms = float(estimated)
+                    self._mpv_play_started_monotonic = now
+                elif estimated < 0.0:
+                    estimated = 0.0
+            else:
+                estimated = max(0.0, min(duration_ms, estimated))
         self._mpv_estimated_position_ms = float(estimated)
         return float(self._mpv_estimated_position_ms)
 
@@ -1929,8 +2030,10 @@ class VideoPlayerWidget(QWidget):
             os.dup2(devnull.fileno(), stderr_fd)
             try:
                 try:
+                    self.media_player.stop()
                     self.media_player.setSource(QUrl.fromLocalFile(current_path))
                     self.media_player.setVideoOutput(video_item)
+                    self.media_player.setPosition(0)
                 except RuntimeError:
                     self.video_item = None
                     self._qt_video_source_path = None
@@ -1941,6 +2044,8 @@ class VideoPlayerWidget(QWidget):
                 os.close(old_stdout)
                 os.close(old_stderr)
         self._qt_video_source_path = current_path
+        self._qt_startup_expected_ms = 0.0
+        self._qt_startup_gate_deadline_monotonic = time.monotonic() + 2.0
         return True
 
     def sync_external_surface_geometry(self):
@@ -2162,8 +2267,10 @@ class VideoPlayerWidget(QWidget):
         self._mpv_play_started_monotonic = 0.0
         self._mpv_play_base_position_ms = 0.0
         self._vlc_estimated_position_ms = 0.0
+        self._vlc_has_valid_time_sample = False
         self._vlc_play_started_monotonic = 0.0
         self._vlc_play_base_position_ms = 0.0
+        self._vlc_time_sample_gate_deadline_monotonic = 0.0
 
         # Create QGraphicsVideoItem for QMediaPlayer output
         # Properly cleanup old video item
@@ -2300,7 +2407,7 @@ class VideoPlayerWidget(QWidget):
                         self._mpv_play_base_position_ms = float(start_ms)
                         self._mpv_play_started_monotonic = time.monotonic()
                 if use_mpv_forward and self.mpv_player is not None:
-                    if self._is_segment_loop_active() and self._mpv_vo_ready:
+                    if self._mpv_vo_ready:
                         self._apply_mpv_loop_settings()
             elif use_vlc_forward:
                 if self.vlc_player is None or self._vlc_needs_reload:
@@ -2345,7 +2452,7 @@ class VideoPlayerWidget(QWidget):
                         # _on_mpv_file_loaded will call _begin_mpv_reveal when ready.
                         self._mpv_pending_play_speed = speed
                         self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms)
-                        self._mpv_play_started_monotonic = time.monotonic()
+                        self._mpv_play_started_monotonic = 0.0
                 except Exception as e:
                     print(f"[VIDEO] mpv play fallback to Qt backend: {e}")
                     self.runtime_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
@@ -2368,6 +2475,9 @@ class VideoPlayerWidget(QWidget):
                     except RuntimeError:
                         pass
                     self.media_player.setPlaybackRate(self.playback_speed)
+                    self._qt_startup_expected_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else 0.0
+                    self._qt_startup_gate_deadline_monotonic = time.monotonic() + 2.0
+                    self.media_player.setPosition(int(max(0.0, self._qt_startup_expected_ms)))
                     self.media_player.play()
             elif use_vlc_forward and self.vlc_player is not None:
                 try:
@@ -2381,6 +2491,8 @@ class VideoPlayerWidget(QWidget):
                     self._set_vlc_rate(self.playback_speed)
                     self._set_vlc_muted(bool(self.audio_output.isMuted()) if self.audio_output else True)
                     self._vlc_end_reached_flag = False
+                    self._vlc_has_valid_time_sample = False
+                    self._vlc_time_sample_gate_deadline_monotonic = time.monotonic() + 2.0
                     self._vlc_stall_ticks = 0
                     # hide VLC surface first so pausing VLC can't flash black
                     self._set_vlc_visible(False)
@@ -2431,6 +2543,9 @@ class VideoPlayerWidget(QWidget):
                     except RuntimeError:
                         pass
                     self.media_player.setPlaybackRate(self.playback_speed)
+                    self._qt_startup_expected_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else 0.0
+                    self._qt_startup_gate_deadline_monotonic = time.monotonic() + 2.0
+                    self.media_player.setPosition(int(max(0.0, self._qt_startup_expected_ms)))
                     self.media_player.play()
             else:
                 self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
@@ -2456,6 +2571,9 @@ class VideoPlayerWidget(QWidget):
 
                 # Set playback rate
                 self.media_player.setPlaybackRate(self.playback_speed)
+                self._qt_startup_expected_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else 0.0
+                self._qt_startup_gate_deadline_monotonic = time.monotonic() + 2.0
+                self.media_player.setPosition(int(max(0.0, self._qt_startup_expected_ms)))
 
                 # Start playback
                 self.media_player.play()
@@ -2856,6 +2974,14 @@ class VideoPlayerWidget(QWidget):
             return
 
         if self._is_mpv_forward_active():
+            if (
+                self._mpv_pending_play_speed is not None
+                or self._mpv_pending_reveal
+                or (not self._mpv_ready_for_seeks)
+                or (not self._mpv_vo_ready)
+            ):
+                # Avoid seekbar/frame progression before MPV is visibly ready.
+                return
             position_ms = self._get_mpv_position_ms()
             if position_ms is None:
                 return
@@ -2863,8 +2989,23 @@ class VideoPlayerWidget(QWidget):
             position_ms = self._get_vlc_position_ms()
             if position_ms is None:
                 return
+            if self._vlc_pending_reveal:
+                # Keep timeline/frame state stable until VLC surface handoff is complete.
+                return
         else:
             position_ms = float(self.media_player.position())
+            gate_deadline = float(self._qt_startup_gate_deadline_monotonic or 0.0)
+            if gate_deadline > 0.0:
+                now = time.monotonic()
+                expected_ms = float(self._qt_startup_expected_ms or 0.0)
+                tol_ms = 180.0
+                if self.fps > 0:
+                    tol_ms = max(120.0, (1000.0 / float(self.fps)) * 2.5)
+                if abs(float(position_ms) - expected_ms) > tol_ms and now < gate_deadline:
+                    # Ignore stale carried-over positions from the previous clip
+                    # until Qt reports a plausible start position.
+                    return
+                self._qt_startup_gate_deadline_monotonic = 0.0
 
         is_external_backend = self._is_mpv_forward_active() or self._is_vlc_forward_active()
         is_vlc_active = self._is_vlc_forward_active()
@@ -2948,32 +3089,31 @@ class VideoPlayerWidget(QWidget):
                 or (vlc_position_ratio is not None and vlc_position_ratio >= 0.965)
                 or frame_number >= max(0, self.total_frames - 3)
             )
+            strict_vlc_full_loop_tail = bool(
+                is_vlc_active
+                and is_full_video_loop
+                and (
+                    (
+                        effective_duration_ms > 0
+                        and position_ms >= (
+                            float(effective_duration_ms) - max(2.0, frame_ms * 0.20)
+                        )
+                    )
+                    or (vlc_position_ratio is not None and vlc_position_ratio >= 0.9985)
+                )
+            )
             elapsed_play_s = max(0.0, time.monotonic() - float(self._vlc_play_started_monotonic or 0.0))
             vlc_stalled_near_tail = bool(
                 is_vlc_active
-                and near_tail_hint
+                and strict_vlc_full_loop_tail
                 and self._vlc_stall_ticks >= 45
             )
             vlc_backend_not_playing_tail = bool(
                 is_vlc_active
                 and vlc_is_playing is False
-                and near_tail_hint
+                and strict_vlc_full_loop_tail
                 and elapsed_play_s >= 0.35
             )
-            if is_vlc_active and self.loop_enabled and is_full_video_loop and (
-                vlc_reached_terminal
-                or vlc_backend_not_playing_tail
-                or vlc_stalled_near_tail
-            ):
-                self._log_loop_debug(
-                    "full-loop restart "
-                    f"pos_ms={position_ms:.1f} frame={frame_number} "
-                    f"ratio={vlc_position_ratio if vlc_position_ratio is not None else 'n/a'} "
-                    f"state={vlc_state} vlc_playing={vlc_is_playing} "
-                    f"stalls={self._vlc_stall_ticks} elapsed={elapsed_play_s:.3f}s"
-                )
-                self._restart_vlc_from_position_ms(0.0)
-                return
 
             # External backend path: handle natural end-of-file when loop is disabled.
             if (
@@ -3005,17 +3145,45 @@ class VideoPlayerWidget(QWidget):
                 if start_frame > end_frame:
                     start_frame, end_frame = end_frame, start_frame
 
-                reached_loop_end = frame_number >= end_frame
-                if not reached_loop_end and self.total_frames > 0:
-                    if self.loop_start is None and self.loop_end is None:
-                        reached_loop_end = near_video_end or vlc_near_ratio_end or vlc_reached_terminal
+                if is_full_video_loop:
+                    # For full-video loops, restarting at frame==last_frame can cut
+                    # the visible tail. Trigger only at the true end tail instead.
+                    end_frame_start_ms = float(end_frame) * frame_ms
+                    if effective_duration_ms > 0:
+                        tail_margin_ms = max(1.0, frame_ms * 0.02)
+                        full_loop_trigger_ms = max(
+                            end_frame_start_ms,
+                            float(effective_duration_ms) - tail_margin_ms,
+                        )
                     else:
-                        # Fire when position reaches the start of end_frame (not end_frame+1).
-                        # Scale lead time with speed so fast playback doesn't overshoot.
-                        loop_end_ms = float(end_frame) * frame_ms
-                        speed_factor = max(1.5, abs(float(self.playback_speed)) * 1.5)
-                        early_trigger_ms = max(frame_ms, frame_ms * speed_factor)
-                        reached_loop_end = position_ms >= (loop_end_ms - early_trigger_ms)
+                        full_loop_trigger_ms = end_frame_start_ms + (frame_ms * 0.90)
+                    if is_vlc_active:
+                        reached_loop_end = bool(vlc_reached_terminal)
+                        if not reached_loop_end and (
+                            vlc_backend_not_playing_tail
+                            or vlc_stalled_near_tail
+                        ):
+                            reached_loop_end = True
+                    elif self._is_mpv_forward_active():
+                        # MPV full-loop relies on native loop-file=inf timing.
+                        reached_loop_end = False
+                    elif not is_external_backend:
+                        # QMediaPlayer full-loop uses native infinite looping.
+                        # Avoid manual end-seek races that can clip tail audio.
+                        reached_loop_end = False
+                    else:
+                        reached_loop_end = position_ms >= full_loop_trigger_ms
+                else:
+                    reached_loop_end = frame_number > end_frame
+                    if not reached_loop_end and self.total_frames > 0:
+                        # Inclusive segment loop end: wait until the transition to
+                        # end_frame+1 so end_frame is actually visible.
+                        loop_out_ms = float(end_frame + 1) * frame_ms
+                        late_margin_ms = max(1.0, min(10.0, frame_ms * 0.08))
+                        reached_loop_end = (
+                            frame_number > end_frame
+                            or position_ms >= (loop_out_ms - late_margin_ms)
+                        )
 
                 if reached_loop_end:
                     if self._is_mpv_forward_active() and self._is_segment_loop_active():
@@ -3025,7 +3193,14 @@ class VideoPlayerWidget(QWidget):
                         # Loop back to start
                         start_position_ms = (float(start_frame) * frame_ms) if frame_ms > 0 else 0.0
                         is_segment_loop = self.loop_start is not None or self.loop_end is not None
-                        if is_vlc_active and vlc_reached_ended:
+                        if is_vlc_active and is_full_video_loop:
+                            # Use one deterministic restart path for VLC full-loop,
+                            # avoiding seek-vs-restart races that can cut tail audio.
+                            self._restart_vlc_from_position_ms(
+                                start_position_ms,
+                                cover_frame=end_frame,
+                            )
+                        elif is_vlc_active and vlc_reached_ended:
                             self._restart_vlc_from_position_ms(
                                 start_position_ms,
                                 cover_frame=start_frame if is_segment_loop else None,
@@ -3053,10 +3228,6 @@ class VideoPlayerWidget(QWidget):
                             )
                         else:
                             self.seek_to_frame(start_frame)
-                            if is_vlc_active and is_full_video_loop and vlc_near_ratio_end:
-                                # Some VLC builds stall near EOF without entering Ended;
-                                # force a clean restart in that case.
-                                self._restart_vlc_from_position_ms(start_position_ms)
                         if self.is_playing:
                             if self._is_mpv_forward_active():
                                 try:
@@ -3215,6 +3386,8 @@ class VideoPlayerWidget(QWidget):
                     self._mpv_estimated_position_ms = sync_ms
                     self._mpv_play_base_position_ms = sync_ms
                     self._vlc_estimated_position_ms = sync_ms
+                    self._vlc_has_valid_time_sample = False
+                    self._vlc_time_sample_gate_deadline_monotonic = time.monotonic() + 2.0
                 self.play()
             elif is_negative:
                 # Update OpenCV timer interval
