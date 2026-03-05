@@ -3360,7 +3360,72 @@ class MainWindow(QMainWindow):
             self.image_list_model.add_to_undo_stack(
                 action_name='Change rating', should_ask_for_confirmation=False)
             self.get_active_viewer().rating_change(rating)
-            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+            # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
+            # Re-apply filter only when the active filter actually depends on rating.
+            if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
+                self._arm_masonry_refresh_anchor()
+                self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+
+    def _arm_masonry_refresh_anchor(self):
+        """Keep selected masonry item stable across filter-triggered relayout."""
+        view = self.image_list.list_view if hasattr(self, "image_list") else None
+        if view is None or not bool(getattr(view, "use_masonry", False)):
+            return
+
+        source_model = self.image_list_model
+        if source_model is None:
+            return
+
+        target_global = getattr(view, "_selected_global_index", None)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            try:
+                cur = self.image_list_selection_model.currentIndex()
+            except Exception:
+                cur = QModelIndex()
+            mapped = self._proxy_index_to_global_rank(cur) if cur.isValid() else -1
+            if isinstance(mapped, int) and mapped >= 0:
+                target_global = int(mapped)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            return
+
+        try:
+            page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        except Exception:
+            page_size = 1000
+        target_page = max(0, int(target_global) // max(1, page_size))
+
+        import time as _t
+        view._selected_global_index = int(target_global)
+        view._restore_target_global_index = int(target_global)
+        view._restore_target_page = int(target_page)
+        view._restore_anchor_until = _t.time() + 4.0
+        view._recenter_after_layout = True
+
+        if hasattr(source_model, "ensure_pages_for_range"):
+            try:
+                source_model.ensure_pages_for_range(int(target_global), int(target_global) + 1)
+            except Exception:
+                pass
+
+    def _filter_uses_star_rating(self, filter_node) -> bool:
+        """Return True if a filter tree contains a `stars` predicate."""
+        if filter_node is None:
+            return False
+        stack = [filter_node]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                if node and node[0] == 'stars':
+                    return True
+                for part in node:
+                    if isinstance(part, list):
+                        stack.append(part)
+                    elif isinstance(part, str) and 'stars:' in part.lower():
+                        return True
+            elif isinstance(node, str):
+                if 'stars:' in node.lower():
+                    return True
+        return False
 
 
     @Slot()

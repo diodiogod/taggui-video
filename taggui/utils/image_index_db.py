@@ -1,5 +1,6 @@
 """Database caching for image dimensions and metadata to speed up directory loading."""
 
+import json
 import sqlite3
 import shutil
 import time
@@ -20,6 +21,8 @@ class ImageIndexDB:
     LEGACY_DB_NAME = '.taggui_index.db'
     BUNDLE_SUFFIXES = ('', '-wal', '-shm')
     INTERNAL_DIR_NAMES = {DB_DIR_NAME, '.taggui_profiles'}
+    RATING_MIGRATION_DONE_KEY = 'rating_migration_v1_done'
+    RATING_MIGRATION_LAST_ID_KEY = 'rating_migration_v1_last_id'
 
     @classmethod
     def db_dir_path(cls, directory_path: Path) -> Path:
@@ -634,39 +637,205 @@ class ImageIndexDB:
             cursor.execute("SELECT id, file_name FROM images WHERE file_size IS NULL OR file_type IS NULL OR ctime IS NULL")
             rows = cursor.fetchall()
             
-            if not rows:
-                return
-
-            print(f"[DB] Backfilling metadata for {len(rows)} legacy items...")
-            updates = []
-            
-            batch_size = 1000
-            for i, (row_id, rel_path) in enumerate(rows):
-                try:
-                    full_path = directory_path / rel_path
-                    if not full_path.exists():
-                        continue
-                        
-                    stat = full_path.stat()
-                    suffix = full_path.suffix.lower().lstrip('.')
-                    
-                    updates.append((stat.st_size, suffix, stat.st_ctime, row_id))
-                except (OSError, ValueError):
-                    continue
+            if rows:
+                print(f"[DB] Backfilling metadata for {len(rows)} legacy items...")
+                updates = []
                 
-                if len(updates) >= batch_size:
+                batch_size = 1000
+                for i, (row_id, rel_path) in enumerate(rows):
+                    try:
+                        full_path = directory_path / rel_path
+                        if not full_path.exists():
+                            continue
+                            
+                        stat = full_path.stat()
+                        suffix = full_path.suffix.lower().lstrip('.')
+                        
+                        updates.append((stat.st_size, suffix, stat.st_ctime, row_id))
+                    except (OSError, ValueError):
+                        continue
+                    
+                    if len(updates) >= batch_size:
+                        cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
+                        self.conn.commit()
+                        updates = []
+                
+                if updates:
                     cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
                     self.conn.commit()
-                    updates = []
-            
-            if updates:
-                cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
-                self.conn.commit()
-                
-            print(f"[DB] Backfill complete.")
+                    
+                print(f"[DB] Backfill complete.")
+
+            # 3. One-time/Incremental rating migration: JSON sidecars -> DB rating.
+            migrated, scanned, done = self.migrate_ratings_from_sidecars(directory_path)
+            if migrated > 0:
+                print(f"[DB] Rating migration: imported {migrated} rating(s) from {scanned} candidate sidecar(s).")
+            elif not done and scanned > 0:
+                print(f"[DB] Rating migration: scanned {scanned} candidate sidecar(s) (no new ratings yet).")
             
         except sqlite3.Error as e:
             print(f"[DB] Maintenance error: {e}")
+
+    def migrate_ratings_from_sidecars(
+        self,
+        directory_path: Path,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 2.5,
+    ) -> tuple[int, int, bool]:
+        """
+        Incrementally migrate legacy rating values from JSON sidecars into DB.
+
+        Returns:
+            (migrated_count, scanned_sidecars_count, done)
+        """
+        if not self.enabled or not self.conn:
+            return 0, 0, True
+
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 2.5
+
+        start_ts = time.monotonic()
+        migrated_total = 0
+        scanned_sidecars = 0
+
+        done = False
+        last_id = 0
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.RATING_MIGRATION_DONE_KEY,),
+                )
+                row = cursor.fetchone()
+                if row is not None and str(row[0]) == '1':
+                    return 0, 0, True
+
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.RATING_MIGRATION_LAST_ID_KEY,),
+                )
+                last_row = cursor.fetchone()
+                if last_row is not None:
+                    try:
+                        last_id = int(last_row[0])
+                    except Exception:
+                        last_id = 0
+        except sqlite3.Error:
+            return 0, 0, True
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT id, file_name
+                        FROM images
+                        WHERE id > ? AND COALESCE(rating, 0) <= 0.0
+                        ORDER BY id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                done = True
+                break
+
+            updates: list[tuple[float, int]] = []
+            for row in rows:
+                try:
+                    row_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                except Exception:
+                    continue
+
+                if row_id > last_id:
+                    last_id = row_id
+
+                json_path = (directory_path / rel_path).with_suffix('.json')
+                if not json_path.exists():
+                    continue
+                try:
+                    if json_path.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+
+                scanned_sidecars += 1
+                try:
+                    with json_path.open(encoding='UTF-8') as fp:
+                        meta = json.load(fp)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+                raw_rating = meta.get('rating') if isinstance(meta, dict) else None
+                if not isinstance(raw_rating, (int, float)):
+                    continue
+
+                rating_value = float(raw_rating)
+                # Legacy-safe normalization: accept old 0..5 values too.
+                if rating_value > 1.0 and rating_value <= 5.0:
+                    rating_value = rating_value / 5.0
+                rating_value = max(0.0, min(1.0, rating_value))
+
+                # Skip explicit zeros; DB default already represents "no rating".
+                if rating_value <= 0.0:
+                    continue
+
+                updates.append((rating_value, row_id))
+
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    if updates:
+                        cursor.executemany(
+                            'UPDATE images SET rating = ? WHERE id = ?',
+                            updates,
+                        )
+                        migrated_total += len(updates)
+
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.RATING_MIGRATION_LAST_ID_KEY, str(int(last_id))),
+                    )
+
+                    self.conn.commit()
+            except sqlite3.Error:
+                break
+
+            if len(rows) < batch_size:
+                done = True
+                break
+
+        if done:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.RATING_MIGRATION_DONE_KEY, '1'),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                pass
+
+        return migrated_total, scanned_sidecars, done
 
 
     def _bulk_insert_chunk(self, data_chunk):
@@ -1367,11 +1536,13 @@ class ImageIndexDB:
         if not self.enabled or not self.conn:
             return
 
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('UPDATE images SET rating = ? WHERE id = ?', (rating, image_id))
-        except sqlite3.Error as e:
-            print(f'Database rating write error: {e}')
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('UPDATE images SET rating = ? WHERE id = ?', (rating, image_id))
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f'Database rating write error: {e}')
 
     def mark_thumbnail_cached(self, file_name: str, cached: bool = True):
         """Mark thumbnail as cached/uncached for an image (thread-safe)."""

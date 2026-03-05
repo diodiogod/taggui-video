@@ -1554,6 +1554,31 @@ class ImageListModel(QAbstractListModel):
         if isinstance(filter_node, list):
             if len(filter_node) == 0:
                 return "", ()
+
+            # Numeric triplet filters like ['stars', '>=', '4'].
+            if len(filter_node) == 3 and isinstance(filter_node[0], str):
+                key = str(filter_node[0]).strip().lower()
+                cmp_op = str(filter_node[1]).strip()
+                value_raw = filter_node[2]
+                cmp_sql = {
+                    '=': '=',
+                    '==': '=',
+                    '!=': '!=',
+                    '<': '<',
+                    '>': '>',
+                    '<=': '<=',
+                    '>=': '>=',
+                }.get(cmp_op)
+                if key == 'stars' and cmp_sql is not None:
+                    try:
+                        stars_value = int(value_raw)
+                    except Exception:
+                        return "", ()
+                    # UI supports 0..5 star semantics.
+                    stars_value = max(0, min(5, stars_value))
+                    # Ratings are stored as 0.0..1.0 floats; compare using
+                    # rounded 0..5 star domain to avoid float-equality issues.
+                    return "CAST(ROUND(COALESCE(rating, 0) * 5.0) AS INTEGER) " + cmp_sql + " ?", (stars_value,)
                 
             # Handle infix notation [A, 'AND', B] or prefix ['tag', 'val']
             # Determine type by inspection
@@ -4246,8 +4271,45 @@ class ImageListModel(QAbstractListModel):
                  # Ensure we don't trigger re-enrichment by having at least one tag
                  self._db.set_tags_for_image(image_id, [])
                  self._db.add_tag_to_image(image_id, '__no_tags__')
+            # Keep DB rating in sync with sidecar/in-memory rating.
+            self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
+
+    def _save_rating_to_db(self, image: Image):
+        """Persist rating to DB for paginated mode."""
+        if not self._paginated_mode or not self._db:
+            return
+        if not image or not getattr(image, "path", None):
+            return
+
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+
+        image_id = self._db.get_image_id(rel_path)
+        if not image_id:
+            # Self-heal missing DB row before rating write.
+            try:
+                stat = image.path.stat()
+                is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
+                self._db.save_info(
+                    file_name=rel_path,
+                    width=image.width or 512,
+                    height=image.height or 512,
+                    is_video=is_video,
+                    mtime=stat.st_mtime,
+                    rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                )
+                image_id = self._db.get_image_id(rel_path)
+            except Exception:
+                image_id = None
+
+        if image_id:
+            self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
 
     def write_meta_to_disk(self, image: Image):
+        # Keep DB rating synchronized even when only metadata changes.
+        self._save_rating_to_db(image)
         does_exist = image.path.with_suffix('.json').exists()
         meta: dict[str, any] = {'version': 1, 'rating': image.rating}
         if image.crop is not None:
