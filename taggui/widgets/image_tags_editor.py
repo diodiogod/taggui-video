@@ -16,6 +16,7 @@ from widgets.image_list import ImageList
 from widgets.descriptive_text_edit import DescriptiveTextEdit
 
 MAX_TOKEN_COUNT = 75
+INTERNAL_HIDDEN_TAGS = {"__no_tags__"}
 
 
 class TagInputBox(QLineEdit):
@@ -334,8 +335,14 @@ class ImageTagsEditor(QDockWidget):
 
     def _tags_from_descriptive_text(self, text: str) -> list[str]:
         if text:
-            return text.split(self.tag_separator)
+            return self._filter_internal_tags(text.split(self.tag_separator))
         return []
+
+    def _filter_internal_tags(self, tags: list[str] | None) -> list[str]:
+        """Remove internal sentinel tags from the user-visible editor."""
+        if not tags:
+            return []
+        return [tag for tag in tags if tag and tag not in INTERNAL_HIDDEN_TAGS]
 
     def _read_caption_text_from_disk(self, image: Image) -> str | None:
         """Read the sidecar caption text exactly as stored on disk."""
@@ -391,7 +398,7 @@ class ImageTagsEditor(QDockWidget):
         tags_from_source = (
             self._tags_from_descriptive_text(caption_text)
             if caption_text is not None
-            else image.tags
+            else self._filter_internal_tags(image.tags)
         )
         # Keep the in-memory image tags aligned with the sidecar source of truth.
         if image.tags != tags_from_source:
