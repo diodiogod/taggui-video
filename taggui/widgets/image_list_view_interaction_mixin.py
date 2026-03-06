@@ -510,7 +510,24 @@ class ImageListViewInteractionMixin:
             # event arrived to this widget, forcibly clear drag tracking.
             self._clear_spawn_drag_tracking()
 
-        if self.use_masonry and self._masonry_items:
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
+        virtual_list_active = bool(
+            hasattr(self, '_virtual_list_is_active') and self._virtual_list_is_active(source_model)
+        )
+        list_like_active = bool(
+            virtual_list_active
+            or (
+                not bool(getattr(self, "use_masonry", False))
+                and self.viewMode() == QListView.ViewMode.ListMode
+            )
+        )
+
+        if list_like_active and (event.buttons() & Qt.MouseButton.LeftButton):
+            # Prevent Qt's native drag-selection/range-selection path for list
+            # modes. Click selection is already decided on press, and larger
+            # drags are handled above by the explicit spawn-drag gesture.
+            event.accept()
+        elif self.use_masonry and self._masonry_items:
             # Don't call super() - it triggers rubber-band selection
             # Just accept the event to prevent default behavior
             event.accept()
@@ -611,7 +628,16 @@ class ImageListViewInteractionMixin:
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
             source_model._enrichment_timer.start(500)
 
-        if self.use_masonry and self._masonry_items:
+        virtual_list_active = bool(
+            hasattr(self, '_virtual_list_is_active') and self._virtual_list_is_active(source_model)
+        )
+
+        if virtual_list_active:
+            # Virtual-list selection is already fully handled on press. Letting
+            # Qt process release can reuse a stale currentIndex() as a range
+            # anchor and intermittently select everything between clicks.
+            event.accept()
+        elif self.use_masonry and self._masonry_items:
             # Just accept the event, don't let Qt handle it
             event.accept()
         else:
@@ -1436,17 +1462,43 @@ class ImageListViewInteractionMixin:
                 self._activate_resize_anchor(source_model=source_model, hold_s=4.0)
             # Get scroll direction
             delta = event.angleDelta().y()
+            self._last_ctrl_wheel_zoom_direction = 1 if delta > 0 else -1 if delta < 0 else 0
 
             # Adjust thumbnail size
             zoom_step = 20  # Pixels per scroll step
+            base_zoom_size = int(
+                getattr(self, "_target_thumbnail_size", self.current_thumbnail_size)
+                if (
+                    self.use_masonry
+                    and hasattr(self, "_is_full_width_masonry_mode")
+                    and self._is_full_width_masonry_mode()
+                )
+                else self.current_thumbnail_size
+            )
             if delta > 0:
                 # Scroll up = zoom in (larger thumbnails)
-                new_size = min(self.current_thumbnail_size + zoom_step, self.max_thumbnail_size)
+                new_size = min(base_zoom_size + zoom_step, self.max_thumbnail_size)
             else:
                 # Scroll down = zoom out (smaller thumbnails)
-                new_size = max(self.current_thumbnail_size - zoom_step, self.min_thumbnail_size)
+                new_size = max(base_zoom_size - zoom_step, self.min_thumbnail_size)
 
-            if new_size != self.current_thumbnail_size:
+            full_width_masonry = bool(
+                self.use_masonry
+                and hasattr(self, "_is_full_width_masonry_mode")
+                and self._is_full_width_masonry_mode()
+            )
+            if full_width_masonry:
+                self._target_thumbnail_size = int(new_size)
+            else:
+                self._target_thumbnail_size = int(new_size)
+
+            if new_size != self.current_thumbnail_size or full_width_masonry:
+                if full_width_masonry and hasattr(self, "_resolve_full_width_masonry_thumbnail_size"):
+                    new_size = self._resolve_full_width_masonry_thumbnail_size(
+                        self._target_thumbnail_size,
+                        self._last_ctrl_wheel_zoom_direction,
+                    )
+
                 self.current_thumbnail_size = new_size
                 self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
 
@@ -1455,15 +1507,26 @@ class ImageListViewInteractionMixin:
 
                 # If masonry, recalculate layout and re-center after zoom stops
                 if self.use_masonry:
-                    # Treat Ctrl+wheel as a zoom session and keep the splitter
-                    # fixed until Ctrl is released.
-                    self._zoom_resize_wait_for_ctrl_release = True
-                    self._zoom_resize_snap_defer_until = time.time() + 1.0
-                    if hasattr(self, "_zoom_resize_idle_timer"):
-                        self._zoom_resize_idle_timer.stop()
+                    if full_width_masonry:
+                        # In full-width masonry, preview the already-correct
+                        # fitted size during Ctrl+wheel instead of waiting for
+                        # Ctrl release and then changing size again.
+                        self._zoom_resize_wait_for_ctrl_release = False
+                        self._zoom_resize_snap_defer_until = 0.0
+                        if hasattr(self, "_zoom_resize_idle_timer"):
+                            self._zoom_resize_idle_timer.stop()
+                        resize_delay_ms = 120
+                    else:
+                        # Treat Ctrl+wheel as a zoom session and keep the splitter
+                        # fixed until Ctrl is released.
+                        self._zoom_resize_wait_for_ctrl_release = True
+                        self._zoom_resize_snap_defer_until = time.time() + 1.0
+                        if hasattr(self, "_zoom_resize_idle_timer"):
+                            self._zoom_resize_idle_timer.stop()
+                        resize_delay_ms = 420
                     # Debounce: recalculate and re-center after user stops zooming
                     self._resize_timer.stop()
-                    self._resize_timer.start(420)
+                    self._resize_timer.start(resize_delay_ms)
                 else:
                     updated_source_model = (
                         self.model().sourceModel()

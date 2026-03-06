@@ -145,6 +145,7 @@ class ImageListView(
         self._masonry_splitter_snapping = False
         self._zoom_resize_snap_defer_until = 0.0
         self._zoom_resize_wait_for_ctrl_release = False
+        self._last_ctrl_wheel_zoom_direction = 0
         self._zoom_resize_idle_timer = QTimer(self)
         self._zoom_resize_idle_timer.setSingleShot(True)
         self._zoom_resize_idle_timer.timeout.connect(self._on_zoom_resize_idle_finished)
@@ -249,6 +250,7 @@ class ImageListView(
         self.current_thumbnail_size = settings.value('image_list_thumbnail_size', default_display_size, type=int)
         self.current_thumbnail_size = max(self.min_thumbnail_size,
                                           min(self.max_thumbnail_size, self.current_thumbnail_size))
+        self._target_thumbnail_size = int(self.current_thumbnail_size)
 
         # Seed startup mode so hysteresis honors the mode that was active on close.
         self._apply_startup_view_mode_seed()

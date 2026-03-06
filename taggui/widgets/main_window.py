@@ -3602,6 +3602,8 @@ class MainWindow(QMainWindow):
         min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
         max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
         size = max(min_size, min(max_size, int(target_size)))
+        if hasattr(list_view, "_target_thumbnail_size"):
+            list_view._target_thumbnail_size = int(size)
         if int(getattr(list_view, 'current_thumbnail_size', size)) == size:
             return
         list_view.current_thumbnail_size = size

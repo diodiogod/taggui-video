@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+import math
 from PySide6.QtCore import Property
 from PySide6.QtWidgets import QMainWindow
 
@@ -166,6 +167,66 @@ class _DragIndicatorWidget(QWidget):
 
 
 class ImageListViewGeometryMixin:
+    def _is_full_width_masonry_mode(self) -> bool:
+        """Whether masonry currently owns the full workspace width."""
+        if not self.use_masonry:
+            return False
+        host = self.window()
+        if not isinstance(host, QMainWindow):
+            return False
+        return not bool(getattr(host, "_main_viewer_visible", True))
+
+    def _resolve_full_width_masonry_thumbnail_size(self, target_size: int, zoom_direction: int = 0) -> int:
+        """Resolve a target thumbnail size to the closest full-width exact-fit size."""
+        metrics = self._get_masonry_column_metrics() if hasattr(self, "_get_masonry_column_metrics") else None
+        if not metrics:
+            return int(target_size)
+
+        avail_width = int(metrics.get("avail_width", 0) or 0)
+        spacing = int(metrics.get("spacing", 2) or 2)
+        target_size = int(target_size or 0)
+        min_size = int(getattr(self, "min_thumbnail_size", 16) or 16)
+        max_size = int(getattr(self, "max_thumbnail_size", 512) or 512)
+        if avail_width <= 0 or target_size <= 0:
+            return max(min_size, min(max_size, target_size if target_size > 0 else min_size))
+
+        zoom_direction = int(zoom_direction or 0)
+        base = max(1.0, float(target_size + spacing))
+        cols_exact = (float(avail_width + spacing) / base)
+
+        if zoom_direction > 0:
+            cols = max(1, int(math.floor(cols_exact)))
+        elif zoom_direction < 0:
+            cols = max(1, int(math.ceil(cols_exact)))
+        else:
+            cols = max(1, int(round(cols_exact)))
+
+        max_cols = max(1, int((avail_width + spacing) // max(1, min_size + spacing)))
+        cols = max(1, min(max_cols, cols))
+        usable = avail_width - ((cols - 1) * spacing)
+        if usable <= 0:
+            return max(min_size, min(max_size, target_size))
+
+        size = usable // cols
+        return max(min_size, min(max_size, int(size)))
+
+    def _quantize_full_width_masonry_thumbnail_size(self) -> bool:
+        """Snap thumbnail size to the best-fit full-width masonry size."""
+        if not self._is_full_width_masonry_mode():
+            return False
+
+        target_size = int(getattr(self, "_target_thumbnail_size", getattr(self, "current_thumbnail_size", 0)) or 0)
+        zoom_direction = int(getattr(self, "_last_ctrl_wheel_zoom_direction", 0) or 0)
+        best_size = self._resolve_full_width_masonry_thumbnail_size(target_size, zoom_direction)
+        if best_size == int(getattr(self, "current_thumbnail_size", 0) or 0):
+            return False
+
+        self.current_thumbnail_size = int(best_size)
+        self._target_thumbnail_size = int(target_size)
+        self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
+        self._update_view_mode()
+        return True
+
     def _on_zoom_resize_idle_finished(self):
         """Allow a deferred snap only after Ctrl+wheel zoom has gone idle."""
         if not self.use_masonry:
@@ -175,6 +236,7 @@ class ImageListViewGeometryMixin:
             return
         self._zoom_resize_snap_defer_until = 0.0
         self._zoom_resize_wait_for_ctrl_release = False
+        self._quantize_full_width_masonry_thumbnail_size()
         self._on_resize_finished()
 
     def _snap_masonry_dock_to_columns(self) -> bool:
@@ -1266,7 +1328,7 @@ class ImageListViewGeometryMixin:
                 self._resize_timer.start(90)
                 return
 
-            if self._snap_masonry_dock_to_columns():
+            if (not self._is_full_width_masonry_mode()) and self._snap_masonry_dock_to_columns():
                 return
 
             # In strict paginated mode, explicit page/global anchoring above is
