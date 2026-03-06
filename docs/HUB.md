@@ -27,8 +27,6 @@ This is the main documentation map for TagGUI Video 1M.
 
 These are placeholders for documentation that should be expanded next.
 
-- `SKIN_WORKFLOW_GUIDE.md` - practical user-facing skin selection and skin designer workflow
-
 ## Technical References
 
 - [Skin README](../taggui/skins/README.md)
