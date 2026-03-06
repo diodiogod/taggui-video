@@ -32,11 +32,11 @@ Use this when:
 
 This repair action can:
 
-- clearing stale in-memory thumbnail data
-- deleting the corresponding disk thumbnail cache entry
-- re-reading dimensions from disk
-- updating the DB entry
-- forcing a masonry refresh
+- clear stale in-memory thumbnail data
+- delete the corresponding disk thumbnail cache entry
+- re-read dimensions from disk
+- update the DB entry
+- force a masonry refresh
 
 This is not meant as a normal everyday action, but it is useful when one or a few items are clearly wrong.
 

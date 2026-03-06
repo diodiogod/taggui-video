@@ -23,7 +23,7 @@ Current code indicates support for:
 GPU use requires compatible hardware and model support, but CPU generation is also supported for some workflows.
 
 > [!WARNING]
-> Current video captioning support is frame-based, not full-video understanding. In practice, TagGUI can caption or tag the currently used video frame, including crop-limited workflows, but it does not yet run a whole-video analysis model over the full clip timeline. That should be treated as a current limitation and a future improvement target.
+> Video captioning is currently frame-based, not full-video understanding. TagGUI can caption or tag the current video frame, including crop-limited workflows, but it does not analyze an entire clip across its full timeline.
 
 ## Basic Workflow
 

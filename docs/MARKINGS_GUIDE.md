@@ -3,7 +3,7 @@
 Markings are the visual annotation system in TagGUI Video 1M.
 
 > [!NOTE]
-> The markings workflow is part of the upstream fork lineage this project builds on, especially the `StableLlama/taggui` fork, rather than the original TagGUI baseline. This guide keeps that work visible because it remains an important part of the current project.
+> The markings workflow comes from the upstream fork lineage this project builds on, especially the `StableLlama/taggui` fork, rather than the original TagGUI baseline. It remains an important part of TagGUI Video 1M.
 
 They let you do more than text tagging: you can define crop areas, mark regions as hints, and build include or exclude masks for export and training workflows.
 
@@ -156,8 +156,8 @@ These are useful when you want to inspect the image cleanly or verify how masks 
 ## Notes
 
 - Crop guidance and latent-space overlays are especially relevant for export and training preparation workflows.
-- Markings are not just for legacy image export use cases; they remain part of the current project and connect directly to filtering, export, and dataset preparation.
+- Markings remain part of TagGUI Video 1M and connect directly to filtering, export, and dataset preparation.
 - A future export guide should explain exactly how include/exclude markings interact with masking strategies and output formats.
 
 > [!WARNING]
-> In the current TagGUI Video 1M code path, tags and star ratings have DB-backed support, but markings are still stored in the sidecar JSON metadata. The paginated SQL filter path does not currently implement marking-based predicates such as `marking:`, `crops:`, or `visible:`. This should be treated as a current limitation and revisited later.
+> Tags and star ratings have DB-backed support, but markings are still stored in sidecar JSON metadata. The paginated SQL filter path does not yet implement marking-based predicates such as `marking:`, `crops:`, or `visible:`.

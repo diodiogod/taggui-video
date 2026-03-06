@@ -15,7 +15,7 @@ This makes TagGUI a practical video media viewer even before you use the editing
 
 ## Core Video Workflows
 
-The main video tasks supported by the current project are:
+The main video tasks supported in TagGUI Video 1M are:
 
 - play and inspect videos inside the main viewer
 - navigate by timeline and frames
@@ -167,7 +167,7 @@ Other backend paths exist and may still be useful, but they do not behave identi
 
 ## Related Docs
 
-- Floating viewers behavior: `FLOATING_VIEWERS_USER_GUIDE.md`
-- Filtering and sorting: `FILTERING_GUIDE.md`
-- Captioning: `CAPTIONING_GUIDE.md`
-- Skin system details: `SKIN_DESIGNER_GUIDE.md`
+- [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Filtering Guide](FILTERING_GUIDE.md)
+- [Captioning Guide](CAPTIONING_GUIDE.md)
+- [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)

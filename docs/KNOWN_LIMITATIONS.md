@@ -26,5 +26,4 @@ Current known constraints in TagGUI Video 1M.
 
 ## Large-Folder UX
 
-- The current project direction is converging on `windowed_strict`.
 - First-open behavior on very large folders can still involve noticeable scanning, DB build, or thumbnail work before the folder settles into a faster cached path.

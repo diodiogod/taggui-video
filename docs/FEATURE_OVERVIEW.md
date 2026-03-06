@@ -19,12 +19,12 @@ High-level capabilities of TagGUI Video 1M.
 
 ## Related Docs
 
-- Getting started: `GETTING_STARTED.md`
-- Filtering and sorting: `FILTERING_GUIDE.md`
-- Captioning: `CAPTIONING_GUIDE.md`
-- Markings and crop workflow: `MARKINGS_GUIDE.md`
-- Shortcuts: `SHORTCUTS.md`
-- Video workflows: `VIDEO_WORKFLOW_GUIDE.md`
-- Floating viewers: `FLOATING_VIEWERS_USER_GUIDE.md`
-- Skins: `SKIN_DESIGNER_GUIDE.md`
-- Skin system reference: `../taggui/skins/README.md`
+- [Getting Started](GETTING_STARTED.md)
+- [Filtering Guide](FILTERING_GUIDE.md)
+- [Captioning Guide](CAPTIONING_GUIDE.md)
+- [Markings Guide](MARKINGS_GUIDE.md)
+- [Shortcuts](SHORTCUTS.md)
+- [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
+- [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)
+- [Skin README](../taggui/skins/README.md)

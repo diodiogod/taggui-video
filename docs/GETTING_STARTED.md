@@ -1,28 +1,64 @@
 # Getting Started
 
-This page is the practical entry point for using TagGUI Video 1M.
+This is the practical entry point for running TagGUI Video 1M.
 
-## 1. Install and Launch
+## Install and Launch
 
-- Windows: run `start_windows.bat`
-- Manual: run `python taggui/run_gui.py`
+Use the launcher script from the project root.
 
-## 2. First Session
+- Windows: `start_windows.bat`
+- Linux: `bash start_linux.sh`
 
-- Load a media folder (`File -> Load Directory`)
-- Confirm tags are reading/writing to `.txt` sidecar files
-- Verify sorting/media filter in the Images panel
+On first run, the launcher will:
 
-## 3. Recommended Defaults
+- optionally pull the latest Git changes
+- create or reuse a local virtual environment
+- install PyTorch for your detected CPU/CUDA setup
+- install `requirements.txt`
+- start the GUI
 
-- Masonry strategy for current branch testing: `windowed_strict`
-- Keep autosave behavior enabled
-- Use default thumbnail cache unless profiling/benchmarking
+The launcher looks for a `venv` in the current directory first, then one level above it.
 
-## 4. Next Docs
+> [!NOTE]
+> The launcher installs dependencies automatically when it creates a new virtual environment. If you already have an existing `venv`, it reuses it and starts the app without reinstalling `requirements.txt`. After a project update, run `pip install -r requirements.txt` manually if new dependencies were added.
 
-- Feature overview: `FEATURE_OVERVIEW.md`
-- Video workflows: `VIDEO_WORKFLOW_GUIDE.md`
-- Floating viewers and compare mode: `FLOATING_VIEWERS_USER_GUIDE.md`
-- Skins and visual customization: `SKIN_DESIGNER_GUIDE.md`
-- Troubleshooting: `TROUBLESHOOTING.md`
+## Useful Launcher Flags
+
+These flags are available on the launcher scripts:
+
+- `--skip-git` to start without running `git pull`
+- `--clear-cache` to clear the pip cache before launch
+- `--clean-old` to remove packages that are no longer in `requirements.txt`
+
+Windows also supports:
+
+- `--crash-log` to enable crash diagnostics
+- `--no-crash-log` to disable crash diagnostics
+
+## Manual Fallback
+
+If you already have the environment prepared and only want to start the app manually from the project root:
+
+- `python run_taggui.py`
+
+Use this path only if you already installed the dependencies yourself. The launcher scripts are the intended default.
+
+## First Session
+
+After the app opens:
+
+- load a media folder
+- wait for the initial scan if the folder is large
+- use the media selector to switch between `All`, `Images`, and `Videos`
+- confirm that browsing, filtering, and tagging behave as expected for your folder
+
+The first open of a large folder can take longer while TagGUI builds its database and thumbnail cache. Later opens should be faster.
+
+## Recommended Next Docs
+
+- [Feature Overview](FEATURE_OVERVIEW.md)
+- [Filtering Guide](FILTERING_GUIDE.md)
+- [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
+- [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
