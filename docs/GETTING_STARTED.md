@@ -21,8 +21,8 @@ This page is the practical entry point for using TagGUI Video 1M.
 
 ## 4. Next Docs
 
-- Feature overview: `docs/FEATURE_OVERVIEW.md`
-- Large datasets: `docs/LARGE_DATASET_GUIDE.md`
-- Video workflows: `docs/VIDEO_WORKFLOW_GUIDE.md`
-- Troubleshooting: `docs/TROUBLESHOOTING.md`
-
+- Feature overview: `FEATURE_OVERVIEW.md`
+- Video workflows: `VIDEO_WORKFLOW_GUIDE.md`
+- Floating viewers and compare mode: `FLOATING_VIEWERS_USER_GUIDE.md`
+- Skins and visual customization: `SKIN_DESIGNER_GUIDE.md`
+- Troubleshooting: `TROUBLESHOOTING.md`

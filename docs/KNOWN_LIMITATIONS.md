@@ -1,18 +1,30 @@
 # Known Limitations
 
-Current known constraints for the ongoing migration phase.
+Current known constraints in TagGUI Video 1M.
 
-## Strategy/Mode State
+## Filtering and Metadata
 
-- Legacy masonry strategy paths still exist in codebase.
-- Project direction is converging on `windowed_strict`.
+- Tags and star ratings have DB-backed support in the current large-folder path.
+- Markings are still stored in sidecar JSON metadata.
+- Marking-related filters such as `marking:`, `crops:`, and `visible:` are not yet fully implemented in the DB-backed paginated SQL path.
 
-## Video/UI
+## Video Captioning
 
-- Skin designer parity and usability still have open polish items.
+- Current video captioning support is frame-based.
+- TagGUI can caption or tag the current frame or cropped frame region.
+- It does not yet perform full-video timeline-aware captioning across an entire clip.
 
-## Documentation
+## Video and Playback
 
-- README redesign is in migration phases.
-- Detailed legacy docs remain available in:
-  - `docs/archive/README_LEGACY_REFERENCE.md`
+- Backend behavior can differ.
+- The project currently prefers the MPV path, but backend-specific behavior still needs clearer dedicated documentation.
+
+## Skin Designer
+
+- The skin system works, but the skin designer is still experimental.
+- Designer parity, polish, and edge-case behavior still need work.
+
+## Large-Folder UX
+
+- The current project direction is converging on `windowed_strict`.
+- First-open behavior on very large folders can still involve noticeable scanning, DB build, or thumbnail work before the folder settles into a faster cached path.

@@ -25,8 +25,3 @@ Current scope:
 
 - This migration added major capability, but also increased complexity.
 - 
-
-## Historical Reference
-
-- Legacy full README snapshot:
-  - `docs/archive/README_LEGACY_REFERENCE.md`

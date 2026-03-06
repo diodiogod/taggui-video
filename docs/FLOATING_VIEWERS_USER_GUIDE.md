@@ -14,6 +14,7 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - View menu: `View -> Spawn Floating Viewer`
 - Shortcut: `Ctrl+Shift+N`
 - Close all shortcut: `Ctrl+Shift+W`
+- Hold existing spawned viewers: `H`
 - Right-click in the main viewer area and spawn.
 - Drag a thumbnail from list/masonry and release on empty screen area to spawn at drop location.
 
@@ -30,6 +31,14 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - If media is zoomed/pannable, `left-drag` pans media instead; use white edge handles or middle-drag to move window.
 - Resize from all corners and all borders (drag edge/corner zones).
 - Close button (`x`) appears on hover near the top-right corner.
+
+## Hold Mode
+
+- `H` toggles hold mode for existing spawned viewers.
+- Middle-click in the main window or image list area also toggles hold mode.
+- In hold mode, existing spawned viewers become dimmed, gray, and click-through.
+- Hold mode is meant to keep spawned viewers visible but out of the way while you keep working in the main app or spawn new viewers.
+- Turning hold mode off restores normal interactivity.
 
 ## Mouse and Zoom Behavior
 

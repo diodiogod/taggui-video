@@ -10,13 +10,11 @@ Entry page for live player skin customization docs.
 
 ## Primary References
 
-- `docs/VIDEO_PLAYER_SKINS.md`
-- `SKIN_SYSTEM.md`
-- `taggui/skins/README.md`
-- `taggui/skins/PROPERTY_REFERENCE.md`
+- `../taggui/skins/README.md`
+- `../taggui/skins/PROPERTY_REFERENCE.md`
+- `dev reports/SKIN_SYSTEM.md`
 
 ## Notes
 
 - Live designer and runtime parity are still being polished.
 - Preset and reset flows are available; validate before release use.
-
