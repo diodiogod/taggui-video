@@ -145,3 +145,13 @@ def test_service_resolves_source_model_from_proxy():
 
     # If sourceModel() resolution fails, this would return scrollbar max (77).
     assert service.estimate_strict_virtual_scroll_max() == 9700
+
+
+def test_column_metrics_use_full_viewport_width_without_double_counting_scrollbar():
+    view = FakeView(source_model=FakeSourceModel(total_count=900), viewport_w=306, viewport_h=500)
+    service = StrictScrollDomainService(view)
+
+    metrics = service._get_column_metrics()
+
+    assert metrics["avail_width"] == 306
+    assert metrics["num_columns"] == 3

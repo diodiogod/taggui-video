@@ -78,11 +78,11 @@ class ImageListViewStrategyMixin:
             sb_width = int(sb.width())
         except Exception:
             sb_width = 0
-        # Reserve a stable scrollbar/gutter width even when the bar is hidden.
-        # This prevents relayout paths from flipping between adjacent column
-        # counts while the splitter or workspace width is near a threshold.
-        sb_width = max(15, sb_width)
-        avail_width = max(1, viewport_width - horizontal_padding - sb_width - 24)
+        # `viewport().width()` is already the drawable content width inside the
+        # scroll area. Subtracting the scrollbar/gutter again creates a false
+        # dead strip on the right and delays the next column from fitting while
+        # the splitter is dragged.
+        avail_width = max(1, viewport_width - horizontal_padding)
         num_columns = max(1, avail_width // (column_width + spacing))
         content_width = max(column_width, (num_columns * (column_width + spacing)) - spacing)
         return {

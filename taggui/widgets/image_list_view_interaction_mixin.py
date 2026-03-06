@@ -750,6 +750,15 @@ class ImageListViewInteractionMixin:
         # Default behavior for other keys
         super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event):
+        """Delay masonry snap until Ctrl is released after Ctrl+wheel zoom."""
+        if event.key() == Qt.Key.Key_Control and bool(getattr(self, "_zoom_resize_wait_for_ctrl_release", False)):
+            self._zoom_resize_snap_defer_until = 0.0
+            if hasattr(self, "_zoom_resize_idle_timer"):
+                self._zoom_resize_idle_timer.stop()
+                self._zoom_resize_idle_timer.start(250)
+        super().keyReleaseEvent(event)
+
     def _resolve_keyboard_anchor(self, source_model, target_global: int) -> bool:
         """Best-effort selection rebind for first keypress after drag jumps."""
         try:
@@ -1446,6 +1455,12 @@ class ImageListViewInteractionMixin:
 
                 # If masonry, recalculate layout and re-center after zoom stops
                 if self.use_masonry:
+                    # Treat Ctrl+wheel as a zoom session and keep the splitter
+                    # fixed until Ctrl is released.
+                    self._zoom_resize_wait_for_ctrl_release = True
+                    self._zoom_resize_snap_defer_until = time.time() + 1.0
+                    if hasattr(self, "_zoom_resize_idle_timer"):
+                        self._zoom_resize_idle_timer.stop()
                     # Debounce: recalculate and re-center after user stops zooming
                     self._resize_timer.stop()
                     self._resize_timer.start(420)

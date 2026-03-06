@@ -22,8 +22,8 @@ class StrictScrollDomainService:
         viewport_width = max(1, int(self._view.viewport().width()))
         col_w = max(16, int(self._view.current_thumbnail_size))
         horizontal_padding = max(0, int(getattr(self._view, "_masonry_horizontal_padding", 0) or 0))
-        sb_width = max(15, int(self._view.verticalScrollBar().width() or 0))
-        avail_width = max(1, viewport_width - horizontal_padding - sb_width - 24)
+        sb_width = int(self._view.verticalScrollBar().width() or 0)
+        avail_width = max(1, viewport_width - horizontal_padding)
         num_cols = max(1, avail_width // (col_w + spacing))
         return {
             "column_width": col_w,

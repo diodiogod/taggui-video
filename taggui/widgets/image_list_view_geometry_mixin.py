@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from PySide6.QtCore import Property
+from PySide6.QtWidgets import QMainWindow
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -165,6 +166,75 @@ class _DragIndicatorWidget(QWidget):
 
 
 class ImageListViewGeometryMixin:
+    def _on_zoom_resize_idle_finished(self):
+        """Allow a deferred snap only after Ctrl+wheel zoom has gone idle."""
+        if not self.use_masonry:
+            return
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._zoom_resize_idle_timer.start(250)
+            return
+        self._zoom_resize_snap_defer_until = 0.0
+        self._zoom_resize_wait_for_ctrl_release = False
+        self._on_resize_finished()
+
+    def _snap_masonry_dock_to_columns(self) -> bool:
+        """Shrink the dock to the exact width required for the current column count."""
+        if not self.use_masonry:
+            return False
+        if bool(getattr(self, "_masonry_splitter_snapping", False)):
+            self._masonry_splitter_snapping = False
+            return False
+
+        metrics = self._get_masonry_column_metrics() if hasattr(self, "_get_masonry_column_metrics") else None
+        if not metrics:
+            return False
+
+        viewport_width = int(metrics.get("viewport_width", 0) or 0)
+        content_width = int(metrics.get("content_width", 0) or 0)
+        horizontal_padding = int(metrics.get("horizontal_padding", 0) or 0)
+        spacing = int(metrics.get("spacing", 2) or 2)
+        if viewport_width <= 0 or content_width <= 0:
+            return False
+
+        # Leave a few safety pixels above the exact threshold so the snapped
+        # dock width keeps the intended column count even if resizeDocks lands
+        # slightly short of the requested size.
+        snap_safety_px = max(6, spacing * 3)
+        target_viewport_width = content_width + horizontal_padding + snap_safety_px
+        if target_viewport_width >= viewport_width:
+            return False
+
+        slack = viewport_width - target_viewport_width
+        # Ignore tiny paint/frame noise; only snap meaningful dead space.
+        if slack < max(8, spacing * 2):
+            return False
+
+        dock = self.parentWidget()
+        while dock is not None and not isinstance(dock, QDockWidget):
+            dock = dock.parentWidget()
+        main_window = self.window()
+        if not isinstance(dock, QDockWidget):
+            return False
+        if not isinstance(main_window, QMainWindow):
+            return False
+        if dock.isFloating():
+            return False
+
+        current_dock_width = int(dock.width() or 0)
+        if current_dock_width <= 0:
+            return False
+
+        chrome_width = max(0, current_dock_width - viewport_width)
+        target_dock_width = chrome_width + target_viewport_width
+        min_dock_width = max(int(dock.minimumWidth() or 0), target_dock_width)
+        target_dock_width = max(min_dock_width, target_dock_width)
+        if target_dock_width >= current_dock_width - 2:
+            return False
+
+        self._masonry_splitter_snapping = True
+        main_window.resizeDocks([dock], [target_dock_width], Qt.Orientation.Horizontal)
+        return True
+
     def _build_queues_async(self):
         """Build priority queues asynchronously (runs on next event loop to avoid blocking UI)."""
         source_model = self.model().sourceModel()
@@ -1160,6 +1230,44 @@ class ImageListViewGeometryMixin:
             else:
                 self._resize_anchor_page = None
                 self._resize_anchor_until = 0.0
+
+            ctrl_active = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+            zoom_snap_waiting = bool(getattr(self, "_zoom_resize_wait_for_ctrl_release", False))
+            zoom_idle_pending = bool(
+                hasattr(self, "_zoom_resize_idle_timer")
+                and self._zoom_resize_idle_timer.isActive()
+            )
+            import time
+            if (
+                (ctrl_active and zoom_snap_waiting)
+                or (zoom_snap_waiting and zoom_idle_pending)
+                or time.time() < float(getattr(self, "_zoom_resize_snap_defer_until", 0.0) or 0.0)
+            ):
+                # Ctrl+wheel zoom should relayout thumbnails without repeatedly
+                # resizing the dock. Snap only after zoom input has been idle.
+                self._recenter_after_layout = not strict_paginated
+                self._last_masonry_window_signature = None
+                self._last_masonry_signal = "zoom_resize"
+                self._calculate_masonry_layout()
+                self.viewport().update()
+                return
+
+            mouse_buttons = QApplication.mouseButtons()
+            dragging_splitter = bool(mouse_buttons & Qt.MouseButton.LeftButton)
+            if dragging_splitter:
+                # Keep live masonry updates while the splitter moves, but do not
+                # snap until the drag is actually finished.
+                self._recenter_after_layout = not strict_paginated
+                self._last_masonry_window_signature = None
+                self._last_masonry_signal = "resize_drag"
+                self._calculate_masonry_layout()
+                self.viewport().update()
+                self._resize_timer.stop()
+                self._resize_timer.start(90)
+                return
+
+            if self._snap_masonry_dock_to_columns():
+                return
 
             # In strict paginated mode, explicit page/global anchoring above is
             # more stable than recentering via possibly stale proxy row index.

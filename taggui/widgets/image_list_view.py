@@ -142,6 +142,12 @@ class ImageListView(
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._on_resize_finished)
         self._skip_next_resize_recalc = False
+        self._masonry_splitter_snapping = False
+        self._zoom_resize_snap_defer_until = 0.0
+        self._zoom_resize_wait_for_ctrl_release = False
+        self._zoom_resize_idle_timer = QTimer(self)
+        self._zoom_resize_idle_timer.setSingleShot(True)
+        self._zoom_resize_idle_timer.timeout.connect(self._on_zoom_resize_idle_finished)
 
         # Mouse scroll detection timer (pause loading during scroll)
         self._mouse_scroll_timer = QTimer(self)

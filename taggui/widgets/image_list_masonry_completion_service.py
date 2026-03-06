@@ -81,8 +81,7 @@ class MasonryCompletionService:
                 column_width = v.current_thumbnail_size
                 spacing = 2
                 horizontal_padding = int(getattr(v, "_masonry_horizontal_padding", 0) or 0)
-                sb_width = max(15, int(v.verticalScrollBar().width() or 0))
-                avail_w = v.viewport().width() - horizontal_padding - sb_width - 24
+                avail_w = v.viewport().width() - horizontal_padding
                 num_columns = max(1, avail_w // (column_width + spacing))
         
             if v._masonry_items:
