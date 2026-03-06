@@ -18,6 +18,8 @@ This is the main documentation map for TagGUI Video 1M.
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
+- [Video Backends](VIDEO_BACKENDS.md)
+- [Export Guide](EXPORT_GUIDE.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)
 
@@ -25,8 +27,6 @@ This is the main documentation map for TagGUI Video 1M.
 
 These are placeholders for documentation that should be expanded next.
 
-- `VIDEO_BACKENDS.md` - playback backends, preferred backend, and backend-specific tradeoffs
-- `EXPORT_GUIDE.md` - export workflow, crop/include/exclude interaction, and masking strategy details
 - `SKIN_WORKFLOW_GUIDE.md` - practical user-facing skin selection and skin designer workflow
 
 ## Technical References

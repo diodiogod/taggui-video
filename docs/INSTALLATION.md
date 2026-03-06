@@ -83,6 +83,9 @@ The app searches for runtime files automatically, but backend availability still
 If a backend is missing, check the video settings page for status and runtime hints.
 
 > [!NOTE]
+> In this repository, the Windows MPV runtime is already bundled under `third_party/mpv/windows-x86_64/`. A normal fresh installation from this checkout should not require downloading MPV runtime files manually.
+
+> [!NOTE]
 > Playback backends and runtime placement will be documented in more detail in a dedicated backend guide.
 
 ## Video Editing Requirements
@@ -104,6 +107,7 @@ For video editing workflows, make sure `ffmpeg` is installed and available on yo
 ## Related Docs
 
 - [Getting Started](GETTING_STARTED.md)
+- [Video Backends](VIDEO_BACKENDS.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)

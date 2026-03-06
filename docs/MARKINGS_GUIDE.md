@@ -157,7 +157,7 @@ These are useful when you want to inspect the image cleanly or verify how masks 
 
 - Crop guidance and latent-space overlays are especially relevant for export and training preparation workflows.
 - Markings remain part of TagGUI Video 1M and connect directly to filtering, export, and dataset preparation.
-- A future export guide should explain exactly how include/exclude markings interact with masking strategies and output formats.
+- [Export Guide](EXPORT_GUIDE.md) explains how include/exclude markings interact with export settings and output behavior.
 
 > [!WARNING]
 > Tags and star ratings have DB-backed support, but markings are still stored in sidecar JSON metadata. The paginated SQL filter path does not yet implement marking-based predicates such as `marking:`, `crops:`, or `visible:`.
