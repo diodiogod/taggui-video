@@ -23,10 +23,6 @@ This is the main documentation map for TagGUI Video 1M.
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)
 
-## Planned Pages
-
-These are placeholders for documentation that should be expanded next.
-
 ## Technical References
 
 - [Skin README](../taggui/skins/README.md)
