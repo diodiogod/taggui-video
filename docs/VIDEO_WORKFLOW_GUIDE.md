@@ -168,6 +168,7 @@ Other backend paths exist and may still be useful, but they do not behave identi
 ## Related Docs
 
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Compare Guide](COMPARE_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)

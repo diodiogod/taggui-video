@@ -56,6 +56,7 @@ The first open of a large folder can take longer while TagGUI builds its databas
 
 ## Recommended Next Docs
 
+- [Installation](INSTALLATION.md)
 - [Feature Overview](FEATURE_OVERVIEW.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)

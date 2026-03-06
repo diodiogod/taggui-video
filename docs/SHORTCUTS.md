@@ -81,7 +81,7 @@ Hold mode freezes existing spawned viewers as dimmed, gray, click-through overla
 - Adaptive zoom in a floating viewer: left double-click
 - Exit compare mode: `Esc`
 - Open compare mode: drag a thumbnail onto a target viewer, hold for about 1 second, then release
-- Replace the right side of an active compare view: drag another source onto the same compare target and hold again
+- Expand or update an active compare view: drag another source onto the same compare target and hold again
 
 ## Floating Viewer Context Menu
 

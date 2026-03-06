@@ -24,6 +24,7 @@ High-level capabilities of TagGUI Video 1M.
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)
+- [Compare Guide](COMPARE_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
 - [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)

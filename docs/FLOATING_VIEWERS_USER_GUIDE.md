@@ -77,7 +77,8 @@ How to open compare mode:
 What happens on merge:
 
 - If the source is a floating window, it closes after a successful merge into the target.
-- If the target is already in compare mode, the new merge replaces the right side only.
+- If the target is already in compare mode, the new merge expands the compare first.
+- Once the compare is already full, a new merge replaces the right-side layer.
 
 How to exit compare mode:
 
@@ -89,3 +90,9 @@ How to exit compare mode:
 - Spawned viewer can inherit speed and loop state from the active viewer when opening the same video.
 - Speed is per viewer.
 - Loop markers are persisted with viewer scopes (`main`, `floating_*`) so different viewers can keep different marker ranges for the same media.
+
+## Related Docs
+
+- [Compare Guide](COMPARE_GUIDE.md)
+- [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
+- [Shortcuts](SHORTCUTS.md)
