@@ -24,11 +24,9 @@ Current scope:
 ## Reality Check
 
 - This migration added major capability, but also increased complexity.
-- 1M target is not complete yet.
-- Legacy and current paths may diverge in behavior during this phase.
+- 
 
 ## Historical Reference
 
 - Legacy full README snapshot:
   - `docs/archive/README_LEGACY_REFERENCE.md`
-
