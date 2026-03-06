@@ -204,12 +204,13 @@ class ToolbarManager:
         self.toolbar.addWidget(self.always_show_controls_btn)
 
         # Compact zoom-follow mode cycle button.
-        self.zoom_follow_mode_btn = QPushButton('⊙')
+        self.zoom_follow_mode_btn = QPushButton('⛶')
         self.zoom_follow_mode_btn.setToolTip('Default: Per-image zoom behavior')
         self.zoom_follow_mode_btn.setFixedSize(32, 32)
         self.zoom_follow_mode_btn.setStyleSheet("""
             QPushButton {
-                font-size: 16px;
+                font-size: 18px;
+                font-weight: 600;
                 border: 2px solid #555;
                 border-radius: 4px;
                 background-color: #2b2b2b;
@@ -423,7 +424,7 @@ class ToolbarManager:
             icon = '🔒'
             tip = 'Zoom Lock: Keep same zoom detail across image changes'
         else:
-            icon = '⊙'
+            icon = '⛶'
             tip = 'Default: Per-image zoom behavior'
         self.zoom_follow_mode_btn.setText(icon)
         self.zoom_follow_mode_btn.setToolTip(tip)
