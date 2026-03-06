@@ -127,7 +127,7 @@ class ImageList(QDockWidget):
             denom = unfiltered_image_count
 
         label_text = f'Image {current_pos} / {denom}'
-        if image_count != unfiltered_image_count:
+        if image_count != unfiltered_image_count and denom != unfiltered_image_count:
             label_text += f' ({unfiltered_image_count} total)'
         self.image_index_label.setText(label_text)
 
