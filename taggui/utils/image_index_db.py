@@ -1346,7 +1346,7 @@ class ImageIndexDB:
     def remove_images_by_paths(self, rel_paths: list):
         """Remove images (and their tags) from the DB by relative path."""
         if not self.enabled or not self.conn or not rel_paths:
-            return
+            return 0
         try:
             cursor = self.conn.cursor()
             placeholders = ','.join('?' for _ in rel_paths)
@@ -1366,8 +1366,10 @@ class ImageIndexDB:
             self.commit()
             if ids:
                 print(f'[DB] Removed {len(ids)} deleted images from index.')
+            return len(ids)
         except Exception as e:
             print(f'[DB] Error removing deleted images: {e}')
+            return 0
 
     def remove_tag_from_image(self, image_id: int, tag: str):
         """Remove a single tag from an image."""

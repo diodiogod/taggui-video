@@ -185,10 +185,17 @@ class ImageListViewCalculationMixin:
             self._strict_waiting_window_pages = None
 
         loaded_pages_sig = tuple(sorted(source_model._pages.keys())) if hasattr(source_model, "_pages") else ()
+        filter_sql = str(getattr(source_model, "_filter_sql", "") or "")
+        filter_bindings = tuple(getattr(source_model, "_filter_bindings", ()) or ())
+        proxy_row_count = int(self.model().rowCount()) if self.model() else 0
         window_signature = (
             ctx.window_start_page,
             ctx.window_end_page,
             loaded_pages_sig,
+            int(ctx.total_items),
+            proxy_row_count,
+            filter_sql,
+            filter_bindings,
             ctx.num_columns,
             self.current_thumbnail_size,
             self.viewport().width(),

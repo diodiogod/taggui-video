@@ -171,6 +171,9 @@ class SignalManager:
         image_list_model.dataChanged.connect(refresh_viewer_on_data_change)
         image_list_model.update_undo_and_redo_actions_requested.connect(
             menu_manager.update_undo_and_redo_actions)
+        image_list_model.total_count_changed.connect(
+            lambda _count: image_list.update_image_index_label(
+                image_list.list_view.currentIndex()))
         proxy_image_list_model.filter_changed.connect(
             lambda: image_list.update_image_index_label(
                 image_list.list_view.currentIndex()))

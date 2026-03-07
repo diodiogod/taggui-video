@@ -12,6 +12,11 @@ from widgets.image_viewer import (
     COMPARE_FIT_MODE_STRETCH,
     ImageViewer,
 )
+from widgets.compare_divider_utils import (
+    COMPARE_DIVIDER_COLOR,
+    COMPARE_DIVIDER_THICKNESS_PX,
+    centered_divider_geometry,
+)
 from widgets.video_controls import VideoControlsWidget
 from widgets.video_sync_coordinator import VideoSyncCoordinator
 
@@ -55,6 +60,8 @@ class MediaComparisonWidget(QWidget):
         self._close_hover_zone_px = 56
         self._video_fit_transform_stamp: dict[int, tuple] = {}
         self._proxy_image_list_model = proxy_image_list_model
+        self._divider_thickness_px = COMPARE_DIVIDER_THICKNESS_PX
+        self._divider_color = COMPARE_DIVIDER_COLOR
         video_compare_fit_mode = str(
             settings.value(
                 'video_compare_fit_mode',
@@ -117,10 +124,10 @@ class MediaComparisonWidget(QWidget):
         self._viewer_d_clip.hide()
 
         self._divider_widget = QWidget(self)
-        self._divider_widget.setStyleSheet("background-color: rgba(255, 255, 255, 220);")
+        self._divider_widget.setStyleSheet(f"background-color: {self._divider_color};")
         self._divider_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._divider_widget_h = QWidget(self)
-        self._divider_widget_h.setStyleSheet("background-color: rgba(255, 255, 255, 220);")
+        self._divider_widget_h.setStyleSheet(f"background-color: {self._divider_color};")
         self._divider_widget_h.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self._close_button = QPushButton("X", self)
@@ -1065,13 +1072,25 @@ class MediaComparisonWidget(QWidget):
             self._divider_widget.hide()
         else:
             divider_h = height if has_fourth else (top_height if has_third else height)
-            self._divider_widget.setGeometry(max(0, split_x - 1), 0, 3, max(1, divider_h))
+            thickness = max(1, int(getattr(self, "_divider_thickness_px", 2)))
+            self._divider_widget.setGeometry(*centered_divider_geometry(
+                line_pos=split_x,
+                thickness=thickness,
+                span=max(1, divider_h),
+                vertical=True,
+            ))
             self._divider_widget.show()
             self._divider_widget.raise_()
         if not has_third or split_y <= 0 or split_y >= height:
             self._divider_widget_h.hide()
         else:
-            self._divider_widget_h.setGeometry(0, max(0, split_y - 1), width, 3)
+            thickness = max(1, int(getattr(self, "_divider_thickness_px", 2)))
+            self._divider_widget_h.setGeometry(*centered_divider_geometry(
+                line_pos=split_y,
+                thickness=thickness,
+                span=width,
+                vertical=False,
+            ))
             self._divider_widget_h.show()
             self._divider_widget_h.raise_()
 

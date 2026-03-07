@@ -57,7 +57,7 @@ class ImageListView(
         # Recalculate masonry layout when model changes (including filter changes)
         proxy_image_list_model.modelReset.connect(lambda: self._recalculate_masonry_if_needed("modelReset"))
         proxy_image_list_model.layoutChanged.connect(lambda: self._on_layout_changed())
-        proxy_image_list_model.filter_changed.connect(lambda: self._recalculate_masonry_if_needed("filter_changed"))
+        proxy_image_list_model.filter_changed.connect(self._on_filter_changed)
 
         # Handle dimension updates from enrichment (no layout invalidation)
         source_model.dimensions_updated.connect(lambda: self._recalculate_masonry_if_needed("dimensions_updated"))
@@ -529,6 +529,14 @@ class ImageListView(
     def _on_model_reset_complete(self):
         self._model_resetting = False
         self._clear_selection_cache()
+
+    @Slot()
+    def _on_filter_changed(self):
+        # Filtering can radically change which items are present even if the
+        # viewport and loaded page tuple look the same, so force a fresh
+        # masonry pass instead of reusing the previous window signature.
+        self._last_masonry_window_signature = None
+        self._recalculate_masonry_if_needed("filter_changed")
 
     @Slot(QModelIndex, QModelIndex)
     def _remember_selected_global_index(self, current: QModelIndex, previous: QModelIndex):

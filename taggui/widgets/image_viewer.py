@@ -12,6 +12,11 @@ from utils.image import Image, ImageMarking, Marking
 from utils.rect import RectPosition
 from widgets.video_player import VideoPlayerWidget
 from widgets.video_controls import VideoControlsWidget
+from widgets.compare_divider_utils import (
+    COMPARE_DIVIDER_COLOR,
+    COMPARE_DIVIDER_THICKNESS_PX,
+    centered_divider_geometry,
+)
 from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
 from widgets.marking_view import ImageGraphicsView
@@ -117,16 +122,22 @@ class ImageViewer(QWidget):
         if compare_fit_mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
             compare_fit_mode = COMPARE_FIT_MODE_PRESERVE
         self._compare_fit_mode = compare_fit_mode
+        self._compare_divider_thickness_px = COMPARE_DIVIDER_THICKNESS_PX
+        self._compare_divider_color = COMPARE_DIVIDER_COLOR
         self._compare_divider_overlay = QWidget(self)
         self._compare_divider_overlay.setObjectName("imageViewerCompareDivider")
         self._compare_divider_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._compare_divider_overlay.setStyleSheet("background-color: rgba(255, 255, 255, 230);")
+        self._compare_divider_overlay.setStyleSheet(
+            f"background-color: {self._compare_divider_color};"
+        )
         self._compare_divider_overlay.hide()
         self._compare_divider_overlay.raise_()
         self._compare_divider_overlay_h = QWidget(self)
         self._compare_divider_overlay_h.setObjectName("imageViewerCompareDividerHorizontal")
         self._compare_divider_overlay_h.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._compare_divider_overlay_h.setStyleSheet("background-color: rgba(255, 255, 255, 230);")
+        self._compare_divider_overlay_h.setStyleSheet(
+            f"background-color: {self._compare_divider_color};"
+        )
         self._compare_divider_overlay_h.hide()
         self._compare_divider_overlay_h.raise_()
         self._compare_reveal_timer = QTimer(self)
@@ -585,7 +596,7 @@ class ImageViewer(QWidget):
         ):
             overlay_v.hide()
         else:
-            divider_width = 3
+            divider_width = max(1, int(getattr(self, "_compare_divider_thickness_px", 2)))
             vertical_top = 0
             vertical_height = max(1, self.height())
             # In 3-image mode (A/B top + C bottom), the vertical divider
@@ -595,12 +606,13 @@ class ImageViewer(QWidget):
                     line_y = int(self.height() * split_ratio_y)
                 line_y = max(0, min(max(0, self.height() - 1), int(line_y)))
                 vertical_height = max(1, line_y)
-            overlay_v.setGeometry(
-                line_x - (divider_width // 2),
-                vertical_top,
-                divider_width,
-                vertical_height,
+            x, _, w, h = centered_divider_geometry(
+                line_pos=line_x,
+                thickness=divider_width,
+                span=vertical_height,
+                vertical=True,
             )
+            overlay_v.setGeometry(x, vertical_top, w, h)
             overlay_v.show()
             overlay_v.raise_()
 
@@ -621,8 +633,13 @@ class ImageViewer(QWidget):
         ):
             overlay_h.hide()
             return
-        divider_height = 3
-        overlay_h.setGeometry(0, line_y - (divider_height // 2), max(1, self.width()), divider_height)
+        divider_height = max(1, int(getattr(self, "_compare_divider_thickness_px", 2)))
+        overlay_h.setGeometry(*centered_divider_geometry(
+            line_pos=line_y,
+            thickness=divider_height,
+            span=max(1, self.width()),
+            vertical=False,
+        ))
         overlay_h.show()
         overlay_h.raise_()
 

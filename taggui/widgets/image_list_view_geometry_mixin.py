@@ -243,6 +243,13 @@ class ImageListViewGeometryMixin:
         """Shrink the dock to the exact width required for the current column count."""
         if not self.use_masonry:
             return False
+        host = self.window()
+        try:
+            preserve_until = float(getattr(host, "_preserve_restored_dock_layout_until", 0.0) or 0.0)
+        except Exception:
+            preserve_until = 0.0
+        if preserve_until > time.time():
+            return False
         if bool(getattr(self, "_masonry_splitter_snapping", False)):
             self._masonry_splitter_snapping = False
             return False
@@ -274,7 +281,7 @@ class ImageListViewGeometryMixin:
         dock = self.parentWidget()
         while dock is not None and not isinstance(dock, QDockWidget):
             dock = dock.parentWidget()
-        main_window = self.window()
+        main_window = host
         if not isinstance(dock, QDockWidget):
             return False
         if not isinstance(main_window, QMainWindow):

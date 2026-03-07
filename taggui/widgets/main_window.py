@@ -373,6 +373,7 @@ class MainWindow(QMainWindow):
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
         self._restore_in_progress = False
         self._restore_target_global_rank = -1
+        self._preserve_restored_dock_layout_until = 0.0
         self._workspace_apply_pending_id = None
         self._workspace_apply_timer_active = False
         self._workspace_apply_retry_count = 0
@@ -836,6 +837,7 @@ class MainWindow(QMainWindow):
         print("[SHUTDOWN] closeEvent triggered")
         self.cancel_compare_drag()
         self.close_all_floating_viewers()
+        self._save_image_list_dock_width()
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
         # Save marker size setting
@@ -1056,6 +1058,63 @@ class MainWindow(QMainWindow):
         if media_value not in {"All", "Images", "Videos"}:
             media_value = ""
         return sort_value, media_value
+
+    def _current_workspace_id(self) -> str:
+        """Return the active workspace id with a safe fallback."""
+        workspace_id = str(
+            settings.value('workspace_preset', 'media_viewer', type=str)
+            or 'media_viewer'
+        ).strip()
+        presets = {preset["id"] for preset in self.get_workspace_presets()}
+        if workspace_id not in presets:
+            workspace_id = 'media_viewer'
+        return workspace_id
+
+    def _image_list_dock_width_settings_key(self) -> str:
+        workspace_id = self._current_workspace_id()
+        viewer_mode = "viewer" if bool(getattr(self, '_main_viewer_visible', True)) else "list_only"
+        return f"workspace_layout/{workspace_id}/{viewer_mode}/image_list_dock_width"
+
+    def _save_image_list_dock_width(self):
+        dock = getattr(self, 'image_list', None)
+        if dock is None or dock.isFloating() or not dock.isVisible():
+            return
+        if not bool(getattr(self, '_main_viewer_visible', True)):
+            return
+        width = int(dock.width() or 0)
+        if width < 120:
+            return
+        settings.setValue(self._image_list_dock_width_settings_key(), width)
+
+    def _restore_saved_image_list_dock_width(self) -> bool:
+        dock = getattr(self, 'image_list', None)
+        if dock is None or dock.isFloating() or not dock.isVisible():
+            return False
+        if not bool(getattr(self, '_main_viewer_visible', True)):
+            return False
+        target_width = int(settings.value(
+            self._image_list_dock_width_settings_key(),
+            0,
+            type=int,
+        ) or 0)
+        if target_width < 120:
+            return False
+        self.resizeDocks([dock], [target_width], Qt.Orientation.Horizontal)
+        self._preserve_restored_dock_layout_until = max(
+            float(getattr(self, '_preserve_restored_dock_layout_until', 0.0) or 0.0),
+            time.time() + 2.5,
+        )
+        return True
+
+    def _schedule_restore_image_list_dock_width(self, delay_ms: int = 0):
+        """Reapply the saved left-dock width after startup/folder-load layout churn."""
+        def _apply():
+            try:
+                self._restore_saved_image_list_dock_width()
+            except Exception as e:
+                print(f"[RESTORE] Failed to restore image-list dock width: {e}")
+
+        QTimer.singleShot(max(0, int(delay_ms)), _apply)
 
     def _save_folder_view_preferences(self, *,
                                       sort_value: str | None = None,
@@ -2802,6 +2861,8 @@ class MainWindow(QMainWindow):
         else:
             _set_current_and_select(selected_index)
         self._set_central_content_page()
+        self._schedule_restore_image_list_dock_width(0)
+        self._schedule_restore_image_list_dock_width(180)
 
         # Scroll to selected image after layout is ready.
         # In windowed_strict paginated mode, the masonry window may not include
@@ -3516,11 +3577,16 @@ class MainWindow(QMainWindow):
 
     def restore(self):
         # Restore the window geometry and state.
+        import time
         if settings.contains('geometry'):
             self.restoreGeometry(settings.value('geometry', type=bytes))
         else:
             self.showMaximized()
         self.restoreState(settings.value('window_state', type=bytes))
+        # Keep the restored dock widths authoritative during startup. Without
+        # this, the masonry auto-snap can immediately overwrite the user's
+        # saved splitter position after the first relayout.
+        self._preserve_restored_dock_layout_until = time.time() + 8.0
         # Get the last index of the last selected image.
         if settings.contains('image_index'):
             image_index = settings.value('image_index', type=int)

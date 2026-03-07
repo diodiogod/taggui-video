@@ -837,6 +837,7 @@ class ImageListModel(QAbstractListModel):
     background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
+    stale_index_paths_detected = Signal(list, int)  # rel_paths, page_num
 
     # Default threshold for enabling pagination mode (overridden by settings)
     PAGINATION_THRESHOLD = 0  # Will be loaded from settings
@@ -993,6 +994,7 @@ class ImageListModel(QAbstractListModel):
 
         # Connect page_loaded signal to handler (for pagination mode)
         self.page_loaded.connect(self._on_page_loaded_signal)
+        self.stale_index_paths_detected.connect(self._on_stale_index_paths_detected)
         self.background_validation_progress.connect(self._on_background_validation_progress)
         self._flow_log_last: dict[str, float] = {}
         self._dimensions_update_timer = QTimer(self)
@@ -1363,12 +1365,40 @@ class ImageListModel(QAbstractListModel):
         with self._page_load_lock:
             self._protected_page_window = (s, e)
 
+    def _prune_stale_index_paths(self, rel_paths: list[str]) -> tuple[int, int]:
+        """Remove missing indexed files and refresh the current filtered total."""
+        if not self._directory_path:
+            return 0, int(getattr(self, "_total_count", 0) or 0)
+
+        normalized_paths = sorted({str(path) for path in rel_paths if path})
+        if not normalized_paths:
+            return 0, int(getattr(self, "_total_count", 0) or 0)
+
+        db = ImageIndexDB(self._directory_path)
+        try:
+            removed_count = int(db.remove_images_by_paths(normalized_paths) or 0)
+            new_total = int(db.count(
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+            ) or 0)
+        finally:
+            db.close()
+
+        if self._paginated_mode:
+            self._total_count = new_total
+
+        return removed_count, new_total
+
     def _load_page_sync(self, page_num: int):
         """Load a page synchronously (for initial load)."""
         if not self._db:
             return
 
-        images = self._load_images_from_db(page_num)
+        images, missing_rel_paths = self._load_images_from_db(page_num)
+        if missing_rel_paths:
+            removed_count, _ = self._prune_stale_index_paths(missing_rel_paths)
+            if removed_count > 0:
+                images, _ = self._load_images_from_db(page_num)
         self._store_page(page_num, images)
 
     def cancel_pending_loads_except(self, keep_pages: set[int]):
@@ -1393,8 +1423,10 @@ class ImageListModel(QAbstractListModel):
             if not self._db:
                 return
 
-            images = self._load_images_from_db(page_num)
+            images, missing_rel_paths = self._load_images_from_db(page_num)
             self._store_page(page_num, images)
+            if missing_rel_paths:
+                self.stale_index_paths_detected.emit(missing_rel_paths, int(page_num))
             # print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
@@ -1409,10 +1441,10 @@ class ImageListModel(QAbstractListModel):
             with self._page_load_lock:
                 self._loading_pages.discard(page_num)
 
-    def _load_images_from_db(self, page_num: int) -> list[Image]:
+    def _load_images_from_db(self, page_num: int) -> tuple[list[Image], list[str]]:
         """Load images from database for a specific page."""
         if not self._db or not self._directory_path:
-            return []
+            return [], []
 
         rows = self._db.get_page(
             page=page_num,
@@ -1424,6 +1456,7 @@ class ImageListModel(QAbstractListModel):
             random_seed=self._random_seed
         )
         images = []
+        missing_rel_paths: list[str] = []
         image_ids = [row['id'] for row in rows]
         tags_map = self._db.get_tags_for_images(image_ids)
 
@@ -1436,6 +1469,7 @@ class ImageListModel(QAbstractListModel):
             # or between sessions).  Lightweight stat check avoids showing
             # gray placeholders for stale DB entries.
             if not file_path.exists():
+                missing_rel_paths.append(str(row['file_name']))
                 continue
 
             image = Image(
@@ -1473,7 +1507,7 @@ class ImageListModel(QAbstractListModel):
 
             images.append(image)
 
-        return images
+        return images, missing_rel_paths
 
     def _rebuild_combined_filter(self):
         """Rebuild _filter_sql/_filter_bindings from text + media type parts."""
@@ -1837,6 +1871,31 @@ class ImageListModel(QAbstractListModel):
         self.pages_updated.emit(loaded_pages)
         self._log_flow("PAGE", f"Emitted pages_updated with {len(loaded_pages)} pages",
                        throttle_key="pages_updated", every_s=0.3)
+
+    @Slot(list, int)
+    def _on_stale_index_paths_detected(self, rel_paths: list, page_num: int):
+        """Reconcile stale DB rows discovered during asynchronous page loads."""
+        if not self._paginated_mode:
+            return
+
+        removed_count, new_total = self._prune_stale_index_paths(rel_paths)
+        if removed_count <= 0:
+            return
+
+        with self._page_load_lock:
+            current_pages = sorted(self._pages.keys())
+            self._pages.clear()
+            self._page_load_order.clear()
+
+        if not current_pages:
+            current_pages = [max(0, int(page_num))]
+
+        for loaded_page in current_pages:
+            self._load_page_sync(int(loaded_page))
+
+        self.total_count_changed.emit(int(new_total))
+        self.modelReset.emit()
+        self._emit_pages_updated()
 
 
     def _process_enrichment_queue(self):
