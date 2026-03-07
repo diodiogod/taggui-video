@@ -3,6 +3,122 @@ from widgets.image_list_strict_domain_service import StrictScrollDomainService
 from widgets.image_list_masonry_incremental_service import MasonryIncrementalService
 
 class ImageListViewStrategyMixin:
+    def _image_dimensions_need_enrichment(self, image) -> bool:
+        """Return True when an image still has placeholder or missing dimensions."""
+        if not image:
+            return False
+        try:
+            dims = getattr(image, 'dimensions', None)
+            return (
+                not dims
+                or dims[0] is None
+                or dims[1] is None
+                or dims == (512, 512)
+            )
+        except Exception:
+            return False
+
+    def _page_needs_enrichment(self, page_images) -> bool:
+        """Return True when any image in the page still needs real dimensions."""
+        if not page_images:
+            return False
+        try:
+            return any(self._image_dimensions_need_enrichment(image) for image in page_images if image)
+        except Exception:
+            return False
+
+    def _window_unenriched_count(self, source_model, window_start: int, window_end: int, *, cap: int = 5) -> int:
+        """Count placeholder/missing dimensions in a strict masonry window."""
+        count = 0
+        try:
+            lock = getattr(source_model, '_page_load_lock', None)
+            pages = getattr(source_model, '_pages', {})
+            if lock is not None:
+                with lock:
+                    for page_num in range(int(window_start), int(window_end) + 1):
+                        for image in pages.get(page_num, []):
+                            if image and self._image_dimensions_need_enrichment(image):
+                                count += 1
+                                if count >= int(cap):
+                                    return count
+            else:
+                for page_num in range(int(window_start), int(window_end) + 1):
+                    for image in pages.get(page_num, []):
+                        if image and self._image_dimensions_need_enrichment(image):
+                            count += 1
+                            if count >= int(cap):
+                                return count
+        except Exception:
+            return count
+        return count
+
+    def _hold_strict_layout_for_window_enrichment(
+        self,
+        source_model,
+        window_start: int,
+        window_end: int,
+        *,
+        reason: str,
+        retry_limit: int = 16,
+    ) -> bool:
+        """Delay strict masonry layout until the cold window gets one real enriched settle."""
+        window_sig = (int(window_start), int(window_end), reason)
+        if getattr(self, '_strict_enrich_wait_signature', None) == window_sig:
+            self._strict_enrich_wait_count = int(getattr(self, '_strict_enrich_wait_count', 0) or 0) + 1
+        else:
+            self._strict_enrich_wait_signature = window_sig
+            self._strict_enrich_wait_count = 1
+
+        wait_count = int(getattr(self, '_strict_enrich_wait_count', 1) or 1)
+        if wait_count > int(retry_limit):
+            self._strict_enrich_wait_signature = None
+            self._strict_enrich_wait_count = 0
+            return False
+
+        try:
+            self._check_and_enrich_loaded_pages()
+        except Exception:
+            pass
+        self._log_flow(
+            "MASONRY",
+            f"Holding strict layout for window enrichment ({reason}: pages {int(window_start)}-{int(window_end)}, retry {wait_count})",
+            throttle_key=f"strict_wait_enrich_{reason}",
+            every_s=0.5,
+        )
+        source_model_local = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        self._wait_and_retry_masonry(source_model_local, delay_ms=140)
+        return True
+
+    def _apply_incremental_cache_refresh(self, source_model, *, anchor_global=None, anchor_old_y=None):
+        """Rebuild visible masonry items from the incremental page cache."""
+        incremental = self._get_masonry_incremental_service()
+        self._masonry_items = incremental.assemble_items()
+        self._masonry_index_map = None
+
+        if isinstance(anchor_global, int) and anchor_global >= 0 and anchor_old_y is not None:
+            try:
+                new_anchor_item = self._get_masonry_item_for_global_index(anchor_global)
+                if new_anchor_item is not None:
+                    new_anchor_y = int(new_anchor_item.get('y', 0))
+                    delta_y = int(new_anchor_y) - int(anchor_old_y)
+                    if abs(delta_y) > 1:
+                        sb = self.verticalScrollBar()
+                        target_val = max(0, min(int(sb.value()) + int(delta_y), int(sb.maximum())))
+                        prev_block = sb.blockSignals(True)
+                        try:
+                            sb.setValue(target_val)
+                        finally:
+                            sb.blockSignals(prev_block)
+                        self._last_stable_scroll_value = int(sb.value())
+            except Exception:
+                pass
+
+        self.viewport().update()
+
     def _get_current_or_selected_global_index(self, source_model=None) -> int | None:
         """Resolve the current stable global index without mutating selection."""
         target_global = getattr(self, '_selected_global_index', None)
@@ -941,6 +1057,44 @@ class ImageListViewStrategyMixin:
         # ALL window images enriched — do a single masonry refresh
         self._enrich_first_refresh_done = True
 
+        incremental = self._get_masonry_incremental_service()
+        target_pages = sorted(getattr(source_model, '_enrichment_target_pages', ()) or ())
+        if incremental.is_active and target_pages:
+            anchor_global = None
+            anchor_old_y = None
+            try:
+                anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+                if isinstance(anchor_global, int) and anchor_global >= 0:
+                    anchor_item = self._get_masonry_item_for_global_index(anchor_global)
+                    if anchor_item is not None:
+                        anchor_old_y = int(anchor_item.get('y', 0))
+            except Exception:
+                anchor_global = None
+                anchor_old_y = None
+
+            extended_pages = []
+            for page_num in target_pages:
+                if page_num in incremental.get_cached_pages():
+                    continue
+                page_images = getattr(source_model, '_pages', {}).get(page_num)
+                if not page_images or self._page_needs_enrichment(page_images):
+                    continue
+                if incremental.can_extend_down(page_num):
+                    if self._try_incremental_extend(page_num, source_model, direction="down"):
+                        extended_pages.append(page_num)
+                elif incremental.can_extend_up(page_num):
+                    if self._try_incremental_extend(page_num, source_model, direction="up"):
+                        extended_pages.append(page_num)
+
+            if extended_pages:
+                self._apply_incremental_cache_refresh(
+                    source_model,
+                    anchor_global=anchor_global,
+                    anchor_old_y=anchor_old_y,
+                )
+                self._check_and_enrich_loaded_pages()
+                return
+
         def silent_refresh():
             if not hasattr(source_model, '_pages'):
                 return
@@ -1238,7 +1392,12 @@ class ImageListViewStrategyMixin:
             # Try incremental extend for each new page
             extended = []
             extended_up = False
+            blocked_unenriched_pages = set()
             for page_num in sorted(new_pages):
+                page_images = getattr(source_model, '_pages', {}).get(page_num)
+                if page_images and self._page_needs_enrichment(page_images):
+                    blocked_unenriched_pages.add(int(page_num))
+                    continue
                 if incremental.can_extend_down(page_num):
                     if self._try_incremental_extend(page_num, source_model, direction="down"):
                         extended.append(page_num)
@@ -1276,6 +1435,17 @@ class ImageListViewStrategyMixin:
                         pass
                 self.viewport().update()
                 self._check_and_enrich_loaded_pages()
+                return
+
+            if strict_mode and blocked_unenriched_pages and blocked_unenriched_pages == set(new_pages):
+                self._log_flow(
+                    "PAGES",
+                    f"Deferring incremental layout for unenriched pages {min(blocked_unenriched_pages)}-{max(blocked_unenriched_pages)}",
+                    throttle_key="pages_wait_enriched_extend",
+                    every_s=0.4,
+                )
+                self._check_and_enrich_loaded_pages()
+                self.viewport().update()
                 return
 
             # New pages aren't adjacent — this is a jump or gap. Full recalc.

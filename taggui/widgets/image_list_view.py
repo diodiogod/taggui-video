@@ -184,6 +184,8 @@ class ImageListView(
         self._strict_drag_frozen_max = 0
         self._strict_drag_frozen_until = 0.0
         self._strict_scroll_max_floor = 0
+        self._strict_enrich_wait_signature = None
+        self._strict_enrich_wait_count = 0
         self._restore_target_page = None  # Set by main_window scroll restore
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
@@ -500,6 +502,8 @@ class ImageListView(
         self._strict_drag_frozen_max = 0
         self._strict_drag_frozen_until = 0.0
         self._strict_scroll_max_floor = 0
+        self._strict_enrich_wait_signature = None
+        self._strict_enrich_wait_count = 0
         self._strict_drag_live_fraction = 0.0
         self._restore_target_page = None
         self._restore_target_global_index = None

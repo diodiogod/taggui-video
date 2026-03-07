@@ -184,7 +184,18 @@ class ImageListViewCalculationMixin:
             self._strict_waiting_target_page = None
             self._strict_waiting_window_pages = None
 
-        loaded_pages_sig = tuple(sorted(source_model._pages.keys())) if hasattr(source_model, "_pages") else ()
+        if hasattr(source_model, "_pages"):
+            if ctx.strict_mode and (not ctx.full_layout_mode):
+                loaded_pages_sig = tuple(
+                    sorted(
+                        p for p in source_model._pages.keys()
+                        if int(ctx.window_start_page) <= int(p) <= int(ctx.window_end_page)
+                    )
+                )
+            else:
+                loaded_pages_sig = tuple(sorted(source_model._pages.keys()))
+        else:
+            loaded_pages_sig = ()
         filter_sql = str(getattr(source_model, "_filter_sql", "") or "")
         filter_bindings = tuple(getattr(source_model, "_filter_bindings", ()) or ())
         proxy_row_count = int(self.model().rowCount()) if self.model() else 0
@@ -244,6 +255,45 @@ class ImageListViewCalculationMixin:
             )
             self._wait_and_retry_masonry(source_model, delay_ms=120)
             return False
+
+        if ctx.strict_mode and (not ctx.full_layout_mode) and self._last_masonry_signal != "enrichment_complete":
+            cached_pages = set()
+            try:
+                incremental = self._get_masonry_incremental_service()
+                if incremental.is_active:
+                    cached_pages = incremental.get_cached_pages()
+            except Exception:
+                cached_pages = set()
+            current_page_cached = int(ctx.current_page) in cached_pages
+            if (not current_page_cached):
+                unenriched_count = 0
+                try:
+                    if hasattr(self, '_window_unenriched_count'):
+                        unenriched_count = int(
+                            self._window_unenriched_count(
+                                source_model,
+                                int(ctx.window_start_page),
+                                int(ctx.window_end_page),
+                                cap=5,
+                            )
+                            or 0
+                        )
+                except Exception:
+                    unenriched_count = 0
+                if unenriched_count >= 5:
+                    if self._hold_strict_layout_for_window_enrichment(
+                        source_model,
+                        int(ctx.window_start_page),
+                        int(ctx.window_end_page),
+                        reason="cold_window",
+                    ):
+                        return False
+            else:
+                self._strict_enrich_wait_signature = None
+                self._strict_enrich_wait_count = 0
+        elif getattr(self, '_strict_enrich_wait_signature', None) is not None:
+            self._strict_enrich_wait_signature = None
+            self._strict_enrich_wait_count = 0
 
         ctx.items_data = planner.build_items_with_spacers(
             filtered_items=filtered_items,
