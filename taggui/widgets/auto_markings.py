@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 
 from PySide6.QtCore import Signal, QModelIndex, Qt, Slot
@@ -6,7 +7,7 @@ from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
                                QAbstractScrollArea, QFrame, QFormLayout,
-                               QMessageBox, QTableWidget, QHeaderView,
+                               QMessageBox, QTableWidget, QHeaderView, QLabel,
                                QTableWidgetItem, QComboBox)
 
 from utils.icons import create_add_box_icon
@@ -37,6 +38,7 @@ class MarkingSettingsForm(QVBoxLayout):
         self.model_combo_box = FocusedScrollSettingsComboBox(key='marking_model_id')
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
         self.model_combo_box.activated.connect(lambda _: self.model_selected.emit(True))
+        self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
         self.get_local_model_paths()
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
@@ -90,6 +92,11 @@ class MarkingSettingsForm(QVBoxLayout):
         self.toggle_advanced_settings_form_button.clicked.connect(
             self.toggle_advanced_settings_form)
 
+    @Slot(str)
+    def _on_model_text_changed(self, text: str):
+        settings.setValue('marking_model_id', text)
+        self.model_selected.emit(bool(text))
+
     def get_local_model_paths(self):
         models_directory_path = settings.value(
             'marking_models_directory_path',
@@ -100,8 +107,10 @@ class MarkingSettingsForm(QVBoxLayout):
         models_directory_path = Path(models_directory_path)
         print(f'Loading local auto-marking model paths under '
               f'{models_directory_path}...')
-        config_paths = set(models_directory_path.glob('**/*.pt'))
+        config_paths = sorted(models_directory_path.glob('**/*.pt'))
+        saved_text = str(settings.value('marking_model_id', '', type=str) or '')
         self.model_selected.emit(False)
+        prev_block = self.model_combo_box.blockSignals(True)
         self.model_combo_box.clear()
         if len(config_paths) == 0:
             self.model_combo_box.setPlaceholderText(
@@ -111,6 +120,14 @@ class MarkingSettingsForm(QVBoxLayout):
             for path in config_paths:
                 self.model_combo_box.addItem(
                     str(path.relative_to(models_directory_path)), userData=path)
+            if saved_text and self.model_combo_box.findText(saved_text) >= 0:
+                self.model_combo_box.setCurrentText(saved_text)
+            elif self.model_combo_box.count() > 0:
+                self.model_combo_box.setCurrentIndex(0)
+        self.model_combo_box.blockSignals(prev_block)
+        current_text = str(self.model_combo_box.currentText() or '')
+        settings.setValue('marking_model_id', current_text)
+        self.model_selected.emit(bool(current_text))
 
     @Slot()
     def toggle_advanced_settings_form(self):
@@ -134,6 +151,7 @@ class MarkingSettingsForm(QVBoxLayout):
 
 class AutoMarkings(QDockWidget):
     marking_generated = Signal(QModelIndex, list)
+    _CLASS_ACTIONS_SETTINGS_KEY = 'auto_marking_class_actions_json'
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList, parent):
@@ -157,6 +175,9 @@ class AutoMarkings(QDockWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat('%v / %m images marked (%p%)')
         self.progress_bar.hide()
+        self.result_label = QLabel()
+        self.result_label.setWordWrap(True)
+        self.result_label.hide()
         self.console_text_edit = QPlainTextEdit()
         set_text_edit_height(self.console_text_edit, 4)
         self.console_text_edit.setReadOnly(True)
@@ -165,6 +186,7 @@ class AutoMarkings(QDockWidget):
         layout = QVBoxLayout(container)
         layout.addWidget(self.start_cancel_button)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.result_label)
         layout.addWidget(self.console_text_edit)
         self.marking_settings_form = MarkingSettingsForm()
         layout.addLayout(self.marking_settings_form)
@@ -197,6 +219,60 @@ class AutoMarkings(QDockWidget):
         button_text = ('Cancel Auto-Marking' if is_marking
                        else 'Start Auto-Marking')
         self.start_cancel_button.setText(button_text)
+
+    def _current_model_key(self) -> str:
+        return str(self.marking_settings_form.model_combo_box.currentText() or '').strip()
+
+    def _load_saved_class_actions(self) -> dict[str, dict[str, str]]:
+        raw = settings.value(self._CLASS_ACTIONS_SETTINGS_KEY, '{}', type=str)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _save_saved_class_actions(self, payload: dict[str, dict[str, str]]):
+        settings.setValue(self._CLASS_ACTIONS_SETTINGS_KEY, json.dumps(payload))
+
+    def _persist_class_actions_for_current_model(self):
+        model_key = self._current_model_key()
+        if not model_key:
+            return
+        payload = self._load_saved_class_actions()
+        model_actions = {}
+        row_count = self.marking_settings_form.class_table.rowCount()
+        for row in range(row_count):
+            class_item = self.marking_settings_form.class_table.item(row, 0)
+            combo = self.marking_settings_form.class_table.cellWidget(row, 1)
+            if class_item is None or combo is None:
+                continue
+            class_id = class_item.data(Qt.ItemDataRole.UserRole)
+            if class_id is None:
+                continue
+            model_actions[str(class_id)] = str(combo.currentText() or 'ignore')
+        payload[model_key] = model_actions
+        self._save_saved_class_actions(payload)
+
+    def _restore_class_actions_for_current_model(self):
+        model_key = self._current_model_key()
+        if not model_key:
+            return
+        payload = self._load_saved_class_actions()
+        model_actions = payload.get(model_key, {})
+        default_action = 'hint'
+        if self.marking_settings_form.class_table.rowCount() > 1:
+            default_action = 'ignore'
+        row_count = self.marking_settings_form.class_table.rowCount()
+        for row in range(row_count):
+            class_item = self.marking_settings_form.class_table.item(row, 0)
+            combo = self.marking_settings_form.class_table.cellWidget(row, 1)
+            if class_item is None or combo is None:
+                continue
+            class_id = class_item.data(Qt.ItemDataRole.UserRole)
+            action = model_actions.get(str(class_id), default_action)
+            combo.setCurrentText(action)
 
     @Slot(str)
     def update_console_text_edit(self, text: str):
@@ -237,6 +313,17 @@ class AutoMarkings(QDockWidget):
         alert.setText(text)
         alert.exec()
 
+    @Slot(str, int)
+    def update_result_label(self, image_name: str, marking_count: int):
+        if marking_count <= 0:
+            text = f'No markings found for {image_name}.'
+        elif marking_count == 1:
+            text = f'Found 1 marking for {image_name}.'
+        else:
+            text = f'Found {marking_count} markings for {image_name}.'
+        self.result_label.setText(text)
+        self.result_label.show()
+
     def prepare_generation(self):
         selected_image_indices = self.image_list.get_selected_image_indices()
         marking_settings = self.marking_settings_form.get_marking_settings()
@@ -249,6 +336,8 @@ class AutoMarkings(QDockWidget):
             self.console_text_edit.clear)
         self.marking_thread.marking_generated.connect(
             self.marking_generated)
+        self.marking_thread.marking_result.connect(
+            self.update_result_label)
         self.marking_thread.progress_bar_update_requested.connect(
             self.progress_bar.setValue)
         self.marking_thread.finished.connect(
@@ -267,14 +356,19 @@ class AutoMarkings(QDockWidget):
                 len(self.marking_thread.model.names))
         for row, (class_id, class_name) in enumerate(
                 self.marking_thread.model.names.items()):
-            self.marking_settings_form.class_table.setItem(
-                row, 0, QTableWidgetItem(class_name))
+            class_item = QTableWidgetItem(class_name)
+            class_item.setData(Qt.ItemDataRole.UserRole, int(class_id))
+            self.marking_settings_form.class_table.setItem(row, 0, class_item)
             combo = QComboBox()
             combo.addItem('ignore')
             combo.addItem(create_add_box_icon(Qt.gray), 'hint')
             combo.addItem(create_add_box_icon(Qt.red), 'exclude')
             combo.addItem(create_add_box_icon(Qt.green), 'include')
+            combo.currentTextChanged.connect(
+                lambda _text, self=self: self._persist_class_actions_for_current_model()
+            )
             self.marking_settings_form.class_table.setCellWidget(row, 1, combo)
+        self._restore_class_actions_for_current_model()
         # NOTE: As this thread has no place to display the output, we keep
         # `stdout` and `stderr`.
         # Redirect `stdout` and `stderr` so that the outputs are displayed in
@@ -310,6 +404,8 @@ class AutoMarkings(QDockWidget):
             self.show_alert_when_finished = (confirmation_dialog
                                              .show_alert_check_box.isChecked())
         self.set_is_marking(True)
+        self.result_label.setText('Running auto-marking...')
+        self.result_label.show()
         if selected_image_count > 1:
             self.progress_bar.setRange(0, selected_image_count)
             self.progress_bar.setValue(0)

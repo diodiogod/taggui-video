@@ -16,6 +16,7 @@ class MarkingThread(ModelThread):
     # third parameter must be declared as `list` instead of `list[str]` for it
     # to work.
     marking_generated = Signal(QModelIndex, list)
+    marking_result = Signal(str, int)
 
     def __init__(self, parent, image_list_model: ImageListModel,
                  selected_image_indices: list[QModelIndex],
@@ -83,4 +84,5 @@ class MarkingThread(ModelThread):
                                      'type': marking[1],
                                      'confidence': round(confidence, 3)})
         self.marking_generated.emit(image_index, markings)
+        self.marking_result.emit(image.path.name, len(markings))
         return f'Found {len(markings)} marking(s).'

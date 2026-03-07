@@ -107,6 +107,7 @@ class MarkingItem(QGraphicsRectItem):
         elif self.rect_type == ImageMarking.EXCLUDE:
             self.area.setRect(QRectF(grid.snap(self.rect().toRect().topLeft(), floor),
                                      grid.snap(self.rect().toRect().adjusted(0,0,1,1).bottomRight(), ceil)))
+        self.adjust_layout()
 
     def handleAt(self, point: QPointF) -> RectPosition:
         handle_space = -min(self.pen_half_width - self.handle_half_size,
