@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QMenu, QMessageBox, QVBoxLayout, QFrame, QPushButton,
                                QWidget, QStyledItemDelegate, QToolTip, QStyle, QStyleOptionViewItem,
                                QProgressBar)
-from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
-                       ParseException, QuotedString, Suppress, Word,
+from pyparsing import (CaselessKeyword, CaselessLiteral, Combine, Group, OpAssoc,
+                       Optional, ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
 
 from models.proxy_image_list_model import ProxyImageListModel
@@ -51,6 +51,8 @@ FILTER_TEMPLATE_SPECS = [
     ('Marking', 'Filter by marking label', 'marking:"{cursor}"', True),
     ('Marking Type', 'Filter by marking kind', 'marking_type:hint', False),
     ('Stars', 'Filter by star rating', 'stars:>={cursor}', True),
+    ('Love', 'Filter loved items', 'love:true', False),
+    ('Bomb', 'Filter bombed items', 'bomb:true', False),
     ('Width', 'Filter by image width', 'width:>1024', False),
     ('Height', 'Filter by image height', 'height:>1024', False),
     ('Name', 'Filter by file name', 'name:"{cursor}"', True),
@@ -241,15 +243,16 @@ class FilterLineEdit(QLineEdit):
                                                    esc_char='\\')
                                     | Word(printables, exclude_chars='()'))
         string_filter_keys = ['tag', 'caption', 'marking', 'marking_type', 'crops', 'visible',
-                              'name', 'path', 'size', 'target']
+                              'name', 'path', 'size', 'target', 'love', 'bomb']
         string_filter_expressions = [Group(CaselessLiteral(key) + Suppress(':')
                                            + optionally_quoted_string)
                                      for key in string_filter_keys]
         comparison_operator = one_of('= == != < > <= >=')
+        number_value = Combine(Word(nums) + Optional('.' + Word(nums)))
         number_filter_keys = ['tags', 'chars', 'tokens', 'stars', 'width',
                               'height', 'area']
         number_filter_expressions = [Group(CaselessLiteral(key) + Suppress(':')
-                                           + comparison_operator + Word(nums))
+                                           + comparison_operator + number_value)
                                      for key in number_filter_keys]
         string_filter_expressions = reduce(or_, string_filter_expressions)
         number_filter_expressions = reduce(or_, number_filter_expressions)

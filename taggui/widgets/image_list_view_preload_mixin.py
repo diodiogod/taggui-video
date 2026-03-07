@@ -78,6 +78,8 @@ class ImageListViewPreloadMixin:
 
     def _get_masonry_cache_key(self) -> str:
         """Generate a unique cache key for current directory and settings."""
+        cache_version = "masonry_v2"
+
         # Get directory from model
         dir_path = "default"
         if self.model() and hasattr(self.model(), 'sourceModel'):
@@ -111,7 +113,7 @@ class ImageListViewPreloadMixin:
             import time
             filter_key = f"filter_{int(time.time())}"
 
-        return f"{dir_path}_{self.current_thumbnail_size}_{viewport_width}_{sort_order}_{filter_key}"
+        return f"{cache_version}_{dir_path}_{self.current_thumbnail_size}_{viewport_width}_{sort_order}_{filter_key}"
 
 
     def _preload_nearby_thumbnails(self):

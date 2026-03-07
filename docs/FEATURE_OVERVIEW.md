@@ -15,6 +15,7 @@ High-level capabilities of TagGUI Video 1M.
 ## Tooling Highlights
 
 - Batch tag operations and filtering
+- Half-star ratings plus local love/bomb reactions
 - Auto-captioning integrations
 - Crop/masking workflow
 - Dataset export pipeline

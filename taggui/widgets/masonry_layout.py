@@ -17,7 +17,7 @@ class MasonryItem:
 class MasonryLayout:
     """Calculates masonry (Pinterest-style) layout positions for items."""
 
-    CACHE_VERSION = 2  # Increment to invalidate all old caches
+    CACHE_VERSION = 3  # Increment to invalidate old caches after sort-order fixes
 
     def __init__(self, column_width: int = 200, spacing: int = 2, num_columns: int = 4):
         """

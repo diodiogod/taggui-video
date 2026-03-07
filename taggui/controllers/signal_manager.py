@@ -49,6 +49,26 @@ class SignalManager:
         if toolbar_manager.zoom_follow_mode_btn is not None:
             toolbar_manager.zoom_follow_mode_btn.clicked.connect(
                 self.main_window.cycle_active_viewer_zoom_follow_mode)
+        if toolbar_manager.rating_widget is not None:
+            toolbar_manager.rating_widget.rating_selected.connect(
+                lambda stars, event: self.main_window.set_rating(float(stars) / 5.0, True, event)
+            )
+        if toolbar_manager.love_button is not None:
+            toolbar_manager.love_button.toggled.connect(
+                lambda checked: self.main_window.set_reactions(
+                    bool(checked),
+                    bool(self.main_window.bomb_button.isChecked()) if self.main_window.bomb_button is not None else False,
+                    True,
+                )
+            )
+        if toolbar_manager.bomb_button is not None:
+            toolbar_manager.bomb_button.toggled.connect(
+                lambda checked: self.main_window.set_reactions(
+                    bool(self.main_window.love_button.isChecked()) if self.main_window.love_button is not None else False,
+                    bool(checked),
+                    True,
+                )
+            )
 
         toolbar_manager.add_action_group.triggered.connect(
             lambda action: image_viewer.add_marking(
@@ -96,6 +116,7 @@ class SignalManager:
 
         # Rating stars
         image_viewer.rating_changed.connect(self.main_window.set_rating)
+        image_viewer.reaction_flags_changed.connect(self.main_window.set_reactions)
         image_viewer.zoom_follow_mode_changed.connect(
             lambda mode: self.main_window.sync_zoom_follow_mode_button())
 

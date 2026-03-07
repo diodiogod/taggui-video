@@ -1043,6 +1043,9 @@ class ImageListModel(QAbstractListModel):
         self._suppress_enrichment_signals = False  # Suppress dataChanged during filtering
         self._enrichment_completed_flag = False  # Flag to trigger masonry recalc after enrichment
         self._final_recalc_timer = None  # Timer for final masonry recalc (only one should be active)
+        self._enrichment_log_signature = None
+        self._enrichment_log_batches = 0
+        self._enrichment_log_total = 0
 
         # Queue for thread-safe dimension updates from background enrichment
         from queue import Queue
@@ -1539,7 +1542,9 @@ class ImageListModel(QAbstractListModel):
                 dimensions=(row['width'], row['height']),
                 tags=tags,
                 is_video=bool(row['is_video']),
-                rating=row.get('rating', 0.0)
+                rating=row.get('rating', 0.0),
+                love=bool(row.get('love', 0)),
+                bomb=bool(row.get('bomb', 0)),
             )
 
             # Populate metadata
@@ -1673,14 +1678,13 @@ class ImageListModel(QAbstractListModel):
                 if cmp_sql is not None:
                     if key == 'stars':
                         try:
-                            stars_value = int(value_raw)
+                            stars_value = float(value_raw)
                         except Exception:
                             return "", ()
                         # UI supports 0..5 star semantics.
                         stars_value = max(0, min(5, stars_value))
-                        # Ratings are stored as 0.0..1.0 floats; compare using
-                        # rounded 0..5 star domain to avoid float-equality issues.
-                        return "CAST(ROUND(COALESCE(rating, 0) * 5.0) AS INTEGER) " + cmp_sql + " ?", (stars_value,)
+                        # Ratings are stored as 0.0..1.0 floats.
+                        return "(COALESCE(rating, 0) * 5.0) " + cmp_sql + " ?", (stars_value,)
                     if key == 'width':
                         try:
                             width_value = int(value_raw)
@@ -1771,6 +1775,13 @@ class ImageListModel(QAbstractListModel):
                         "WHERE image_id=images.id AND type = ?)",
                         (val,)
                     )
+                if op in ('love', 'bomb'):
+                    normalized = str(val).strip().lower()
+                    if normalized in {'1', 'true', 'yes', 'on'}:
+                        return f"COALESCE({op}, 0) = 1", ()
+                    if normalized in {'0', 'false', 'no', 'off'}:
+                        return f"COALESCE({op}, 0) = 0", ()
+                    return "", ()
                 
                 # Default case for other prefixes? like 'path'
                 
@@ -3202,6 +3213,14 @@ class ImageListModel(QAbstractListModel):
         self._enrichment_running = True
         self._enrichment_scope = scope
         self._enrichment_target_pages = frozenset(_window_page_set) if _window_page_set else None
+        enrichment_signature = (
+            scope,
+            tuple(sorted(_window_page_set)) if _window_page_set else (),
+        )
+        if self._enrichment_log_signature != enrichment_signature:
+            self._enrichment_log_signature = enrichment_signature
+            self._enrichment_log_batches = 0
+            self._enrichment_log_total = 0
 
         def enrich_worker():
              from utils.image_index_db import ImageIndexDB
@@ -3215,6 +3234,18 @@ class ImageListModel(QAbstractListModel):
                  return
 
              db_bg = ImageIndexDB(self._directory_path)
+
+             def describe_scope(page_set) -> str:
+                 phase = 'window repair' if scope == 'window' else 'preload warmup'
+                 if not page_set:
+                     return f"{phase} for all loaded pages"
+                 pages_sorted = sorted(page_set)
+                 start_page = pages_sorted[0]
+                 end_page = pages_sorted[-1]
+                 page_count = len(pages_sorted)
+                 if start_page == end_page:
+                     return f"{phase} on page {start_page}"
+                 return f"{phase} on pages {start_page}-{end_page} ({page_count} pages)"
 
              # Collect unenriched images — scoped to window pages if provided.
              prioritized_rel_paths = []
@@ -3284,11 +3315,21 @@ class ImageListModel(QAbstractListModel):
                  # 0 files to enrich = area already enriched in DB.
                  # Don't emit — no data changed, so masonry refresh would be
                  # pointless and can break restore scroll position at startup.
+                 scope_label = describe_scope(_window_page_set)
+                 if self._enrichment_log_batches > 0 or self._enrichment_log_total > 0:
+                     print(
+                         f"[ENRICH] {scope_label} complete after "
+                         f"{self._enrichment_log_batches} batch(es), "
+                         f"{self._enrichment_log_total} item(s) total [ALL DONE]"
+                     )
+                 else:
+                     print(f"[ENRICH] {scope_label} already up to date [ALL DONE]")
                  return
 
-             scope = f"pages {sorted(_window_page_set)[:3]}..." if _window_page_set else "all loaded"
-             print(f"[ENRICH] {len(placeholders)} to enrich ({scope})")
-             
+             scope_label = describe_scope(_window_page_set)
+             self._enrichment_log_batches += 1
+             batch_number = self._enrichment_log_batches
+
              enriched_count = 0
              commit_interval = 100
              video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
@@ -3400,8 +3441,19 @@ class ImageListModel(QAbstractListModel):
              self._enrichment_exhausted = (enriched_count < max_enrich_per_cycle)
              self._enrichment_actual_count = enriched_count
              self._enrichment_running = False
-             print(f"[ENRICH] Enriched {enriched_count}/{len(placeholders)} ({scope})"
-                   f"{' [ALL DONE]' if self._enrichment_exhausted else ''}")
+             self._enrichment_log_total += enriched_count
+             cumulative_total = self._enrichment_log_total
+             if self._enrichment_exhausted:
+                 print(
+                     f"[ENRICH] {scope_label}: batch {batch_number} finished "
+                     f"({enriched_count} item(s)); cumulative {cumulative_total} "
+                     f"across {self._enrichment_log_batches} batch(es) [ALL DONE]"
+                 )
+             else:
+                 print(
+                     f"[ENRICH] {scope_label}: batch {batch_number} finished "
+                     f"({enriched_count} item(s)); cumulative {cumulative_total}, continuing"
+                 )
 
              # Signal completion from background thread
              self.enrichment_complete.emit()
@@ -4024,8 +4076,16 @@ class ImageListModel(QAbstractListModel):
                     tags = caption.split(self.tag_separator)
                     tags = [tag.strip() for tag in tags]
                     tags = [tag for tag in tags if tag]
-            image = Image(image_path, dimensions, tags, is_video=is_video,
-                         video_metadata=video_metadata)
+            image = Image(
+                image_path,
+                dimensions,
+                tags,
+                is_video=is_video,
+                video_metadata=video_metadata,
+                rating=float((cached or {}).get('rating', 0.0) or 0.0),
+                love=bool((cached or {}).get('love', False)),
+                bomb=bool((cached or {}).get('bomb', False)),
+            )
             # Store DB cached info (including thumbnail_cached flag) for fast cache checks
             image._db_cached_info = cached if cached else {}
             json_file_path = image_path.with_suffix('.json')
@@ -4419,6 +4479,8 @@ class ImageListModel(QAbstractListModel):
         """Add the current state of the image tags to the undo stack."""
         tags = [{'tags': image.tags.copy(),
                  'rating': image.rating,
+                 'love': bool(getattr(image, 'love', False)),
+                 'bomb': bool(getattr(image, 'bomb', False)),
                  'crop': QRect(image.crop) if image.crop is not None else None,
                  'markings': image.markings.copy(),
                  'loop_start_frame': image.loop_start_frame,
@@ -4574,6 +4636,44 @@ class ImageListModel(QAbstractListModel):
         if image_id:
             self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
 
+    def save_reactions_to_db(self, image: Image):
+        """Persist DB-only love/bomb flags for one image."""
+        if not self._db or not image or not getattr(image, "path", None):
+            return
+        if not self._directory_path:
+            return
+
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+
+        image_id = self._db.get_image_id(rel_path)
+        if not image_id:
+            try:
+                stat = image.path.stat()
+                width = image.dimensions[0] if image.dimensions and image.dimensions[0] else 512
+                height = image.dimensions[1] if image.dimensions and image.dimensions[1] else 512
+                is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
+                self._db.save_info(
+                    file_name=rel_path,
+                    width=width,
+                    height=height,
+                    is_video=is_video,
+                    mtime=stat.st_mtime,
+                    rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                )
+                image_id = self._db.get_image_id(rel_path)
+            except Exception:
+                image_id = None
+
+        if image_id:
+            self._db.set_reactions(
+                image_id,
+                bool(getattr(image, 'love', False)),
+                bool(getattr(image, 'bomb', False)),
+            )
+
     def write_meta_to_disk(self, image: Image):
         # Keep DB rating synchronized even when only metadata changes.
         self._save_rating_to_db(image)
@@ -4628,6 +4728,8 @@ class ImageListModel(QAbstractListModel):
         source_stack.pop()
         tags = [{'tags': image.tags.copy(),
                  'rating': image.rating,
+                 'love': bool(getattr(image, 'love', False)),
+                 'bomb': bool(getattr(image, 'bomb', False)),
                  'crop': QRect(image.crop) if image.crop is not None else None,
                  'markings': image.markings.copy(),
                  'loop_start_frame': image.loop_start_frame,
@@ -4640,6 +4742,8 @@ class ImageListModel(QAbstractListModel):
                 zip(self.images, history_item.tags)):
             if (image.tags == history_image_tags['tags'] and
                 image.rating == history_image_tags['rating'] and
+                bool(getattr(image, 'love', False)) == bool(history_image_tags.get('love', False)) and
+                bool(getattr(image, 'bomb', False)) == bool(history_image_tags.get('bomb', False)) and
                 image.crop == history_image_tags['crop'] and
                 image.markings == history_image_tags['markings'] and
                 image.loop_start_frame == history_image_tags.get('loop_start_frame') and
@@ -4648,12 +4752,15 @@ class ImageListModel(QAbstractListModel):
             changed_image_indices.append(image_index)
             image.tags = history_image_tags['tags']
             image.rating = history_image_tags['rating']
+            image.love = bool(history_image_tags.get('love', False))
+            image.bomb = bool(history_image_tags.get('bomb', False))
             image.crop = history_image_tags['crop']
             image.markings = history_image_tags['markings']
             image.loop_start_frame = history_image_tags.get('loop_start_frame')
             image.loop_end_frame = history_image_tags.get('loop_end_frame')
             self.write_image_tags_to_disk(image)
             self.write_meta_to_disk(image)
+            self.save_reactions_to_db(image)
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
@@ -5260,8 +5367,24 @@ class ImageListModel(QAbstractListModel):
                 tags = [tag.strip() for tag in tags]
                 tags = [tag for tag in tags if tag]
 
-        image = Image(image_path, dimensions, tags, is_video=is_video,
-                     video_metadata=video_metadata)
+        cached_info = {}
+        if self._db and self._directory_path:
+            try:
+                relative_path = str(image_path.relative_to(self._directory_path))
+                cached_info = self._db.get_cached_info(relative_path, image_path.stat().st_mtime) or {}
+            except Exception:
+                cached_info = {}
+
+        image = Image(
+            image_path,
+            dimensions,
+            tags,
+            is_video=is_video,
+            video_metadata=video_metadata,
+            rating=float(cached_info.get('rating', 0.0) or 0.0),
+            love=bool(cached_info.get('love', False)),
+            bomb=bool(cached_info.get('bomb', False)),
+        )
 
         json_file_path = image_path.with_suffix('.json')
         if json_file_path.exists() and json_file_path.stat().st_size > 0:

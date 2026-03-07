@@ -1059,7 +1059,7 @@ class ImageListViewInteractionMixin:
 
                 dimensions = None
                 if is_video:
-                    from utils.video_utils import extract_video_info
+                    from models.image_list_model import extract_video_info
                     dimensions, _, _ = extract_video_info(img_path)
                 elif suffix == '.jxl':
                     from utils.jxlutil import get_jxl_size

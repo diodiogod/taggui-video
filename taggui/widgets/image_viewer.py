@@ -58,6 +58,7 @@ class ImageViewer(QWidget):
     accept_crop_addition = Signal(bool, name='allowAdditionOfCrop')
     crop_changed = Signal(object, name='cropChanged')  # Grid type
     rating_changed = Signal(float, name='ratingChanged')
+    reaction_flags_changed = Signal(bool, bool, name='reactionFlagsChanged')
     directory_reload_requested = Signal(name='directoryReloadRequested')
     activated = Signal(name='viewerActivated')
 
@@ -1809,6 +1810,10 @@ class ImageViewer(QWidget):
             self._floating_double_click_return_scale = None
         self._floating_last_auto_double_click_zoom_scale = None
         self.rating_changed.emit(image.rating)
+        self.reaction_flags_changed.emit(
+            bool(getattr(image, 'love', False)),
+            bool(getattr(image, 'bomb', False)),
+        )
 
         if is_complete:
             self.marking_items.clear()
@@ -2001,6 +2006,25 @@ class ImageViewer(QWidget):
             if image.rating != rating:
                 image.rating = rating
                 self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+
+    def reaction_flags_change(self, love: bool | None = None, bomb: bool | None = None):
+        if self.proxy_image_index.isValid():
+            image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+            if image is None:
+                return
+            changed = False
+            if love is not None and bool(getattr(image, 'love', False)) != bool(love):
+                image.love = bool(love)
+                changed = True
+            if bomb is not None and bool(getattr(image, 'bomb', False)) != bool(bomb):
+                image.bomb = bool(bomb)
+                changed = True
+            if changed:
+                source_model = self.proxy_image_list_model.sourceModel()
+                saver = getattr(source_model, 'save_reactions_to_db', None)
+                if callable(saver):
+                    saver(image)
+                self.reaction_flags_changed.emit(bool(image.love), bool(image.bomb))
 
     @Slot()
     def setting_change(self, key, value):

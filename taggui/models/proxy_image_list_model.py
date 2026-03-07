@@ -215,6 +215,20 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 return (len(dimension) == 2
                         and dimension[0] == str(image.target_dimension.width())
                         and dimension[1] == str(image.target_dimension.height()))
+            if filter_[0] == 'love':
+                normalized = str(filter_[1]).strip().lower()
+                if normalized in {'1', 'true', 'yes', 'on'}:
+                    return bool(getattr(image, 'love', False))
+                if normalized in {'0', 'false', 'no', 'off'}:
+                    return not bool(getattr(image, 'love', False))
+                return False
+            if filter_[0] == 'bomb':
+                normalized = str(filter_[1]).strip().lower()
+                if normalized in {'1', 'true', 'yes', 'on'}:
+                    return bool(getattr(image, 'bomb', False))
+                if normalized in {'0', 'false', 'no', 'off'}:
+                    return not bool(getattr(image, 'bomb', False))
+                return False
         if filter_[1] == 'AND':
             if len(filter_) < 3:
                 return self.does_image_match_filter(image, filter_[0])
@@ -244,7 +258,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
             number_to_compare = image.dimensions[1]
         elif filter_[0] == 'area':
             number_to_compare =  image.dimensions[0] * image.dimensions[1]
-        return comparison_operator(number_to_compare, int(filter_[2]))
+        return comparison_operator(number_to_compare, float(filter_[2]))
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:

@@ -327,7 +327,9 @@ class PaginatedImageModel(QAbstractListModel):
                 dimensions=(row['width'], row['height']),
                 tags=tags,
                 is_video=bool(row['is_video']),
-                rating=row.get('rating', 0.0)
+                rating=row.get('rating', 0.0),
+                love=bool(row.get('love', 0)),
+                bomb=bool(row.get('bomb', 0)),
             )
 
             if row['is_video']:
@@ -408,7 +410,7 @@ class PaginatedImageModel(QAbstractListModel):
 
     def set_sort(self, field: str, direction: str = 'DESC'):
         """Change sort order and reload from page 1."""
-        valid_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating'}
+        valid_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'love_rate_bomb'}
         if field not in valid_fields:
             field = 'mtime'
 

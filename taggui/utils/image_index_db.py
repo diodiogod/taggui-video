@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 8  # v8 tracks .txt sidecar mtimes for cheap tag reconciliation
+DB_VERSION = 9  # v9 adds DB-only love/bomb reaction flags
 
 
 class ImageIndexDB:
@@ -214,6 +214,8 @@ class ImageIndexDB:
                         video_frame_count INTEGER,
                         mtime REAL NOT NULL,
                         rating REAL DEFAULT 0.0,
+                        love INTEGER DEFAULT 0,
+                        bomb INTEGER DEFAULT 0,
                         indexed_at REAL,
                         thumbnail_cached INTEGER DEFAULT 0,
                         file_size INTEGER,
@@ -248,6 +250,8 @@ class ImageIndexDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
@@ -263,7 +267,7 @@ class ImageIndexDB:
                     self.conn.commit()
                 elif int(row['value']) != DB_VERSION:
                     old_version = int(row['value'])
-                    if old_version in (6, 7) and DB_VERSION == 8:
+                    if old_version in (6, 7, 8) and DB_VERSION == 9:
                         print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating incrementally...')
                         if old_version <= 6:
                             self._create_image_markings_schema(cursor)
@@ -271,6 +275,12 @@ class ImageIndexDB:
                         columns = [info[1] for info in cursor.fetchall()]
                         if 'txt_sidecar_mtime' not in columns:
                             cursor.execute('ALTER TABLE images ADD COLUMN txt_sidecar_mtime REAL')
+                        if 'love' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN love INTEGER DEFAULT 0')
+                        if 'bomb' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                         cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
                                      (str(DB_VERSION), 'version'))
                         self.conn.commit()
@@ -296,6 +306,8 @@ class ImageIndexDB:
                                 video_frame_count INTEGER,
                                 mtime REAL NOT NULL,
                                 rating REAL DEFAULT 0.0,
+                                love INTEGER DEFAULT 0,
+                                bomb INTEGER DEFAULT 0,
                                 indexed_at REAL,
                                 thumbnail_cached INTEGER DEFAULT 0,
                                 file_size INTEGER,
@@ -318,6 +330,8 @@ class ImageIndexDB:
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
@@ -345,12 +359,22 @@ class ImageIndexDB:
                         print("Migrating DB: Adding txt_sidecar_mtime column...")
                         cursor.execute('ALTER TABLE images ADD COLUMN txt_sidecar_mtime REAL')
                         self.conn.commit()
+                    if 'love' not in columns:
+                        print("Migrating DB: Adding love column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN love INTEGER DEFAULT 0')
+                        self.conn.commit()
+                    if 'bomb' not in columns:
+                        print("Migrating DB: Adding bomb column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0')
+                        self.conn.commit()
                         
                     # Ensure indexes exist
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_ctime ON images(ctime)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size)')
@@ -418,7 +442,8 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT width, height, is_video, video_fps, video_duration,
-                       video_frame_count, mtime, thumbnail_cached
+                       video_frame_count, mtime, thumbnail_cached, rating,
+                       love, bomb
                 FROM images
                 WHERE file_name = ?
             ''', (file_name,))
@@ -434,7 +459,10 @@ class ImageIndexDB:
             result = {
                 'dimensions': (row['width'], row['height']),
                 'is_video': bool(row['is_video']),
-                'thumbnail_cached': bool(row['thumbnail_cached'])
+                'thumbnail_cached': bool(row['thumbnail_cached']),
+                'rating': float(row['rating'] or 0.0),
+                'love': bool(row['love']),
+                'bomb': bool(row['bomb']),
             }
 
             if row['is_video']:
@@ -1197,6 +1225,48 @@ class ImageIndexDB:
             print(f'Database count error: {e}')
             return 0
 
+    @staticmethod
+    def _reaction_sort_bucket_expr() -> str:
+        return (
+            "CASE "
+            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) = 0 THEN 0 "
+            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) != 0 THEN 1 "
+            "WHEN COALESCE(love, 0) = 0 AND COALESCE(bomb, 0) = 0 THEN 2 "
+            "ELSE 3 END"
+        )
+
+    def _resolve_sort_order(self, sort_field: str, sort_dir: str = 'DESC', **kwargs) -> tuple[str, str, Optional[str], str]:
+        """Normalize sort parameters and return the SQL ORDER BY clause."""
+        valid_sort_fields = {
+            'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height',
+            'id', 'RANDOM()', 'width * height', 'file_size', 'file_type',
+            'ctime', 'love_rate_bomb'
+        }
+        if sort_field not in valid_sort_fields:
+            sort_field = 'mtime'
+
+        normalized_dir = sort_dir.upper()
+        if normalized_dir not in ('ASC', 'DESC'):
+            normalized_dir = 'DESC'
+
+        if sort_field == 'love_rate_bomb':
+            order_clause = (
+                f"{self._reaction_sort_bucket_expr()} ASC, "
+                "COALESCE(rating, 0) DESC, file_name ASC, id ASC"
+            )
+            return sort_field, normalized_dir, None, order_clause
+
+        sort_expr = sort_field
+        if sort_field == 'RANDOM()':
+            seed = kwargs.get('random_seed', 1234567)
+            sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+        elif sort_field == 'ctime':
+            sort_expr = 'COALESCE(ctime, mtime)'
+        elif sort_field == 'file_size':
+            sort_expr = 'COALESCE(file_size, 0)'
+
+        return sort_field, normalized_dir, sort_expr, f'{sort_expr} {normalized_dir}, id ASC'
+
     def get_rank_of_image(self, rel_path: str, sort_field: str = 'file_name', sort_dir: str = 'ASC', 
                           filter_sql: str = '', bindings: tuple = (), **kwargs) -> int:
         """
@@ -1209,16 +1279,9 @@ class ImageIndexDB:
         try:
             cursor = self.conn.cursor()
             safe_bindings = self._normalize_bindings(bindings)
-            
-            # 1. Resolve sort expression (must match get_page logic)
-            sort_expr = sort_field
-            if sort_field == 'RANDOM()':
-                seed = kwargs.get('random_seed', 1234567)
-                sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
-            elif sort_field == 'ctime':
-                sort_expr = 'COALESCE(ctime, mtime)'
-            elif sort_field == 'file_size':
-                sort_expr = 'COALESCE(file_size, 0)'
+            sort_field, sort_dir, sort_expr, _ = self._resolve_sort_order(
+                sort_field, sort_dir, **kwargs
+            )
                 
             # 2. Resolve target row (id + sort value), trying exact and slash-variant paths.
             target_candidates = [rel_path]
@@ -1231,27 +1294,59 @@ class ImageIndexDB:
 
             target_row = None
             for candidate in target_candidates:
-                if filter_sql:
-                    q = f"SELECT id, {sort_expr} FROM images WHERE file_name = ? AND ({filter_sql}) LIMIT 1"
-                    cursor.execute(q, (candidate,) + safe_bindings)
+                if sort_field == 'love_rate_bomb':
+                    if filter_sql:
+                        q = (
+                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
+                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            f"FROM images WHERE file_name = ? AND ({filter_sql}) LIMIT 1"
+                        )
+                        cursor.execute(q, (candidate,) + safe_bindings)
+                    else:
+                        q = (
+                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
+                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            "FROM images WHERE file_name = ? LIMIT 1"
+                        )
+                        cursor.execute(q, (candidate,))
                 else:
-                    q = f"SELECT id, {sort_expr} FROM images WHERE file_name = ? LIMIT 1"
-                    cursor.execute(q, (candidate,))
+                    if filter_sql:
+                        q = f"SELECT id, {sort_expr} FROM images WHERE file_name = ? AND ({filter_sql}) LIMIT 1"
+                        cursor.execute(q, (candidate,) + safe_bindings)
+                    else:
+                        q = f"SELECT id, {sort_expr} FROM images WHERE file_name = ? LIMIT 1"
+                        cursor.execute(q, (candidate,))
                 target_row = cursor.fetchone()
                 if target_row:
                     break
 
             if not target_row:
                 # Case-insensitive fallback for Windows path casing mismatches.
-                if filter_sql:
-                    q = (
-                        f"SELECT id, {sort_expr} FROM images "
-                        f"WHERE lower(file_name) = lower(?) AND ({filter_sql}) LIMIT 1"
-                    )
-                    cursor.execute(q, (rel_path,) + safe_bindings)
+                if sort_field == 'love_rate_bomb':
+                    if filter_sql:
+                        q = (
+                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
+                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            f"FROM images WHERE lower(file_name) = lower(?) AND ({filter_sql}) LIMIT 1"
+                        )
+                        cursor.execute(q, (rel_path,) + safe_bindings)
+                    else:
+                        q = (
+                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
+                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            "FROM images WHERE lower(file_name) = lower(?) LIMIT 1"
+                        )
+                        cursor.execute(q, (rel_path,))
                 else:
-                    q = f"SELECT id, {sort_expr} FROM images WHERE lower(file_name) = lower(?) LIMIT 1"
-                    cursor.execute(q, (rel_path,))
+                    if filter_sql:
+                        q = (
+                            f"SELECT id, {sort_expr} FROM images "
+                            f"WHERE lower(file_name) = lower(?) AND ({filter_sql}) LIMIT 1"
+                        )
+                        cursor.execute(q, (rel_path,) + safe_bindings)
+                    else:
+                        q = f"SELECT id, {sort_expr} FROM images WHERE lower(file_name) = lower(?) LIMIT 1"
+                        cursor.execute(q, (rel_path,))
                 target_row = cursor.fetchone()
 
             if not target_row:
@@ -1259,20 +1354,38 @@ class ImageIndexDB:
                 return -1
 
             target_id = int(target_row[0])
-            target_val = target_row[1]
 
-            # 3. Deterministic rank count mirroring get_page tie-break: ORDER BY sort_expr, id ASC.
-            if sort_dir.upper() == 'ASC':
-                before_clause = f"(({sort_expr} < ?) OR ({sort_expr} = ? AND id < ?))"
+            if sort_field == 'love_rate_bomb':
+                target_bucket = int(target_row[1])
+                target_rating = float(target_row[2] or 0.0)
+                target_file_name = str(target_row[3])
+                before_clause = (
+                    f"(({self._reaction_sort_bucket_expr()} < ?)"
+                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) > ?)"
+                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND file_name < ?)"
+                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND file_name = ? AND id < ?))"
+                )
+                rank_bindings = (
+                    target_bucket,
+                    target_bucket, target_rating,
+                    target_bucket, target_rating, target_file_name,
+                    target_bucket, target_rating, target_file_name, target_id,
+                )
             else:
-                before_clause = f"(({sort_expr} > ?) OR ({sort_expr} = ? AND id < ?))"
+                target_val = target_row[1]
+                # 3. Deterministic rank count mirroring get_page tie-break: ORDER BY sort_expr, id ASC.
+                if sort_dir == 'ASC':
+                    before_clause = f"(({sort_expr} < ?) OR ({sort_expr} = ? AND id < ?))"
+                else:
+                    before_clause = f"(({sort_expr} > ?) OR ({sort_expr} = ? AND id < ?))"
+                rank_bindings = (target_val, target_val, target_id)
 
             if filter_sql:
                 where_clause = f"({filter_sql}) AND {before_clause}"
-                query_bindings = safe_bindings + (target_val, target_val, target_id)
+                query_bindings = safe_bindings + rank_bindings
             else:
                 where_clause = before_clause
-                query_bindings = (target_val, target_val, target_id)
+                query_bindings = rank_bindings
 
             cursor.execute(f"SELECT COUNT(*) FROM images WHERE {where_clause}", query_bindings)
             return int(cursor.fetchone()[0])
@@ -1305,38 +1418,26 @@ class ImageIndexDB:
         if not self._ensure_connection():
             return []
 
-        # Validate sort field to prevent SQL injection
-        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height', 'id', 'RANDOM()', 'width * height', 'file_size', 'file_type', 'ctime'}
-        if sort_field not in valid_sort_fields:
-            sort_field = 'mtime'
-        if sort_dir.upper() not in ('ASC', 'DESC'):
-            sort_dir = 'DESC'
+        sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
+            sort_field, sort_dir, **kwargs
+        )
 
         try:
             with self._db_lock:
                 cursor = self.conn.cursor()
                 offset = page * page_size
 
-                # Handle stable random sorting if requested
-                sort_expr = sort_field
-                if sort_field == 'RANDOM()':
-                    seed = kwargs.get('random_seed', 1234567)
-                    sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
-                elif sort_field == 'ctime':
-                    sort_expr = 'COALESCE(ctime, mtime)'
-                elif sort_field == 'file_size':
-                    sort_expr = 'COALESCE(file_size, 0)'
-
                 query = f'''
                     SELECT id, file_name, width, height, aspect_ratio, is_video,
                            video_fps, video_duration, video_frame_count, mtime, rating,
+                           love, bomb,
                            file_size, file_type, ctime
                     FROM images
                 '''
                 if filter_sql:
                     query += f' WHERE {filter_sql} '
                     
-                query += f' ORDER BY {sort_expr} {sort_dir}, id ASC LIMIT ? OFFSET ?'
+                query += f' ORDER BY {order_clause} LIMIT ? OFFSET ?'
 
                 safe_bindings = self._normalize_bindings(bindings)
                 cursor.execute(query, safe_bindings + (page_size, offset))
@@ -1368,32 +1469,19 @@ class ImageIndexDB:
         if not self._ensure_connection():
             return []
 
-        # Validate sort (reuse logic from get_page)
-        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating', 'width', 'height', 'id', 'RANDOM()', 'width * height', 'file_size', 'file_type', 'ctime'}
-        if sort_field not in valid_sort_fields:
-            sort_field = 'mtime'
-        if sort_dir.upper() not in ('ASC', 'DESC'):
-            sort_dir = 'DESC'
+        sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
+            sort_field, sort_dir, **kwargs
+        )
 
         try:
             with self._db_lock:
                 cursor = self.conn.cursor()
 
-                # Handle stable random sorting
-                sort_expr = sort_field
-                if sort_field == 'RANDOM()':
-                    seed = kwargs.get('random_seed', 1234567)
-                    sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
-                elif sort_field == 'ctime':
-                    sort_expr = 'COALESCE(ctime, mtime)'
-                elif sort_field == 'file_size':
-                    sort_expr = 'COALESCE(file_size, 0)'
-
                 query = f'SELECT aspect_ratio FROM images'
                 if filter_sql:
                     query += f' WHERE {filter_sql} '
                 
-                query += f' ORDER BY {sort_expr} {sort_dir}'
+                query += f' ORDER BY {order_clause}'
 
                 safe_bindings = self._normalize_bindings(bindings)
                 cursor.execute(query, safe_bindings)
@@ -1413,6 +1501,7 @@ class ImageIndexDB:
             cursor.execute('''
                 SELECT id, file_name, width, height, aspect_ratio, is_video,
                        video_fps, video_duration, video_frame_count, mtime, rating,
+                       love, bomb,
                        file_size, file_type, ctime
                 FROM images WHERE id = ?
             ''', (image_id,))
@@ -1438,7 +1527,8 @@ class ImageIndexDB:
                 placeholders = ','.join('?' * len(batch))
                 cursor.execute(f'''
                     SELECT id, file_name, width, height, aspect_ratio, is_video,
-                           video_fps, video_duration, video_frame_count, mtime, rating
+                           video_fps, video_duration, video_frame_count, mtime, rating,
+                           love, bomb
                     FROM images WHERE id IN ({placeholders})
                 ''', batch)
                 result.extend([dict(row) for row in cursor.fetchall()])
@@ -1880,32 +1970,19 @@ class ImageIndexDB:
         if not self.enabled or not self.conn:
             return []
 
-        valid_sort_fields = {'mtime', 'file_name', 'aspect_ratio', 'rating',
-                             'width', 'height', 'id', 'RANDOM()',
-                             'width * height', 'file_size', 'file_type', 'ctime'}
-        if sort_field not in valid_sort_fields:
-            sort_field = 'file_name'
-        if sort_dir.upper() not in ('ASC', 'DESC'):
-            sort_dir = 'ASC'
+        sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
+            sort_field, sort_dir, **kwargs
+        )
 
         try:
             with self._db_lock:
                 cursor = self.conn.cursor()
                 page_size = end_rank - start_rank
 
-                sort_expr = sort_field
-                if sort_field == 'RANDOM()':
-                    seed = kwargs.get('random_seed', 1234567)
-                    sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
-                elif sort_field == 'ctime':
-                    sort_expr = 'COALESCE(ctime, mtime)'
-                elif sort_field == 'file_size':
-                    sort_expr = 'COALESCE(file_size, 0)'
-
                 inner_query = 'SELECT file_name, width FROM images'
                 if filter_sql:
                     inner_query += f' WHERE {filter_sql}'
-                inner_query += f' ORDER BY {sort_expr} {sort_dir} LIMIT ? OFFSET ?'
+                inner_query += f' ORDER BY {order_clause} LIMIT ? OFFSET ?'
 
                 safe_bindings = self._normalize_bindings(bindings)
                 query = f'SELECT file_name FROM ({inner_query}) sub WHERE sub.width IS NULL'
@@ -1949,7 +2026,8 @@ class ImageIndexDB:
             offset = page * page_size
             cursor.execute('''
                 SELECT i.id, i.file_name, i.width, i.height, i.aspect_ratio, i.is_video,
-                       i.video_fps, i.video_duration, i.video_frame_count, i.mtime, i.rating
+                       i.video_fps, i.video_duration, i.video_frame_count, i.mtime, i.rating,
+                       i.love, i.bomb
                 FROM images i
                 INNER JOIN image_tags t ON i.id = t.image_id
                 WHERE t.tag = ?
@@ -1975,6 +2053,22 @@ class ImageIndexDB:
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f'Database rating write error: {e}')
+
+    def set_reactions(self, image_id: int, love: bool, bomb: bool):
+        """Set DB-only love/bomb reaction flags for one image."""
+        if not self.enabled or not self.conn:
+            return
+
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'UPDATE images SET love = ?, bomb = ? WHERE id = ?',
+                    (int(bool(love)), int(bool(bomb)), image_id),
+                )
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f'Database reaction write error: {e}')
 
     def mark_thumbnail_cached(self, file_name: str, cached: bool = True):
         """Mark thumbnail as cached/uncached for an image (thread-safe)."""

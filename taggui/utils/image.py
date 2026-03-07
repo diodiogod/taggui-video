@@ -31,6 +31,8 @@ class Image:
     crop: QRect | None = None
     markings: list[Marking] = field(default_factory=list)
     rating: float = 0.0
+    love: bool = False
+    bomb: bool = False
     thumbnail: QIcon | None = None
     thumbnail_qimage: QImage | None = None  # Store QImage, convert to QPixmap/QIcon lazily
     is_video: bool = False

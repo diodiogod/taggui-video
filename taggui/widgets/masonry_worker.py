@@ -8,6 +8,8 @@ from pathlib import Path
 from dataclasses import dataclass
 import threading
 
+MASONRY_CACHE_VERSION = 4
+
 
 @dataclass
 class MasonryItem:
@@ -193,7 +195,7 @@ def _save_to_cache(cache_key, result, items_data, column_width, spacing, num_col
     try:
         cache_path = _get_cache_path(cache_key)
         cache_data = {
-            'cache_version': 3,  # Bumped version for pickle format
+            'cache_version': MASONRY_CACHE_VERSION,
             'column_width': column_width,
             'spacing': spacing,
             'num_columns': num_columns,
@@ -230,27 +232,46 @@ def _load_from_cache(cache_key, items_data, column_width, spacing, num_columns):
             cache_data = pickle.load(f)
 
         # Validate cache
-        if (cache_data.get('cache_version') != 3 or
+        if (cache_data.get('cache_version') != MASONRY_CACHE_VERSION or
             cache_data['column_width'] != column_width or
             cache_data['spacing'] != spacing or
             cache_data['num_columns'] != num_columns or
             cache_data['items_count'] != len(items_data)):
             return None
 
-        # Validate aspect ratios match (sample check for performance)
+        # Validate both item order and aspect ratios. Order mismatches can
+        # otherwise reuse a stale layout and apply the wrong heights to items.
         cached_items = cache_data['items']
-        # Only validate first 100 items for speed (full validation too slow for 32K items)
-        sample_size = min(100, len(items_data))
-        for i in range(sample_size):
+        if len(cached_items) != len(items_data):
+            return None
+
+        if len(items_data) <= 256:
+            sample_positions = list(range(len(items_data)))
+        else:
+            sample_positions = sorted({
+                0,
+                len(items_data) - 1,
+                len(items_data) // 4,
+                len(items_data) // 2,
+                (3 * len(items_data)) // 4,
+                *range(min(64, len(items_data))),
+                *range(max(0, len(items_data) - 64), len(items_data)),
+            })
+
+        for i in sample_positions:
             index, aspect_ratio = items_data[i]
             if i >= len(cached_items):
                 return None
-            cached_aspect = cached_items[i]['aspect_ratio']
+            cached_item = cached_items[i]
+
+            if int(cached_item.get('index', -999999)) != int(index):
+                return None
             
             # SPACER HANDLING: If aspect_ratio is a tuple (SPACER), skip float validation
             if isinstance(aspect_ratio, tuple):
                  continue
 
+            cached_aspect = cached_item['aspect_ratio']
             if abs(cached_aspect - aspect_ratio) > 0.001:
                 return None
 

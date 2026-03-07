@@ -52,15 +52,18 @@ These actions are available from the `Edit` menu.
 
 ## Star Ratings
 
-- Rate the current file with the toolbar stars
+- Rate the current file with the painted toolbar stars
+- Half-stars are supported: click the left or right half of a star, or drag across the widget and release
 - Set rating with keyboard: `Ctrl` + `1` through `Ctrl` + `5`
 - Clear rating with keyboard: `Ctrl` + `0`
 - Create an exact star filter: `Ctrl` + click a toolbar star
 - Create a minimum-star filter: `Ctrl` + `Shift` + click a toolbar star
+- Toggle `love` and `bomb` from the toolbar reaction buttons
 
 Examples:
 
 - `Ctrl` + click on the 3-star button applies `stars:=3`
+- `Ctrl` + click on the left half of the 4th star applies `stars:=3.5`
 - `Ctrl` + `Shift` + click on the 3-star button applies `stars:>=3`
 
 ## Floating Viewers

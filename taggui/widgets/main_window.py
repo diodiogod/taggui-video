@@ -462,7 +462,9 @@ class MainWindow(QMainWindow):
         # Create toolbar and menus
         self.toolbar_manager.create_toolbar()
         self.rating = self.toolbar_manager.rating
-        self.star_labels = self.toolbar_manager.star_labels
+        self.rating_widget = self.toolbar_manager.rating_widget
+        self.love_button = self.toolbar_manager.love_button
+        self.bomb_button = self.toolbar_manager.bomb_button
 
         self.image_list = ImageList(self.proxy_image_list_model,
                                     tag_separator, image_list_image_width)
@@ -1265,6 +1267,7 @@ class MainWindow(QMainWindow):
         self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
             self.sync_zoom_follow_mode_button(target)
+            self._sync_rating_controls_from_viewer(target)
             if self._exclusive_video_controls_visibility:
                 self._sync_active_viewer_controls_visibility(target)
             return
@@ -1273,6 +1276,7 @@ class MainWindow(QMainWindow):
         active_zoom = -1 if getattr(target, 'is_zoom_to_fit', False) else target.view.transform().m11()
         self.zoom(active_zoom)
         self.sync_zoom_follow_mode_button(target)
+        self._sync_rating_controls_from_viewer(target)
 
         live_windows = []
         for window in list(getattr(self, '_floating_viewers', [])):
@@ -1341,6 +1345,31 @@ class MainWindow(QMainWindow):
             except Exception:
                 continue
 
+    def _current_viewer_image(self, viewer: ImageViewer | None = None):
+        target = viewer or self.get_active_viewer()
+        if target is None:
+            return None
+        try:
+            index = target.proxy_image_index
+            if index is not None and index.isValid():
+                return index.data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            return None
+        return None
+
+    def _sync_rating_controls_from_viewer(self, viewer: ImageViewer | None = None):
+        image = self._current_viewer_image(viewer)
+        if image is None:
+            self.set_rating(0.0, False)
+            self.set_reactions(False, False, False)
+            return
+        self.set_rating(float(getattr(image, 'rating', 0.0) or 0.0), False)
+        self.set_reactions(
+            bool(getattr(image, 'love', False)),
+            bool(getattr(image, 'bomb', False)),
+            False,
+        )
+
     def _connect_floating_viewer(self, viewer: ImageViewer):
         """Bind floating viewer signals to existing main-window slots."""
         viewer.activated.connect(lambda: self.set_active_viewer(viewer))
@@ -1348,6 +1377,7 @@ class MainWindow(QMainWindow):
         viewer.zoom_follow_mode_changed.connect(
             lambda mode, source=viewer: self.sync_zoom_follow_mode_button(source))
         viewer.rating_changed.connect(self.set_rating)
+        viewer.reaction_flags_changed.connect(self.set_reactions)
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
         viewer.directory_reload_requested.connect(self.reload_directory)
         viewer.video_player.playback_started.connect(self._freeze_list_view)
@@ -3303,11 +3333,21 @@ class MainWindow(QMainWindow):
 
         self.delayed_filter()
 
+    @Slot()
+    def apply_image_list_filter_now(self):
+        """Force the current filter to apply immediately."""
+        if self._filter_timer.isActive():
+            self._filter_timer.stop()
+        self._execute_delayed_filter()
+
     def delayed_filter(self):
         media_type = self.image_list.media_type_combo_box.currentText()
         self.proxy_image_list_model.set_media_type_filter(media_type)
         filter_ = self.image_list.filter_line_edit.parse_filter_text()
         self.proxy_image_list_model.set_filter(filter_)
+        if filter_ is not None:
+            self.image_list.filter_line_edit.remember_filter_history(
+                self.image_list.filter_line_edit.text())
         # filter_changed.emit() is already called by set_filter() - don't emit twice!
         if filter_ is None:
             all_tags_list_selection_model = (self.all_tags_editor
@@ -3496,24 +3536,25 @@ class MainWindow(QMainWindow):
     @Slot(float)
     def set_rating(self, rating: float, interactive: bool = False,
                    event: QMouseEvent|None = None):
-        """Set the rating from 0.0 to 1.0.
-
-        In the future, half-stars '⯪' might be included, but right now it's
-        causing display issues."""
+        """Set the rating from 0.0 to 1.0."""
         if event is not None and (event.modifiers() & Qt.ControlModifier) == Qt.ControlModifier:
             # don't set the image but instead the filter
             is_shift = (event.modifiers() & Qt.ShiftModifier) == Qt.ShiftModifier
-            stars = f'stars:{'>=' if is_shift else '='}{round(rating*5)}'
+            stars_value = float(rating or 0.0) * 5.0
+            if abs(stars_value - round(stars_value)) <= 1e-6:
+                value_text = str(int(round(stars_value)))
+            else:
+                value_text = f"{stars_value:.1f}".rstrip('0').rstrip('.')
+            stars = f"stars:{'>=' if is_shift else '='}{value_text}"
             self.image_list.filter_line_edit.setText(stars)
             return
 
-        if interactive and rating == 2.0/10.0 and self.rating == rating:
-            rating = 0.0
         self.rating = rating
-        for i, label in enumerate(self.star_labels):
-            label.setEnabled(True)
-            label.setText('★' if 2*i+1 < 10.0*rating else '☆')
+        if self.rating_widget is not None:
+            self.rating_widget.set_rating(float(rating or 0.0) * 5.0)
         if interactive:
+            if self._current_viewer_image() is None:
+                return
             self.image_list_model.add_to_undo_stack(
                 action_name='Change rating', should_ask_for_confirmation=False)
             self.get_active_viewer().rating_change(rating)
@@ -3522,6 +3563,23 @@ class MainWindow(QMainWindow):
             if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
                 self._arm_masonry_refresh_anchor()
                 self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+
+    def set_reactions(self, love: bool, bomb: bool, interactive: bool = False):
+        if self.love_button is not None:
+            blocker = self.love_button.blockSignals(True)
+            self.love_button.setChecked(bool(love))
+            self.love_button.blockSignals(blocker)
+        if self.bomb_button is not None:
+            blocker = self.bomb_button.blockSignals(True)
+            self.bomb_button.setChecked(bool(bomb))
+            self.bomb_button.blockSignals(blocker)
+
+        if interactive:
+            if self._current_viewer_image() is None:
+                return
+            self.image_list_model.add_to_undo_stack(
+                action_name='Change reactions', should_ask_for_confirmation=False)
+            self.get_active_viewer().reaction_flags_change(love=love, bomb=bomb)
 
     def _arm_masonry_refresh_anchor(self):
         """Keep selected masonry item stable across filter-triggered relayout."""

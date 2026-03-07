@@ -9,6 +9,7 @@ from utils.icons import (create_add_box_icon, create_apply_crop_icon,
                          toggle_marking_icon, show_markings_icon,
                          show_labels_icon, show_marking_latent_icon)
 from utils.settings import settings
+from widgets.rating_controls import ReactionToggleButton, StarRatingWidget
 
 
 class ToolbarManager:
@@ -47,8 +48,10 @@ class ToolbarManager:
         self.fix_all_sar_btn = None
         self.apply_speed_btn = None
         self.change_fps_btn = None
-        self.star_labels = []
         self.rating = 0
+        self.rating_widget = None
+        self.love_button = None
+        self.bomb_button = None
         self.delete_marked_btn = None
         self.delete_marked_menu = None
 
@@ -342,36 +345,33 @@ class ToolbarManager:
         return button
 
     def _create_rating_stars(self):
-        """Create rating stars widget."""
+        """Create rating and reaction widgets."""
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
 
-        star_widget = QWidget()
-        star_layout = QHBoxLayout(star_widget)
-        star_layout.setContentsMargins(0, 0, 0, 0)
-        star_layout.setSpacing(0)
+        rating_widget = QWidget()
+        rating_layout = QHBoxLayout(rating_widget)
+        rating_layout.setContentsMargins(0, 0, 0, 0)
+        rating_layout.setSpacing(6)
 
         self.rating = 0
-        self.star_labels = []
+        self.rating_widget = StarRatingWidget(self.main_window)
+        rating_layout.addWidget(self.rating_widget)
+
+        self.love_button = ReactionToggleButton('love', self.main_window)
+        rating_layout.addWidget(self.love_button)
+
+        self.bomb_button = ReactionToggleButton('bomb', self.main_window)
+        rating_layout.addWidget(self.bomb_button)
 
         for i in range(6):
             shortcut = QShortcut(QKeySequence(f'Ctrl+{i}'), self.main_window)
-            shortcut.activated.connect(lambda checked=False, rating=i:
-                                       self.main_window.set_rating(2*rating, False))
-            if i == 0:
-                continue
-            star_label = QLabel('☆', self.main_window)
-            star_label.setEnabled(False)
-            star_label.setAlignment(Qt.AlignCenter)
-            star_label.setStyleSheet('QLabel { font-size: 22px; }')
-            star_label.setToolTip(f'Ctrl+{i}')
-            star_label.mousePressEvent = lambda event, rating=i: (
-                self.main_window.set_rating(rating/5.0, True, event))
-            self.star_labels.append(star_label)
-            star_layout.addWidget(star_label)
+            shortcut.activated.connect(
+                lambda checked=False, rating=i: self.main_window.set_rating(rating / 5.0, True)
+            )
 
-        self.toolbar.addWidget(star_widget)
+        self.toolbar.addWidget(rating_widget)
 
     def _create_delete_marked_button(self):
         """Create delete marked images dropdown button."""

@@ -38,7 +38,7 @@ class ImageList(QDockWidget):
         sort_label = QLabel('Sort')
         self.sort_combo_box = SettingsComboBox(key='image_list_sort_by')
         self.sort_combo_box.addItems(['Default', 'Name', 'Modified', 'Created',
-                                       'Size', 'Type', 'Random'])
+                                       'Size', 'Type', 'Love / Rate / Bomb', 'Random'])
 
         self.media_type_combo_box = SettingsComboBox(key='media_type_filter')
         self.media_type_combo_box.addItems(['All', 'Images', 'Videos'])
@@ -248,6 +248,7 @@ class ImageList(QDockWidget):
                     'Created': ('ctime', 'DESC'),
                     'Size': ('file_size', 'DESC'),
                     'Type': ('file_type', 'ASC'),
+                    'Love / Rate / Bomb': ('love_rate_bomb', 'ASC'),
                     'Random': ('RANDOM()', 'ASC')  # Now supported in DB
                 }
 
@@ -304,6 +305,17 @@ class ImageList(QDockWidget):
                         source_model.images.sort(key=lambda img: safe_stat(img, 'st_size'), reverse=True)
                     elif sort_by == 'Type':
                         source_model.images.sort(key=lambda img: (img.path.suffix.lower(), natural_sort_key(img.path.name)))
+                    elif sort_by == 'Love / Rate / Bomb':
+                        source_model.images.sort(
+                            key=lambda img: (
+                                0 if img.love and not img.bomb else
+                                1 if img.love and img.bomb else
+                                2 if not img.love and not img.bomb else
+                                3,
+                                -float(img.rating or 0.0),
+                                natural_sort_key(img.path),
+                            )
+                        )
                     elif sort_by == 'Random':
                         import random
                         random.shuffle(source_model.images)

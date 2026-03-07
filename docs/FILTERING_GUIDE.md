@@ -42,6 +42,7 @@ Current sort options in the code are:
 - `Created`
 - `Size`
 - `Type`
+- `Love / Rate / Bomb`
 - `Random`
 
 ### What These Mean
@@ -52,6 +53,7 @@ Current sort options in the code are:
 - `Created`: newest created files first
 - `Size`: largest files first
 - `Type`: grouped by file type or extension
+- `Love / Rate / Bomb`: love-only first, then love+bomb, then normal items by rating, then bomb-only last
 - `Random`: randomized ordering
 
 ### DB-Backed Sort Support
@@ -63,6 +65,7 @@ In the current DB-backed Video 1M path, sorting is connected to database fields 
 - `ctime`
 - `file_size`
 - `file_type`
+- `love_rate_bomb`
 - `rating`
 - `aspect_ratio`
 
@@ -235,20 +238,40 @@ Example:
 stars:>=4
 ```
 
+Half-star values are supported, for example:
+
+```text
+stars:=3.5
+```
+
 ### Star Rating UI Shortcuts
 
 TagGUI also supports star filtering directly from the rating UI.
 
 - Click a star to rate the current file
+- Click the left or right half of a star for half-star ratings
+- Drag across the star widget and release to scrub a rating
 - `Ctrl` + click a star to set an exact star filter
 - `Ctrl` + `Shift` + click a star to set a minimum-star filter
 
 Examples:
 
 - `Ctrl` + click on 4 stars sets `stars:=4`
+- `Ctrl` + click on the left half of the 4th star sets `stars:=3.5`
 - `Ctrl` + `Shift` + click on 4 stars sets `stars:>=4`
 
 This is one of the quickest ways to turn ratings into an active filter.
+
+### `love:` / `bomb:`
+
+DB-backed local reaction filters.
+
+Examples:
+
+```text
+love:true
+bomb:true
+```
 
 ### `width:` / `height:`
 
@@ -344,7 +367,7 @@ tag:"orange cat"
 ## Current Limitations in Video 1M
 
 > [!WARNING]
-> In the current paginated and DB-backed Video 1M path, not every filter type is implemented in SQL yet. Tags, star ratings, and basic marking predicates such as `marking:` and `marking_type:` have DB-backed support, but geometry-aware marking predicates such as `crops:` and `visible:` are still tied to in-memory or sidecar metadata behavior rather than a full SQL-backed filter path.
+> In the current paginated and DB-backed Video 1M path, not every filter type is implemented in SQL yet. Tags, star ratings, local love/bomb reactions, and basic marking predicates such as `marking:` and `marking_type:` have DB-backed support, but geometry-aware marking predicates such as `crops:` and `visible:` are still tied to in-memory or sidecar metadata behavior rather than a full SQL-backed filter path.
 
 > [!NOTE]
 > The parser supports more filter syntax than the current DB-backed paginated path accelerates. If a filter feels inconsistent in very large paginated datasets, this implementation gap is one of the first things to check.
@@ -353,7 +376,7 @@ tag:"orange cat"
 
 - Filtering is especially important in large datasets where visual browsing alone is not enough.
 - Marking-aware filtering connects directly to the markings workflow.
-- Rating-aware filtering connects directly to the DB-backed star-rating support already present in Video 1M.
+- Rating-aware and reaction-aware filtering connect directly to the DB-backed curation metadata already present in Video 1M.
 - Media-type filtering and DB-backed sorting are part of the same large-collection workflow, even though they are controlled through separate UI widgets instead of the text filter box.
 
 ## Continue Reading
