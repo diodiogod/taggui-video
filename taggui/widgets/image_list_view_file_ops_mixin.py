@@ -259,9 +259,25 @@ class ImageListViewFileOpsMixin:
 
         # Restore files
         restored = 0
+        main_window = self.window()
+        video_editing_controller = getattr(main_window, 'video_editing_controller', None)
         for img, backup_path in images_with_backups:
             try:
                 shutil.copy2(str(backup_path), str(img.path))
+                json_path = img.path.with_suffix('.json')
+                json_backup_path = json_path.with_suffix(json_path.suffix + '.backup')
+                if json_backup_path.exists():
+                    shutil.copy2(str(json_backup_path), str(json_path))
+                elif json_path.exists():
+                    try:
+                        json_path.unlink()
+                    except Exception:
+                        pass
+                if getattr(img, 'is_video', False) and video_editing_controller is not None:
+                    try:
+                        video_editing_controller._refresh_edited_video_metadata(img.path)
+                    except Exception:
+                        pass
                 restored += 1
             except Exception as e:
                 QMessageBox.warning(None, "Restore Error", f"Failed to restore {img.path.name}:\n{str(e)}")
@@ -270,6 +286,13 @@ class ImageListViewFileOpsMixin:
             QMessageBox.information(None, "Restore Complete", f"Successfully restored {restored} {'file' if restored == 1 else 'files'}.")
             # Trigger reload to update thumbnails
             self.directory_reload_requested.emit()
+            if video_editing_controller is not None:
+                for img, _backup_path in images_with_backups:
+                    if getattr(img, 'is_video', False):
+                        try:
+                            video_editing_controller._force_reload_current_video_viewer(img.path)
+                        except Exception:
+                            pass
 
 
     @Slot()

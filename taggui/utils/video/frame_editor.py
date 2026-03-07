@@ -13,6 +13,32 @@ class FrameEditor:
     """Handles frame-level video editing operations using ffmpeg."""
 
     @staticmethod
+    def _probe_streams(input_path: Path) -> Tuple[bool, Optional[dict], Optional[dict], str]:
+        """Probe media streams and return whether an audio stream exists."""
+        probe_cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            str(input_path)
+        ]
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if probe_result.returncode != 0:
+            return False, None, None, probe_result.stderr
+
+        probe_data = json.loads(probe_result.stdout)
+        video_stream = None
+        has_audio = False
+        for stream in probe_data.get('streams', []):
+            codec_type = stream.get('codec_type')
+            if codec_type == 'video' and video_stream is None:
+                video_stream = stream
+            elif codec_type == 'audio':
+                has_audio = True
+
+        return has_audio, probe_data, video_stream, ""
+
+    @staticmethod
     def extract_range_rough(input_path: Path, output_path: Path,
                             start_frame: int, end_frame: int, fps: float) -> Tuple[bool, str]:
         """
@@ -31,6 +57,10 @@ class FrameEditor:
             Tuple of (success: bool, message: str)
         """
         try:
+            has_audio, _, _, probe_error = FrameEditor._probe_streams(input_path)
+            if probe_error:
+                return False, f"Failed to probe video: {probe_error}"
+
             # Create backup if replacing original
             if input_path == output_path:
                 if not create_backup(input_path):
@@ -103,6 +133,10 @@ class FrameEditor:
             Tuple of (success: bool, message: str)
         """
         try:
+            has_audio, _, _, probe_error = FrameEditor._probe_streams(input_path)
+            if probe_error:
+                return False, f"Failed to probe video: {probe_error}"
+
             # Create backup if replacing original
             if input_path == output_path:
                 if not create_backup(input_path):
@@ -156,24 +190,26 @@ class FrameEditor:
                 if abs(tempo - 1.0) >= 0.01:
                     af_parts.append(f'atempo={tempo}')
 
-            af = ','.join(af_parts)
-
             # Frame-accurate extraction via trim filter (re-encodes).
             # -ss before -i would only seek to keyframes; trim filter is frame-accurate.
             cmd = [
                 *ffmpeg_base_args_software(),
                 '-i', str(input_path),
                 '-vf', vf,
-                '-af', af,
                 '-c:v', 'libx264',
                 '-pix_fmt', 'yuv420p',
                 '-crf', '18',
                 '-preset', 'medium',
-                '-c:a', 'aac',
-                '-b:a', '192k',
+            ]
+            if has_audio:
+                af = ','.join(af_parts)
+                cmd.extend(['-af', af, '-c:a', 'aac', '-b:a', '192k'])
+            else:
+                cmd.append('-an')
+            cmd.extend([
                 '-y',
                 str(actual_output)
-            ]
+            ])
 
             result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -253,25 +289,11 @@ class FrameEditor:
             Tuple of (success: bool, message: str)
         """
         try:
-            # Get current frame count
-            probe_cmd = [
-                'ffprobe',
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_streams',
-                str(input_path)
-            ]
-            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
-            if probe_result.returncode != 0:
-                return False, f"Failed to probe video: {probe_result.stderr}"
+            has_audio, _, video_stream, probe_error = FrameEditor._probe_streams(input_path)
+            if probe_error:
+                return False, f"Failed to probe video: {probe_error}"
 
-            probe_data = json.loads(probe_result.stdout)
-            current_frames = None
-            for stream in probe_data.get('streams', []):
-                if stream.get('codec_type') == 'video':
-                    current_frames = stream.get('nb_frames')
-                    break
-
+            current_frames = None if video_stream is None else video_stream.get('nb_frames')
             if current_frames is None:
                 return False, "Could not determine frame count"
 
@@ -301,26 +323,31 @@ class FrameEditor:
 
                 if start_frame > 0:
                     filter_parts.append(f'[0:v]trim=start_frame=0:end_frame={start_frame},setpts=PTS-STARTPTS[before];')
-                    audio_filter_parts.append(f'[0:a]atrim=start=0:duration={start_time},asetpts=PTS-STARTPTS[abefore];')
+                    if has_audio:
+                        audio_filter_parts.append(f'[0:a]atrim=start=0:duration={start_time},asetpts=PTS-STARTPTS[abefore];')
 
                 if end_frame < current_frames - 1:
                     after_start_time = end_time
                     filter_parts.append(f'[0:v]trim=start_frame={end_frame+1},setpts=PTS-STARTPTS[after];')
-                    audio_filter_parts.append(f'[0:a]atrim=start={after_start_time},asetpts=PTS-STARTPTS[aafter];')
+                    if has_audio:
+                        audio_filter_parts.append(f'[0:a]atrim=start={after_start_time},asetpts=PTS-STARTPTS[aafter];')
 
                 # Concatenate the segments - keep video logic untouched
                 if start_frame > 0 and end_frame < current_frames - 1:
                     # Remove from middle: concat before + after
                     filter_parts.append('[before][after]concat=n=2:v=1:a=0[out]')
-                    audio_filter_parts.append('[abefore][aafter]concat=n=2:v=0:a=1[aout]')
+                    if has_audio:
+                        audio_filter_parts.append('[abefore][aafter]concat=n=2:v=0:a=1[aout]')
                 elif start_frame > 0:
                     # Remove only from end: keep before
                     filter_parts.append('[before]copy[out]')
-                    audio_filter_parts.append('[abefore]anull[aout]')  # Pass through audio unchanged
+                    if has_audio:
+                        audio_filter_parts.append('[abefore]anull[aout]')  # Pass through audio unchanged
                 elif end_frame >= 0:
                     # Remove only from start (or all): handle normally
                     filter_parts.append('[after]copy[out]')
-                    audio_filter_parts.append('[aafter]anull[aout]')  # Pass through audio unchanged
+                    if has_audio:
+                        audio_filter_parts.append('[aafter]anull[aout]')  # Pass through audio unchanged
 
                 # Combine filters - they're already terminated with semicolons in the lists
                 video_filter_complex = ''.join(filter_parts)
@@ -363,7 +390,12 @@ class FrameEditor:
                     '-pix_fmt', 'yuv420p',
                     '-crf', '18',
                     '-preset', 'slow',
-                    '-c:a', 'aac',
+                ])
+                if has_audio:
+                    cmd.extend(['-c:a', 'aac'])
+                else:
+                    cmd.append('-an')
+                cmd.extend([
                     '-y',
                     str(temp_output)
                 ])
@@ -442,25 +474,11 @@ class FrameEditor:
             Tuple of (success: bool, message: str)
         """
         try:
-            # Get current frame count first
-            probe_cmd = [
-                'ffprobe',
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_streams',
-                str(input_path)
-            ]
-            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
-            if probe_result.returncode != 0:
-                return False, f"Failed to probe video: {probe_result.stderr}"
+            has_audio, _, video_stream, probe_error = FrameEditor._probe_streams(input_path)
+            if probe_error:
+                return False, f"Failed to probe video: {probe_error}"
 
-            probe_data = json.loads(probe_result.stdout)
-            current_frames = None
-            for stream in probe_data.get('streams', []):
-                if stream.get('codec_type') == 'video':
-                    current_frames = stream.get('nb_frames')
-                    break
-
+            current_frames = None if video_stream is None else video_stream.get('nb_frames')
             if current_frames is None:
                 return False, "Could not determine frame count"
 
@@ -488,10 +506,15 @@ class FrameEditor:
                 '-c:v', 'libx264',
                 '-crf', '28',  # Lower quality for speed
                 '-preset', 'ultrafast',
-                '-c:a', 'aac',
+            ]
+            if has_audio:
+                extract_cmd.extend(['-c:a', 'aac'])
+            else:
+                extract_cmd.append('-an')
+            extract_cmd.extend([
                 '-y',
                 str(frame_file)
-            ]
+            ])
 
             extract_result = subprocess.run(extract_cmd, capture_output=True, text=True)
 
@@ -530,41 +553,50 @@ class FrameEditor:
             # Split the input
             if frame_num > 0:
                 filter_parts.append(f'[0:v]trim=start_frame=0:end_frame={frame_num},setpts=PTS-STARTPTS[before];')
-                audio_filter_parts.append(f'[0:a]atrim=start=0:duration={frame_time},asetpts=PTS-STARTPTS[abefore];')
+                if has_audio:
+                    audio_filter_parts.append(f'[0:a]atrim=start=0:duration={frame_time},asetpts=PTS-STARTPTS[abefore];')
 
             # Original frame at position
             filter_parts.append(f'[0:v]trim=start_frame={frame_num}:end_frame={frame_num+1},setpts=PTS-STARTPTS[at];')
-            audio_filter_parts.append(f'[0:a]atrim=start={frame_time}:duration={at_frame_duration},asetpts=PTS-STARTPTS[aat];')
+            if has_audio:
+                audio_filter_parts.append(f'[0:a]atrim=start={frame_time}:duration={at_frame_duration},asetpts=PTS-STARTPTS[aat];')
 
             # Looped frame section (repeat audio for looped frames)
-            audio_filter_parts.append(f'[0:a]atrim=start={frame_time}:duration={at_frame_duration},asetpts=PTS-STARTPTS,aloop=loop={repeat_count-1}[alooped];')
+            if has_audio:
+                audio_filter_parts.append(f'[0:a]atrim=start={frame_time}:duration={at_frame_duration},asetpts=PTS-STARTPTS,aloop=loop={repeat_count-1}[alooped];')
 
             # Frames after (if any)
             if frame_num < current_frames - 1:
                 filter_parts.append(f'[0:v]trim=start_frame={frame_num+1},setpts=PTS-STARTPTS[after];')
-                audio_filter_parts.append(f'[0:a]atrim=start={after_frame_start},asetpts=PTS-STARTPTS[aafter];')
+                if has_audio:
+                    audio_filter_parts.append(f'[0:a]atrim=start={after_frame_start},asetpts=PTS-STARTPTS[aafter];')
 
             # Concatenate all parts
             concat_inputs = []
             audio_concat_inputs = []
             if frame_num > 0:
                 concat_inputs.append('[before]')
-                audio_concat_inputs.append('[abefore]')
+                if has_audio:
+                    audio_concat_inputs.append('[abefore]')
             concat_inputs.append('[at]')
-            audio_concat_inputs.append('[aat]')
+            if has_audio:
+                audio_concat_inputs.append('[aat]')
             concat_inputs.append('[looped]')
-            audio_concat_inputs.append('[alooped]')
+            if has_audio:
+                audio_concat_inputs.append('[alooped]')
             if frame_num < current_frames - 1:
                 concat_inputs.append('[after]')
-                audio_concat_inputs.append('[aafter]')
+                if has_audio:
+                    audio_concat_inputs.append('[aafter]')
 
             filter_parts.append(f'{"".join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[outv]')
-            audio_filter_parts.append(f'{"".join(audio_concat_inputs)}concat=n={len(audio_concat_inputs)}:v=0:a=1[aout]')
+            if has_audio:
+                audio_filter_parts.append(f'{"".join(audio_concat_inputs)}concat=n={len(audio_concat_inputs)}:v=0:a=1[aout]')
 
             # Combine video and audio filter chains with semicolon separator
             video_filter = ''.join(filter_parts).rstrip(';')
             audio_filter = ''.join(audio_filter_parts).rstrip(';')
-            filter_complex = video_filter + ';' + audio_filter
+            filter_complex = video_filter if not audio_filter else video_filter + ';' + audio_filter
 
             # Use temp output if input == output
             import shutil
@@ -576,16 +608,20 @@ class FrameEditor:
                 '-i', str(frame_file),
                 '-filter_complex', filter_complex,
                 '-map', '[outv]',
-                '-map', '[aout]',
                 '-c:v', 'libx264',
                 '-pix_fmt', 'yuv420p',
                 '-crf', '18',
                 '-preset', 'slow',
-                '-c:a', 'aac',
                 '-r', str(fps),
+            ]
+            if has_audio:
+                cmd.extend(['-map', '[aout]', '-c:a', 'aac'])
+            else:
+                cmd.append('-an')
+            cmd.extend([
                 '-y',
                 str(temp_output)
-            ]
+            ])
 
             result = subprocess.run(cmd, capture_output=True, text=True)
 

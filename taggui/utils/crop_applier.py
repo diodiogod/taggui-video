@@ -8,6 +8,23 @@ from PySide6.QtCore import QRect
 from utils.video.ffmpeg_gpu import ffmpeg_base_args
 
 
+def _backup_sidecar_json(file_path: Path) -> bool:
+    """Backup sidecar JSON when present."""
+    json_path = file_path.with_suffix('.json')
+    if not json_path.exists():
+        return True
+
+    json_backup_path = json_path.with_suffix(json_path.suffix + '.backup')
+    if json_backup_path.exists():
+        return True
+
+    try:
+        shutil.copy2(json_path, json_backup_path)
+        return True
+    except Exception:
+        return False
+
+
 def create_backup(file_path: Path) -> bool:
     """Create backup of original file with .backup extension.
 
@@ -17,10 +34,10 @@ def create_backup(file_path: Path) -> bool:
     if not backup_path.exists():
         try:
             shutil.copy2(file_path, backup_path)
-            return True
         except Exception:
             return False
-    return True  # Backup already exists
+
+    return _backup_sidecar_json(file_path)
 
 
 def apply_crop_to_image(image_path: Path, crop_rect: QRect) -> tuple[bool, str]:

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from collections import deque
 
 from utils.video_editor import VideoEditor
@@ -107,6 +107,216 @@ class VideoEditingController:
         QApplication.processEvents()  # Process pending events to keep GUI responsive
         gc.collect()  # Force garbage collection
 
+    def _refresh_edited_video_metadata(self, video_path: Path):
+        """Refresh cached metadata for a video that was edited in place."""
+        try:
+            if not video_path.exists():
+                return
+
+            from models.image_list_model import extract_video_info
+
+            dimensions, video_metadata, preview_qimage = extract_video_info(video_path)
+            if not dimensions or not video_metadata:
+                return
+
+            stat = video_path.stat()
+            image_list_model = getattr(self.main_window, 'image_list_model', None)
+            if image_list_model is None:
+                return
+
+            rating = 0.0
+            try:
+                source_row = image_list_model.get_index_for_path(video_path)
+                if source_row != -1:
+                    image = image_list_model.data(
+                        image_list_model.index(source_row, 0),
+                        Qt.ItemDataRole.UserRole,
+                    )
+                    if image is not None:
+                        rating = float(getattr(image, 'rating', 0.0) or 0.0)
+                        image.dimensions = dimensions
+                        image.video_metadata = video_metadata
+                        image.mtime = stat.st_mtime
+                        if preview_qimage is not None:
+                            image.thumbnail_qimage = preview_qimage
+            except Exception:
+                pass
+
+            db = getattr(image_list_model, '_db', None)
+            directory_path = getattr(self.main_window, 'directory_path', None)
+            if db is None or directory_path is None:
+                return
+
+            try:
+                rel_path = str(video_path.relative_to(directory_path))
+            except ValueError:
+                return
+
+            db.save_info(
+                rel_path,
+                dimensions[0],
+                dimensions[1],
+                True,
+                stat.st_mtime,
+                video_metadata,
+                rating=rating,
+                file_size=stat.st_size,
+                file_type=video_path.suffix.lower(),
+                ctime=getattr(stat, 'st_ctime', stat.st_mtime),
+            )
+            db.commit()
+        except Exception as e:
+            print(f"Failed to refresh edited video metadata for {video_path}: {e}")
+
+    def _clear_video_loop_markers(self, video_path: Path, *, disable_current_loop: bool = False):
+        """Clear persisted loop markers for a video whose timeline changed."""
+        try:
+            json_path = video_path.with_suffix('.json')
+            if json_path.exists():
+                try:
+                    with json_path.open(encoding='UTF-8') as meta_file:
+                        meta = json.load(meta_file)
+                    if not isinstance(meta, dict):
+                        meta = {'version': 1}
+                except Exception:
+                    meta = {'version': 1}
+
+                meta['loop_start_frame'] = None
+                meta['loop_end_frame'] = None
+                meta.pop('viewer_loop_markers', None)
+                meta.pop('floating_last_loop_start_frame', None)
+                meta.pop('floating_last_loop_end_frame', None)
+
+                try:
+                    with json_path.open('w', encoding='UTF-8') as meta_file:
+                        json.dump(meta, meta_file)
+                except Exception:
+                    pass
+
+            image_list_model = getattr(self.main_window, 'image_list_model', None)
+            if image_list_model is None:
+                return
+
+            source_row = image_list_model.get_index_for_path(video_path)
+            if source_row != -1:
+                source_index = image_list_model.index(source_row, 0)
+                image = image_list_model.data(source_index, Qt.ItemDataRole.UserRole)
+                if image is not None:
+                    image.loop_start_frame = None
+                    image.loop_end_frame = None
+                    image.viewer_loop_markers = {}
+                    image_list_model.write_meta_to_disk(image)
+
+            if disable_current_loop:
+                viewer = getattr(self.main_window, 'image_viewer', None)
+                if viewer is not None:
+                    try:
+                        if Path(str(viewer.video_player.video_path or "")) == video_path:
+                            viewer.video_controls.apply_loop_state(
+                                None,
+                                None,
+                                False,
+                                save=False,
+                                emit_signals=True,
+                            )
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Failed to clear loop markers for {video_path}: {e}")
+
+    def _force_reload_current_video_viewer(self, video_path: Path):
+        """Force the active viewer/player to reopen an edited video from disk."""
+        def _reload(attempt: int = 0):
+            try:
+                image_list_model = getattr(self.main_window, 'image_list_model', None)
+                proxy_model = getattr(self.main_window, 'proxy_image_list_model', None)
+                if image_list_model is None or proxy_model is None:
+                    return
+
+                source_row = image_list_model.get_index_for_path(video_path)
+                if source_row == -1:
+                    return
+
+                source_index = image_list_model.index(source_row, 0)
+                proxy_index = proxy_model.mapFromSource(source_index)
+                if not proxy_index.isValid():
+                    if attempt < 8:
+                        QTimer.singleShot(200, lambda: _reload(attempt + 1))
+                    return
+
+                expected_frame_count = 0
+                try:
+                    image = image_list_model.data(source_index, Qt.ItemDataRole.UserRole)
+                    if image is not None:
+                        video_metadata = getattr(image, 'video_metadata', None)
+                        if isinstance(video_metadata, dict):
+                            expected_frame_count = int(video_metadata.get('frame_count') or 0)
+                except Exception:
+                    expected_frame_count = 0
+
+                try:
+                    self.main_window.image_list.list_view.setCurrentIndex(proxy_index)
+                except Exception:
+                    pass
+
+                viewer = self.main_window.get_selection_target_viewer()
+                if viewer is None:
+                    return
+
+                try:
+                    viewer.video_controls.reset()
+                except Exception:
+                    pass
+                try:
+                    viewer.video_player.cleanup()
+                except Exception:
+                    pass
+                viewer.inhibit_reload_image = False
+                viewer.load_image(proxy_index)
+
+                actual_frame_count = 0
+                try:
+                    actual_frame_count = int(viewer.video_player.get_total_frames() or 0)
+                except Exception:
+                    actual_frame_count = 0
+
+                if expected_frame_count > 0 and actual_frame_count != expected_frame_count and attempt < 8:
+                    QTimer.singleShot(250, lambda: _reload(attempt + 1))
+            except Exception as e:
+                print(f"Failed to force viewer reload for {video_path}: {e}")
+
+        QTimer.singleShot(0, lambda: _reload(0))
+
+    def _build_extract_copy_path(self, input_path: Path, start_frame: int, end_frame: int) -> Path:
+        """Build a unique output path for extract-as-copy operations."""
+        directory = input_path.parent
+        stem = input_path.stem
+        suffix = input_path.suffix
+
+        counter = 1
+        new_stem = f"{stem}_extract_{start_frame}-{end_frame}"
+        new_path = directory / f"{new_stem}{suffix}"
+        while new_path.exists():
+            counter += 1
+            new_stem = f"{stem}_extract_{start_frame}-{end_frame}_{counter}"
+            new_path = directory / f"{new_stem}{suffix}"
+        return new_path
+
+    def _copy_extract_sidecars(self, input_path: Path, output_path: Path):
+        """Copy sidecars for an extracted copy, then clear invalid loop markers."""
+        import shutil
+
+        caption_file_path = input_path.with_suffix('.txt')
+        if caption_file_path.exists():
+            output_caption_path = output_path.with_suffix('.txt')
+            shutil.copy2(str(caption_file_path), str(output_caption_path))
+
+        json_file_path = input_path.with_suffix('.json')
+        if json_file_path.exists():
+            output_json_path = output_path.with_suffix('.json')
+            shutil.copy2(str(json_file_path), str(output_json_path))
+            self._clear_video_loop_markers(output_path, disable_current_loop=False)
+
     def _run_video_operation(self, operation_name: str, operation_func, *args):
         """Run a video editing operation and show progress."""
         from PySide6.QtWidgets import QProgressDialog
@@ -204,49 +414,18 @@ class VideoEditingController:
         extract_as_copy = extract_as_copy_checkbox.isChecked()
 
         if extract_as_copy:
-            # Create a copy first using the duplicate function
-            import shutil
+            new_path = self._build_extract_copy_path(input_path, start_frame, end_frame)
 
-            # Generate unique name for duplicate
-            directory = input_path.parent
-            stem = input_path.stem
-            suffix = input_path.suffix
-
-            # Find a unique name by appending "_copy" or "_copy2", etc.
-            counter = 1
-            new_stem = f"{stem}_extract_{start_frame}-{end_frame}"
-            new_path = Path(directory / f"{new_stem}{suffix}")
-            while new_path.exists():
-                counter += 1
-                new_stem = f"{stem}_extract_{start_frame}-{end_frame}_{counter}"
-                new_path = Path(directory / f"{new_stem}{suffix}")
-
-            # Copy the media file
-            shutil.copy2(str(input_path), str(new_path))
-
-            # Copy caption file if it exists
-            caption_file_path = input_path.with_suffix('.txt')
-            if caption_file_path.exists():
-                new_caption_path = new_path.with_suffix('.txt')
-                shutil.copy2(str(caption_file_path), str(new_caption_path))
-
-            # Copy JSON metadata file if it exists
-            json_file_path = input_path.with_suffix('.json')
-            if json_file_path.exists():
-                new_json_path = new_path.with_suffix('.json')
-                shutil.copy2(str(json_file_path), str(new_json_path))
-
-            # Add the new image to the model
-            source_model = self.main_window.image_list_model.sourceModel()
-            source_model.add_image(new_path)
-
-            # Extract range on the copy (no backup needed since it's a new file)
+            # Extract directly to the new file. Do not create a temporary full copy first,
+            # otherwise the new copy incorrectly receives its own .backup files.
             success, message = VideoEditor.extract_range_rough(
-                new_path, new_path,
+                input_path, new_path,
                 start_frame, end_frame, fps
             )
 
             if success:
+                self._copy_extract_sidecars(input_path, new_path)
+                self._refresh_edited_video_metadata(new_path)
                 QMessageBox.information(self.main_window, "Success", f"Created copy and extracted range:\n{new_path.name}")
                 self.main_window.reload_directory()
             else:
@@ -279,8 +458,11 @@ class VideoEditingController:
             )
 
             if success:
+                self._clear_video_loop_markers(input_path, disable_current_loop=True)
+                self._refresh_edited_video_metadata(input_path)
                 QMessageBox.information(self.main_window, "Success", message)
                 self.main_window.reload_directory()
+                self._force_reload_current_video_viewer(input_path)
             else:
                 QMessageBox.critical(self.main_window, "Error", message)
 
@@ -426,45 +608,12 @@ class VideoEditingController:
         target_fps = speed_fps_settings['fps']
 
         if extract_as_copy:
-            # Create a copy first using the duplicate function
-            import shutil
+            new_path = self._build_extract_copy_path(input_path, start_frame, end_frame)
 
-            # Generate unique name for duplicate
-            directory = input_path.parent
-            stem = input_path.stem
-            suffix = input_path.suffix
-
-            # Find a unique name by appending "_copy" or "_copy2", etc.
-            counter = 1
-            new_stem = f"{stem}_extract_{start_frame}-{end_frame}"
-            new_path = directory / f"{new_stem}{suffix}"
-            while new_path.exists():
-                counter += 1
-                new_stem = f"{stem}_extract_{start_frame}-{end_frame}_{counter}"
-                new_path = directory / f"{new_stem}{suffix}"
-
-            # Copy the media file
-            shutil.copy2(str(input_path), str(new_path))
-
-            # Copy caption file if it exists
-            caption_file_path = input_path.with_suffix('.txt')
-            if caption_file_path.exists():
-                new_caption_path = new_path.with_suffix('.txt')
-                shutil.copy2(str(caption_file_path), str(new_caption_path))
-
-            # Copy JSON metadata file if it exists
-            json_file_path = input_path.with_suffix('.json')
-            if json_file_path.exists():
-                new_json_path = new_path.with_suffix('.json')
-                shutil.copy2(str(json_file_path), str(new_json_path))
-
-            # Add the new image to the model
-            source_model = self.main_window.image_list_model
-            source_model.add_image(new_path)
-
-            # Extract range on the copy (no backup needed since it's a new file)
+            # Extract directly to the new file so extract-as-copy does not generate
+            # .backup files for the newly created clip.
             success, message = VideoEditor.extract_range(
-                new_path, new_path,
+                input_path, new_path,
                 start_frame, end_frame, fps,
                 reverse=reverse,
                 speed_factor=speed_factor,
@@ -472,6 +621,8 @@ class VideoEditingController:
             )
 
             if success:
+                self._copy_extract_sidecars(input_path, new_path)
+                self._refresh_edited_video_metadata(new_path)
                 operation_desc = f"Created copy and extracted frames {start_frame}-{end_frame}"
                 if reverse:
                     operation_desc += " (reversed)"
@@ -507,8 +658,11 @@ class VideoEditingController:
             )
 
             if success:
+                self._clear_video_loop_markers(input_path, disable_current_loop=True)
+                self._refresh_edited_video_metadata(input_path)
                 QMessageBox.information(self.main_window, "Success", message)
                 self.main_window.reload_directory()
+                self._force_reload_current_video_viewer(input_path)
                 # Reset speed slider to 1.0x if speed was applied
                 if abs(speed_factor - 1.0) >= 0.01:
                     video_controls.speed_slider.setValue(200)  # 1.0x = 200 in slider units
@@ -647,8 +801,10 @@ class VideoEditingController:
         )
 
         if success:
+            self._refresh_edited_video_metadata(input_path)
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
+            self._force_reload_current_video_viewer(input_path)
         else:
             QMessageBox.critical(self.main_window, "Error", message)
 
@@ -688,8 +844,10 @@ class VideoEditingController:
         )
 
         if success:
+            self._refresh_edited_video_metadata(input_path)
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
+            self._force_reload_current_video_viewer(input_path)
         else:
             QMessageBox.critical(self.main_window, "Error", message)
 
@@ -742,8 +900,10 @@ class VideoEditingController:
         )
 
         if success:
+            self._refresh_edited_video_metadata(input_path)
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
+            self._force_reload_current_video_viewer(input_path)
         else:
             QMessageBox.critical(self.main_window, "Error", message)
 
@@ -1381,8 +1541,10 @@ class VideoEditingController:
         )
 
         if success:
+            self._refresh_edited_video_metadata(input_path)
             QMessageBox.information(self.main_window, "Success", message)
             self.main_window.reload_directory()
+            self._force_reload_current_video_viewer(input_path)
         else:
             QMessageBox.critical(self.main_window, "Error", message)
 
