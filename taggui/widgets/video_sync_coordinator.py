@@ -52,28 +52,43 @@ class _PlayerEntry:
     def __init__(self, viewer):
         self.viewer = viewer
         self.player = viewer.video_player
+        self.start_frame: int | None = None
+        self.end_frame: int | None = None
         self.start_ms = 0.0
         self.end_ms = 0.0
         self.duration_ms = 0.0
+        self.cycle_duration_ms = 0.0
         self.finished = False
         self._sync_label: QLabel | None = None
 
     def resolve_bounds(self):
         player = self.player
+        self.start_frame = None
+        self.end_frame = None
         self.duration_ms = max(0.0, float(player.duration_ms or 0.0))
+        self.cycle_duration_ms = self.duration_ms
         try:
             controls = self.viewer.video_controls
             if bool(getattr(controls, 'is_looping', False)):
                 loop_range = controls.get_loop_range()
                 if loop_range:
                     fps = max(1.0, float(player.fps or 25.0))
-                    self.start_ms = (max(0, int(loop_range[0])) / fps) * 1000.0
-                    self.end_ms = (max(0, int(loop_range[1])) / fps) * 1000.0
+                    self.start_frame = max(0, int(loop_range[0]))
+                    self.end_frame = max(0, int(loop_range[1]))
+                    if self.start_frame > self.end_frame:
+                        self.start_frame, self.end_frame = self.end_frame, self.start_frame
+                    self.start_ms = (self.start_frame / fps) * 1000.0
+                    # Match the player's inclusive loop marker behavior:
+                    # loop-end is the start of the frame after loop_end.
+                    self.end_ms = ((self.end_frame + 1) / fps) * 1000.0
+                    self.end_ms = min(self.duration_ms, self.end_ms) if self.duration_ms > 0 else self.end_ms
+                    self.cycle_duration_ms = max(1.0, self.end_ms - self.start_ms)
                     return
         except Exception:
             pass
         self.start_ms = 0.0
         self.end_ms = self.duration_ms
+        self.cycle_duration_ms = max(0.0, self.end_ms - self.start_ms)
 
     def ensure_vlc_ready(self):
         """Pre-warm VLC so fire_play() has no setup overhead."""
@@ -143,6 +158,41 @@ class _PlayerEntry:
                 player._vlc_stall_ticks = 0
             except Exception:
                 pass
+
+    def has_segment_loop(self) -> bool:
+        return self.start_frame is not None and self.end_frame is not None
+
+    def current_position_ms(self) -> float | None:
+        player = self.player
+        try:
+            if hasattr(player, "_is_vlc_forward_active") and player._is_vlc_forward_active():
+                position_ms = player._get_vlc_position_ms()
+                if position_ms is not None:
+                    return float(position_ms)
+            elif hasattr(player, "_is_mpv_forward_active") and player._is_mpv_forward_active():
+                position_ms = player._get_mpv_position_ms()
+                if position_ms is not None:
+                    return float(position_ms)
+            else:
+                return float(player.media_player.position())
+        except Exception:
+            pass
+
+        try:
+            if player.fps > 0:
+                return (float(player.get_current_frame_number()) / float(player.fps)) * 1000.0
+        except Exception:
+            pass
+        return None
+
+    def freeze_at_end(self):
+        if self.end_frame is None:
+            return
+        self.pause_hard()
+        try:
+            self.player.seek_to_frame(int(self.end_frame))
+        except Exception:
+            pass
 
     def fire_play(self):
         self.finished = False
@@ -234,6 +284,10 @@ class VideoSyncCoordinator(QObject):
         self._poll_timer.setInterval(_POLL_INTERVAL_MS)
         self._poll_timer.timeout.connect(self._poll_barrier)
 
+        self._running_timer = QTimer(self)
+        self._running_timer.setInterval(_POLL_INTERVAL_MS)
+        self._running_timer.timeout.connect(self._poll_running)
+
         # Stall watchdog — fires if players never emit playback_finished.
         self._watchdog_timer = QTimer(self)
         self._watchdog_timer.setSingleShot(True)
@@ -253,7 +307,7 @@ class VideoSyncCoordinator(QObject):
                 pass
 
         self._longest_duration_ms = max(
-            (e.end_ms for e in self._entries), default=0.0
+            (e.cycle_duration_ms for e in self._entries), default=0.0
         )
 
         for entry in self._entries:
@@ -277,6 +331,7 @@ class VideoSyncCoordinator(QObject):
 
     def stop(self):
         self._poll_timer.stop()
+        self._running_timer.stop()
         self._watchdog_timer.stop()
         self._state = self._STATE_IDLE
         for entry in self._entries:
@@ -303,6 +358,7 @@ class VideoSyncCoordinator(QObject):
     def _begin_barrier(self):
         if self._state == self._STATE_IDLE:
             return
+        self._running_timer.stop()
         self._finished_count = 0
         for entry in self._entries:
             entry.finished = False
@@ -341,6 +397,37 @@ class VideoSyncCoordinator(QObject):
     # ------------------------------------------------------------------
     # Running — wait for all players to finish
     # ------------------------------------------------------------------
+
+    @Slot()
+    def _poll_running(self):
+        if self._state != self._STATE_RUNNING:
+            return
+
+        for idx, entry in enumerate(self._entries):
+            if entry.finished or not entry.has_segment_loop():
+                continue
+
+            position_ms = entry.current_position_ms()
+            if position_ms is None:
+                continue
+
+            fps = max(1.0, float(entry.player.fps or 25.0))
+            frame_ms = 1000.0 / fps
+            late_margin_ms = max(1.0, min(10.0, frame_ms * 0.08))
+            if position_ms < (entry.end_ms - late_margin_ms):
+                continue
+
+            _sync_log(f"[SYNC] segment end reached for player={idx} at {position_ms:.1f}ms")
+            entry.freeze_at_end()
+            entry.finished = True
+            self._finished_count += 1
+
+        if self._finished_count >= len(self._entries):
+            _sync_log("[SYNC] all finished - beginning barrier")
+            self._running_timer.stop()
+            self._watchdog_timer.stop()
+            self._state = self._STATE_BARRIER
+            self._begin_barrier()
 
     @Slot()
     def _on_player_finished(self):
@@ -390,6 +477,7 @@ class VideoSyncCoordinator(QObject):
         _sync_log(f"[SYNC] firing play on {len(self._entries)} players")
         for entry in self._entries:
             entry.fire_play()
+        self._running_timer.start()
         watchdog_ms = int(self._longest_duration_ms + _STALL_TIMEOUT_MS)
         if watchdog_ms > 0:
             self._watchdog_timer.start(watchdog_ms)
