@@ -1,5 +1,7 @@
 # Export Guide
 
+[Back to Documentation Hub](HUB.md)
+
 TagGUI Video 1M includes a non-destructive export workflow for preparing images and masks for training or dataset cleanup.
 
 This export path is separate from `Apply crop to file`, which modifies the source file directly.
@@ -18,6 +20,10 @@ The export dialog lets you:
 Open it from:
 
 - `File -> Export...`
+
+<p align="center">
+  <img src="../images/export-guide-dialog-main.jpg" alt="Export dialog" width="76%">
+</p>
 
 ## Image Selection
 

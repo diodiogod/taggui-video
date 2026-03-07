@@ -1,5 +1,7 @@
 # Getting Started
 
+[Back to Documentation Hub](HUB.md)
+
 This is the practical entry point for running TagGUI Video 1M.
 
 ## Install and Launch

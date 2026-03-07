@@ -1,5 +1,7 @@
 # Feature Overview
 
+[Back to Documentation Hub](HUB.md)
+
 High-level capabilities of TagGUI Video 1M.
 
 ## Core Areas

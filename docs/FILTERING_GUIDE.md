@@ -1,5 +1,7 @@
 # Filtering Guide
 
+[Back to Documentation Hub](HUB.md)
+
 Filtering is one of the core workflows in TagGUI Video 1M.
 
 It is what turns the app from a simple browser into a practical tool for large collections: you can search by tags, caption text, ratings, file properties, media type, and sort order.

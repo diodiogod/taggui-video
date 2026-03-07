@@ -1,11 +1,17 @@
 # Markings Guide
 
+[Back to Documentation Hub](HUB.md)
+
 Markings are the visual annotation system in TagGUI Video 1M.
 
 > [!NOTE]
 > The markings workflow comes from the upstream fork lineage this project builds on, especially the `StableLlama/taggui` fork, rather than the original TagGUI baseline. It remains an important part of TagGUI Video 1M.
 
 They let you do more than text tagging: you can define crop areas, mark regions as hints, and build include or exclude masks for export and training workflows.
+
+<p align="center">
+  <img src="../images/markings-guide-crop-include-exclude.jpg" alt="Crop include and exclude markings" width="78%">
+</p>
 
 ## Marking Types
 
@@ -26,6 +32,10 @@ The crop is the main export boundary.
 - It defines which part of the image is kept for export.
 - If export settings require bucket fitting, TagGUI may need to crop further than the visible crop box.
 - That extra trimmed area is shown as a semi-transparent red overlay.
+
+<p align="center">
+  <img src="../images/doc/cropping.jpg" alt="Crop guidance example" width="62%">
+</p>
 
 Crop editing also shows visual guidance:
 

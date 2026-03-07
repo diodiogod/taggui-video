@@ -23,6 +23,14 @@ This is the main documentation map for TagGUI Video 1M.
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)
 
+## Video Walkthroughs
+
+- <a href="https://youtu.be/FGNSq01nOT4">
+    <img src="https://img.youtube.com/vi/FGNSq01nOT4/hqdefault.jpg" alt="Old TagGUI video workflow walkthrough" width="72%">
+  </a>
+- Still useful for core video workflow and loop-marker behavior
+- It predates the current skin system and some newer UI additions
+
 ## Technical References
 
 - [Skin README](../taggui/skins/README.md)

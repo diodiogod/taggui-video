@@ -52,7 +52,7 @@ video_player:
     button_hover_color: '#2196F3'
     button_border: '1px solid #333333'
     button_border_radius: 6
-    timeline_height: 8
+    timeline_height: 6
     timeline_color: '#2196F3'
     timeline_bg_color: '#1A1A1A'
     slider_handle_size: 16

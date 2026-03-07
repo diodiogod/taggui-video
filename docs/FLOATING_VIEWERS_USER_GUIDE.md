@@ -1,5 +1,7 @@
 # Floating Viewers User Guide
 
+[Back to Documentation Hub](HUB.md)
+
 This guide covers spawned/floating viewers (PiP-style windows): how to open them, move/resize them, and use the new smart zoom behaviors.
 
 ## What They Are
@@ -39,6 +41,10 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - In hold mode, existing spawned viewers become dimmed, gray, and click-through.
 - Hold mode is meant to keep spawned viewers visible but out of the way while you keep working in the main app or spawn new viewers.
 - Turning hold mode off restores normal interactivity.
+
+<p align="center">
+  <img src="../images/floating-viewers-spawn-move-hold.gif" alt="Floating viewers spawn move and hold workflow" width="74%">
+</p>
 
 ## Mouse and Zoom Behavior
 

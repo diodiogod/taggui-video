@@ -1,8 +1,14 @@
 # Compare Guide
 
+[Back to Documentation Hub](HUB.md)
+
 TagGUI Video 1M supports comparison for both images and videos.
 
 The compare workflow is built around drag-and-hold merging: drag one media item onto a target viewer, hold briefly, then release to enter compare mode.
+
+<p align="center">
+  <img src="../images/compare-guide-drag-hold.gif" alt="Compare drag and hold workflow" width="80%">
+</p>
 
 ## Basic Compare Gesture
 
@@ -48,6 +54,10 @@ Important behavior:
 - if compare is already active, dropping another source onto the same target expands the compare before it starts replacing the right-side layer
 
 Image compare can also expand beyond two items for broader visual comparison.
+
+<p align="center">
+  <img src="../images/compare-guide-three-way-view.jpg" alt="Three-way compare view" width="72%">
+</p>
 
 ## Video Compare
 

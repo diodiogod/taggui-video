@@ -1,5 +1,7 @@
 # Captioning Guide
 
+[Back to Documentation Hub](HUB.md)
+
 Captioning and tagging remain core workflows in TagGUI Video 1M.
 
 The project started from dataset-preparation use cases, and that is still reflected in the current app: you can browse large collections, then filter, caption, and tag them for organization, cleanup, and training preparation.
@@ -32,6 +34,10 @@ GPU use requires compatible hardware and model support, but CPU generation is al
 3. Choose a captioning model.
 4. Configure the prompt and generation settings.
 5. Click `Start Auto-Captioning`.
+
+<p align="center">
+  <img src="../images/captioning-guide-auto-captioner-panel.jpg" alt="Auto-Captioner panel" width="76%">
+</p>
 
 The app also supports loading previously downloaded local models through the models directory setting in `File -> Settings`.
 
@@ -157,3 +163,9 @@ Captioning in TagGUI Video 1M is useful for:
 - Prompt quality still matters. Auto-captioning works best when followed by human review for important datasets.
 - Different models expose different strengths: some are better at descriptive captions, others are better at tag-style outputs.
 - A future model-specific reference page may be useful if you want to document recommended models for different tasks.
+
+## Video Walkthrough
+
+- [Old TagGUI video workflow walkthrough](https://youtu.be/FGNSq01nOT4)
+- Still useful for the older captioning workflow and core auto-captioner concepts
+- It predates some newer UI additions such as the current skin system

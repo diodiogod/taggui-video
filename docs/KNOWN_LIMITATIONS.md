@@ -1,5 +1,7 @@
 # Known Limitations
 
+[Back to Documentation Hub](HUB.md)
+
 Current known constraints in TagGUI Video 1M.
 
 ## Filtering and Metadata

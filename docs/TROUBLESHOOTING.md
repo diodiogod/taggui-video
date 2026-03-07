@@ -1,5 +1,7 @@
 # Troubleshooting
 
+[Back to Documentation Hub](HUB.md)
+
 Use this page only for real, current issues that are already known to happen in TagGUI Video 1M.
 
 ## Folder Cache or Database Feels Wrong

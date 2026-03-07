@@ -1,5 +1,7 @@
 # Video Workflow Guide
 
+[Back to Documentation Hub](HUB.md)
+
 Video support in TagGUI Video 1M starts with simple playback, but the real value is in review, comparison, extraction, and training-preparation workflows.
 
 ## Start with Playback
@@ -124,6 +126,10 @@ Important behavior:
 - one viewer is the active controls owner at a time
 - right-click actions include `Sync video`
 - sync is useful for comparison, even if it should not be described as perfectly frame-accurate
+
+<p align="center">
+  <img src="../images/video-guide-sync-viewers.gif" alt="Syncing spawned video viewers" width="78%">
+</p>
 
 Detailed viewer behavior is documented in `FLOATING_VIEWERS_USER_GUIDE.md`.
 

@@ -1,5 +1,7 @@
 # Installation
 
+[Back to Documentation Hub](HUB.md)
+
 This page covers the current setup path for TagGUI Video 1M.
 
 The intended workflow is:

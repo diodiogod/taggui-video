@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="images/screenshot-v1.25.0.png" alt="TagGUI Video 1M screenshot" width="100%">
+  <img src="images/readme-hero-main-view.jpg" alt="TagGUI Video 1M main view" width="100%">
 </p>
 
 TagGUI Video 1M is a desktop tool for browsing, tagging, and reviewing very large image and video collections.
@@ -19,6 +19,9 @@ Captioning and tagging remain core to the project, including workflows that supp
 ## Start Here
 
 - [Documentation Hub](docs/HUB.md)
+
+## Quick Links
+
 - [Install and Launch](docs/GETTING_STARTED.md)
 - [Video Workflow](docs/VIDEO_WORKFLOW_GUIDE.md)
 - [Floating Viewers and Compare Mode](docs/FLOATING_VIEWERS_USER_GUIDE.md)

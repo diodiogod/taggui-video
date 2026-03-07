@@ -1,5 +1,7 @@
 # Shortcuts
 
+[Back to Documentation Hub](HUB.md)
+
 This page collects the most useful keyboard shortcuts and quick actions currently documented for TagGUI Video 1M.
 
 ## Global

@@ -1,5 +1,7 @@
 # Skin Designer Guide
 
+[Back to Documentation Hub](HUB.md)
+
 TagGUI Video 1M includes a skinnable video player.
 
 You can use built-in skins, switch between them instantly, and create your own custom skins with the visual designer.
@@ -19,6 +21,10 @@ You can change skins from:
 
 Skin changes apply immediately. No restart is required.
 
+<p align="center">
+  <img src="../images/skin-guide-built-in-controls.jpg" alt="Built-in video player skin controls" width="78%">
+</p>
+
 ## Custom Skin Design
 
 If the built-in skins are not enough, you can open the custom skin designer from the video controls.
@@ -31,6 +37,10 @@ The designer is meant for:
 
 > [!NOTE]
 > The skin system works, and the custom designer works, but the designer can still have rough edges. If you find a reproducible issue, it should be reported as a bug.
+
+<p align="center">
+  <img src="../images/skin-guide-designer-window.jpg" alt="Custom skin designer window" width="64%">
+</p>
 
 ## What Skins Affect
 

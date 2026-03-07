@@ -1,5 +1,7 @@
 # Video Backends
 
+[Back to Documentation Hub](HUB.md)
+
 TagGUI Video 1M can run with different video playback backends.
 
 The practical recommendation is:
