@@ -22,7 +22,6 @@ timm==1.0.15
 einops==0.8.1
 protobuf==6.31.0
 sentencepiece==0.2.0
-torchvision==0.22.1
 xformers==0.0.31
 
 # InternLM-XComposer2
@@ -34,11 +33,14 @@ huggingface-hub==0.31.4
 onnxruntime==1.22.0
 
 # ============================================
-# PyTorch & FlashAttention - DO NOT ADD HERE
+# PyTorch stack - DO NOT ADD HERE
 # ============================================
-# These are installed automatically by start_windows.bat / start_linux.sh
-# The startup scripts detect your GPU's CUDA version and install the correct PyTorch build
-# DO NOT manually add torch/flash-attn to this file - it will break CUDA compatibility
+# These are installed automatically by start_windows.bat / start_linux.sh.
+# The startup scripts detect your GPU's CUDA version and install a matching
+# torch + torchvision stack from the correct PyTorch wheel index.
+# DO NOT manually add torch / torchvision / torchaudio / flash-attn here.
+# Installing them from requirements.txt can mix CPU and CUDA wheels and break
+# operators such as torchvision NMS used by Ultralytics YOLO.
 # ============================================
 
 # YOLO

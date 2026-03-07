@@ -63,6 +63,24 @@ If video behavior feels off:
 - remember that not all backend paths behave the same way
 - if the issue persists, it should likely be documented later in a dedicated backend guide
 
+## YOLO or Auto-Markings Fails With `torchvision::nms`
+
+If auto-marking or other YOLO-based features fail with an error mentioning
+`torchvision::nms`, the usual cause is a mismatched Torch stack such as:
+
+- CUDA `torch`
+- CPU-only `torchvision`
+
+Fix it by refreshing the launcher-managed Torch stack instead of reinstalling
+from `requirements.txt`:
+
+- Windows: `.\start_windows.bat --refresh-torch`
+- Linux: `bash start_linux.sh --refresh-torch`
+
+If the Windows launcher warns that it could not parse the NVIDIA driver version,
+the safest fallback is to rerun the refresh after checking that `nvidia-smi`
+works normally in a terminal.
+
 ## Large Folder Takes Time on First Open
 
 The first open of a large folder can take longer because TagGUI may need to:

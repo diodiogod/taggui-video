@@ -176,22 +176,42 @@ if %SHOULD_INSTALL% EQU 1 (
 
     echo Detecting CUDA version...
     set CUDA_VERSION=cpu
+    set DRIVER_VERSION=
     nvidia-smi >nul 2>&1
     if !ERRORLEVEL! EQU 0 (
-        for /f "tokens=*" %%i in ('nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul') do set DRIVER_VERSION=%%i
-        echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+        for /f "usebackq tokens=* delims=" %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
+            if not defined DRIVER_VERSION set DRIVER_VERSION=%%i
+        )
+        if not defined DRIVER_VERSION (
+            for /f "usebackq tokens=2 delims=: " %%i in (`nvidia-smi 2^>nul ^| findstr /C:"Driver Version"`) do (
+                if not defined DRIVER_VERSION set DRIVER_VERSION=%%i
+            )
+        )
+        if defined DRIVER_VERSION (
+            echo !DRIVER_VERSION!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*" >nul 2>&1
+            if !ERRORLEVEL! NEQ 0 (
+                set DRIVER_VERSION=
+            )
+        )
+        if defined DRIVER_VERSION (
+            echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+        ) else (
+            echo WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack
+        )
 
         :: Detect CUDA wheel channel from driver
-        for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
-            if %%v GEQ 570 (
-                set CUDA_VERSION=cu128
-                echo Detected CUDA 12.8-capable driver
-            ) else if %%v GEQ 560 (
-                set CUDA_VERSION=cu126
-                echo Detected CUDA 12.6-capable driver
-            ) else if %%v GEQ 450 (
-                set CUDA_VERSION=cu118
-                echo Detected CUDA 11.8-capable driver
+        if defined DRIVER_VERSION (
+            for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
+                if %%v GEQ 570 (
+                    set CUDA_VERSION=cu128
+                    echo Detected CUDA 12.8-capable driver
+                ) else if %%v GEQ 560 (
+                    set CUDA_VERSION=cu126
+                    echo Detected CUDA 12.6-capable driver
+                ) else if %%v GEQ 450 (
+                    set CUDA_VERSION=cu118
+                    echo Detected CUDA 11.8-capable driver
+                )
             )
         )
     ) else (

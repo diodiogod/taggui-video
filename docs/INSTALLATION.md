@@ -53,6 +53,19 @@ That means after pulling project updates, you may need to run this manually insi
 pip install -r requirements.txt
 ```
 
+If the update changes the Torch stack or model features start failing with
+errors such as `torchvision::nms`, do not repair it with `pip install -r requirements.txt`.
+Use the launcher refresh path instead so `torch` and `torchvision` come from the
+same CPU/CUDA wheel index:
+
+```bash
+# Windows
+start_windows.bat --refresh-torch
+
+# Linux
+bash start_linux.sh --refresh-torch
+```
+
 ## Launcher Flags
 
 Supported launcher flags:
@@ -102,7 +115,7 @@ For video editing workflows, make sure `ffmpeg` is installed and available on yo
 
 - `Python not installed`: install Python 3.10 or newer
 - `requirements.txt not found`: run the launcher from the project root
-- launcher reuses an old environment after update: run `pip install -r requirements.txt`
+- launcher reuses an old environment after update: run `pip install -r requirements.txt` for normal deps, or `--refresh-torch` for Torch stack issues
 - video editing actions fail: install `ffmpeg`
 - backend-specific playback issues: check the configured backend and runtime availability in settings
 

@@ -3,6 +3,7 @@ from PySide6.QtCore import QModelIndex, QThread, Signal, Qt
 from PIL import Image as PILImage
 import pillow_jxl
 
+import torch
 from ultralytics import YOLO
 
 from models.image_list_model import ImageListModel
@@ -40,6 +41,16 @@ class MarkingThread(ModelThread):
             self.model = None
             return
         self.model = YOLO(self.marking_settings['model_path'])
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    def _predict_with_device(self, pil_image, device: str):
+        return self.model.predict(source=pil_image,
+                                  conf=self.marking_settings['conf'],
+                                  iou=self.marking_settings['iou'],
+                                  max_det=self.marking_settings['max_det'],
+                                  classes=list(self.marking_settings['classes'].keys()),
+                                  retina_masks=True,
+                                  device=device)
 
     def get_model_inputs(self, image: Image):
         return '', {}
@@ -47,14 +58,19 @@ class MarkingThread(ModelThread):
     def generate_output(self, image_index, image: Image, image_prompt, model_inputs) -> str:
         if len(self.marking_settings['classes']) == 0:
             return 'No classes to mark selected.'
-        classes = list(self.marking_settings['classes'].keys())
         pil_image = PILImage.open(image.path)
-        results = self.model.predict(source=pil_image,
-                                     conf=self.marking_settings['conf'],
-                                     iou=self.marking_settings['iou'],
-                                     max_det=self.marking_settings['max_det'],
-                                     classes=classes,
-                                     retina_masks=True)
+        try:
+            results = self._predict_with_device(pil_image, self.device)
+        except NotImplementedError as exc:
+            # Some local environments ship CUDA-enabled torch with CPU-only
+            # torchvision, which makes Ultralytics fail in NMS on CUDA.
+            # Fall back to CPU transparently so auto-marking still works.
+            message = str(exc)
+            if self.device != 'cpu' and 'torchvision::nms' in message and 'CUDA' in message:
+                self.device = 'cpu'
+                results = self._predict_with_device(pil_image, self.device)
+            else:
+                raise
         markings = []
         for r in results:
             for box, class_id, confidence in zip(r.boxes.xyxy.to('cpu').tolist(),

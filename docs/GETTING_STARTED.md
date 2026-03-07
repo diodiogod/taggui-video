@@ -24,6 +24,15 @@ The launcher looks for a `venv` in the current directory first, then one level a
 > [!NOTE]
 > The launcher installs dependencies automatically when it creates a new virtual environment. If you already have an existing `venv`, it reuses it and starts the app without reinstalling `requirements.txt`. After a project update, run `pip install -r requirements.txt` manually if new dependencies were added.
 
+> [!IMPORTANT]
+> Do not use `pip install -r requirements.txt` to repair PyTorch or `torchvision`.
+> The Torch stack is managed by the launcher so CPU/CUDA wheels stay matched.
+> If model features such as YOLO fail with errors like `torchvision::nms` or a
+> stale Torch version, refresh the stack with:
+>
+> - Windows: `start_windows.bat --refresh-torch`
+> - Linux: `bash start_linux.sh --refresh-torch`
+
 ## Useful Launcher Flags
 
 These flags are available on the launcher scripts:
