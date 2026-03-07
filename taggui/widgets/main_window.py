@@ -838,6 +838,7 @@ class MainWindow(QMainWindow):
         self.cancel_compare_drag()
         self.close_all_floating_viewers()
         self._save_image_list_dock_width()
+        self._save_right_dock_width()
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
         # Save marker size setting
@@ -1075,6 +1076,23 @@ class MainWindow(QMainWindow):
         viewer_mode = "viewer" if bool(getattr(self, '_main_viewer_visible', True)) else "list_only"
         return f"workspace_layout/{workspace_id}/{viewer_mode}/image_list_dock_width"
 
+    def _right_dock_width_settings_key(self) -> str:
+        workspace_id = self._current_workspace_id()
+        viewer_mode = "viewer" if bool(getattr(self, '_main_viewer_visible', True)) else "list_only"
+        return f"workspace_layout/{workspace_id}/{viewer_mode}/right_dock_width"
+
+    def _primary_visible_right_dock(self):
+        for dock_name in ('image_tags_editor', 'all_tags_editor', 'auto_captioner', 'auto_markings'):
+            dock = getattr(self, dock_name, None)
+            if dock is None:
+                continue
+            try:
+                if dock.isVisible() and not dock.isFloating():
+                    return dock
+            except Exception:
+                continue
+        return None
+
     def _save_image_list_dock_width(self):
         dock = getattr(self, 'image_list', None)
         if dock is None or dock.isFloating() or not dock.isVisible():
@@ -1085,6 +1103,17 @@ class MainWindow(QMainWindow):
         if width < 120:
             return
         settings.setValue(self._image_list_dock_width_settings_key(), width)
+
+    def _save_right_dock_width(self):
+        dock = self._primary_visible_right_dock()
+        if dock is None:
+            return
+        if not bool(getattr(self, '_main_viewer_visible', True)):
+            return
+        width = int(dock.width() or 0)
+        if width < 120:
+            return
+        settings.setValue(self._right_dock_width_settings_key(), width)
 
     def _restore_saved_image_list_dock_width(self) -> bool:
         dock = getattr(self, 'image_list', None)
@@ -1106,6 +1135,26 @@ class MainWindow(QMainWindow):
         )
         return True
 
+    def _restore_saved_right_dock_width(self) -> bool:
+        dock = self._primary_visible_right_dock()
+        if dock is None:
+            return False
+        if not bool(getattr(self, '_main_viewer_visible', True)):
+            return False
+        target_width = int(settings.value(
+            self._right_dock_width_settings_key(),
+            0,
+            type=int,
+        ) or 0)
+        if target_width < 120:
+            return False
+        self.resizeDocks([dock], [target_width], Qt.Orientation.Horizontal)
+        self._preserve_restored_dock_layout_until = max(
+            float(getattr(self, '_preserve_restored_dock_layout_until', 0.0) or 0.0),
+            time.time() + 2.5,
+        )
+        return True
+
     def _schedule_restore_image_list_dock_width(self, delay_ms: int = 0):
         """Reapply the saved left-dock width after startup/folder-load layout churn."""
         def _apply():
@@ -1113,6 +1162,16 @@ class MainWindow(QMainWindow):
                 self._restore_saved_image_list_dock_width()
             except Exception as e:
                 print(f"[RESTORE] Failed to restore image-list dock width: {e}")
+
+        QTimer.singleShot(max(0, int(delay_ms)), _apply)
+
+    def _schedule_restore_right_dock_width(self, delay_ms: int = 0):
+        """Reapply the saved right-dock width after startup/folder-load layout churn."""
+        def _apply():
+            try:
+                self._restore_saved_right_dock_width()
+            except Exception as e:
+                print(f"[RESTORE] Failed to restore right dock width: {e}")
 
         QTimer.singleShot(max(0, int(delay_ms)), _apply)
 
@@ -2863,6 +2922,8 @@ class MainWindow(QMainWindow):
         self._set_central_content_page()
         self._schedule_restore_image_list_dock_width(0)
         self._schedule_restore_image_list_dock_width(180)
+        self._schedule_restore_right_dock_width(0)
+        self._schedule_restore_right_dock_width(180)
 
         # Scroll to selected image after layout is ready.
         # In windowed_strict paginated mode, the masonry window may not include
