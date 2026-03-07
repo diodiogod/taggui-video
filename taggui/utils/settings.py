@@ -48,6 +48,8 @@ DEFAULT_SETTINGS = {
     'video_compare_fit_mode': 'preserve',  # preserve, fill, stretch (video compare window mode)
     'video_multi_compare_experimental': True,  # Allow adding 3rd/4th video layers in compare window
     'video_playback_backend': 'mpv_experimental',  # qt_hybrid, mpv_experimental, vlc_experimental
+    'auto_marking_merge_overlaps': False,
+    'auto_marking_merge_overlap_threshold': 0.6,
     # GPU preferences
     'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving
     'video_ffmpeg_accel_mode': 'none',  # none, cuda

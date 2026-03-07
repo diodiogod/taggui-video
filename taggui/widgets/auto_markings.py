@@ -2,7 +2,7 @@ import sys
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Signal, QModelIndex, Qt, Slot
+from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
@@ -17,7 +17,8 @@ from utils.big_widgets import TallPushButton
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     FocusedScrollSettingsDoubleSpinBox,
-                                    FocusedScrollSettingsSpinBox)
+                                    FocusedScrollSettingsSpinBox,
+                                    SettingsBigCheckBox)
 from widgets.auto_captioner import (set_text_edit_height,
                                     restore_stdout_and_stderr, HorizontalLine)
 from widgets.image_list import ImageList
@@ -81,6 +82,19 @@ class MarkingSettingsForm(QVBoxLayout):
         self.max_det_spin_box = FocusedScrollSettingsSpinBox(
             key='max_det', default=300, minimum=1, maximum=500)
         advanced_settings_form.addRow('Maximum number of detections', self.max_det_spin_box)
+        self.merge_overlaps_check_box = SettingsBigCheckBox(
+            key='auto_marking_merge_overlaps',
+            default=DEFAULT_SETTINGS['auto_marking_merge_overlaps'],
+            text='Merge overlapping detections')
+        advanced_settings_form.addRow('Post-process', self.merge_overlaps_check_box)
+        self.merge_overlap_threshold_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='auto_marking_merge_overlap_threshold',
+            default=DEFAULT_SETTINGS['auto_marking_merge_overlap_threshold'],
+            minimum=0.01,
+            maximum=1.0)
+        self.merge_overlap_threshold_spin_box.setSingleStep(0.05)
+        advanced_settings_form.addRow('Merge overlap threshold',
+                                      self.merge_overlap_threshold_spin_box)
         self.advanced_settings_form_container.hide()
 
         self.addLayout(basic_settings_form)
@@ -146,6 +160,8 @@ class MarkingSettingsForm(QVBoxLayout):
             'conf': self.confidence_spin_box.value(),
             'iou': self.iou_spin_box.value(),
             'max_det': self.max_det_spin_box.value(),
+            'merge_overlaps': self.merge_overlaps_check_box.isChecked(),
+            'merge_overlap_threshold': self.merge_overlap_threshold_spin_box.value(),
             'classes': []
         }
 
@@ -202,6 +218,7 @@ class AutoMarkings(QDockWidget):
             self.start_or_cancel_marking)
         self.marking_settings_form.model_selected.connect(lambda _: self.prepare_generation())
         self.marking_settings_form.model_selected.connect(self.start_cancel_button.setEnabled)
+        QTimer.singleShot(0, self._restore_model_selection_state)
 
     @Slot()
     def start_or_cancel_marking(self):
@@ -213,6 +230,13 @@ class AutoMarkings(QDockWidget):
         else:
             # Start marking.
             self.generate_markings()
+
+    @Slot()
+    def _restore_model_selection_state(self):
+        if self.marking_settings_form.model_combo_box.currentData() is None:
+            return
+        self.prepare_generation()
+        self.start_cancel_button.setEnabled(True)
 
     def set_is_marking(self, is_marking: bool):
         self.is_marking = is_marking
