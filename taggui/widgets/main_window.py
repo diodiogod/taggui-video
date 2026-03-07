@@ -2888,6 +2888,7 @@ class MainWindow(QMainWindow):
         _restore_global_rank = getattr(self, '_restore_global_rank', -1)
         view._selected_global_index = _restore_global_rank if _restore_global_rank >= 0 else None
         view._resize_anchor_page = None
+        view._resize_anchor_target_global = None
         view._resize_anchor_until = 0.0
 
         def _fresh_view_index(index: QModelIndex) -> QModelIndex:

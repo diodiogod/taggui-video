@@ -1298,6 +1298,7 @@ class ImageListViewGeometryMixin:
                     self._activate_resize_anchor(source_model=source_model, hold_s=2.0)
             else:
                 self._resize_anchor_page = None
+                self._resize_anchor_target_global = None
                 self._resize_anchor_until = 0.0
 
             ctrl_active = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)

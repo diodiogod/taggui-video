@@ -51,6 +51,7 @@ class MasonryWindowPlannerService:
             if time.time() <= resize_until:
                 return max(0, min(max(0, (total_items - 1) // page_size) if total_items > 0 else 0, int(resize_page)))
             self._view._resize_anchor_page = None
+            self._view._resize_anchor_target_global = None
             self._view._resize_anchor_until = 0.0
 
         if stick_bottom and total_items > 0:

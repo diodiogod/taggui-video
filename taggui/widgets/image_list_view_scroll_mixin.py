@@ -36,6 +36,35 @@ class ImageListViewScrollMixin:
         # the last throttled frame can leave viewport stale/blank until click.
         self.viewport().update()
 
+        # Idle is a good moment to re-evaluate window repair. Without this, a
+        # small page shift can stop on already-loaded pages and never hit one
+        # of the later masonry callbacks that normally trigger enrichment.
+        if (
+            self.use_masonry
+            and source_model
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+            and hasattr(self, '_check_and_enrich_loaded_pages')
+        ):
+            try:
+                self._check_and_enrich_loaded_pages()
+            except Exception:
+                pass
+
+        # Also schedule a low-priority masonry settle pass when scrolling goes
+        # idle. This makes already-arrived dimension updates reorganize the
+        # visible window without requiring an extra nudge-scroll from the user.
+        if self.use_masonry and hasattr(self, '_recalculate_masonry_if_needed'):
+            try:
+                if (
+                    source_model
+                    and hasattr(self, '_activate_selected_idle_anchor')
+                ):
+                    self._activate_selected_idle_anchor(source_model=source_model, hold_s=1.5)
+                self._recalculate_masonry_if_needed("scroll_idle")
+            except Exception:
+                pass
+
         # Start cache flush timer (2 seconds = truly idle)
         self._cache_flush_timer.stop()
         self._cache_flush_timer.start(2000)  # 2 seconds idle before flush
@@ -395,6 +424,7 @@ class ImageListViewScrollMixin:
                 current_page = max(0, min(last_page, int(resize_page)))
             else:
                 self._resize_anchor_page = None
+                self._resize_anchor_target_global = None
                 self._resize_anchor_until = 0.0
         if current_page is not None:
             pass  # skip all other derivation

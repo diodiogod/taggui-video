@@ -117,6 +117,7 @@ class ImageListViewInteractionMixin:
         # Drop resize anchor lock so completion handler won't snap to stale target.
         if time.time() < float(getattr(self, '_resize_anchor_until', 0.0) or 0.0):
             self._resize_anchor_page = None
+            self._resize_anchor_target_global = None
             self._resize_anchor_until = 0.0
         # Drop restore anchor — user's deliberate click supersedes startup restore.
         self._restore_anchor_until = 0.0

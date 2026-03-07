@@ -188,6 +188,7 @@ class ImageListView(
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
         self._resize_anchor_page = None
+        self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
         self._skip_next_resize_recalc = False
         self._selected_global_index = None  # Stable identity across buffered row shifts
@@ -506,6 +507,7 @@ class ImageListView(
         self._selected_global_lock_until = 0.0
         self._selected_global_lock_value = None
         self._resize_anchor_page = None
+        self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
         self._current_page = 0
         self._last_stable_scroll_value = 0

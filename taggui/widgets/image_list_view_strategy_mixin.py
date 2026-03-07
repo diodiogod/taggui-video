@@ -3,6 +3,123 @@ from widgets.image_list_strict_domain_service import StrictScrollDomainService
 from widgets.image_list_masonry_incremental_service import MasonryIncrementalService
 
 class ImageListViewStrategyMixin:
+    def _get_current_or_selected_global_index(self, source_model=None) -> int | None:
+        """Resolve the current stable global index without mutating selection."""
+        target_global = getattr(self, '_selected_global_index', None)
+        if isinstance(target_global, int) and target_global >= 0:
+            return int(target_global)
+
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        cur = self.currentIndex()
+        if not cur.isValid():
+            return None
+        try:
+            src_idx = (
+                self.model().mapToSource(cur)
+                if self.model() and hasattr(self.model(), 'mapToSource')
+                else cur
+            )
+            if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
+                mapped = source_model.get_global_index_for_row(src_idx.row())
+                if isinstance(mapped, int) and mapped >= 0:
+                    return int(mapped)
+        except Exception:
+            return None
+        return None
+
+    def _get_masonry_item_for_global_index(self, global_index: int):
+        """Return the masonry item for a stable global index, if loaded."""
+        if not (isinstance(global_index, int) and global_index >= 0):
+            return None
+        try:
+            masonry_map = getattr(self, "_masonry_index_map", None)
+            if isinstance(masonry_map, dict):
+                item = masonry_map.get(int(global_index))
+                if item is not None:
+                    return item
+            for item in (self._masonry_items or []):
+                if int(item.get('index', -1)) == int(global_index):
+                    return item
+        except Exception:
+            return None
+        return None
+
+    def _is_masonry_item_visible(self, item) -> bool:
+        """Return True when the masonry item intersects the current viewport."""
+        if not item:
+            return False
+        try:
+            top = int(item.get('y', 0))
+            bottom = top + int(item.get('height', 0))
+            viewport_top = int(self.verticalScrollBar().value())
+            viewport_bottom = viewport_top + max(1, int(self.viewport().height()))
+            return bottom > viewport_top and top < viewport_bottom
+        except Exception:
+            return False
+
+    def _get_non_restore_reflow_anchor_global(self, source_model=None) -> int | None:
+        """Anchor non-startup masonry reflows to visible selection or viewport center."""
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        selected_global = self._get_current_or_selected_global_index(source_model=source_model)
+        selected_item = self._get_masonry_item_for_global_index(selected_global) if isinstance(selected_global, int) else None
+        if selected_item is not None and self._is_masonry_item_visible(selected_item):
+            return int(selected_global)
+
+        center_global = self._get_viewport_center_anchor_global()
+        if isinstance(center_global, int) and center_global >= 0:
+            return int(center_global)
+
+        if isinstance(selected_global, int) and selected_global >= 0:
+            return int(selected_global)
+        return None
+
+    def _get_viewport_center_anchor_global(self) -> int | None:
+        """Return the masonry item nearest the viewport center, if any."""
+        try:
+            center_y = int(self.verticalScrollBar().value()) + (self.viewport().height() // 2)
+            best_idx = None
+            best_dist = None
+            for item in (self._masonry_items or []):
+                idx = int(item.get('index', -1))
+                if idx < 0:
+                    continue
+                item_center = int(item.get('y', 0)) + int(item.get('height', 0)) // 2
+                dist = abs(item_center - center_y)
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            return best_idx
+        except Exception:
+            return None
+
+    def _activate_selected_idle_anchor(self, source_model=None, hold_s: float = 1.5) -> bool:
+        """Temporarily anchor idle masonry settle passes around the local viewport."""
+        import time
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
+            return False
+        if self._get_masonry_strategy(source_model) != "windowed_strict":
+            return False
+        if self._scrollbar_dragging or self._mouse_scrolling:
+            return False
+
+        target_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            return False
+
+        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        target_page = max(0, int(target_global // max(1, page_size)))
+        current_page = max(0, int(getattr(self, '_current_page', 0) or 0))
+        window_buffer = 3
+        if abs(target_page - current_page) > window_buffer:
+            return False
+        self._idle_anchor_target_global = int(target_global)
+        self._idle_anchor_until = time.time() + max(0.2, float(hold_s))
+        return True
+
     def _activate_resize_anchor(self, source_model=None, hold_s: float = 2.0) -> bool:
         """Anchor strict paginated resize/zoom around current selected global item."""
         import time
@@ -16,22 +133,7 @@ class ImageListViewStrategyMixin:
         if time.time() <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0):
             return False
 
-        anchor_global = getattr(self, '_selected_global_index', None)
-        if not (isinstance(anchor_global, int) and anchor_global >= 0):
-            cur = self.currentIndex()
-            if cur.isValid():
-                try:
-                    src_idx = (
-                        self.model().mapToSource(cur)
-                        if self.model() and hasattr(self.model(), 'mapToSource')
-                        else cur
-                    )
-                    if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
-                        mapped = source_model.get_global_index_for_row(src_idx.row())
-                        if isinstance(mapped, int) and mapped >= 0:
-                            anchor_global = mapped
-                except Exception:
-                    anchor_global = None
+        anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
         if not (isinstance(anchor_global, int) and anchor_global >= 0):
             return False
 
@@ -39,6 +141,7 @@ class ImageListViewStrategyMixin:
         anchor_page = max(0, int(anchor_global // max(1, page_size)))
         until = time.time() + max(0.2, float(hold_s))
         self._resize_anchor_page = anchor_page
+        self._resize_anchor_target_global = int(anchor_global)
         self._resize_anchor_until = until
         try:
             total_items = int(getattr(source_model, '_total_count', 0) or 0)
@@ -583,8 +686,11 @@ class ImageListViewStrategyMixin:
                 self._restore_target_page = None
                 self._restore_target_global_index = None
                 self._restore_anchor_until = 0.0
+            self._idle_anchor_target_global = None
+            self._idle_anchor_until = 0.0
             if getattr(self, '_resize_anchor_page', None) is not None:
                 self._resize_anchor_page = None
+                self._resize_anchor_target_global = None
                 self._resize_anchor_until = 0.0
             # User moved after drag-release: release temporary anchor so
             # ownership follows current scroll immediately (prevents stale
@@ -842,23 +948,7 @@ class ImageListViewStrategyMixin:
             # Keep the same logical item anchored through enrichment-only refreshes.
             sb = self.verticalScrollBar()
             old_scroll = int(sb.value())
-            anchor_global = getattr(self, '_selected_global_index', None)
-            if not (isinstance(anchor_global, int) and anchor_global >= 0):
-                anchor_global = None
-                cur_idx = self.currentIndex()
-                if cur_idx.isValid():
-                    try:
-                        src_idx = (
-                            self.model().mapToSource(cur_idx)
-                            if self.model() and hasattr(self.model(), 'mapToSource')
-                            else cur_idx
-                        )
-                        if src_idx.isValid() and hasattr(source_model, 'get_global_index_for_row'):
-                            mapped = source_model.get_global_index_for_row(src_idx.row())
-                            if isinstance(mapped, int) and mapped >= 0:
-                                anchor_global = mapped
-                    except Exception:
-                        pass
+            anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
 
             # Reload window pages to pick up enriched dimensions
             for p in range(ws, we + 1):
@@ -1129,24 +1219,7 @@ class ImageListViewStrategyMixin:
             old_anchor_y = None
             if strict_mode:
                 try:
-                    anchor_global = getattr(self, '_selected_global_index', None)
-                    if not (isinstance(anchor_global, int) and anchor_global >= 0):
-                        sb_val = int(self.verticalScrollBar().value())
-                        top_item = None
-                        for _it in (self._masonry_items or []):
-                            _idx = int(_it.get('index', -1))
-                            if _idx < 0:
-                                continue
-                            _y = int(_it.get('y', 0))
-                            if _y <= sb_val + 24:
-                                if top_item is None or _y > int(top_item.get('y', 0)):
-                                    top_item = _it
-                        if top_item is None and self._masonry_items:
-                            real_items = [it for it in self._masonry_items if int(it.get('index', -1)) >= 0]
-                            if real_items:
-                                top_item = min(real_items, key=lambda it: abs(int(it.get('y', 0)) - sb_val))
-                        if top_item is not None:
-                            anchor_global = int(top_item.get('index', -1))
+                    anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
 
                     if isinstance(anchor_global, int) and anchor_global >= 0:
                         old_map = getattr(self, '_masonry_index_map', None)
@@ -1317,17 +1390,22 @@ class ImageListViewStrategyMixin:
         now = time.time()
         current_window = set(range(window_start, window_end + 1))
         target = getattr(source_model, '_enrichment_target_pages', None)
-        window_changed = target is None or not (current_window & target)
+        target_window = set(target) if target is not None else set()
+        target_scope = getattr(source_model, '_enrichment_scope', 'window')
+        same_window_target = (
+            target_scope == 'window'
+            and bool(target_window)
+            and target_window == current_window
+        )
 
         if getattr(source_model, '_enrichment_running', False):
-            if not window_changed:
-                # Enrichment is already working on our window — let it finish
+            if same_window_target:
+                # Enrichment is already repairing exactly this window — let it finish.
                 return
-            # Enrichment is targeting a different location — cancel + restart below
+            # Otherwise allow a retarget below, even for nearby page shifts.
 
-        # Debounce: only when enrichment targets the same window (prevents re-trigger
-        # while cycles are still processing). Skip debounce after a jump (window changed).
-        if not window_changed:
+        # Debounce only when the current window exactly matches the last window-repair target.
+        if same_window_target:
             last_trigger = getattr(self, '_last_enrich_trigger_time', 0.0)
             if now - last_trigger < 5.0:
                 return
@@ -1342,7 +1420,12 @@ class ImageListViewStrategyMixin:
                     if not image:
                         continue
                     dims = image.dimensions
-                    if not dims or dims[0] is None or dims[1] is None:
+                    if (
+                        not dims
+                        or dims[0] is None
+                        or dims[1] is None
+                        or dims == (512, 512)
+                    ):
                         unenriched_count += 1
                         if unenriched_count >= 5:
                             break
@@ -1355,7 +1438,7 @@ class ImageListViewStrategyMixin:
             self._enrich_first_refresh_done = False
             self._log_flow(
                 "ENRICH",
-                f"Window pages {window_start}-{window_end} have unenriched images, triggering enrichment",
+                f"Window pages {window_start}-{window_end} have unenriched images, triggering window repair",
                 level="INFO",
                 throttle_key="enrich_trigger",
                 every_s=5.0,

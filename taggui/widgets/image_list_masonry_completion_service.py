@@ -504,7 +504,8 @@ class MasonryCompletionService:
                                 and now <= float(getattr(v, '_resize_anchor_until', 0.0) or 0.0)
                             )
                             restore_anchor_live = now <= float(getattr(v, '_restore_anchor_until', 0.0) or 0.0)
-                            if not (resize_anchor_live or restore_anchor_live):
+                            idle_anchor_live = now <= float(getattr(v, '_idle_anchor_until', 0.0) or 0.0)
+                            if not (resize_anchor_live or restore_anchor_live or idle_anchor_live):
                                 return
 
                             # If user is intentionally at an edge, never pull the viewport
@@ -517,7 +518,12 @@ class MasonryCompletionService:
                             if resize_anchor_live and (at_top_edge or at_bottom_edge):
                                 return
 
-                            target_global = getattr(v, '_selected_global_index', None)
+                            if idle_anchor_live:
+                                target_global = getattr(v, '_idle_anchor_target_global', None)
+                            elif resize_anchor_live:
+                                target_global = getattr(v, '_resize_anchor_target_global', None)
+                            else:
+                                target_global = getattr(v, '_selected_global_index', None)
                             if not (isinstance(target_global, int) and target_global >= 0):
                                 target_global = getattr(v, '_restore_target_global_index', None)
                             if not (isinstance(target_global, int) and target_global >= 0):
@@ -603,33 +609,29 @@ class MasonryCompletionService:
                 
                     if v._recenter_after_layout:
                         v._recenter_after_layout = False
-                        idx = v.currentIndex()
-                        if idx.isValid():
-                            # Manual scrollTo for masonry to ensure robust centering
-                            # (Standard scrollTo fails with custom layout/buffered data)
+                        anchor_global = None
+                        if hasattr(v, '_get_non_restore_reflow_anchor_global'):
                             try:
-                                # Get global index
-                                global_idx = idx.row()
-                                if hasattr(v.model(), 'mapToSource'):
-                                    src_idx = v.model().mapToSource(idx)
-                                    if hasattr(source_model, 'get_global_index_for_row'):
-                                        global_idx = source_model.get_global_index_for_row(src_idx.row())
-                                    else:
-                                        global_idx = src_idx.row()
+                                anchor_global = v._get_non_restore_reflow_anchor_global(source_model=source_model)
+                            except Exception:
+                                anchor_global = None
 
-                                # Find item rect in masonry map
-                                item_rect = v._get_masonry_item_rect(global_idx)
-                            
+                        if isinstance(anchor_global, int) and anchor_global >= 0:
+                            try:
+                                item_rect = v._get_masonry_item_rect(anchor_global)
                                 if not item_rect.isNull():
-                                    # Scroll to center
                                     target_y = item_rect.center().y() - (v.viewport().height() // 2)
                                     target_y = max(0, min(target_y, v.verticalScrollBar().maximum()))
                                     v.verticalScrollBar().setValue(target_y)
                                 else:
-                                    # Fallback if item not found (e.g. not loaded yet)
-                                    v.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+                                    idx = v.currentIndex()
+                                    if idx.isValid():
+                                        v.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
                             except Exception as e:
                                 print(f"[MASONRY] Manual scrollTo failed: {e}")
+                        else:
+                            idx = v.currentIndex()
+                            if idx.isValid():
                                 v.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
 
                     # Resume enrichment
