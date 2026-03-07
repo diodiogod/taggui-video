@@ -33,11 +33,17 @@ class SignalManager:
 
         image_viewer.zoom.connect(self.main_window.zoom)
         toolbar_manager.zoom_fit_best_action.triggered.connect(
-            lambda: self.main_window.get_active_viewer().zoom_fit())
+            lambda: (
+                self.main_window.get_active_viewer().clear_saved_double_click_detail_zoom(),
+                self.main_window.get_active_viewer().zoom_fit(),
+            ))
         toolbar_manager.zoom_in_action.triggered.connect(
             lambda: self.main_window.get_active_viewer().zoom_in())
         toolbar_manager.zoom_original_action.triggered.connect(
-            lambda: self.main_window.get_active_viewer().zoom_original())
+            lambda: (
+                self.main_window.get_active_viewer().clear_saved_double_click_detail_zoom(),
+                self.main_window.get_active_viewer().zoom_original(),
+            ))
         toolbar_manager.zoom_out_action.triggered.connect(
             lambda: self.main_window.get_active_viewer().zoom_out())
         if toolbar_manager.zoom_follow_mode_btn is not None:

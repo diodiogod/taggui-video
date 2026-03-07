@@ -934,6 +934,23 @@ class ImageViewer(QWidget):
         except Exception:
             return False
 
+    def _scene_pos_hits_current_media(self, scene_pos) -> bool:
+        """Return True only when the scene point lands on the current media item."""
+        if scene_pos is None or not hasattr(scene_pos, "x") or not hasattr(scene_pos, "y"):
+            return True
+        item = self.current_video_item or self.current_image_item
+        if item is None:
+            return True
+        try:
+            return bool(item.sceneBoundingRect().contains(scene_pos))
+        except Exception:
+            return True
+
+    def clear_saved_double_click_detail_zoom(self):
+        """Forget the session-local remembered detail zoom used by double-click."""
+        self._floating_double_click_return_scale = None
+        self._floating_last_auto_double_click_zoom_scale = None
+
     def get_zoom_follow_mode(self) -> str:
         mode = str(getattr(self, "_zoom_follow_mode", ZOOM_FOLLOW_MODE_DEFAULT) or ZOOM_FOLLOW_MODE_DEFAULT).strip().lower()
         if mode not in ZOOM_FOLLOW_MODE_OPTIONS:
@@ -1261,9 +1278,13 @@ class ImageViewer(QWidget):
                     and hasattr(scene_anchor_pos, "x")
                     and hasattr(scene_anchor_pos, "y")
                 ):
-                    click_inside_media = scene_rect.contains(scene_anchor_pos)
+                    click_inside_media = self._scene_pos_hits_current_media(scene_anchor_pos)
             except Exception:
                 click_inside_media = True
+            if not click_inside_media:
+                # Double-clicking empty viewer background means "drop any saved
+                # detail zoom memory" before applying the normal fit/fill action.
+                self.clear_saved_double_click_detail_zoom()
 
             # Priority toggle: if we previously stored a zoom scale for this
             # floating viewer, restore it first when current view is unpannable.
@@ -1321,17 +1342,18 @@ class ImageViewer(QWidget):
 
             # If no visible bars and content is pannable (zoomed/cropped), restore fit.
             if self.is_content_pannable():
-                # Save return scale only if user intentionally changed zoom away
-                # from the last auto double-click zoom-in scale.
-                auto_scale = self._floating_last_auto_double_click_zoom_scale
-                should_store_return_scale = True
-                if isinstance(auto_scale, (int, float)):
-                    auto_scale = float(auto_scale)
-                    scale_delta = abs(current_scale - auto_scale)
-                    tolerance = max(1e-4, auto_scale * 1e-3)
-                    should_store_return_scale = scale_delta > tolerance
-                if should_store_return_scale:
-                    self._floating_double_click_return_scale = current_scale
+                if click_inside_media:
+                    # Save return scale only if user intentionally changed zoom
+                    # away from the last auto double-click zoom-in scale.
+                    auto_scale = self._floating_last_auto_double_click_zoom_scale
+                    should_store_return_scale = True
+                    if isinstance(auto_scale, (int, float)):
+                        auto_scale = float(auto_scale)
+                        scale_delta = abs(current_scale - auto_scale)
+                        tolerance = max(1e-4, auto_scale * 1e-3)
+                        should_store_return_scale = scale_delta > tolerance
+                    if should_store_return_scale:
+                        self._floating_double_click_return_scale = current_scale
                 self.zoom_fit()
                 if (not self.is_spawned_viewer
                         and follow_mode == ZOOM_FOLLOW_MODE_FIT_LOCK):
@@ -1778,14 +1800,14 @@ class ImageViewer(QWidget):
         ):
             return
 
-        self.proxy_image_index = QPersistentModelIndex(proxy_index)
-        self._floating_double_click_return_scale = None
-        self._floating_last_auto_double_click_zoom_scale = None
-
         image: Image = self._safe_get_image(proxy_index)
         if image is None:
             # Page not loaded yet in pagination mode - wait
             return
+        self.proxy_image_index = QPersistentModelIndex(proxy_index)
+        if self.is_spawned_viewer or bool(getattr(image, "is_video", False)):
+            self._floating_double_click_return_scale = None
+        self._floating_last_auto_double_click_zoom_scale = None
         self.rating_changed.emit(image.rating)
 
         if is_complete:

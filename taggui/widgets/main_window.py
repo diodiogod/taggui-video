@@ -2756,6 +2756,7 @@ class MainWindow(QMainWindow):
     def cycle_active_viewer_zoom_follow_mode(self):
         target = self.get_active_viewer()
         try:
+            target.clear_saved_double_click_detail_zoom()
             target.cycle_zoom_follow_mode()
         except Exception:
             return
