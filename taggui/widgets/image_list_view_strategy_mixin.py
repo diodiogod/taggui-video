@@ -207,25 +207,13 @@ class ImageListViewStrategyMixin:
 
 
     def _get_masonry_strategy(self, source_model=None) -> str:
-        """Return active masonry strategy for paginated mode control."""
-        strategy = "full_compat"
-        try:
-            raw = settings.value("masonry_strategy", "full_compat", type=str)
-            if raw:
-                strategy = str(raw).strip().lower()
-        except Exception:
-            strategy = "full_compat"
-
-        if strategy not in {"full_compat", "windowed_strict"}:
-            strategy = "full_compat"
-
+        """Return the active masonry strategy."""
         is_paginated = bool(
             source_model
             and hasattr(source_model, "_paginated_mode")
             and source_model._paginated_mode
         )
-        if not is_paginated:
-            strategy = "full_compat"
+        strategy = "windowed_strict" if is_paginated else "full_compat"
 
         if strategy != self._masonry_strategy_logged:
             self._masonry_strategy_logged = strategy

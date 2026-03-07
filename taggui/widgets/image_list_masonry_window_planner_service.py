@@ -157,10 +157,6 @@ class MasonryWindowPlannerService:
     ):
         max_page = (total_items + page_size - 1) // page_size
         full_layout_mode = False
-        if total_items > 0 and strategy != "windowed_strict":
-            coverage = loaded_count / total_items
-            if coverage >= 0.95 and total_items <= 50000:
-                full_layout_mode = True
 
         if full_layout_mode:
             window_start_page = 0

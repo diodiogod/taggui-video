@@ -1151,7 +1151,7 @@ class ImageListViewInteractionMixin:
         # Set scroll position BEFORE masonry rebuild so the layout sees the
         # correct scroll_val for source_idx determination.
         sb = self.verticalScrollBar()
-        strategy = getattr(self, '_masonry_strategy', '')
+        strategy = self._get_masonry_strategy(source_model)
         sb.blockSignals(True)
         if strategy == 'windowed_strict':
             canonical_max = self._strict_canonical_domain_max(source_model)

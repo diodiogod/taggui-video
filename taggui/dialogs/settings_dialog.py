@@ -175,28 +175,8 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(pagination_spin_box, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        # Masonry strategy
-        grid_layout.addWidget(QLabel('Masonry strategy'), 7, 0,
-                              Qt.AlignmentFlag.AlignRight)
-        masonry_strategy_combo = SettingsComboBox(
-            key='masonry_strategy',
-            default='full_compat')
-        masonry_strategy_combo.addItems(['full_compat', 'windowed_strict'])
-        masonry_strategy_combo.setToolTip(
-            'Select masonry engine behavior for paginated mode.\n\n'
-            'full_compat:\n'
-            '- Stable/default behavior.\n'
-            '- Allows full masonry fallback when coverage is high.\n\n'
-            'windowed_strict:\n'
-            '- Experimental true paginated behavior for very large datasets.\n'
-            '- Keeps masonry calculation window-local (no full fallback).\n\n'
-            'If the UI is already open, changing this takes effect on the next masonry recalculation.'
-        )
-        grid_layout.addWidget(masonry_strategy_combo, 7, 1,
-                              Qt.AlignmentFlag.AlignLeft)
-
         # Thumbnail eviction pages (VRAM behavior in paginated mode)
-        grid_layout.addWidget(QLabel('Thumbnail eviction pages (VRAM)'), 8, 0,
+        grid_layout.addWidget(QLabel('Thumbnail eviction pages (VRAM)'), 7, 0,
                               Qt.AlignmentFlag.AlignRight)
         eviction_pages_spin_box = SettingsSpinBox(
             key='thumbnail_eviction_pages',
@@ -207,11 +187,11 @@ class SettingsDialog(QDialog):
             '3 = balanced default\n'
             '5 = higher VRAM, smoother revisits\n'
             'Applied live.')
-        grid_layout.addWidget(eviction_pages_spin_box, 8, 1,
+        grid_layout.addWidget(eviction_pages_spin_box, 7, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         # Max pages in memory (page object budget for paginated mode)
-        grid_layout.addWidget(QLabel('Max pages in memory (RAM)'), 9, 0,
+        grid_layout.addWidget(QLabel('Max pages in memory (RAM)'), 8, 0,
                               Qt.AlignmentFlag.AlignRight)
         max_pages_spin_box = SettingsSpinBox(
             key='max_pages_in_memory',
@@ -222,11 +202,11 @@ class SettingsDialog(QDialog):
             'Higher = smoother revisits, more RAM use\n'
             'Guardrail: effective value is at least (2 * eviction pages + 1).\n'
             'Applied live.')
-        grid_layout.addWidget(max_pages_spin_box, 9, 1,
+        grid_layout.addWidget(max_pages_spin_box, 8, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
         # Video player skin
-        grid_layout.addWidget(QLabel('Video player skin'), 10, 0,
+        grid_layout.addWidget(QLabel('Video player skin'), 9, 0,
                               Qt.AlignmentFlag.AlignRight)
         self.video_skin_combo = SettingsComboBox(
             key='video_player_skin',

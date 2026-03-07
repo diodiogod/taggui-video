@@ -91,22 +91,22 @@ def test_get_window_buffer_clamps_settings_value(monkeypatch):
     assert service.get_window_buffer() == 1
 
 
-def test_compute_window_bounds_switches_to_full_layout_at_high_coverage():
+def test_compute_window_bounds_keeps_window_local_in_paginated_mode():
     service = MasonryWindowPlannerService(FakeView())
     result = service.compute_window_bounds(
         total_items=1000,
         page_size=100,
         current_page=5,
-        strategy="full_compat",
+        strategy="windowed_strict",
         loaded_count=950,
         window_buffer=3,
     )
 
-    assert result["full_layout_mode"] is True
-    assert result["window_start_page"] == 0
-    assert result["window_end_page"] == 9
-    assert result["min_idx"] == 0
-    assert result["max_idx"] == 1000
+    assert result["full_layout_mode"] is False
+    assert result["window_start_page"] == 2
+    assert result["window_end_page"] == 8
+    assert result["min_idx"] == 200
+    assert result["max_idx"] == 900
 
 
 def test_build_items_with_spacers_inserts_prefix_gap_and_tail():
