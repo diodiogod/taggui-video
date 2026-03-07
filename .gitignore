@@ -124,9 +124,14 @@ celerybeat.pid
 .venv
 env/
 venv/
+venv_test/
 ENV/
 env.bak/
 venv.bak/
+
+# Local repo artifacts
+.taggui_index.db
+.gitignored/
 
 # Spyder project settings
 .spyderproject
