@@ -645,6 +645,44 @@ class ImageListModel(QAbstractListModel):
                 },
             )
 
+    def _apply_image_metadata_from_meta(self, image: Image, meta: dict):
+        """Apply supported image/video metadata from a parsed sidecar JSON dict."""
+        if not isinstance(meta, dict) or meta.get('version') != 1:
+            return
+
+        crop = meta.get('crop')
+        if isinstance(crop, list) and len(crop) == 4:
+            try:
+                image.crop = QRect(*crop)
+            except Exception:
+                pass
+
+        rating = meta.get('rating')
+        if isinstance(rating, (int, float)):
+            image.rating = float(rating)
+
+        markings = meta.get('markings')
+        if isinstance(markings, list):
+            for marking_data in markings:
+                if not isinstance(marking_data, dict):
+                    continue
+                rect = marking_data.get('rect')
+                rect_type_name = marking_data.get('type')
+                if not (isinstance(rect, list) and len(rect) == 4 and isinstance(rect_type_name, str)):
+                    continue
+                try:
+                    marking = Marking(
+                        label=marking_data.get('label'),
+                        type=ImageMarking[rect_type_name],
+                        rect=QRect(*rect),
+                        confidence=marking_data.get('confidence', 1.0),
+                    )
+                except Exception:
+                    continue
+                image.markings.append(marking)
+
+        self._apply_loop_metadata_from_meta(image, meta)
+
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
@@ -1502,8 +1540,7 @@ class ImageListModel(QAbstractListModel):
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         pass
                     else:
-                        if meta.get('version') == 1:
-                            self._apply_loop_metadata_from_meta(image, meta)
+                        self._apply_image_metadata_from_meta(image, meta)
 
             images.append(image)
 
@@ -3878,22 +3915,7 @@ class ImageListModel(QAbstractListModel):
                         # Silently skip files with invalid unicode
                         pass
 
-                    if meta.get('version') == 1:
-                        crop = meta.get('crop')
-                        if crop and type(crop) is list and len(crop) == 4:
-                            image.crop = QRect(*crop)
-                        rating = meta.get('rating')
-                        if rating:
-                            image.rating = rating
-                        markings = meta.get('markings')
-                        if markings and type(markings) is list:
-                            for marking in markings:
-                                marking = Marking(label=marking.get('label'),
-                                                  type=ImageMarking[marking.get('type')],
-                                                  rect=QRect(*marking.get('rect')),
-                                                  confidence=marking.get('confidence', 1.0))
-                                image.markings.append(marking)
-                        self._apply_loop_metadata_from_meta(image, meta)
+                    self._apply_image_metadata_from_meta(image, meta)
                     # Silently ignore unsupported JSON versions (like ComfyUI workflow files)
             new_images.append(image)
 
@@ -5050,22 +5072,7 @@ class ImageListModel(QAbstractListModel):
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     pass  # Ignore JSON errors for duplicates
                 else:
-                    if meta.get('version') == 1:
-                        crop = meta.get('crop')
-                        if crop and type(crop) is list and len(crop) == 4:
-                            image.crop = QRect(*crop)
-                        rating = meta.get('rating')
-                        if rating:
-                            image.rating = rating
-                        markings = meta.get('markings')
-                        if markings and type(markings) is list:
-                            for marking in markings:
-                                marking = Marking(label=marking.get('label'),
-                                                  type=ImageMarking[marking.get('type')],
-                                                  rect=QRect(*marking.get('rect')),
-                                                  confidence=marking.get('confidence', 1.0))
-                                image.markings.append(marking)
-                        self._apply_loop_metadata_from_meta(image, meta)
+                    self._apply_image_metadata_from_meta(image, meta)
 
         # Insert the image in the correct sorted position
         # Use natural sort key for insertion
