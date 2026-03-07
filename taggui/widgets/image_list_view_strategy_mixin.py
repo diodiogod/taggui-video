@@ -207,7 +207,7 @@ class ImageListViewStrategyMixin:
 
 
     def _get_masonry_strategy(self, source_model=None) -> str:
-        """Return the active masonry strategy."""
+        """Return the active masonry strategy for the current model."""
         is_paginated = bool(
             source_model
             and hasattr(source_model, "_paginated_mode")

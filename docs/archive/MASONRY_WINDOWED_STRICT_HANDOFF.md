@@ -6,7 +6,7 @@ Build a **true paginated/windowed masonry** flow that scales to very large datas
 ## Current Mode Under Test
 - Strategy: `windowed_strict`
 - Main file: `taggui/widgets/image_list.py`
-- Baseline comparison mode: `full_compat`
+- Historical baseline comparison mode: `full_compat` (now removed from live paginated settings)
 
 ## What Is Working
 - Startup and initial page rendering are stable.

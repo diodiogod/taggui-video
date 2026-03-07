@@ -4,7 +4,7 @@
 Reach a stable, smooth image list that scales to very large datasets (100k to 1M+ files) without requiring global/full masonry recalculation.
 
 ## Current Baseline
-- Branch baseline is stable-ish in `full_compat` behavior.
+- Historical note: this plan started from the old `full_compat` baseline.
 - Drag/scroll UX can still jitter or jump due to competing ownership between:
   - scrollbar fraction (virtual position),
   - visible masonry window (real painted items),
@@ -20,9 +20,9 @@ Reach a stable, smooth image list that scales to very large datasets (100k to 1M
 ## Phases
 
 ### Phase 1: Control Plane (safe, no regression)
-- Add explicit masonry strategy switch:
-  - `full_compat` (default, current behavior),
-  - `windowed_strict` (new progressive mode).
+- Add explicit masonry strategy switch during rollout:
+  - `full_compat` (legacy baseline at the time),
+  - `windowed_strict` (new progressive mode at the time).
 - Keep current baseline untouched by default.
 - Add low-noise logs for active strategy/mode.
 
@@ -61,5 +61,5 @@ Reach a stable, smooth image list that scales to very large datasets (100k to 1M
 
 ## Rules for Implementation
 - Keep changes incremental and reversible.
-- Preserve working baseline (`full_compat`) while building `windowed_strict`.
+- Preserve the working baseline while building `windowed_strict`.
 - Prefer deterministic state transitions over heuristic corrections.
