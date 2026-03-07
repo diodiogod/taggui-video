@@ -57,7 +57,7 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - Width/height fill zooms center around the clicked media area (autopan to click target).
 - Detail jump zoom amount is configurable in `Settings -> Advanced -> Floating double-click detail zoom (%)` (applied live).
 - Stored zoom memory is temporary and per floating viewer; it resets when that viewer loads a different file.
-- Double-clicking in black-bar area can trigger auto-fit without erasing stored custom zoom.
+- Double-clicking in black-bar area resets to fit and clears the stored custom zoom.
 
 ## Right-Click Menu on Floating Viewers
 
