@@ -161,26 +161,31 @@ class ImageListViewStrategyMixin:
             return None
         return None
 
-    def _is_masonry_item_visible(self, item) -> bool:
-        """Return True when the masonry item intersects the current viewport."""
+    def _is_masonry_item_near_viewport(self, item, *, margin_px: int | None = None) -> bool:
+        """Return True when the masonry item is in or near the current viewport."""
         if not item:
             return False
         try:
             top = int(item.get('y', 0))
             bottom = top + int(item.get('height', 0))
             viewport_top = int(self.verticalScrollBar().value())
-            viewport_bottom = viewport_top + max(1, int(self.viewport().height()))
-            return bottom > viewport_top and top < viewport_bottom
+            viewport_height = max(1, int(self.viewport().height()))
+            viewport_bottom = viewport_top + viewport_height
+            if margin_px is None:
+                margin_px = max(120, min(360, int(viewport_height * 0.25)))
+            expanded_top = viewport_top - max(0, int(margin_px))
+            expanded_bottom = viewport_bottom + max(0, int(margin_px))
+            return bottom > expanded_top and top < expanded_bottom
         except Exception:
             return False
 
     def _get_non_restore_reflow_anchor_global(self, source_model=None) -> int | None:
-        """Anchor non-startup masonry reflows to visible selection or viewport center."""
+        """Anchor non-startup masonry reflows to nearby selection or viewport center."""
         if source_model is None:
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
         selected_global = self._get_current_or_selected_global_index(source_model=source_model)
         selected_item = self._get_masonry_item_for_global_index(selected_global) if isinstance(selected_global, int) else None
-        if selected_item is not None and self._is_masonry_item_visible(selected_item):
+        if selected_item is not None and self._is_masonry_item_near_viewport(selected_item):
             return int(selected_global)
 
         center_global = self._get_viewport_center_anchor_global()
