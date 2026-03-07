@@ -1525,7 +1525,7 @@ class ImageListModel(QAbstractListModel):
         for row in rows:
             file_path = self._directory_path / row['file_name']
             img_id = row['id']
-            tags = tags_map.get(img_id, [])
+            tags = self._filter_internal_db_tags(tags_map.get(img_id, []))
 
             # Skip files that no longer exist on disk (deleted outside app
             # or between sessions).  Lightweight stat check avoids showing
@@ -1569,6 +1569,12 @@ class ImageListModel(QAbstractListModel):
             images.append(image)
 
         return images, missing_rel_paths
+
+    @staticmethod
+    def _filter_internal_db_tags(tags: list[str] | None) -> list[str]:
+        if not tags:
+            return []
+        return [tag for tag in tags if tag and tag != '__no_tags__']
 
     def _rebuild_combined_filter(self):
         """Rebuild _filter_sql/_filter_bindings from text + media type parts."""
@@ -3308,8 +3314,10 @@ class ImageListModel(QAbstractListModel):
                       
                       # Extract tags
                       txt_path = full_path.with_suffix('.txt')
+                      txt_sidecar_mtime = None
                       if txt_path.exists():
                           try:
+                              txt_sidecar_mtime = float(txt_path.stat().st_mtime)
                               caption = txt_path.read_text(encoding='utf-8', errors='replace')
                               if caption:
                                   tags = [t.strip() for t in caption.split(self.tag_separator) if t.strip()]
@@ -3378,6 +3386,7 @@ class ImageListModel(QAbstractListModel):
                                else:
                                    # Mark as scanned with special tag to prevent reprocessing
                                    db_bg.add_tag_to_image(image_id, '__no_tags__')
+                               db_bg.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
                                    
                            enriched_count += 1
 
@@ -3439,12 +3448,18 @@ class ImageListModel(QAbstractListModel):
         if self._directory_path != directory_path:
             return
 
-        if not result.get('changes_detected'):
+        tag_updates = int(result.get('tag_updates_count', 0) or 0)
+        if not result.get('changes_detected') and tag_updates <= 0:
             return
 
         added_count = int(result.get('added_count', 0) or 0)
         removed_count = int(result.get('removed_count', 0) or 0)
-        print(f"[CACHE] Applying background refresh (+{added_count:,} / -{removed_count:,})")
+        if result.get('changes_detected'):
+            print(f"[CACHE] Applying background refresh (+{added_count:,} / -{removed_count:,})")
+        elif tag_updates > 0:
+            print(f"[CACHE] Applying background tag refresh ({tag_updates:,} image sidecar change(s))")
+            self.enrichment_complete.emit()
+            return
 
         self.load_directory(
             directory_path,
@@ -3588,10 +3603,23 @@ class ImageListModel(QAbstractListModel):
                 db.bulk_insert_relative_paths(added_db_paths, directory_path)
 
             db.replace_directory_signatures(merged_dir_mtimes)
+            tag_updates_count = int(
+                db.reconcile_tags_in_subtrees(
+                    directory_path,
+                    changed_roots,
+                    self.tag_separator,
+                ) or 0
+            )
+            if tag_updates_count > 0:
+                print(
+                    "[CACHE] Background validation: reconciled "
+                    f"{tag_updates_count:,} image tag sidecar(s)"
+                )
 
             changes_detected = bool(added_rel_paths or removed_db_paths)
             if not changes_detected:
-                print("[CACHE] Background validation complete: image list unchanged")
+                if tag_updates_count <= 0:
+                    print("[CACHE] Background validation complete: image list unchanged")
 
             _emit_progress(progress_label, len(refreshed_rel_paths), progress_maximum, True)
 
@@ -3601,8 +3629,9 @@ class ImageListModel(QAbstractListModel):
                 'changes_detected': changes_detected,
                 'added_count': len(added_rel_paths),
                 'removed_count': len(removed_db_paths),
+                'tag_updates_count': tag_updates_count,
                 'precomputed_rel_paths': merged_native_paths if changes_detected else None,
-                'db_synced': changes_detected,
+                'db_synced': bool(changes_detected or tag_updates_count),
             })
 
         except Exception as e:
@@ -4451,12 +4480,20 @@ class ImageListModel(QAbstractListModel):
                  print(f"[DB ERROR] Failed to self-heal image {rel_path}: {e}")
 
         if image_id:
+            txt_path = image.path.with_suffix('.txt')
+            txt_sidecar_mtime = None
+            try:
+                if txt_path.exists():
+                    txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+            except OSError:
+                txt_sidecar_mtime = None
             if image.tags:
                  self._db.set_tags_for_image(image_id, image.tags)
             else:
                  # Ensure we don't trigger re-enrichment by having at least one tag
                  self._db.set_tags_for_image(image_id, [])
                  self._db.add_tag_to_image(image_id, '__no_tags__')
+            self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
             # Keep DB rating in sync with sidecar/in-memory rating.
             self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
 
@@ -4998,6 +5035,12 @@ class ImageListModel(QAbstractListModel):
                      image_id = self._db.get_image_id(rel_path)
                      if image_id:
                          self._db.set_tags_for_image(image_id, new_tags_list)
+                         txt_sidecar_mtime = None
+                         try:
+                             txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                         except OSError:
+                             pass
+                         self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
                  except Exception as e:
                      print(f"Error updating tags for {rel_path}: {e}")
 
@@ -5052,6 +5095,12 @@ class ImageListModel(QAbstractListModel):
                          else:
                              self._db.set_tags_for_image(image_id, [])
                              self._db.add_tag_to_image(image_id, '__no_tags__')
+                         txt_sidecar_mtime = None
+                         try:
+                             txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                         except OSError:
+                             pass
+                         self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
                  except Exception as e:
                      print(f"Error deleting tags for {rel_path}: {e}")
 

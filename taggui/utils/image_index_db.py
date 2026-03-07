@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 7  # v7 adds searchable image_markings index
+DB_VERSION = 8  # v8 tracks .txt sidecar mtimes for cheap tag reconciliation
 
 
 class ImageIndexDB:
@@ -218,7 +218,8 @@ class ImageIndexDB:
                         thumbnail_cached INTEGER DEFAULT 0,
                         file_size INTEGER,
                         file_type TEXT,
-                        ctime REAL
+                        ctime REAL,
+                        txt_sidecar_mtime REAL
                     )
                 ''')
 
@@ -262,9 +263,14 @@ class ImageIndexDB:
                     self.conn.commit()
                 elif int(row['value']) != DB_VERSION:
                     old_version = int(row['value'])
-                    if old_version == 6 and DB_VERSION == 7:
-                        print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating markings index...')
-                        self._create_image_markings_schema(cursor)
+                    if old_version in (6, 7) and DB_VERSION == 8:
+                        print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating incrementally...')
+                        if old_version <= 6:
+                            self._create_image_markings_schema(cursor)
+                        cursor.execute("PRAGMA table_info(images)")
+                        columns = [info[1] for info in cursor.fetchall()]
+                        if 'txt_sidecar_mtime' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN txt_sidecar_mtime REAL')
                         cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
                                      (str(DB_VERSION), 'version'))
                         self.conn.commit()
@@ -294,7 +300,8 @@ class ImageIndexDB:
                                 thumbnail_cached INTEGER DEFAULT 0,
                                 file_size INTEGER,
                                 file_type TEXT,
-                                ctime REAL
+                                ctime REAL,
+                                txt_sidecar_mtime REAL
                             )
                         ''')
                         cursor.execute('''
@@ -332,6 +339,11 @@ class ImageIndexDB:
                     if 'ctime' not in columns:
                         print("Migrating DB: Adding ctime column...")
                         cursor.execute('ALTER TABLE images ADD COLUMN ctime REAL')
+                        self.conn.commit()
+
+                    if 'txt_sidecar_mtime' not in columns:
+                        print("Migrating DB: Adding txt_sidecar_mtime column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN txt_sidecar_mtime REAL')
                         self.conn.commit()
                         
                     # Ensure indexes exist
@@ -1619,6 +1631,146 @@ class ImageIndexDB:
             self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
+
+    def set_txt_sidecar_mtime(self, image_id: int, txt_sidecar_mtime: float | None):
+        """Persist the observed .txt sidecar mtime for one image."""
+        if not self.enabled or not self.conn:
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
+                (txt_sidecar_mtime, image_id)
+            )
+            self.commit()
+        except sqlite3.Error as e:
+            print(f'Database tag write error: {e}')
+
+    def reconcile_tags_in_subtrees(
+        self,
+        directory_path: Path,
+        subtree_roots: list[str],
+        tag_separator: str,
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        """Reconcile DB tag rows against current .txt sidecars in changed subtrees."""
+        if (not self.enabled or not self.conn or not directory_path
+                or not subtree_roots):
+            return 0
+
+        normalized_roots = []
+        for root in subtree_roots:
+            root_text = str(root or '').replace("\\", "/").strip("/")
+            if root_text not in normalized_roots:
+                normalized_roots.append(root_text)
+
+        select_sql = 'SELECT id, file_name, txt_sidecar_mtime FROM images'
+        bindings: list[str] = []
+        if '' not in normalized_roots:
+            clauses = []
+            for root in normalized_roots:
+                native_root = str(Path(root))
+                clauses.append('(file_name = ? OR file_name LIKE ?)')
+                bindings.extend([native_root, str(Path(native_root) / '%')])
+            select_sql += ' WHERE ' + ' OR '.join(clauses)
+        select_sql += ' ORDER BY id'
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(select_sql, tuple(bindings))
+                rows = cursor.fetchall()
+        except sqlite3.Error:
+            return 0
+
+        updated_images = 0
+        for start in range(0, len(rows), max(1, int(batch_size))):
+            batch = rows[start:start + max(1, int(batch_size))]
+            image_ids = []
+            rel_paths_by_id: dict[int, str] = {}
+            stored_sidecar_mtimes: dict[int, float | None] = {}
+            for row in batch:
+                try:
+                    image_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                    stored_txt_mtime = (
+                        row['txt_sidecar_mtime'] if isinstance(row, sqlite3.Row) else row[2]
+                    )
+                except Exception:
+                    continue
+                image_ids.append(image_id)
+                rel_paths_by_id[image_id] = rel_path
+                stored_sidecar_mtimes[image_id] = (
+                    float(stored_txt_mtime) if stored_txt_mtime is not None else None
+                )
+
+            if not image_ids:
+                continue
+
+            tags_map = self.get_tags_for_images(image_ids)
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    for image_id in image_ids:
+                        rel_path = rel_paths_by_id.get(image_id)
+                        if not rel_path:
+                            continue
+
+                        text_path = (directory_path / rel_path).with_suffix('.txt')
+                        current_txt_mtime: float | None = None
+                        sidecar_tags: list[str] = []
+                        if text_path.exists():
+                            try:
+                                current_txt_mtime = float(text_path.stat().st_mtime)
+                                caption = text_path.read_text(encoding='utf-8', errors='replace')
+                            except OSError:
+                                caption = ''
+                                current_txt_mtime = None
+                            if caption:
+                                sidecar_tags = [t.strip() for t in caption.split(tag_separator) if t.strip()]
+
+                        db_tags = [
+                            tag for tag in (tags_map.get(image_id, []) or [])
+                            if tag and tag != '__no_tags__'
+                        ]
+                        stored_txt_mtime = stored_sidecar_mtimes.get(image_id)
+                        if ((current_txt_mtime is None and stored_txt_mtime is None and not db_tags)
+                                or (current_txt_mtime is not None
+                                    and stored_txt_mtime is not None
+                                    and abs(current_txt_mtime - stored_txt_mtime) <= 0.001)):
+                            continue
+
+                        if sidecar_tags == db_tags:
+                            cursor.execute(
+                                'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
+                                (current_txt_mtime, image_id)
+                            )
+                            continue
+
+                        cursor.execute('DELETE FROM image_tags WHERE image_id = ?', (image_id,))
+                        if sidecar_tags:
+                            unique_tags = list(dict.fromkeys(sidecar_tags))
+                            cursor.executemany(
+                                'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
+                                [(image_id, tag) for tag in unique_tags]
+                            )
+                        else:
+                            cursor.execute(
+                                'INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
+                                (image_id, '__no_tags__')
+                            )
+                        cursor.execute(
+                            'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
+                            (current_txt_mtime, image_id)
+                        )
+                        updated_images += 1
+                    self.conn.commit()
+            except sqlite3.Error:
+                continue
+
+        return updated_images
 
     def remove_images_by_paths(self, rel_paths: list):
         """Remove images (and their tags) from the DB by relative path."""
