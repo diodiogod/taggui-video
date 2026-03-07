@@ -7,8 +7,9 @@ Current known constraints in TagGUI Video 1M.
 ## Filtering and Metadata
 
 - Tags and star ratings have DB-backed support in the current large-folder path.
-- Markings are still stored in sidecar JSON metadata.
-- Marking-related filters such as `marking:`, `crops:`, and `visible:` are not yet fully implemented in the DB-backed paginated SQL path.
+- Markings are still stored in sidecar JSON metadata as the source of truth.
+- Basic marking filters such as `marking:` and `marking_type:` are now implemented in the DB-backed paginated SQL path.
+- Geometry-aware marking filters such as `crops:` and `visible:` are still not implemented in the DB-backed paginated SQL path.
 
 ## Video Captioning
 

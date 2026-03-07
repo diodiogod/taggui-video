@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 6  # Increment to allow NULLs in width/height (v6)
+DB_VERSION = 7  # v7 adds searchable image_markings index
 
 
 class ImageIndexDB:
@@ -23,6 +23,8 @@ class ImageIndexDB:
     INTERNAL_DIR_NAMES = {DB_DIR_NAME, '.taggui_profiles'}
     RATING_MIGRATION_DONE_KEY = 'rating_migration_v1_done'
     RATING_MIGRATION_LAST_ID_KEY = 'rating_migration_v1_last_id'
+    MARKING_MIGRATION_DONE_KEY = 'marking_migration_v1_done'
+    MARKING_MIGRATION_LAST_ID_KEY = 'marking_migration_v1_last_id'
 
     @classmethod
     def db_dir_path(cls, directory_path: Path) -> Path:
@@ -142,6 +144,26 @@ class ImageIndexDB:
 
     _init_lock = threading.Lock() # Class-level lock for migrations
 
+    @staticmethod
+    def _create_image_markings_schema(cursor):
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS image_markings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                type TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                x INTEGER,
+                y INTEGER,
+                width INTEGER,
+                height INTEGER,
+                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_markings_image_id ON image_markings(image_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_markings_label ON image_markings(label)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_markings_type ON image_markings(type)')
+
     def _init_db(self):
         """Create database and tables if they don't exist."""
         try:
@@ -217,6 +239,7 @@ class ImageIndexDB:
                         scanned_at REAL NOT NULL
                     )
                 ''')
+                self._create_image_markings_schema(cursor)
 
                 # Create indexes for fast queries
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
@@ -238,44 +261,59 @@ class ImageIndexDB:
                                  ('version', str(DB_VERSION)))
                     self.conn.commit()
                 elif int(row['value']) != DB_VERSION:
-                    # Version mismatch, drop and recreate tables (schema changed)
-                    print(f'Database version mismatch (v{row["value"]} -> v{DB_VERSION}), recreating tables...')
-                    cursor.execute('DROP TABLE IF EXISTS images')
-                    cursor.execute('DROP TABLE IF EXISTS image_tags')
-                    cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
-                                 (str(DB_VERSION), 'version'))
-                    self.conn.commit()
-                    # Recreate tables with new schema (v6 allows NULL width/height)
-                    cursor.execute('''
-                        CREATE TABLE images (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            file_name TEXT UNIQUE NOT NULL,
-                            width INTEGER,
-                            height INTEGER,
-                            aspect_ratio REAL,
-                            is_video INTEGER NOT NULL,
-                            video_fps REAL,
-                            video_duration REAL,
-                            video_frame_count INTEGER,
-                            mtime REAL NOT NULL,
-                            rating REAL DEFAULT 0.0,
-                            indexed_at REAL,
-                            thumbnail_cached INTEGER DEFAULT 0,
-                            file_size INTEGER,
-                            file_type TEXT,
-                            ctime REAL
-                        )
-                    ''')
-                    cursor.execute('''
-                        CREATE TABLE image_tags (
-                            image_id INTEGER NOT NULL,
-                            tag TEXT NOT NULL,
-                            PRIMARY KEY (image_id, tag),
-                            FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
-                        )
-                    ''')
-                    # Recreate indexes
-                    cursor.execute('CREATE INDEX idx_images_mtime ON images(mtime)')
+                    old_version = int(row['value'])
+                    if old_version == 6 and DB_VERSION == 7:
+                        print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating markings index...')
+                        self._create_image_markings_schema(cursor)
+                        cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
+                                     (str(DB_VERSION), 'version'))
+                        self.conn.commit()
+                    else:
+                        # Version mismatch, drop and recreate tables (schema changed)
+                        print(f'Database version mismatch (v{row["value"]} -> v{DB_VERSION}), recreating tables...')
+                        cursor.execute('DROP TABLE IF EXISTS image_markings')
+                        cursor.execute('DROP TABLE IF EXISTS images')
+                        cursor.execute('DROP TABLE IF EXISTS image_tags')
+                        cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
+                                     (str(DB_VERSION), 'version'))
+                        self.conn.commit()
+                        cursor.execute('''
+                            CREATE TABLE images (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                file_name TEXT UNIQUE NOT NULL,
+                                width INTEGER,
+                                height INTEGER,
+                                aspect_ratio REAL,
+                                is_video INTEGER NOT NULL,
+                                video_fps REAL,
+                                video_duration REAL,
+                                video_frame_count INTEGER,
+                                mtime REAL NOT NULL,
+                                rating REAL DEFAULT 0.0,
+                                indexed_at REAL,
+                                thumbnail_cached INTEGER DEFAULT 0,
+                                file_size INTEGER,
+                                file_type TEXT,
+                                ctime REAL
+                            )
+                        ''')
+                        cursor.execute('''
+                            CREATE TABLE image_tags (
+                                image_id INTEGER NOT NULL,
+                                tag TEXT NOT NULL,
+                                PRIMARY KEY (image_id, tag),
+                                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                            )
+                        ''')
+                        self._create_image_markings_schema(cursor)
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_is_video ON images(is_video)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
                 else:
                     # Existing database (v6), check for missing columns (migration from v5)
                     cursor.execute("PRAGMA table_info(images)")
@@ -306,6 +344,7 @@ class ImageIndexDB:
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
+                    self._create_image_markings_schema(cursor)
                     self.conn.commit()
 
         except sqlite3.Error as e:
@@ -637,9 +676,9 @@ class ImageIndexDB:
             cursor.execute("SELECT id, file_name FROM images WHERE file_size IS NULL OR file_type IS NULL OR ctime IS NULL")
             rows = cursor.fetchall()
             
+            updates = []
             if rows:
                 print(f"[DB] Backfilling metadata for {len(rows)} legacy items...")
-                updates = []
                 
                 batch_size = 1000
                 for i, (row_id, rel_path) in enumerate(rows):
@@ -660,10 +699,11 @@ class ImageIndexDB:
                         self.conn.commit()
                         updates = []
                 
-                if updates:
-                    cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
-                    self.conn.commit()
-                    
+            if updates:
+                cursor.executemany("UPDATE images SET file_size=?, file_type=?, ctime=? WHERE id=?", updates)
+                self.conn.commit()
+
+            if rows:
                 print(f"[DB] Backfill complete.")
 
             # 3. One-time/Incremental rating migration: JSON sidecars -> DB rating.
@@ -672,6 +712,13 @@ class ImageIndexDB:
                 print(f"[DB] Rating migration: imported {migrated} rating(s) from {scanned} candidate sidecar(s).")
             elif not done and scanned > 0:
                 print(f"[DB] Rating migration: scanned {scanned} candidate sidecar(s) (no new ratings yet).")
+
+            # 4. One-time/Incremental markings migration: JSON sidecars -> DB markings index.
+            migrated_markings, scanned_marking_sidecars, marking_done = self.migrate_markings_from_sidecars(directory_path)
+            if migrated_markings > 0:
+                print(f"[DB] Marking migration: imported {migrated_markings} marking(s) from {scanned_marking_sidecars} candidate sidecar(s).")
+            elif not marking_done and scanned_marking_sidecars > 0:
+                print(f"[DB] Marking migration: scanned {scanned_marking_sidecars} candidate sidecar(s) (no indexed markings yet).")
             
         except sqlite3.Error as e:
             print(f"[DB] Maintenance error: {e}")
@@ -837,6 +884,187 @@ class ImageIndexDB:
 
         return migrated_total, scanned_sidecars, done
 
+    def migrate_markings_from_sidecars(
+        self,
+        directory_path: Path,
+        *,
+        batch_size: int = 1000,
+        max_seconds: float = 2.5,
+    ) -> tuple[int, int, bool]:
+        """
+        Incrementally migrate existing sidecar markings into the DB search index.
+
+        Returns:
+            (migrated_markings_count, scanned_sidecars_count, done)
+        """
+        if not self.enabled or not self.conn:
+            return 0, 0, True
+
+        if batch_size <= 0:
+            batch_size = 1000
+        if max_seconds <= 0:
+            max_seconds = 2.5
+
+        start_ts = time.monotonic()
+        migrated_total = 0
+        scanned_sidecars = 0
+        done = False
+        last_id = 0
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.MARKING_MIGRATION_DONE_KEY,),
+                )
+                row = cursor.fetchone()
+                if row is not None and str(row[0]) == '1':
+                    return 0, 0, True
+
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.MARKING_MIGRATION_LAST_ID_KEY,),
+                )
+                last_row = cursor.fetchone()
+                if last_row is not None:
+                    try:
+                        last_id = int(last_row[0])
+                    except Exception:
+                        last_id = 0
+        except sqlite3.Error:
+            return 0, 0, True
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT id, file_name
+                        FROM images
+                        WHERE id > ?
+                        ORDER BY id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                done = True
+                break
+
+            pending_rows: list[tuple[int, str, str, float, int | None, int | None, int | None, int | None]] = []
+            processed_ids: list[int] = []
+            for row in rows:
+                try:
+                    row_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                except Exception:
+                    continue
+
+                if row_id > last_id:
+                    last_id = row_id
+                processed_ids.append(row_id)
+
+                json_path = (directory_path / rel_path).with_suffix('.json')
+                if not json_path.exists():
+                    continue
+                try:
+                    if json_path.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+
+                scanned_sidecars += 1
+                try:
+                    with json_path.open(encoding='UTF-8') as fp:
+                        meta = json.load(fp)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+                raw_markings = meta.get('markings') if isinstance(meta, dict) else None
+                if not isinstance(raw_markings, list):
+                    continue
+
+                for marking in raw_markings:
+                    if not isinstance(marking, dict):
+                        continue
+                    rect = marking.get('rect')
+                    if not isinstance(rect, (list, tuple)) or len(rect) < 4:
+                        continue
+                    try:
+                        x, y, width, height = [int(round(float(v))) for v in rect[:4]]
+                    except Exception:
+                        continue
+                    label = str(marking.get('label') or '').strip()
+                    marking_type = str(marking.get('type') or '').strip().lower()
+                    if not label or not marking_type:
+                        continue
+                    try:
+                        confidence = float(marking.get('confidence', 1.0) or 1.0)
+                    except Exception:
+                        confidence = 1.0
+                    pending_rows.append(
+                        (row_id, label, marking_type, confidence, x, y, width, height)
+                    )
+
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    if processed_ids:
+                        placeholders = ','.join('?' for _ in processed_ids)
+                        cursor.execute(
+                            f'DELETE FROM image_markings WHERE image_id IN ({placeholders})',
+                            processed_ids,
+                        )
+                    if pending_rows:
+                        cursor.executemany(
+                            '''
+                            INSERT INTO image_markings
+                            (image_id, label, type, confidence, x, y, width, height)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            ''',
+                            pending_rows,
+                        )
+                        migrated_total += len(pending_rows)
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.MARKING_MIGRATION_LAST_ID_KEY, str(int(last_id))),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                break
+
+            if len(rows) < batch_size:
+                done = True
+                break
+
+        if done:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.MARKING_MIGRATION_DONE_KEY, '1'),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                pass
+
+        return migrated_total, scanned_sidecars, done
+
 
     def _bulk_insert_chunk(self, data_chunk):
         """Helper to insert a chunk of data."""
@@ -852,6 +1080,55 @@ class ImageIndexDB:
             self.conn.commit()
         except sqlite3.Error as e:
             print(f'Database bulk insert error: {e}')
+
+    def set_markings_for_image(self, image_id: int, markings: List[Dict[str, Any]]):
+        """Replace searchable markings for one image."""
+        if not self.enabled or not self.conn:
+            return
+
+        normalized_rows: list[tuple[int, str, str, float, int | None, int | None, int | None, int | None]] = []
+        for marking in markings or []:
+            if not isinstance(marking, dict):
+                continue
+
+            rect = marking.get('rect')
+            if isinstance(rect, (list, tuple)) and len(rect) >= 4:
+                try:
+                    x, y, width, height = [int(round(float(v))) for v in rect[:4]]
+                except Exception:
+                    x = y = width = height = None
+            else:
+                x = y = width = height = None
+
+            label = str(marking.get('label') or '').strip()
+            marking_type = str(marking.get('type') or '').strip().lower()
+            if not label or not marking_type:
+                continue
+
+            try:
+                confidence = float(marking.get('confidence', 1.0) or 1.0)
+            except Exception:
+                confidence = 1.0
+
+            normalized_rows.append(
+                (image_id, label, marking_type, confidence, x, y, width, height)
+            )
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('DELETE FROM image_markings WHERE image_id = ?', (image_id,))
+            if normalized_rows:
+                cursor.executemany(
+                    '''
+                    INSERT INTO image_markings
+                    (image_id, label, type, confidence, x, y, width, height)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    normalized_rows,
+                )
+            self.commit()
+        except sqlite3.Error as e:
+            print(f'Database marking write error: {e}')
     def commit(self):
         """Commit pending transactions."""
         if not self.conn:
@@ -1359,6 +1636,7 @@ class ImageIndexDB:
             if ids:
                 id_ph = ','.join('?' for _ in ids)
                 cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
+                cursor.execute(f'DELETE FROM image_markings WHERE image_id IN ({id_ph})', ids)
             cursor.execute(
                 f'DELETE FROM images WHERE file_name IN ({placeholders})',
                 rel_paths

@@ -125,6 +125,7 @@ That label can be used to:
 The existing filter system also supports marking-aware queries such as:
 
 - `marking:label`
+- `marking_type:hint`
 - confidence comparisons on marking labels
 - visibility/crop-related marking filters
 
@@ -170,7 +171,7 @@ These are useful when you want to inspect the image cleanly or verify how masks 
 - [Export Guide](EXPORT_GUIDE.md) explains how include/exclude markings interact with export settings and output behavior.
 
 > [!WARNING]
-> Tags and star ratings have DB-backed support, but markings are still stored in sidecar JSON metadata. The paginated SQL filter path does not yet implement marking-based predicates such as `marking:`, `crops:`, or `visible:`.
+> Markings still live in sidecar JSON metadata as the source of truth, but paginated DB-backed filtering now indexes basic marking metadata too. `marking:` and `marking_type:` work in the paginated SQL path; geometry-aware predicates such as `crops:` and `visible:` still do not.
 
 ## Continue Reading
 

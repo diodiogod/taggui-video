@@ -344,7 +344,7 @@ tag:"orange cat"
 ## Current Limitations in Video 1M
 
 > [!WARNING]
-> In the current paginated and DB-backed Video 1M path, not every filter type is implemented in SQL yet. Tags and star ratings have DB-backed support, but marking-related predicates such as `marking:`, `crops:`, and `visible:` are still tied to in-memory or sidecar metadata behavior rather than a full SQL-backed filter path.
+> In the current paginated and DB-backed Video 1M path, not every filter type is implemented in SQL yet. Tags, star ratings, and basic marking predicates such as `marking:` and `marking_type:` have DB-backed support, but geometry-aware marking predicates such as `crops:` and `visible:` are still tied to in-memory or sidecar metadata behavior rather than a full SQL-backed filter path.
 
 > [!NOTE]
 > The parser supports more filter syntax than the current DB-backed paginated path accelerates. If a filter feels inconsistent in very large paginated datasets, this implementation gap is one of the first things to check.

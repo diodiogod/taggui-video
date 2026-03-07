@@ -23,6 +23,8 @@ comparison_operators = {
     '>=': operator.ge
 }
 
+MARKING_CONFIDENCE_PATTERN = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
+
 
 class ProxyImageListModel(QSortFilterProxyModel):
     filter_changed = Signal()
@@ -36,7 +38,6 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.tag_separator = tag_separator
         self.filter: list | None = None
         self._media_type_filter = 'All'
-        self._confidence_pattern = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
         self._pending_pages_payload: list[int] = []
         self._last_proxy_invalidate_ts = 0.0
         self._pages_update_timer = QTimer(self)
@@ -173,7 +174,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 else:
                     label = filter_[1][:last_colon_index]
                     confidence = filter_[1][last_colon_index + 1:]
-                    match = self._confidence_pattern.match(confidence)
+                    match = MARKING_CONFIDENCE_PATTERN.match(confidence)
                     if not match or len(match.group(2)) == 0:
                         return False
                     comparison_operator = comparison_operators[match.group(1)]
@@ -182,6 +183,10 @@ class ProxyImageListModel(QSortFilterProxyModel):
                                comparison_operator(marking.confidence,
                                                    confidence_target))
                                for marking in image.markings)
+            if filter_[0] == 'marking_type':
+                target_type = str(filter_[1]).strip().lower()
+                return any(fnmatchcase(marking.type.name.lower(), target_type)
+                           for marking in image.markings)
             if filter_[0] == 'crops':
                 crop = image.crop if image.crop is not None else QRect(0, 0, *image.dimensions)
                 return any(fnmatchcase(marking.label, filter_[1]) and

@@ -37,6 +37,7 @@ UNDO_STACK_SIZE = 32
 _video_lock = threading.Lock()
 # Global lock for thumbnail cache writes (limits I/O contention during scroll).
 _thumbnail_save_lock = threading.Lock()
+MARKING_CONFIDENCE_PATTERN = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
 
 # Custom event for background load completion
 class BackgroundLoadCompleteEvent(QEvent):
@@ -1678,7 +1679,7 @@ class ImageListModel(QAbstractListModel):
             # Determine type by inspection
             if len(filter_node) == 2:
                 # Binary operator like ['tag', 'val']
-                op = filter_node[0]
+                op = str(filter_node[0]).strip().lower()
                 val = filter_node[1]
                 
                 if op == 'tag':
@@ -1691,6 +1692,60 @@ class ImageListModel(QAbstractListModel):
                 if op == 'name':
                      # Contains match by default
                      return "file_name LIKE ?", (f"%{val}%",)
+
+                if op == 'marking':
+                    label_value = str(val)
+                    confidence_sql = ''
+                    confidence_bindings = ()
+                    last_colon_index = label_value.rfind(':')
+                    if last_colon_index >= 0:
+                        candidate_label = label_value[:last_colon_index]
+                        candidate_confidence = label_value[last_colon_index + 1:]
+                        match = MARKING_CONFIDENCE_PATTERN.match(candidate_confidence)
+                        if match and len(match.group(2)) > 0:
+                            confidence_operator = {
+                                '=': '=',
+                                '==': '=',
+                                '!=': '!=',
+                                '<': '<',
+                                '>': '>',
+                                '<=': '<=',
+                                '>=': '>=',
+                            }.get(match.group(1))
+                            if confidence_operator is None:
+                                return "", ()
+                            label_value = candidate_label
+                            confidence_value = float(match.group(2).replace(',', '.'))
+                            confidence_sql = f" AND confidence {confidence_operator} ?"
+                            confidence_bindings = (confidence_value,)
+
+                    if '*' in label_value or '?' in label_value:
+                        label_value = label_value.replace('*', '%').replace('?', '_')
+                        return (
+                            "EXISTS(SELECT 1 FROM image_markings "
+                            "WHERE image_id=images.id AND label LIKE ?" + confidence_sql + ")",
+                            (label_value,) + confidence_bindings
+                        )
+                    return (
+                        "EXISTS(SELECT 1 FROM image_markings "
+                        "WHERE image_id=images.id AND label = ?" + confidence_sql + ")",
+                        (label_value,) + confidence_bindings
+                    )
+
+                if op == 'marking_type':
+                    val = str(val).strip().lower()
+                    if '*' in val or '?' in val:
+                        val = val.replace('*', '%').replace('?', '_')
+                        return (
+                            "EXISTS(SELECT 1 FROM image_markings "
+                            "WHERE image_id=images.id AND type LIKE ?)",
+                            (val,)
+                        )
+                    return (
+                        "EXISTS(SELECT 1 FROM image_markings "
+                        "WHERE image_id=images.id AND type = ?)",
+                        (val,)
+                    )
                 
                 # Default case for other prefixes? like 'path'
                 
@@ -4353,6 +4408,9 @@ class ImageListModel(QAbstractListModel):
         except ValueError:
             rel_path = image.path.name
 
+        width = image.dimensions[0] if image.dimensions and image.dimensions[0] else 512
+        height = image.dimensions[1] if image.dimensions and image.dimensions[1] else 512
+
         image_id = self._db.get_image_id(rel_path)
         if not image_id:
              # Attempt to self-heal by inserting/updating image info
@@ -4362,8 +4420,8 @@ class ImageListModel(QAbstractListModel):
                  is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
                  self._db.save_info(
                      file_name=rel_path,
-                     width=image.width or 512,
-                     height=image.height or 512,
+                     width=width,
+                     height=height,
                      is_video=is_video,
                      mtime=stat.st_mtime,
                      rating=image.rating
@@ -4383,6 +4441,47 @@ class ImageListModel(QAbstractListModel):
             # Keep DB rating in sync with sidecar/in-memory rating.
             self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
 
+    def _save_markings_to_db(self, image: Image):
+        """Persist searchable markings to database in paginated mode."""
+        if not self._paginated_mode or not self._db:
+            return
+        if not image or not getattr(image, 'path', None):
+            return
+
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+
+        width = image.dimensions[0] if image.dimensions and image.dimensions[0] else 512
+        height = image.dimensions[1] if image.dimensions and image.dimensions[1] else 512
+
+        image_id = self._db.get_image_id(rel_path)
+        if not image_id:
+            try:
+                stat = image.path.stat()
+                is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
+                self._db.save_info(
+                    file_name=rel_path,
+                    width=width,
+                    height=height,
+                    is_video=is_video,
+                    mtime=stat.st_mtime,
+                    rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                )
+                image_id = self._db.get_image_id(rel_path)
+            except Exception:
+                image_id = None
+
+        if image_id:
+            markings = [{
+                'label': str(marking.label or ''),
+                'type': marking.type.name.lower(),
+                'confidence': float(getattr(marking, 'confidence', 1.0) or 1.0),
+                'rect': marking.rect.getRect(),
+            } for marking in image.markings if marking.type != ImageMarking.CROP]
+            self._db.set_markings_for_image(image_id, markings)
+
     def _save_rating_to_db(self, image: Image):
         """Persist rating to DB for paginated mode."""
         if not self._paginated_mode or not self._db:
@@ -4395,6 +4494,9 @@ class ImageListModel(QAbstractListModel):
         except ValueError:
             rel_path = image.path.name
 
+        width = image.dimensions[0] if image.dimensions and image.dimensions[0] else 512
+        height = image.dimensions[1] if image.dimensions and image.dimensions[1] else 512
+
         image_id = self._db.get_image_id(rel_path)
         if not image_id:
             # Self-heal missing DB row before rating write.
@@ -4403,8 +4505,8 @@ class ImageListModel(QAbstractListModel):
                 is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
                 self._db.save_info(
                     file_name=rel_path,
-                    width=image.width or 512,
-                    height=image.height or 512,
+                    width=width,
+                    height=height,
                     is_video=is_video,
                     mtime=stat.st_mtime,
                     rating=float(getattr(image, 'rating', 0.0) or 0.0),
@@ -4446,6 +4548,7 @@ class ImageListModel(QAbstractListModel):
                 error_message_box.setIcon(QMessageBox.Icon.Critical)
                 error_message_box.setText(f'Failed to save JSON for {image.path}.')
                 error_message_box.exec()
+        self._save_markings_to_db(image)
 
     def restore_history_tags(self, is_undo: bool):
         if is_undo:

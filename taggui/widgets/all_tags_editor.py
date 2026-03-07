@@ -40,7 +40,12 @@ class AllTagsList(QListView):
         self.setModel(proxy_tag_counter_model)
         self.all_tags_editor = all_tags_editor
         self.setItemDelegate(TextEditItemDelegate(self))
-        self.setWordWrap(True)
+        # Keep the tag list on a single-line rendering path. Wrapped rows force
+        # expensive size-hint recalculation for the whole list while splitter
+        # drags resize the dock.
+        self.setWordWrap(False)
+        self.setUniformItemSizes(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideRight)
         # `selectionChanged` must be used and not `currentChanged` because
         # `currentChanged` is not emitted when the same tag is deselected and
         # selected again.
