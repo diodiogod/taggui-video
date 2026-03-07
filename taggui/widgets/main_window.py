@@ -3879,9 +3879,6 @@ class MainWindow(QMainWindow):
             self.auto_captioner.setVisible(visibility["auto_captioner"])
             self.auto_markings.setVisible(visibility["auto_markings"])
 
-            # Keep right-side tools grouped as tabs, but only tabify widgets
-            # that are visible in this workspace to avoid unstable hidden-dock
-            # tabification paths in Qt on Windows.
             visible_right_docks = [
                 dock
                 for key, dock in right_dock_map.items()
@@ -3893,11 +3890,24 @@ class MainWindow(QMainWindow):
                         dock.setFloating(False)
                 except Exception:
                     continue
-            for prev_dock, next_dock in zip(visible_right_docks, visible_right_docks[1:]):
+            if workspace_id == "tagging":
                 try:
-                    self.tabifyDockWidget(prev_dock, next_dock)
+                    self.splitDockWidget(
+                        self.image_tags_editor,
+                        self.all_tags_editor,
+                        Qt.Orientation.Vertical,
+                    )
                 except Exception:
-                    continue
+                    pass
+            else:
+                # Keep right-side tools grouped as tabs, but only tabify widgets
+                # that are visible in this workspace to avoid unstable hidden-dock
+                # tabification paths in Qt on Windows.
+                for prev_dock, next_dock in zip(visible_right_docks, visible_right_docks[1:]):
+                    try:
+                        self.tabifyDockWidget(prev_dock, next_dock)
+                    except Exception:
+                        continue
 
             # Workspace-level main viewer behavior:
             # - Media Viewer always restores anchored viewer.
@@ -3921,6 +3931,11 @@ class MainWindow(QMainWindow):
                     [self.image_list, self.image_tags_editor],
                     [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
                     Qt.Orientation.Horizontal,
+                )
+                self.resizeDocks(
+                    [self.image_tags_editor, self.all_tags_editor],
+                    [max(280, int(self.height() * 0.58)), max(180, int(self.height() * 0.42))],
+                    Qt.Orientation.Vertical,
                 )
             elif workspace_id == "marking":
                 self.auto_markings.raise_()
