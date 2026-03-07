@@ -32,7 +32,10 @@ set LOGFILE=taggui_setup.log
 set SKIP_GIT=0
 set CLEAR_CACHE=0
 set CLEAN_OLD=0
+set REFRESH_TORCH=0
 set ENABLE_CRASH_DIAG=0
+set TORCH_VERSION=2.7.1
+set TORCHVISION_VERSION=0.22.1
 
 echo Logging to %LOGFILE%
 echo.
@@ -57,6 +60,7 @@ for %%A in (%*) do (
     if /I "%%~A"=="--skip-git" set SKIP_GIT=1
     if /I "%%~A"=="--clear-cache" set CLEAR_CACHE=1
     if /I "%%~A"=="--clean-old" set CLEAN_OLD=1
+    if /I "%%~A"=="--refresh-torch" set REFRESH_TORCH=1
     if /I "%%~A"=="--crash-log" set ENABLE_CRASH_DIAG=1
     if /I "%%~A"=="--no-crash-log" set ENABLE_CRASH_DIAG=0
 )
@@ -156,8 +160,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Only install if venv was just created
+set SHOULD_INSTALL=0
+set SHOULD_REFRESH_TORCH=0
 if %VENV_EXISTS% EQU 0 (
+    set SHOULD_INSTALL=1
+) else if %REFRESH_TORCH% EQU 1 (
+    set SHOULD_INSTALL=1
+    set SHOULD_REFRESH_TORCH=1
+)
+
+:: Only install when venv was just created or user explicitly refreshes Torch
+if %SHOULD_INSTALL% EQU 1 (
     echo Upgrading pip...
     python -m pip install --upgrade pip > "%LOGFILE%" 2>&1
 
@@ -168,27 +181,37 @@ if %VENV_EXISTS% EQU 0 (
         for /f "tokens=*" %%i in ('nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul') do set DRIVER_VERSION=%%i
         echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
 
-        :: Detect CUDA version from driver
-        for /f "tokens=2 delims=." %%v in ("!DRIVER_VERSION!") do (
-            if %%v GEQ 525 (
-                set CUDA_VERSION=cu121
-                echo Detected CUDA 12.1+
+        :: Detect CUDA wheel channel from driver
+        for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
+            if %%v GEQ 570 (
+                set CUDA_VERSION=cu128
+                echo Detected CUDA 12.8-capable driver
+            ) else if %%v GEQ 560 (
+                set CUDA_VERSION=cu126
+                echo Detected CUDA 12.6-capable driver
             ) else if %%v GEQ 450 (
                 set CUDA_VERSION=cu118
-                echo Detected CUDA 11.8+
+                echo Detected CUDA 11.8-capable driver
             )
         )
     ) else (
         echo No NVIDIA GPU detected, installing CPU-only PyTorch
     )
 
-    echo Installing PyTorch for !CUDA_VERSION!...
+    if !SHOULD_REFRESH_TORCH! EQU 1 (
+        echo Refreshing Torch stack in existing virtual environment...
+        pip uninstall -y torch torchvision torchaudio xformers flash-attn > "%LOGFILE%" 2>&1
+    )
+
+    echo Installing PyTorch !TORCH_VERSION! / torchvision !TORCHVISION_VERSION! for !CUDA_VERSION!...
     if "!CUDA_VERSION!"=="cpu" (
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >> "%LOGFILE%" 2>&1
+        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cpu >> "%LOGFILE%" 2>&1
     ) else if "!CUDA_VERSION!"=="cu118" (
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 >> "%LOGFILE%" 2>&1
-    ) else if "!CUDA_VERSION!"=="cu121" (
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 >> "%LOGFILE%" 2>&1
+        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu118 >> "%LOGFILE%" 2>&1
+    ) else if "!CUDA_VERSION!"=="cu126" (
+        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu126 >> "%LOGFILE%" 2>&1
+    ) else if "!CUDA_VERSION!"=="cu128" (
+        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu128 >> "%LOGFILE%" 2>&1
     )
 
     if !ERRORLEVEL! NEQ 0 (
@@ -198,25 +221,10 @@ if %VENV_EXISTS% EQU 0 (
     )
     echo PyTorch installed successfully!
 
-    :: Install flash-attn for CUDA only
+    :: Flash-attention wheels have historically been tightly coupled to specific Torch builds.
+    :: Keep this optional and avoid pinning old wheel URLs during refreshes.
     if not "!CUDA_VERSION!"=="cpu" (
-        echo Installing flash-attention...
-        for /f "tokens=2 delims=." %%v in ('python --version 2^>^&1') do set PY_MINOR=%%v
-
-        if "!CUDA_VERSION!"=="cu121" (
-            if "!PY_MINOR!"=="12" (
-                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu121torch2.5.1cxx11abiFALSE-cp312-cp312-win_amd64.whl >> "%LOGFILE%" 2>&1
-            ) else if "!PY_MINOR!"=="11" (
-                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu121torch2.5.1cxx11abiFALSE-cp311-cp311-win_amd64.whl >> "%LOGFILE%" 2>&1
-            )
-        ) else if "!CUDA_VERSION!"=="cu118" (
-            if "!PY_MINOR!"=="12" (
-                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu118torch2.5.1cxx11abiFALSE-cp312-cp312-win_amd64.whl >> "%LOGFILE%" 2>&1
-            ) else if "!PY_MINOR!"=="11" (
-                pip install https://github.com/bdashore3/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu118torch2.5.1cxx11abiFALSE-cp311-cp311-win_amd64.whl >> "%LOGFILE%" 2>&1
-            )
-        )
-        echo Flash-attention installed!
+        echo Skipping flash-attention wheel install on Windows ^(optional^).
     )
 
     echo Installing requirements...
@@ -238,6 +246,7 @@ if %VENV_EXISTS% EQU 0 (
     echo Dependencies installed successfully!
 ) else (
     echo Virtual environment already exists, skipping installation
+    echo To refresh the Torch stack in this venv, run: start_windows.bat --refresh-torch
 )
 
 :: Optional: Clear pip cache

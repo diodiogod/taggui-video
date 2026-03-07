@@ -31,6 +31,9 @@ LOGFILE="taggui_setup.log"
 SKIP_GIT=0
 CLEAR_CACHE=0
 CLEAN_OLD=0
+REFRESH_TORCH=0
+TORCH_VERSION="2.7.1"
+TORCHVISION_VERSION="0.22.1"
 
 echo "Logging to $LOGFILE"
 echo ""
@@ -41,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --skip-git) SKIP_GIT=1 ;;
         --clear-cache) CLEAR_CACHE=1 ;;
         --clean-old) CLEAN_OLD=1 ;;
+        --refresh-torch) REFRESH_TORCH=1 ;;
     esac
     shift
 done
@@ -121,8 +125,17 @@ source "$VENV_PATH/bin/activate" || {
     exit 1
 }
 
-# Only install if venv was just created
+# Only install when venv was just created or user explicitly refreshes Torch
+SHOULD_INSTALL=0
+SHOULD_REFRESH_TORCH=0
 if [ $VENV_EXISTS -eq 0 ]; then
+    SHOULD_INSTALL=1
+elif [ $REFRESH_TORCH -eq 1 ]; then
+    SHOULD_INSTALL=1
+    SHOULD_REFRESH_TORCH=1
+fi
+
+if [ $SHOULD_INSTALL -eq 1 ]; then
     echo "Upgrading pip..."
     python -m pip install --upgrade pip >> "$LOGFILE" 2>&1
 
@@ -135,25 +148,35 @@ if [ $VENV_EXISTS -eq 0 ]; then
         # Extract major driver version
         DRIVER_MAJOR=$(echo "$DRIVER_VERSION" | cut -d'.' -f1)
 
-        # Detect CUDA version from driver
-        if [ "$DRIVER_MAJOR" -ge 525 ]; then
-            CUDA_VERSION="cu121"
-            echo "Detected CUDA 12.1+"
+        # Detect CUDA wheel channel from driver
+        if [ "$DRIVER_MAJOR" -ge 570 ]; then
+            CUDA_VERSION="cu128"
+            echo "Detected CUDA 12.8-capable driver"
+        elif [ "$DRIVER_MAJOR" -ge 560 ]; then
+            CUDA_VERSION="cu126"
+            echo "Detected CUDA 12.6-capable driver"
         elif [ "$DRIVER_MAJOR" -ge 450 ]; then
             CUDA_VERSION="cu118"
-            echo "Detected CUDA 11.8+"
+            echo "Detected CUDA 11.8-capable driver"
         fi
     else
         echo "No NVIDIA GPU detected, installing CPU-only PyTorch"
     fi
 
-    echo "Installing PyTorch for $CUDA_VERSION..."
+    if [ $SHOULD_REFRESH_TORCH -eq 1 ]; then
+        echo "Refreshing Torch stack in existing virtual environment..."
+        pip uninstall -y torch torchvision torchaudio xformers flash-attn >> "$LOGFILE" 2>&1 || true
+    fi
+
+    echo "Installing PyTorch $TORCH_VERSION / torchvision $TORCHVISION_VERSION for $CUDA_VERSION..."
     if [ "$CUDA_VERSION" == "cpu" ]; then
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >> "$LOGFILE" 2>&1
+        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cpu >> "$LOGFILE" 2>&1
     elif [ "$CUDA_VERSION" == "cu118" ]; then
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 >> "$LOGFILE" 2>&1
-    elif [ "$CUDA_VERSION" == "cu121" ]; then
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 >> "$LOGFILE" 2>&1
+        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu118 >> "$LOGFILE" 2>&1
+    elif [ "$CUDA_VERSION" == "cu126" ]; then
+        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu126 >> "$LOGFILE" 2>&1
+    elif [ "$CUDA_VERSION" == "cu128" ]; then
+        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu128 >> "$LOGFILE" 2>&1
     fi
 
     if [ $? -ne 0 ]; then
@@ -191,6 +214,7 @@ if [ $VENV_EXISTS -eq 0 ]; then
     echo "Dependencies installed successfully!"
 else
     echo "Virtual environment already exists, skipping installation"
+    echo "To refresh the Torch stack in this venv, run: ./start_linux.sh --refresh-torch"
 fi
 
 # Optional: Clear pip cache
