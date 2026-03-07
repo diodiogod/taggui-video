@@ -683,6 +683,73 @@ class ImageListModel(QAbstractListModel):
 
         self._apply_loop_metadata_from_meta(image, meta)
 
+    def _restore_rel_path_candidates(self, path: Path) -> list[str]:
+        """Build normalized DB lookup candidates for a file path."""
+        rel_candidates = []
+        dir_path = Path(self._directory_path)
+        for candidate_path in (path,):
+            try:
+                rel = str(candidate_path.relative_to(dir_path))
+                rel_candidates.append(rel)
+            except Exception:
+                pass
+        try:
+            rel = str(path.resolve().relative_to(dir_path.resolve()))
+            rel_candidates.append(rel)
+        except Exception:
+            pass
+
+        normalized = []
+        seen = set()
+        for rel in rel_candidates:
+            for var in (rel, rel.replace('\\', '/'), rel.replace('/', '\\')):
+                if var not in seen:
+                    seen.add(var)
+                    normalized.append(var)
+
+        if not normalized:
+            normalized.append(path.name)
+        return normalized
+
+    def get_global_rank_for_path(self, path: Path) -> int:
+        """Return the current paginated/global rank for a file path, or -1."""
+        try:
+            if not self._paginated_mode:
+                for i, img in enumerate(self._image_files):
+                    if img.path == path:
+                        return i
+                return -1
+
+            if self._db is None:
+                return -1
+
+            normalized = self._restore_rel_path_candidates(path)
+            print(f"[RESTORE] Checking rank for rel_path candidates: {normalized[:3]}")
+
+            sort_field = getattr(self, '_sort_field', 'file_name')
+            sort_dir = getattr(self, '_sort_dir', 'ASC')
+            random_seed = getattr(self, '_random_seed', 1234567)
+            filter_sql = getattr(self, '_filter_sql', '') or ''
+            filter_bindings = getattr(self, '_filter_bindings', ()) or ()
+
+            rank = -1
+            for rel_path in normalized:
+                rank = self._db.get_rank_of_image(
+                    rel_path,
+                    sort_field,
+                    sort_dir,
+                    filter_sql=filter_sql,
+                    bindings=filter_bindings,
+                    random_seed=random_seed,
+                )
+                if rank != -1:
+                    break
+            print(f"[RESTORE] DB returned rank: {rank}")
+            return int(rank) if isinstance(rank, int) and rank >= 0 else -1
+        except Exception as e:
+            print(f"[RESTORE] get_global_rank_for_path error: {e}")
+            return -1
+
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
@@ -692,70 +759,26 @@ class ImageListModel(QAbstractListModel):
                      if img.path == path:
                          return i
              else:
-                 # Paginated Mode: Query DB for rank
-                 if self._db is None: return -1
-                 rel_candidates = []
-                 dir_path = Path(self._directory_path)
-                 for candidate_path in (path,):
-                     try:
-                         rel = str(candidate_path.relative_to(dir_path))
-                         rel_candidates.append(rel)
-                     except Exception:
-                         pass
-                 try:
-                     rel = str(path.resolve().relative_to(dir_path.resolve()))
-                     rel_candidates.append(rel)
-                 except Exception:
-                     pass
-                 # Normalize separators and dedupe while preserving order.
-                 normalized = []
-                 seen = set()
-                 for rel in rel_candidates:
-                     for var in (rel, rel.replace('\\', '/'), rel.replace('/', '\\')):
-                         if var not in seen:
-                             seen.add(var)
-                             normalized.append(var)
-                 # Final fallback (least reliable): basename.
-                 if not normalized:
-                     normalized.append(path.name)
-
-                 print(f"[RESTORE] Checking rank for rel_path candidates: {normalized[:3]}")
-                     
-                 sort_field = getattr(self, '_sort_field', 'file_name')
-                 sort_dir = getattr(self, '_sort_dir', 'ASC')
-                 random_seed = getattr(self, '_random_seed', 1234567)
-                 filter_sql = getattr(self, '_filter_sql', '') or ''
-                 filter_bindings = getattr(self, '_filter_bindings', ()) or ()
-                 
-                 rank = -1
-                 for rel_path in normalized:
-                     rank = self._db.get_rank_of_image(rel_path, sort_field, sort_dir,
-                                                       filter_sql=filter_sql,
-                                                       bindings=filter_bindings,
-                                                       random_seed=random_seed)
-                     if rank != -1:
-                         break
-                 print(f"[RESTORE] DB returned rank: {rank}")
-                 
+                 rank = self.get_global_rank_for_path(path)
                  if rank == -1:
                      return -1
-                     
+
                  # Map Global Rank to Local Row (and load page if needed)
                  page_size = getattr(self, 'PAGE_SIZE', 1000)
                  target_page_num = rank // page_size
                  offset = rank % page_size
-                 
+
                  page_needed_loading = False
                  with self._page_load_lock:
                      if target_page_num not in self._pages:
                          print(f"[RESTORE] Loading target page {target_page_num} for restore")
                          self._load_page_sync(target_page_num)
                          page_needed_loading = True
-                 
+
                  if page_needed_loading:
                      # Notify view to update rowCount
                      self._emit_pages_updated()
-                 
+
                  # Calculate Local Row
                  # Iterate loaded pages in order to find where our target page sits.
                  # Important: loaded pages may be shorter than PAGE_SIZE because
@@ -781,7 +804,7 @@ class ImageListModel(QAbstractListModel):
                              break
                          # Add full length of preceding loaded pages
                          row_offset += len(self._pages[p_num])
-                     
+
                      if found_page:
                          page_images = self._pages.get(target_page_num, [])
 
@@ -823,7 +846,7 @@ class ImageListModel(QAbstractListModel):
                              f"aborting row map for rank {rank}"
                          )
                          return -1
-                 
+
                  return -1
 
         except Exception as e:
@@ -4093,8 +4116,13 @@ class ImageListModel(QAbstractListModel):
         )
         eviction_pages = max(1, min(int(eviction_pages), 5))
 
-        # Must at least hold current page plus eviction window on both sides.
-        required_min = (2 * eviction_pages) + 1
+        # Must at least hold the active strict masonry window plus one extra
+        # neighbor page. Without that cushion, ownership can wobble by one
+        # page after a drag-jump (for example 9 <-> 10), and the union of the
+        # two windows exceeds the memory budget by exactly one page. That
+        # causes endless edge-page eviction/reload churn such as repeated
+        # "Triggered loads for page range 7-13" loops.
+        required_min = (2 * eviction_pages) + 2
         effective_max = max(raw_max, required_min)
         return raw_max, eviction_pages, effective_max
 

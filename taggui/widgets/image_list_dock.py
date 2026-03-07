@@ -361,15 +361,25 @@ class ImageList(QDockWidget):
             new_proxy_index = QModelIndex()
             
             if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-                # OPTIMIZATION: In paginated mode, don't iterate all data
-                # Just check the first few rows (usually where it ends up after Name sort if it was near top)
-                # For 1600 items, we can iterate, but let's be careful.
-                row_count = source_model.rowCount()
-                for row in range(min(row_count, 3000)): # Cap at 3k for safety
-                    image = source_model.data(source_model.index(row, 0), Qt.ItemDataRole.UserRole)
-                    if image and image.path == selected_image.path:
-                        new_proxy_index = self.proxy_image_list_model.mapFromSource(source_model.index(row, 0))
-                        break
+                target_global = (
+                    source_model.get_global_rank_for_path(selected_image.path)
+                    if hasattr(source_model, 'get_global_rank_for_path')
+                    else -1
+                )
+                if isinstance(target_global, int) and target_global >= 0:
+                    self.list_view._selected_global_index = int(target_global)
+                    if hasattr(self.list_view, '_reanchor_keyboard_to_selected_global'):
+                        self.list_view._reanchor_keyboard_to_selected_global(source_model, int(target_global))
+                        return
+                    local_row = (
+                        source_model.get_loaded_row_for_global_index(int(target_global))
+                        if hasattr(source_model, 'get_loaded_row_for_global_index')
+                        else -1
+                    )
+                    if local_row >= 0:
+                        new_proxy_index = self.proxy_image_list_model.mapFromSource(
+                            source_model.index(local_row, 0)
+                        )
             else:
                 try:
                     new_source_row = source_model.images.index(selected_image)
