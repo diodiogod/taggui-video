@@ -1,6 +1,36 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewFileOpsMixin:
+    def _is_generated_derivative_media(self, path: Path) -> bool:
+        """Return whether the path looks like an app-generated derivative clip/image."""
+        stem = path.stem.casefold()
+        return '_extract_' in stem or '_copy' in stem
+
+    def _delete_sibling_file_safely(self, path: Path):
+        """Best-effort trash/delete for sidecars belonging to a generated derivative."""
+        if not path.exists():
+            return
+        try:
+            sibling_file = QFile(str(path))
+            if sibling_file.moveToTrash():
+                return
+            sibling_file.remove()
+        except Exception:
+            pass
+
+    def _cleanup_generated_derivative_siblings(self, media_path: Path):
+        """Delete sidecars/backups for generated derivative files only."""
+        if not self._is_generated_derivative_media(media_path):
+            return
+
+        json_path = media_path.with_suffix('.json')
+        txt_path = media_path.with_suffix('.txt')
+        media_backup_path = media_path.with_suffix(media_path.suffix + '.backup')
+        json_backup_path = json_path.with_suffix(json_path.suffix + '.backup')
+
+        for sibling in (txt_path, json_path, media_backup_path, json_backup_path):
+            self._delete_sibling_file_safely(sibling)
+
     def copy_selected_images(self):
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
@@ -185,6 +215,8 @@ class ImageListViewFileOpsMixin:
                 if not caption_file.moveToTrash():
                     # For caption files, try permanent deletion without asking again
                     caption_file.remove()  # Silent operation for captions
+
+            self._cleanup_generated_derivative_siblings(image.path)
 
         # Remove deleted images from DB index so they don't reappear on reload
         try:
