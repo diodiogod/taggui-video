@@ -95,3 +95,9 @@ Hold mode freezes existing spawned viewers as dimmed, gray, click-through overla
 
 - Floating viewer double-click zoom is adaptive, not a fixed single-step zoom.
 - Detailed floating viewer behavior is documented in [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md).
+
+## Continue Reading
+
+- [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Compare Guide](COMPARE_GUIDE.md)
+- [Filtering Guide](FILTERING_GUIDE.md)

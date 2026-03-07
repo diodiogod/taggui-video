@@ -171,3 +171,9 @@ These are useful when you want to inspect the image cleanly or verify how masks 
 
 > [!WARNING]
 > Tags and star ratings have DB-backed support, but markings are still stored in sidecar JSON metadata. The paginated SQL filter path does not yet implement marking-based predicates such as `marking:`, `crops:`, or `visible:`.
+
+## Continue Reading
+
+- [Export Guide](EXPORT_GUIDE.md)
+- [Filtering Guide](FILTERING_GUIDE.md)
+- [Captioning Guide](CAPTIONING_GUIDE.md)

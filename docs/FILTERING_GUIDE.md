@@ -355,3 +355,9 @@ tag:"orange cat"
 - Marking-aware filtering connects directly to the markings workflow.
 - Rating-aware filtering connects directly to the DB-backed star-rating support already present in Video 1M.
 - Media-type filtering and DB-backed sorting are part of the same large-collection workflow, even though they are controlled through separate UI widgets instead of the text filter box.
+
+## Continue Reading
+
+- [Markings Guide](MARKINGS_GUIDE.md)
+- [Captioning Guide](CAPTIONING_GUIDE.md)
+- [Export Guide](EXPORT_GUIDE.md)

@@ -81,3 +81,9 @@ If something in skin editing or skin application looks wrong:
 
 - verify the issue with a built-in skin first
 - if it is reproducible, open a GitHub issue
+
+## Continue Reading
+
+- [Installation](INSTALLATION.md)
+- [Video Backends](VIDEO_BACKENDS.md)
+- [Known Limitations](KNOWN_LIMITATIONS.md)

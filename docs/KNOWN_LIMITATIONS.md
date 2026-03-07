@@ -29,3 +29,9 @@ Current known constraints in TagGUI Video 1M.
 ## Large-Folder UX
 
 - First-open behavior on very large folders can still involve noticeable scanning, DB build, or thumbnail work before the folder settles into a faster cached path.
+
+## Continue Reading
+
+- [Troubleshooting](TROUBLESHOOTING.md)
+- [Video Backends](VIDEO_BACKENDS.md)
+- [Export Guide](EXPORT_GUIDE.md)
