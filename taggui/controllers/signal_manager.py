@@ -145,6 +145,7 @@ class SignalManager:
             image_tags_editor.load_image_tags(current)
         image_list_selection_model.currentChanged.connect(safe_load_tags)
         image_list_model.modelReset.connect(self._update_tag_counts)
+        image_list_model.modelReset.connect(self._update_delete_button_visibility)
         image_list_model.enrichment_complete.connect(self._update_tag_counts)
         image_list_model.dataChanged.connect(lambda *args: self._update_tag_counts())
         image_list_model.dataChanged.connect(
