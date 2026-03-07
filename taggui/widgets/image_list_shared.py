@@ -50,7 +50,7 @@ FILTER_TEMPLATE_SPECS = [
     ('Caption', 'Filter by caption text', 'caption:"{cursor}"', True),
     ('Marking', 'Filter by marking label', 'marking:"{cursor}"', True),
     ('Marking Type', 'Filter by marking kind', 'marking_type:hint', False),
-    ('Stars', 'Filter by star rating', 'stars:>=4', False),
+    ('Stars', 'Filter by star rating', 'stars:>={cursor}', True),
     ('Width', 'Filter by image width', 'width:>1024', False),
     ('Height', 'Filter by image height', 'height:>1024', False),
     ('Name', 'Filter by file name', 'name:"{cursor}"', True),
