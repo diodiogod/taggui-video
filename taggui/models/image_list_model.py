@@ -1664,16 +1664,35 @@ class ImageListModel(QAbstractListModel):
                     '<=': '<=',
                     '>=': '>=',
                 }.get(cmp_op)
-                if key == 'stars' and cmp_sql is not None:
-                    try:
-                        stars_value = int(value_raw)
-                    except Exception:
-                        return "", ()
-                    # UI supports 0..5 star semantics.
-                    stars_value = max(0, min(5, stars_value))
-                    # Ratings are stored as 0.0..1.0 floats; compare using
-                    # rounded 0..5 star domain to avoid float-equality issues.
-                    return "CAST(ROUND(COALESCE(rating, 0) * 5.0) AS INTEGER) " + cmp_sql + " ?", (stars_value,)
+                if cmp_sql is not None:
+                    if key == 'stars':
+                        try:
+                            stars_value = int(value_raw)
+                        except Exception:
+                            return "", ()
+                        # UI supports 0..5 star semantics.
+                        stars_value = max(0, min(5, stars_value))
+                        # Ratings are stored as 0.0..1.0 floats; compare using
+                        # rounded 0..5 star domain to avoid float-equality issues.
+                        return "CAST(ROUND(COALESCE(rating, 0) * 5.0) AS INTEGER) " + cmp_sql + " ?", (stars_value,)
+                    if key == 'width':
+                        try:
+                            width_value = int(value_raw)
+                        except Exception:
+                            return "", ()
+                        return "COALESCE(width, 0) " + cmp_sql + " ?", (width_value,)
+                    if key == 'height':
+                        try:
+                            height_value = int(value_raw)
+                        except Exception:
+                            return "", ()
+                        return "COALESCE(height, 0) " + cmp_sql + " ?", (height_value,)
+                    if key == 'area':
+                        try:
+                            area_value = int(value_raw)
+                        except Exception:
+                            return "", ()
+                        return "(COALESCE(width, 0) * COALESCE(height, 0)) " + cmp_sql + " ?", (area_value,)
                 
             # Handle infix notation [A, 'AND', B] or prefix ['tag', 'val']
             # Determine type by inspection

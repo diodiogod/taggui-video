@@ -35,6 +35,7 @@ DEFAULT_SETTINGS = {
     'grammar_check_mode': 'free_api',
     'speed_slider_theme_index': 12,  # Forest Light
     'recent_directories': [],
+    'image_list_filter_history': [],
     # Cache settings
     'enable_dimension_cache': True,
     'enable_thumbnail_cache': True,

@@ -8,10 +8,11 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
                             Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint)
-from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag, QPolygon, QCursor
+from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag, QPolygon, QCursor, QIcon
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QListView, QMenu, QMessageBox, QVBoxLayout,
+                               QListView, QListWidget, QListWidgetItem,
+                               QMenu, QMessageBox, QVBoxLayout, QFrame, QPushButton,
                                QWidget, QStyledItemDelegate, QToolTip, QStyle, QStyleOptionViewItem,
                                QProgressBar)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Group, OpAssoc,
@@ -44,7 +45,192 @@ def replace_filter_wildcards(filter_: str | list) -> str | list:
     return replaced_filter
 
 
+FILTER_TEMPLATE_SPECS = [
+    ('Tag', 'Filter by tag', 'tag:"{cursor}"', True),
+    ('Caption', 'Filter by caption text', 'caption:"{cursor}"', True),
+    ('Marking', 'Filter by marking label', 'marking:"{cursor}"', True),
+    ('Marking Type', 'Filter by marking kind', 'marking_type:hint', False),
+    ('Stars', 'Filter by star rating', 'stars:>=4', False),
+    ('Width', 'Filter by image width', 'width:>1024', False),
+    ('Height', 'Filter by image height', 'height:>1024', False),
+    ('Name', 'Filter by file name', 'name:"{cursor}"', True),
+    ('AND', 'Combine two predicates', 'AND', True),
+    ('OR', 'Match either predicate', 'OR', True),
+    ('NOT', 'Invert the next predicate', 'NOT {cursor}', True),
+]
+
+
+class FilterSuggestionPopup(QFrame):
+    template_selected = Signal(str, bool)
+    history_selected = Signal(str)
+    clear_history_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName('filterSuggestionPopup')
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            """
+            QFrame#filterSuggestionPopup {
+                background-color: palette(base);
+                border: 1px solid palette(mid);
+                border-radius: 8px;
+            }
+            QListWidget {
+                background: transparent;
+                border: none;
+                outline: none;
+                padding: 4px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                margin: 2px 0px;
+                border-radius: 6px;
+            }
+            QListWidget::item:selected {
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        filters_label = QLabel('Filters', self)
+        filters_label.setStyleSheet('font-weight: 600; padding: 2px 4px;')
+        layout.addWidget(filters_label)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list_widget.setUniformItemSizes(False)
+        self.list_widget.itemClicked.connect(self._choose_item)
+        self.list_widget.itemActivated.connect(self._choose_item)
+        self._template_row_height = 44
+        self.list_widget.setStyleSheet('margin-left: 10px;')
+        layout.addWidget(self.list_widget)
+
+        for title, description, template, defer_filter in FILTER_TEMPLATE_SPECS:
+            item = QListWidgetItem(f'{title}\n{description}')
+            item.setData(Qt.ItemDataRole.UserRole, (template, defer_filter))
+            item.setSizeHint(QSize(0, 44))
+            self.list_widget.addItem(item)
+
+        self.history_header_widget = QWidget(self)
+        history_header = QHBoxLayout(self.history_header_widget)
+        history_header.setContentsMargins(0, 0, 0, 0)
+        history_label = QLabel('History', self)
+        history_label.setStyleSheet('font-weight: 600; padding: 2px 4px;')
+        history_header.addWidget(history_label)
+        history_header.addStretch()
+        self.clear_history_button = QPushButton('Clear', self)
+        self.clear_history_button.setFlat(True)
+        self.clear_history_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_history_button.clicked.connect(self.clear_history_requested.emit)
+        history_header.addWidget(self.clear_history_button)
+        layout.addWidget(self.history_header_widget)
+
+        self.history_list_widget = QListWidget(self)
+        self.history_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.history_list_widget.setUniformItemSizes(True)
+        self.history_list_widget.itemClicked.connect(self._choose_history_item)
+        self.history_list_widget.itemActivated.connect(self._choose_history_item)
+        self._history_row_height = 28
+        self.history_list_widget.setStyleSheet('margin-left: 10px;')
+        layout.addWidget(self.history_list_widget)
+
+    def _choose_item(self, item: QListWidgetItem):
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if payload:
+            template, defer_filter = payload
+            self.template_selected.emit(template, bool(defer_filter))
+        self.hide()
+
+    def _choose_history_item(self, item: QListWidgetItem):
+        text = item.data(Qt.ItemDataRole.UserRole)
+        if text:
+            self.history_selected.emit(str(text))
+        self.hide()
+
+    def set_history_items(self, items: list[str]):
+        self.history_list_widget.clear()
+        for text in items:
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, text)
+            self.history_list_widget.addItem(item)
+        has_items = bool(items)
+        self.history_header_widget.setVisible(has_items)
+        self.history_list_widget.setVisible(has_items)
+        self.clear_history_button.setVisible(has_items)
+
+    def show_for(self, line_edit: QLineEdit):
+        width = max(line_edit.width(), 300)
+        anchor = line_edit.mapToGlobal(QPoint(0, line_edit.height() + 4))
+        screen = QApplication.screenAt(anchor) or line_edit.screen() or QApplication.primaryScreen()
+        available_geometry = screen.availableGeometry() if screen is not None else QRect(anchor.x(), anchor.y(), width, 700)
+
+        template_rows = min(self.list_widget.count(), 7)
+        preferred_filters_height = max(140, template_rows * self._template_row_height + 10)
+
+        history_height = 0
+        if self.history_list_widget.isVisible():
+            visible_history_rows = max(2, min(self.history_list_widget.count(), 4))
+            history_height = max(70, visible_history_rows * self._history_row_height + 8)
+
+        preferred_height = 24 + preferred_filters_height + 16
+        if self.history_list_widget.isVisible():
+            preferred_height += 28 + history_height + 8
+
+        available_below = max(160, available_geometry.bottom() - anchor.y() - 8)
+        available_above = max(160, line_edit.mapToGlobal(QPoint(0, 0)).y() - available_geometry.top() - 8)
+        show_above = available_below < preferred_height and available_above > available_below
+        available_height = available_above if show_above else available_below
+
+        base_height_without_history = 24 + 120 + 16
+        if self.history_list_widget.isVisible():
+            base_height_without_history += 28 + 60 + 8
+        popup_height = min(preferred_height, max(base_height_without_history, available_height))
+
+        reserved_history_height = 0
+        if self.history_list_widget.isVisible():
+            reserved_history_height = min(history_height, max(60, popup_height - (24 + 120 + 16 + 28 + 8)))
+            filters_height = max(120, popup_height - (24 + 16 + 28 + 8 + reserved_history_height))
+        else:
+            filters_height = max(120, popup_height - (24 + 16))
+
+        self.list_widget.setMinimumHeight(filters_height)
+        self.list_widget.setMaximumHeight(filters_height)
+
+        if self.history_list_widget.isVisible():
+            self.history_list_widget.setMinimumHeight(reserved_history_height)
+            self.history_list_widget.setMaximumHeight(reserved_history_height)
+
+        self.resize(width, popup_height)
+        if show_above:
+            popup_pos = line_edit.mapToGlobal(QPoint(0, -self.height() - 4))
+        else:
+            popup_pos = anchor
+        popup_x = max(available_geometry.left(), min(popup_pos.x(), available_geometry.right() - self.width()))
+        popup_y = max(available_geometry.top(), min(popup_pos.y(), available_geometry.bottom() - self.height()))
+        self.move(QPoint(popup_x, popup_y))
+        self.show()
+        self.raise_()
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+            self.list_widget.setFocus()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class FilterLineEdit(QLineEdit):
+    apply_requested = Signal()
+
     def __init__(self):
         super().__init__()
         self.setPlaceholderText('Filter Images')
@@ -76,6 +262,131 @@ class FilterLineEdit(QLineEdit):
             [(CaselessKeyword('NOT'), 1, OpAssoc.RIGHT),
              (CaselessKeyword('AND'), 2, OpAssoc.LEFT),
              (CaselessKeyword('OR'), 2, OpAssoc.LEFT)])
+        self._suggestion_popup = FilterSuggestionPopup(self)
+        self._suggestion_popup.template_selected.connect(
+            self._insert_filter_template)
+        self._suggestion_popup.history_selected.connect(
+            self._apply_history_item)
+        self._suggestion_popup.clear_history_requested.connect(
+            self.clear_filter_history)
+        self._pending_history_text = ''
+        self._history_timer = QTimer(self)
+        self._history_timer.setSingleShot(True)
+        self._history_timer.setInterval(1400)
+        self._history_timer.timeout.connect(self._commit_pending_history)
+        self.textChanged.connect(self._cancel_pending_history)
+        suggestion_icon = self._build_suggestion_icon()
+        self._suggestion_action = self.addAction(
+            suggestion_icon,
+            QLineEdit.ActionPosition.TrailingPosition)
+        self._suggestion_action.triggered.connect(
+            self.toggle_suggestion_popup)
+        self._suggestion_action.setToolTip('Show filter suggestions')
+
+    def _build_suggestion_icon(self) -> QIcon:
+        device_ratio = max(1.0, self.devicePixelRatioF())
+        logical_size = 16
+        pixmap = QPixmap(int(logical_size * device_ratio), int(logical_size * device_ratio))
+        pixmap.setDevicePixelRatio(device_ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        color = self.palette().color(self.foregroundRole())
+        color.setAlpha(190)
+        pen = QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(4, 6, 8, 10)
+        painter.drawLine(8, 10, 12, 6)
+        painter.end()
+
+        return QIcon(pixmap)
+
+    def toggle_suggestion_popup(self):
+        if self._suggestion_popup.isVisible():
+            self._suggestion_popup.hide()
+            return
+        self._suggestion_popup.set_history_items(self.get_filter_history())
+        self._suggestion_popup.show_for(self)
+
+    def _insert_filter_template(self, template: str, defer_filter: bool):
+        cursor_token = '{cursor}'
+        cursor_index = template.find(cursor_token)
+        clean_template = template.replace(cursor_token, '')
+
+        cursor = self.cursorPosition()
+        current_text = self.text()
+        prefix = ''
+        suffix = ''
+
+        if cursor > 0 and not current_text[cursor - 1].isspace() and current_text[cursor - 1] not in '([':
+            prefix = ' '
+        if cursor < len(current_text) and not current_text[cursor].isspace() and current_text[cursor] not in ')]':
+            suffix = ' '
+
+        insertion = prefix + clean_template + suffix
+        if defer_filter:
+            old_block = self.blockSignals(True)
+            self.insert(insertion)
+            self.blockSignals(old_block)
+        else:
+            self.insert(insertion)
+
+        if cursor_index >= 0:
+            self.setCursorPosition(cursor + len(prefix) + cursor_index)
+
+        self.setFocus()
+
+    def _apply_history_item(self, filter_text: str):
+        self.setText(filter_text)
+        self.apply_requested.emit()
+
+    def get_filter_history(self) -> list[str]:
+        values = settings.value('image_list_filter_history', defaultValue=[], type=list)
+        if isinstance(values, list):
+            return [str(item) for item in values if str(item).strip()]
+        return []
+
+    def remember_filter_history(self, filter_text: str):
+        text = str(filter_text or '').strip()
+        if not text:
+            return
+        self._pending_history_text = text
+        self._history_timer.start()
+
+    def _cancel_pending_history(self, *_args):
+        if self._history_timer.isActive():
+            self._history_timer.stop()
+
+    def _commit_pending_history(self):
+        text = str(self._pending_history_text or '').strip()
+        if not text:
+            return
+        if text != self.text().strip():
+            return
+        history = [item for item in self.get_filter_history() if item != text]
+        history.insert(0, text)
+        history = history[:12]
+        settings.setValue('image_list_filter_history', history)
+        self._suggestion_popup.set_history_items(history)
+
+    def clear_filter_history(self):
+        settings.setValue('image_list_filter_history', [])
+        self._suggestion_popup.set_history_items([])
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._suggestion_popup.isVisible():
+            self._suggestion_popup.show_for(self)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.apply_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def parse_filter_text(self) -> list | str | None:
         filter_text = self.text()
