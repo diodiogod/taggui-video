@@ -78,8 +78,18 @@ from `requirements.txt`:
 - Linux: `bash start_linux.sh --refresh-torch`
 
 If the Windows launcher warns that it could not parse the NVIDIA driver version,
-the safest fallback is to rerun the refresh after checking that `nvidia-smi`
-works normally in a terminal.
+rerun the refresh with an explicit CUDA wheel override if you know the machine
+should use NVIDIA wheels:
+
+- Windows: `.\start_windows.bat --refresh-torch --cuda=cu128`
+- Linux: `bash start_linux.sh --refresh-torch --cuda=cu128`
+
+If that still fails, check that `nvidia-smi` works normally in a terminal and
+send the launcher log plus the three Torch values:
+
+- `python -c "import torch; print(torch.__version__)"`
+- `python -c "import torch; print(torch.version.cuda)"`
+- `python -c "import torch; print(torch.cuda.is_available())"`
 
 ## Large Folder Takes Time on First Open
 

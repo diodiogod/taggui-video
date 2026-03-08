@@ -40,11 +40,18 @@ These flags are available on the launcher scripts:
 - `--skip-git` to start without running `git pull`
 - `--clear-cache` to clear the pip cache before launch
 - `--clean-old` to remove packages that are no longer in `requirements.txt`
+- `--cuda=cu128` to force a Torch CUDA wheel channel when auto-detection is wrong
 
 Windows also supports:
 
 - `--crash-log` to enable crash diagnostics
 - `--no-crash-log` to disable crash diagnostics
+
+If the launcher warns that it could not parse the NVIDIA driver version, rerun
+the Torch refresh with an explicit override such as:
+
+- Windows: `start_windows.bat --refresh-torch --cuda=cu128`
+- Linux: `bash start_linux.sh --refresh-torch --cuda=cu128`
 
 ## Manual Fallback
 

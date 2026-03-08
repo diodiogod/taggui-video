@@ -32,6 +32,7 @@ SKIP_GIT=0
 CLEAR_CACHE=0
 CLEAN_OLD=0
 REFRESH_TORCH=0
+CUDA_OVERRIDE=""
 TORCH_VERSION="2.7.1"
 TORCHVISION_VERSION="0.22.1"
 
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --clear-cache) CLEAR_CACHE=1 ;;
         --clean-old) CLEAN_OLD=1 ;;
         --refresh-torch) REFRESH_TORCH=1 ;;
+        --cuda=*) CUDA_OVERRIDE="${1#--cuda=}" ;;
     esac
     shift
 done
@@ -139,28 +141,51 @@ if [ $SHOULD_INSTALL -eq 1 ]; then
     echo "Upgrading pip..."
     python -m pip install --upgrade pip >> "$LOGFILE" 2>&1
 
-    echo "Detecting CUDA version..."
     CUDA_VERSION="cpu"
-    if command -v nvidia-smi &> /dev/null; then
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
-        echo "Found NVIDIA GPU with driver: $DRIVER_VERSION"
-
-        # Extract major driver version
-        DRIVER_MAJOR=$(echo "$DRIVER_VERSION" | cut -d'.' -f1)
-
-        # Detect CUDA wheel channel from driver
-        if [ "$DRIVER_MAJOR" -ge 570 ]; then
-            CUDA_VERSION="cu128"
-            echo "Detected CUDA 12.8-capable driver"
-        elif [ "$DRIVER_MAJOR" -ge 560 ]; then
-            CUDA_VERSION="cu126"
-            echo "Detected CUDA 12.6-capable driver"
-        elif [ "$DRIVER_MAJOR" -ge 450 ]; then
-            CUDA_VERSION="cu118"
-            echo "Detected CUDA 11.8-capable driver"
-        fi
+    if [ -n "$CUDA_OVERRIDE" ] && [ "$CUDA_OVERRIDE" != "auto" ]; then
+        case "$CUDA_OVERRIDE" in
+            cpu|cu118|cu126|cu128)
+                CUDA_VERSION="$CUDA_OVERRIDE"
+                echo "Using manual CUDA override: $CUDA_VERSION"
+                ;;
+            *)
+                echo "ERROR: Unsupported CUDA override '$CUDA_OVERRIDE'"
+                echo "Supported values: cpu, cu118, cu126, cu128, auto"
+                exit 1
+                ;;
+        esac
     else
-        echo "No NVIDIA GPU detected, installing CPU-only PyTorch"
+        echo "Detecting CUDA version..."
+        if command -v nvidia-smi &> /dev/null; then
+            DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{print $1}')
+            if [ -z "$DRIVER_VERSION" ]; then
+                DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | awk '{print $1}')
+            fi
+            if [ -n "$DRIVER_VERSION" ]; then
+                echo "Found NVIDIA GPU with driver: $DRIVER_VERSION"
+
+                # Extract major driver version
+                DRIVER_MAJOR=$(echo "$DRIVER_VERSION" | cut -d'.' -f1)
+
+                # Detect CUDA wheel channel from driver
+                if [ "$DRIVER_MAJOR" -ge 570 ]; then
+                    CUDA_VERSION="cu128"
+                    echo "Detected CUDA 12.8-capable driver"
+                elif [ "$DRIVER_MAJOR" -ge 560 ]; then
+                    CUDA_VERSION="cu126"
+                    echo "Detected CUDA 12.6-capable driver"
+                elif [ "$DRIVER_MAJOR" -ge 450 ]; then
+                    CUDA_VERSION="cu118"
+                    echo "Detected CUDA 11.8-capable driver"
+                fi
+            else
+                echo "WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack"
+                echo "If you know the correct wheel channel, rerun with --cuda=cu128 (or cu126 / cu118)"
+            fi
+        else
+            echo "No NVIDIA GPU detected, installing CPU-only PyTorch"
+            echo "If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 (or cu126 / cu118)"
+        fi
     fi
 
     if [ $SHOULD_REFRESH_TORCH -eq 1 ]; then
@@ -215,6 +240,7 @@ if [ $SHOULD_INSTALL -eq 1 ]; then
 else
     echo "Virtual environment already exists, skipping installation"
     echo "To refresh the Torch stack in this venv, run: ./start_linux.sh --refresh-torch"
+    echo "If CUDA detection is wrong, you can force the wheel channel: ./start_linux.sh --refresh-torch --cuda=cu128"
 fi
 
 # Optional: Clear pip cache

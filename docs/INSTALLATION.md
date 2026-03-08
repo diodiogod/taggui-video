@@ -73,6 +73,7 @@ Supported launcher flags:
 - `--skip-git` to skip `git pull`
 - `--clear-cache` to clear the pip cache before launch
 - `--clean-old` to uninstall packages that are no longer in `requirements.txt`
+- `--cuda=cu128` to force a Torch CUDA wheel channel when auto-detection is wrong
 
 Windows also supports:
 
@@ -116,6 +117,7 @@ For video editing workflows, make sure `ffmpeg` is installed and available on yo
 - `Python not installed`: install Python 3.10 or newer
 - `requirements.txt not found`: run the launcher from the project root
 - launcher reuses an old environment after update: run `pip install -r requirements.txt` for normal deps, or `--refresh-torch` for Torch stack issues
+- launcher falls back to CPU because it cannot parse the NVIDIA driver: rerun with `--refresh-torch --cuda=cu128` if you know the machine should use the CUDA 12.8 wheel channel
 - video editing actions fail: install `ffmpeg`
 - backend-specific playback issues: check the configured backend and runtime availability in settings
 

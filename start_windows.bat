@@ -34,6 +34,7 @@ set CLEAR_CACHE=0
 set CLEAN_OLD=0
 set REFRESH_TORCH=0
 set ENABLE_CRASH_DIAG=0
+set CUDA_OVERRIDE=
 set TORCH_VERSION=2.7.1
 set TORCHVISION_VERSION=0.22.1
 
@@ -63,6 +64,8 @@ for %%A in (%*) do (
     if /I "%%~A"=="--refresh-torch" set REFRESH_TORCH=1
     if /I "%%~A"=="--crash-log" set ENABLE_CRASH_DIAG=1
     if /I "%%~A"=="--no-crash-log" set ENABLE_CRASH_DIAG=0
+    set ARG=%%~A
+    if /I "!ARG:~0,7!"=="--cuda=" set CUDA_OVERRIDE=!ARG:~7!
 )
 
 :: Check if git repo exists
@@ -174,48 +177,78 @@ if %SHOULD_INSTALL% EQU 1 (
     echo Upgrading pip...
     python -m pip install --upgrade pip > "%LOGFILE%" 2>&1
 
-    echo Detecting CUDA version...
     set CUDA_VERSION=cpu
     set DRIVER_VERSION=
-    nvidia-smi >nul 2>&1
-    if !ERRORLEVEL! EQU 0 (
-        for /f "usebackq tokens=* delims=" %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
-            if not defined DRIVER_VERSION set DRIVER_VERSION=%%i
-        )
-        if not defined DRIVER_VERSION (
-            for /f "usebackq tokens=2 delims=: " %%i in (`nvidia-smi 2^>nul ^| findstr /C:"Driver Version"`) do (
-                if not defined DRIVER_VERSION set DRIVER_VERSION=%%i
-            )
-        )
-        if defined DRIVER_VERSION (
-            echo !DRIVER_VERSION!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*" >nul 2>&1
-            if !ERRORLEVEL! NEQ 0 (
-                set DRIVER_VERSION=
-            )
-        )
-        if defined DRIVER_VERSION (
-            echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+    if defined CUDA_OVERRIDE (
+        if /I "!CUDA_OVERRIDE!"=="auto" (
+            set CUDA_OVERRIDE=
+        ) else if /I "!CUDA_OVERRIDE!"=="cpu" (
+            set CUDA_VERSION=cpu
+        ) else if /I "!CUDA_OVERRIDE!"=="cu118" (
+            set CUDA_VERSION=cu118
+        ) else if /I "!CUDA_OVERRIDE!"=="cu126" (
+            set CUDA_VERSION=cu126
+        ) else if /I "!CUDA_OVERRIDE!"=="cu128" (
+            set CUDA_VERSION=cu128
         ) else (
-            echo WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack
+            echo ERROR: Unsupported CUDA override "!CUDA_OVERRIDE!"
+            echo Supported values: cpu, cu118, cu126, cu128, auto
+            pause
+            exit /b 1
         )
+    )
 
-        :: Detect CUDA wheel channel from driver
-        if defined DRIVER_VERSION (
-            for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
-                if %%v GEQ 570 (
-                    set CUDA_VERSION=cu128
-                    echo Detected CUDA 12.8-capable driver
-                ) else if %%v GEQ 560 (
-                    set CUDA_VERSION=cu126
-                    echo Detected CUDA 12.6-capable driver
-                ) else if %%v GEQ 450 (
-                    set CUDA_VERSION=cu118
-                    echo Detected CUDA 11.8-capable driver
+    if defined CUDA_OVERRIDE (
+        echo Using manual CUDA override: !CUDA_VERSION!
+    ) else (
+        echo Detecting CUDA version...
+        nvidia-smi >nul 2>&1
+        if !ERRORLEVEL! EQU 0 (
+            for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2^>nul`) do (
+                if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
+            )
+            if not defined DRIVER_VERSION (
+                for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
+                    if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
                 )
             )
+            if not defined DRIVER_VERSION (
+                for /f "tokens=6 delims= " %%i in ('nvidia-smi 2^>nul ^| findstr /C:"Driver Version"') do (
+                    if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
+                )
+            )
+            if defined DRIVER_VERSION (
+                echo !DRIVER_VERSION!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
+                if !ERRORLEVEL! NEQ 0 (
+                    set DRIVER_VERSION=
+                )
+            )
+            if defined DRIVER_VERSION (
+                echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+            ) else (
+                echo WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack
+                echo If you know the correct wheel channel, rerun with --cuda=cu128 ^(or cu126 / cu118^)
+            )
+
+            :: Detect CUDA wheel channel from driver
+            if defined DRIVER_VERSION (
+                for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
+                    if %%v GEQ 570 (
+                        set CUDA_VERSION=cu128
+                        echo Detected CUDA 12.8-capable driver
+                    ) else if %%v GEQ 560 (
+                        set CUDA_VERSION=cu126
+                        echo Detected CUDA 12.6-capable driver
+                    ) else if %%v GEQ 450 (
+                        set CUDA_VERSION=cu118
+                        echo Detected CUDA 11.8-capable driver
+                    )
+                )
+            )
+        ) else (
+            echo No NVIDIA GPU detected, installing CPU-only PyTorch
+            echo If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 ^(or cu126 / cu118^)
         )
-    ) else (
-        echo No NVIDIA GPU detected, installing CPU-only PyTorch
     )
 
     if !SHOULD_REFRESH_TORCH! EQU 1 (
@@ -267,6 +300,7 @@ if %SHOULD_INSTALL% EQU 1 (
 ) else (
     echo Virtual environment already exists, skipping installation
     echo To refresh the Torch stack in this venv, run: start_windows.bat --refresh-torch
+    echo If CUDA detection is wrong, you can force the wheel channel: start_windows.bat --refresh-torch --cuda=cu128
 )
 
 :: Optional: Clear pip cache
