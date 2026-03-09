@@ -168,6 +168,7 @@ class ImageViewer(QWidget):
         self._zoom_follow_anchor_ratio = QPointF(0.5, 0.5)
         self._zoom_follow_pan_ratio = QPointF(0.5, 0.5)
         self._suspend_zoom_follow_locked_scale_sync = False
+        self._fast_pan_visual_mode = False
 
         # Timer for auto-hiding controls
         self._controls_hide_timer = QTimer(self)
@@ -314,6 +315,57 @@ class ImageViewer(QWidget):
                     )
                     view.setViewportUpdateMode(restore_mode)
                     self._compare_forced_full_viewport_update = False
+        except Exception:
+            pass
+
+    def _set_fast_pan_visual_mode(self, enabled: bool):
+        """Temporarily trade filtering quality for smoother still-image panning."""
+        enabled = bool(enabled) and not bool(getattr(self, "_is_video_loaded", False))
+        if enabled == bool(getattr(self, "_fast_pan_visual_mode", False)):
+            return
+
+        self._fast_pan_visual_mode = enabled
+        smooth = not enabled
+        transform_mode = (
+            Qt.TransformationMode.FastTransformation
+            if enabled else
+            Qt.TransformationMode.SmoothTransformation
+        )
+        cache_mode = (
+            QGraphicsItem.DeviceCoordinateCache
+            if enabled else
+            QGraphicsItem.NoCache
+        )
+
+        try:
+            self.view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, smooth)
+        except Exception:
+            pass
+
+        items = []
+        if self.current_image_item is not None:
+            items.append(self.current_image_item)
+        for layer in list(getattr(self, "_compare_layers", []) or []):
+            overlay_item = layer.get("overlay_item")
+            if overlay_item is not None:
+                items.append(overlay_item)
+
+        for item in items:
+            try:
+                item.setTransformationMode(transform_mode)
+            except Exception:
+                pass
+            try:
+                item.setCacheMode(cache_mode)
+            except Exception:
+                pass
+            try:
+                item.update()
+            except Exception:
+                pass
+
+        try:
+            self.view.viewport().update()
         except Exception:
             pass
 
@@ -1823,6 +1875,7 @@ class ImageViewer(QWidget):
 
             # Check if this is a video
             if image.is_video:
+                self._set_fast_pan_visual_mode(False)
                 try:
                     # Image -> video handoff needs a slightly stricter native-reveal policy
                     # to avoid showing an unready backend frame.
@@ -1925,12 +1978,14 @@ class ImageViewer(QWidget):
                 # OpenGL viewport + render hints should provide high-quality GPU scaling
                 image_item = QGraphicsPixmapItem(pixmap)
                 image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+                image_item.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
                 image_item.setZValue(0)
                 self._set_scene_rect_for_item(image_item)
                 self.scene.addItem(image_item)
                 self.current_image_item = image_item  # Keep reference to prevent garbage collection!
                 self.current_video_item = None
                 MarkingItem.image_size = image_item.boundingRect().toRect()
+                self._set_fast_pan_visual_mode(False)
 
             mode = self.get_zoom_follow_mode()
             if mode == ZOOM_FOLLOW_MODE_FIT_LOCK:

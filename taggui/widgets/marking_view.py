@@ -23,13 +23,16 @@ class ImageGraphicsView(QGraphicsView):
                 type=str,
             ) or ''
         ).strip().lower()
-        use_native_video_backend = backend_name in {'vlc_experimental', 'mpv_experimental'}
+        use_native_video_backend = backend_name == 'vlc_experimental'
         if use_native_video_backend:
-            # Native backends embed their own child surface and are unreliable when
+            # VLC still embeds a native child surface and is unreliable when
             # the view itself uses an OpenGL viewport.
             self.setViewport(QWidget())
         else:
             self.setViewport(QOpenGLWidget())
+            # QOpenGLWidget-backed views are safer with full viewport updates,
+            # especially during large pans/zooms on high-resolution displays.
+            self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.showContextMenu)
         self.setRenderHint(QPainter.Antialiasing)
@@ -167,6 +170,9 @@ class ImageGraphicsView(QGraphicsView):
         if self._should_start_manual_pan(event):
             self._manual_pan_active = True
             self._manual_pan_last_global_pos = event.globalPosition().toPoint()
+            fast_pan_mode_setter = getattr(self.image_viewer, "_set_fast_pan_visual_mode", None)
+            if callable(fast_pan_mode_setter):
+                fast_pan_mode_setter(True)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
@@ -278,6 +284,9 @@ class ImageGraphicsView(QGraphicsView):
         ):
             self._manual_pan_active = False
             self._manual_pan_last_global_pos = None
+            fast_pan_mode_setter = getattr(self.image_viewer, "_set_fast_pan_visual_mode", None)
+            if callable(fast_pan_mode_setter):
+                fast_pan_mode_setter(False)
             if self._space_pan_active:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             else:

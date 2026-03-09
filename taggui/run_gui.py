@@ -27,9 +27,9 @@ except Exception:
 
 try:
     import transformers
-    from PySide6.QtGui import QImageReader
+    from PySide6.QtGui import QImageReader, QSurfaceFormat
     from PySide6.QtWidgets import QApplication, QMessageBox
-    from PySide6.QtCore import qInstallMessageHandler
+    from PySide6.QtCore import Qt, qInstallMessageHandler
 
     from utils.settings import settings
     from widgets.main_window import MainWindow
@@ -126,9 +126,35 @@ def suppress_warnings():
         pass
 
 
+def _configure_qt_graphics_stack():
+    """Apply low-risk Qt graphics hints before QApplication is created."""
+    if not sys.platform.startswith('win'):
+        return
+
+    # Keep Qt on native desktop OpenGL for the shared QOpenGLWidget-based paths.
+    os.environ.setdefault('QT_OPENGL', 'desktop')
+
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+    except Exception:
+        pass
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    except Exception:
+        pass
+
+    try:
+        format_hint = QSurfaceFormat()
+        format_hint.setSwapInterval(1)
+        QSurfaceFormat.setDefaultFormat(format_hint)
+    except Exception:
+        pass
+
+
 def run_gui():
     # Suppress Qt multimedia ffmpeg output
     os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false'
+    _configure_qt_graphics_stack()
 
     app = QApplication([])
     # The application name is shown in the taskbar.
