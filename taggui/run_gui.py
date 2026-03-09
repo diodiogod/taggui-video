@@ -9,6 +9,11 @@ import threading
 import faulthandler
 from datetime import datetime
 
+try:
+    from version import APP_DISPLAY_NAME, APP_NAME, __version__
+except ImportError:
+    from .version import APP_DISPLAY_NAME, APP_NAME, __version__
+
 # Suppress ffmpeg verbose output BEFORE any OpenCV imports
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
@@ -158,9 +163,10 @@ def run_gui():
 
     app = QApplication([])
     # The application name is shown in the taskbar.
-    app.setApplicationName('TagGUI')
+    app.setApplicationName(APP_NAME)
     # The application display name is shown in the title bar.
-    app.setApplicationDisplayName('TagGUI')
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    app.setApplicationVersion(__version__)
     app.setStyle('Fusion')
     # Disable the allocation limit to allow loading large images.
     QImageReader.setAllocationLimit(0)

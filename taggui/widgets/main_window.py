@@ -32,6 +32,10 @@ from utils.key_press_forwarder import KeyPressForwarder
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
 from utils.utils import get_resource_path, pluralize
+try:
+    from version import APP_NAME, __version__
+except ImportError:
+    from ..version import APP_NAME, __version__
 from widgets.all_tags_editor import AllTagsEditor
 from widgets.auto_captioner import AutoCaptioner
 from widgets.auto_markings import AutoMarkings
@@ -1030,7 +1034,7 @@ class MainWindow(QMainWindow):
 
     def _update_main_window_title(self, selected_file_name: str | None = None):
         """Show folder and selected file name in the main window title."""
-        base_title = "TagGUI"
+        base_title = f"{APP_NAME} v{__version__}"
         folder_name = self.directory_path.name if self.directory_path else None
         if folder_name:
             base_title = f"{base_title} - {folder_name}"
