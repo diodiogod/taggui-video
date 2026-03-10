@@ -20,12 +20,6 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - Right-click in the main viewer area and spawn.
 - Drag a thumbnail from list/masonry and release on empty screen area to spawn at drop location.
 
-## Active Viewer Routing
-
-- Clicking a floating viewer makes it the active viewer.
-- When you select a new file in the image list, it opens in the active viewer.
-- Other floating viewers keep their current media.
-
 ## Move, Resize, Close
 
 - Move window with `middle-click + drag` anywhere inside a floating viewer.
@@ -93,7 +87,7 @@ How to exit compare mode:
 
 ## Video Behavior Notes
 
-- Spawned viewer can inherit speed and loop state from the active viewer when opening the same video.
+- A spawned viewer can inherit speed and loop state from the source viewer when opening the same video.
 - Speed is per viewer.
 - Loop markers are persisted with viewer scopes (`main`, `floating_*`) so different viewers can keep different marker ranges for the same media.
 
