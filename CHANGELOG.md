@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-03-10
+
+### Added
+
+- Hold Shift while resizing a spawned viewer to keep its aspect ratio
+- Floating viewer docs and shortcuts now mention the new resize modifier
+
+### Changed
+
+- Improve floating viewer resizing
 ## [1.0.3] - 2026-03-10
 
 ### Added
