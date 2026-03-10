@@ -18,6 +18,8 @@ class MenuManager:
         self.redo_action = None
         self.reload_directory_action = None
         self.toggle_toolbar_action = None
+        self.reset_toolbars_action = None
+        self.reset_layout_action = None
         self.toggle_main_viewer_action = None
         self.toggle_image_list_action = None
         self.toggle_image_tags_editor_action = None
@@ -63,7 +65,9 @@ class MenuManager:
         self.reload_directory_action.setDisabled(True)
         self.undo_action = QAction('Undo', parent=self.main_window)
         self.redo_action = QAction('Redo', parent=self.main_window)
-        self.toggle_toolbar_action = QAction('Toolbar', parent=self.main_window)
+        self.toggle_toolbar_action = QAction('Toolbars', parent=self.main_window)
+        self.reset_toolbars_action = QAction('Reset Toolbars', parent=self.main_window)
+        self.reset_layout_action = QAction('Reset Layout', parent=self.main_window)
         self.toggle_main_viewer_action = QAction('Main Viewer', parent=self.main_window)
         self.toggle_image_list_action = QAction('Images', parent=self.main_window)
         self.toggle_image_tags_editor_action = QAction('Image Tags', parent=self.main_window)
@@ -222,7 +226,13 @@ class MenuManager:
         # Connect toggle actions
         toolbar_manager = self.main_window.toolbar_manager
         self.toggle_toolbar_action.triggered.connect(
-            lambda is_checked: toolbar_manager.toolbar.setVisible(is_checked))
+            lambda is_checked: toolbar_manager.set_toolbars_visible(is_checked))
+        self.reset_toolbars_action.triggered.connect(
+            self.main_window.reset_toolbar_layout
+        )
+        self.reset_layout_action.triggered.connect(
+            self.main_window.reset_window_layout
+        )
         self.toggle_main_viewer_action.triggered.connect(
             self.main_window.set_main_viewer_visible
         )
@@ -241,6 +251,14 @@ class MenuManager:
         )
 
         view_menu.addAction(self.toggle_toolbar_action)
+        toolbar_groups_menu = view_menu.addMenu('Toolbar Groups')
+        for toolbar in toolbar_manager.get_toolbars():
+            action = toolbar.toggleViewAction()
+            action.setText(toolbar.windowTitle())
+            toolbar_groups_menu.addAction(action)
+        view_menu.addAction(self.reset_toolbars_action)
+        view_menu.addAction(self.reset_layout_action)
+        view_menu.addSeparator()
         view_menu.addAction(self.toggle_main_viewer_action)
         view_menu.addAction(self.toggle_image_list_action)
         view_menu.addAction(self.toggle_image_tags_editor_action)

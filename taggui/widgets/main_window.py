@@ -382,6 +382,7 @@ class MainWindow(QMainWindow):
         self._workspace_apply_timer_active = False
         self._workspace_apply_retry_count = 0
         self._workspace_applying = False
+        self._default_window_state = None
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
         self._floating_hold_mode = False
@@ -519,6 +520,8 @@ class MainWindow(QMainWindow):
 
         # Create menus
         self.menu_manager.create_menus()
+        self.toolbar_manager.reset_toolbars_layout()
+        self._default_window_state = self.saveState()
         self._sync_perf_hud_menu_action()
         self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
         self.set_main_viewer_visible(self._main_viewer_visible, save=False)
@@ -3738,6 +3741,57 @@ class MainWindow(QMainWindow):
                         print(f"[RESTORE] Failed to restore directory '{directory_path}': {e}")
                 QTimer.singleShot(0, _restore_directory)
 
+    def reset_toolbar_layout(self):
+        """Restore toolbar groups to their default docked layout."""
+        toolbar_manager = getattr(self, 'toolbar_manager', None)
+        if toolbar_manager is None:
+            return
+        toolbar_manager.reset_toolbars_layout()
+        action = getattr(getattr(self, 'menu_manager', None), 'toggle_toolbar_action', None)
+        if action is not None:
+            action.setChecked(toolbar_manager.any_toolbar_visible())
+
+    def reset_window_layout(self):
+        """Restore the default dock, viewer, and toolbar layout."""
+        self.cancel_compare_drag()
+        self.close_all_floating_viewers()
+
+        for dock in (
+            getattr(self, 'image_list', None),
+            getattr(self, 'image_tags_editor', None),
+            getattr(self, 'all_tags_editor', None),
+            getattr(self, 'auto_captioner', None),
+            getattr(self, 'auto_markings', None),
+        ):
+            if dock is None:
+                continue
+            try:
+                if dock.isFloating():
+                    dock.setFloating(False)
+            except Exception:
+                pass
+
+        if self._default_window_state is not None:
+            self.restoreState(self._default_window_state)
+            self._preserve_restored_dock_layout_until = time.time() + 4.0
+
+        self.set_main_viewer_visible(True, save=True)
+        self.reset_toolbar_layout()
+
+        if hasattr(self, 'menu_manager') and self.menu_manager is not None:
+            self.menu_manager.toggle_image_list_action.setChecked(self.image_list.isVisible())
+            self.menu_manager.toggle_image_tags_editor_action.setChecked(self.image_tags_editor.isVisible())
+            self.menu_manager.toggle_all_tags_editor_action.setChecked(self.all_tags_editor.isVisible())
+            self.menu_manager.toggle_auto_captioner_action.setChecked(self.auto_captioner.isVisible())
+            self.menu_manager.toggle_auto_markings_action.setChecked(self.auto_markings.isVisible())
+            self.menu_manager.toggle_main_viewer_action.setChecked(bool(self._main_viewer_visible))
+            workspace_group = getattr(self.menu_manager, 'workspace_action_group', None)
+            if workspace_group is not None:
+                workspace_group.setExclusive(False)
+                for action in getattr(self.menu_manager, 'workspace_actions', {}).values():
+                    action.setChecked(False)
+                workspace_group.setExclusive(True)
+
     def _add_to_recent_directories(self, dir_path: str):
         """Add directory to recent list, maintaining max size."""
         MAX_RECENT = 10
@@ -3994,9 +4048,9 @@ class MainWindow(QMainWindow):
             for dock in right_docks:
                 self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
-            toolbar = getattr(self.toolbar_manager, 'toolbar', None)
-            if toolbar is not None:
-                toolbar.setVisible(visibility["toolbar"])
+            toolbar_manager = getattr(self, 'toolbar_manager', None)
+            if toolbar_manager is not None:
+                toolbar_manager.set_toolbars_visible(visibility["toolbar"])
 
             self.image_list.setVisible(visibility["image_list"])
             self.image_tags_editor.setVisible(visibility["image_tags_editor"])
@@ -4098,7 +4152,7 @@ class MainWindow(QMainWindow):
                 self.menu_manager.set_active_workspace(workspace_id)
                 action = getattr(self.menu_manager, 'toggle_toolbar_action', None)
                 if action is not None:
-                    action.setChecked(visibility["toolbar"])
+                    action.setChecked(bool(visibility["toolbar"]))
                 main_viewer_action = getattr(self.menu_manager, 'toggle_main_viewer_action', None)
                 if main_viewer_action is not None:
                     main_viewer_action.setChecked(bool(self._main_viewer_visible))

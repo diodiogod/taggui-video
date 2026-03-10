@@ -27,9 +27,15 @@ class SignalManager:
         toolbar_manager = self.main_window.toolbar_manager
         image_viewer = self.main_window.image_viewer
 
-        toolbar_manager.toolbar.visibilityChanged.connect(
-            lambda: self.main_window.menu_manager.toggle_toolbar_action.setChecked(
-                toolbar_manager.toolbar.isVisible()))
+        for toolbar in toolbar_manager.get_toolbars():
+            toolbar.visibilityChanged.connect(
+                lambda _visible, tm=toolbar_manager: self.main_window.menu_manager.toggle_toolbar_action.setChecked(
+                    tm.any_toolbar_visible()
+                )
+            )
+        self.main_window.menu_manager.toggle_toolbar_action.setChecked(
+            toolbar_manager.any_toolbar_visible()
+        )
 
         image_viewer.zoom.connect(self.main_window.zoom)
         toolbar_manager.zoom_fit_best_action.triggered.connect(
