@@ -2174,6 +2174,39 @@ class ImageIndexDB:
             print(f'Database find/replace error: {e}')
             return 0
 
+    def get_files_matching_tag_text(self, text: str, use_regex: bool = False) -> List[str]:
+        """Return distinct file names whose tags match the provided text."""
+        if not self.enabled or not self._ensure_connection() or not text:
+            return []
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                if use_regex:
+                    cursor.execute(
+                        '''
+                        SELECT DISTINCT images.file_name
+                        FROM images
+                        JOIN image_tags ON image_tags.image_id = images.id
+                        WHERE image_tags.tag REGEXP ?
+                        ''',
+                        (text,),
+                    )
+                else:
+                    cursor.execute(
+                        '''
+                        SELECT DISTINCT images.file_name
+                        FROM images
+                        JOIN image_tags ON image_tags.image_id = images.id
+                        WHERE image_tags.tag LIKE ?
+                        ''',
+                        (f'%{text}%',),
+                    )
+                return [str(row[0]) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database tag match query error: {e}')
+            return []
+
 
 
     def get_all_image_ids(self, filter_sql: str = '', bindings: tuple = ()) -> List[int]:

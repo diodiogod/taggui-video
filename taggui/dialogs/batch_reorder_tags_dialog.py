@@ -1,11 +1,12 @@
 import re
 
 from PySide6.QtCore import Slot
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QMessageBox, QPushButton, QVBoxLayout
 
 from models.image_list_model import ImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.settings_widgets import SettingsBigCheckBox, SettingsLineEdit
+from utils.utils import get_confirmation_dialog_reply
 from widgets.auto_captioner import HorizontalLine
 
 
@@ -27,24 +28,32 @@ class BatchReorderTagsDialog(QDialog):
         top_buttons_layout.setSpacing(20)
         sort_alphabetically_button = QPushButton('Sort Tags Alphabetically')
         sort_alphabetically_button.clicked.connect(
-            lambda: self.image_list_model.sort_tags_alphabetically(
-                do_not_reorder_first_tag_check_box.isChecked()))
+            lambda: self._confirm_and_run(
+                'Sort Tags Alphabetically',
+                lambda: self.image_list_model.sort_tags_alphabetically(
+                    do_not_reorder_first_tag_check_box.isChecked())))
         top_buttons_layout.addWidget(sort_alphabetically_button)
         sort_by_frequency_button = QPushButton('Sort Tags by Frequency')
         sort_by_frequency_button.clicked.connect(
-            lambda: self.image_list_model.sort_tags_by_frequency(
-                tag_counter_model.tag_counter,
-                do_not_reorder_first_tag_check_box.isChecked()))
+            lambda: self._confirm_and_run(
+                'Sort Tags by Frequency',
+                lambda: self.image_list_model.sort_tags_by_frequency(
+                    tag_counter_model.tag_counter,
+                    do_not_reorder_first_tag_check_box.isChecked())))
         top_buttons_layout.addWidget(sort_by_frequency_button)
         reverse_button = QPushButton('Reverse Order of Tags')
         reverse_button.clicked.connect(
-            lambda: self.image_list_model.reverse_tags_order(
-                do_not_reorder_first_tag_check_box.isChecked()))
+            lambda: self._confirm_and_run(
+                'Reverse Order of Tags',
+                lambda: self.image_list_model.reverse_tags_order(
+                    do_not_reorder_first_tag_check_box.isChecked())))
         top_buttons_layout.addWidget(reverse_button)
         shuffle_button = QPushButton('Shuffle Tags Randomly')
         shuffle_button.clicked.connect(
-            lambda: self.image_list_model.shuffle_tags(
-                do_not_reorder_first_tag_check_box.isChecked()))
+            lambda: self._confirm_and_run(
+                'Shuffle Tags Randomly',
+                lambda: self.image_list_model.shuffle_tags(
+                    do_not_reorder_first_tag_check_box.isChecked())))
         top_buttons_layout.addWidget(shuffle_button)
         top_layout.addLayout(top_buttons_layout)
         horizontal_line = HorizontalLine()
@@ -57,8 +66,10 @@ class BatchReorderTagsDialog(QDialog):
         middle_layout.addWidget(separate_newline_check_box)
         sort_sentences_button = QPushButton('Sort Sentence Tags to Bottom')
         sort_sentences_button.clicked.connect(
-            lambda: self.image_list_model.sort_sentences_down(
-                separate_newline_check_box.isChecked()))
+            lambda: self._confirm_and_run(
+                'Sort Sentence Tags to Bottom',
+                lambda: self.image_list_model.sort_sentences_down(
+                    separate_newline_check_box.isChecked())))
         middle_layout.addWidget(sort_sentences_button)
         horizontal_line2 = HorizontalLine()
         bottom_layout = QVBoxLayout()
@@ -89,4 +100,14 @@ class BatchReorderTagsDialog(QDialog):
     def move_tags_to_front(self):
         tags = re.split(r'(?<!\\),', self.move_tags_line_edit.text())
         tags = [tag.strip().replace(r'\,', ',') for tag in tags]
-        self.image_list_model.move_tags_to_front(tags)
+        self._confirm_and_run(
+            'Move Tags to Front',
+            lambda: self.image_list_model.move_tags_to_front(tags))
+
+    def _confirm_and_run(self, action_name: str, action):
+        reply = get_confirmation_dialog_reply(
+            title=action_name,
+            question=f'Apply "{action_name}" to tags across the current folder?')
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        action()

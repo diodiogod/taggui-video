@@ -568,6 +568,7 @@ class HistoryItem:
     action_name: str
     tags: list[dict[str, list[str] | QRect | None | list[Marking]]]
     should_ask_for_confirmation: bool
+    paginated_snapshot: dict[str, list[str]] | None = None
 
 
 class Scope(str, Enum):
@@ -4351,6 +4352,7 @@ class ImageListModel(QAbstractListModel):
         else:
             self._total_count = db_count
         self._pages = {}  # Will be populated on-demand
+        self._page_load_order.clear()
 
         self.endResetModel()
 
@@ -4477,6 +4479,17 @@ class ImageListModel(QAbstractListModel):
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):
         """Add the current state of the image tags to the undo stack."""
+        if self._paginated_mode:
+            self.undo_stack.append(HistoryItem(
+                action_name,
+                [],
+                should_ask_for_confirmation,
+                paginated_snapshot=self._capture_paginated_tag_snapshot(),
+            ))
+            self.redo_stack.clear()
+            self.update_undo_and_redo_actions_requested.emit()
+            return
+
         tags = [{'tags': image.tags.copy(),
                  'rating': image.rating,
                  'love': bool(getattr(image, 'love', False)),
@@ -4489,6 +4502,73 @@ class ImageListModel(QAbstractListModel):
                                            should_ask_for_confirmation))
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
+
+    def _capture_paginated_tag_snapshot(self) -> dict[str, list[str]]:
+        """Capture current tag state for all paths in paginated mode."""
+        snapshot: dict[str, list[str]] = {}
+        if not self._db or not self._directory_path:
+            return snapshot
+
+        for rel_path in self._db.get_all_paths():
+            path = self._directory_path / rel_path
+            try:
+                snapshot[str(rel_path)] = self._read_sidecar_tags(
+                    path, preserve_empty=True)
+            except OSError as e:
+                print(f"Error reading tags for snapshot {rel_path}: {e}")
+                continue
+
+        return snapshot
+
+    def _restore_paginated_tag_snapshot(self, snapshot: dict[str, list[str]]):
+        """Restore paginated tag history from a path->tags snapshot."""
+        if not self._db or not self._directory_path:
+            return
+
+        for rel_path, tags in snapshot.items():
+            path = self._directory_path / rel_path
+            txt_path = path.with_suffix('.txt')
+            try:
+                txt_path.write_text(self.tag_separator.join(tags), encoding='utf-8')
+                image_id = self._db.get_image_id(rel_path)
+                if image_id:
+                    normalized_tags = self._normalize_tags(tags)
+                    if normalized_tags:
+                        self._db.set_tags_for_image(image_id, normalized_tags)
+                    else:
+                        self._db.set_tags_for_image(image_id, [])
+                        self._db.add_tag_to_image(image_id, '__no_tags__')
+
+                    txt_sidecar_mtime = None
+                    try:
+                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                    except OSError:
+                        pass
+                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+            except OSError as e:
+                print(f"Error restoring tags for {rel_path}: {e}")
+
+        self._reload_loaded_pages_after_paginated_tag_change()
+
+    def _normalize_tags(self, tags: list[str]) -> list[str]:
+        """Trim tag whitespace and drop empty entries."""
+        return [tag.strip() for tag in tags if tag.strip()]
+
+    def _read_sidecar_tags(self, image_path: Path,
+                           preserve_empty: bool = False) -> list[str]:
+        """Read sidecar tags from disk, optionally preserving empty entries."""
+        txt_path = image_path.with_suffix('.txt')
+        if not txt_path.exists():
+            return []
+
+        caption = txt_path.read_text(encoding='utf-8', errors='replace')
+        if not caption:
+            return []
+
+        tags = caption.split(self.tag_separator)
+        if preserve_empty:
+            return tags
+        return self._normalize_tags(tags)
 
     def write_image_tags_to_disk(self, image: Image):
         try:
@@ -4726,6 +4806,17 @@ class ImageListModel(QAbstractListModel):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         source_stack.pop()
+        if self._paginated_mode and history_item.paginated_snapshot is not None:
+            destination_stack.append(HistoryItem(
+                history_item.action_name,
+                [],
+                history_item.should_ask_for_confirmation,
+                paginated_snapshot=self._capture_paginated_tag_snapshot(),
+            ))
+            self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
+            self.update_undo_and_redo_actions_requested.emit()
+            return
+
         tags = [{'tags': image.tags.copy(),
                  'rating': image.rating,
                  'love': bool(getattr(image, 'love', False)),
@@ -4830,19 +4921,10 @@ class ImageListModel(QAbstractListModel):
 
         # In paginated mode with ALL_IMAGES scope, use database
         if self._paginated_mode and scope == Scope.ALL_IMAGES:
-            affected_count = self._db.find_replace_tags(find_text, replace_text, use_regex)
-            print(f"[FIND/REPLACE] Updated {affected_count} images in database")
-
-            # Invalidate all loaded pages to force reload with updated tags
-            self._pages.clear()
-            self._page_load_order.clear()
-
-            # Reload first page
-            self._load_page_sync(0)
-
-            # Emit full model reset
-            self.beginResetModel()
-            self.endResetModel()
+            affected_count = self._find_and_replace_paginated(
+                find_text, replace_text, use_regex)
+            print(f"[FIND/REPLACE] Updated {affected_count} images in paginated mode")
+            self._reload_loaded_pages_after_paginated_tag_change()
             return
 
         # For other scopes or regular mode, iterate through loaded images
@@ -4872,10 +4954,156 @@ class ImageListModel(QAbstractListModel):
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
 
+    def _find_and_replace_paginated(self, find_text: str, replace_text: str,
+                                    use_regex: bool) -> int:
+        """Persist find/replace across sidecar files and DB in paginated mode."""
+        files_to_process = self._db.get_files_matching_tag_text(find_text, use_regex)
+        if not files_to_process:
+            return 0
+
+        affected_count = 0
+        for rel_path in files_to_process:
+            path = self._directory_path / rel_path
+            if not path.exists():
+                continue
+
+            txt_path = path.with_suffix('.txt')
+            if not txt_path.exists():
+                continue
+
+            try:
+                caption = txt_path.read_text(encoding='utf-8', errors='replace')
+            except OSError as e:
+                print(f"Error reading tags for {rel_path}: {e}")
+                continue
+
+            if use_regex:
+                if not re.search(pattern=find_text, string=caption):
+                    continue
+                updated_caption = re.sub(pattern=find_text, repl=replace_text,
+                                         string=caption)
+            else:
+                if find_text not in caption:
+                    continue
+                updated_caption = caption.replace(find_text, replace_text)
+
+            if updated_caption == caption:
+                continue
+
+            new_tags_list = [
+                tag.strip() for tag in updated_caption.split(self.tag_separator)
+                if tag.strip()
+            ]
+
+            try:
+                txt_path.write_text(updated_caption, encoding='utf-8')
+                image_id = self._db.get_image_id(rel_path)
+                if image_id:
+                    if new_tags_list:
+                        self._db.set_tags_for_image(image_id, new_tags_list)
+                    else:
+                        self._db.set_tags_for_image(image_id, [])
+                        self._db.add_tag_to_image(image_id, '__no_tags__')
+
+                    txt_sidecar_mtime = None
+                    try:
+                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                    except OSError:
+                        pass
+                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                affected_count += 1
+            except OSError as e:
+                print(f"Error updating tags for {rel_path}: {e}")
+
+        return affected_count
+
+    def _reload_loaded_pages_after_paginated_tag_change(self):
+        """Reload currently loaded pages after a paginated bulk tag update."""
+        current_pages = list(self._pages.keys())
+        self._pages.clear()
+        self._page_load_order.clear()
+        for page in current_pages:
+            self._load_page_sync(page)
+        self.modelReset.emit()
+        self._emit_pages_updated()
+
+    def _apply_paginated_tag_transform(self, transform) -> tuple[int, int]:
+        """
+        Apply a bulk tag transform to all sidecar captions in paginated mode.
+
+        The transform receives the current tag list and returns
+        `(new_tags, changed)`.
+        Returns `(changed_image_count, tag_delta)`.
+        """
+        files_to_process = self._db.get_all_paths() if self._db else []
+        changed_image_count = 0
+        tag_delta = 0
+
+        for rel_path in files_to_process:
+            path = self._directory_path / rel_path
+            if not path.exists():
+                continue
+
+            txt_path = path.with_suffix('.txt')
+            try:
+                current_tags = self._read_sidecar_tags(path)
+            except OSError as e:
+                print(f"Error reading tags for {rel_path}: {e}")
+                continue
+
+            try:
+                new_tags, changed = transform(list(current_tags))
+            except Exception as e:
+                print(f"Error transforming tags for {rel_path}: {e}")
+                continue
+
+            if not changed:
+                continue
+
+            new_tags = [tag for tag in new_tags if tag and tag.strip()]
+            tag_delta += len(current_tags) - len(new_tags)
+
+            try:
+                txt_path.write_text(self.tag_separator.join(new_tags), encoding='utf-8')
+                image_id = self._db.get_image_id(rel_path) if self._db else None
+                if image_id:
+                    if new_tags:
+                        self._db.set_tags_for_image(image_id, new_tags)
+                    else:
+                        self._db.set_tags_for_image(image_id, [])
+                        self._db.add_tag_to_image(image_id, '__no_tags__')
+
+                    txt_sidecar_mtime = None
+                    try:
+                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                    except OSError:
+                        pass
+                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                changed_image_count += 1
+            except OSError as e:
+                print(f"Error updating tags for {rel_path}: {e}")
+
+        return changed_image_count, tag_delta
+
     def sort_tags_alphabetically(self, do_not_reorder_first_tag: bool):
         """Sort the tags for each image in alphabetical order."""
         self.add_to_undo_stack(action_name='Sort Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            def transform(tags: list[str]):
+                if len(tags) < 2:
+                    return tags, False
+                if do_not_reorder_first_tag:
+                    new_tags = [tags[0]] + sorted(tags[1:])
+                else:
+                    new_tags = sorted(tags)
+                return new_tags, new_tags != tags
+
+            changed_count, _ = self._apply_paginated_tag_transform(transform)
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
@@ -4902,6 +5130,22 @@ class ImageListModel(QAbstractListModel):
         """
         self.add_to_undo_stack(action_name='Sort Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            def transform(tags: list[str]):
+                if len(tags) < 2:
+                    return tags, False
+                if do_not_reorder_first_tag:
+                    new_tags = [tags[0]] + sorted(
+                        tags[1:], key=lambda tag: tag_counter[tag], reverse=True)
+                else:
+                    new_tags = sorted(tags, key=lambda tag: tag_counter[tag], reverse=True)
+                return new_tags, new_tags != tags
+
+            changed_count, _ = self._apply_paginated_tag_transform(transform)
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
@@ -4926,6 +5170,21 @@ class ImageListModel(QAbstractListModel):
         """Reverse the order of the tags for each image."""
         self.add_to_undo_stack(action_name='Reverse Order of Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            def transform(tags: list[str]):
+                if len(tags) < 2:
+                    return tags, False
+                if do_not_reorder_first_tag:
+                    new_tags = [tags[0]] + list(reversed(tags[1:]))
+                else:
+                    new_tags = list(reversed(tags))
+                return new_tags, new_tags != tags
+
+            changed_count, _ = self._apply_paginated_tag_transform(transform)
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
@@ -4944,6 +5203,24 @@ class ImageListModel(QAbstractListModel):
         """Shuffle the tags for each image randomly."""
         self.add_to_undo_stack(action_name='Shuffle Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            def transform(tags: list[str]):
+                if len(tags) < 2:
+                    return tags, False
+                new_tags = list(tags)
+                if do_not_reorder_first_tag:
+                    first_tag, *remaining_tags = new_tags
+                    random.shuffle(remaining_tags)
+                    new_tags = [first_tag] + remaining_tags
+                else:
+                    random.shuffle(new_tags)
+                return new_tags, new_tags != tags
+
+            changed_count, _ = self._apply_paginated_tag_transform(transform)
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if len(image.tags) < 2:
@@ -4964,6 +5241,32 @@ class ImageListModel(QAbstractListModel):
         """Sort the tags so that the sentences are on the bottom."""
         self.add_to_undo_stack(action_name='Sort Sentence Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            def transform(tags: list[str]):
+                sentence_tags = []
+                non_sentence_tags = []
+                for tag in tags:
+                    if separate_newline and tag == '#newline':
+                        continue
+                    if tag.endswith('.'):
+                        sentence_tags.append(tag)
+                    else:
+                        non_sentence_tags.append(tag)
+                if separate_newline:
+                    if len(sentence_tags) > 0:
+                        non_sentence_tags.append(sentence_tags.pop())
+                    for tag in sentence_tags:
+                        non_sentence_tags.append('#newline')
+                        non_sentence_tags.append(tag)
+                else:
+                    non_sentence_tags.extend(sentence_tags)
+                return non_sentence_tags, non_sentence_tags != tags
+
+            changed_count, _ = self._apply_paginated_tag_transform(transform)
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             changed_image_indices.append(image_index)
@@ -4996,6 +5299,23 @@ class ImageListModel(QAbstractListModel):
         """
         self.add_to_undo_stack(action_name='Move Tags to Front',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            def transform(tags: list[str]):
+                if not any(tag in tags for tag in tags_to_move):
+                    return tags, False
+                moved_tags = []
+                for tag in tags_to_move:
+                    tag_count = tags.count(tag)
+                    moved_tags.extend([tag] * tag_count)
+                unmoved_tags = [tag for tag in tags if tag not in moved_tags]
+                new_tags = moved_tags + unmoved_tags
+                return new_tags, new_tags != tags
+
+            changed_count, _ = self._apply_paginated_tag_transform(transform)
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
+
         changed_image_indices = []
         for image_index, image in enumerate(self.iter_all_images()):
             if not any(tag in image.tags for tag in tags_to_move):
@@ -5022,6 +5342,12 @@ class ImageListModel(QAbstractListModel):
         """
         self.add_to_undo_stack(action_name='Remove Duplicate Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            changed_count, removed_tag_count = self._remove_duplicate_tags_paginated()
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return removed_tag_count
+
         changed_image_indices = []
         removed_tag_count = 0
         for image_index, image in enumerate(self.iter_all_images()):
@@ -5039,6 +5365,55 @@ class ImageListModel(QAbstractListModel):
                                   self.index(changed_image_indices[-1]))
         return removed_tag_count
 
+    def _remove_duplicate_tags_paginated(self) -> tuple[int, int]:
+        """Remove duplicate tags in paginated mode without auto-cleaning empties."""
+        files_to_process = self._db.get_all_paths() if self._db else []
+        changed_image_count = 0
+        removed_tag_count = 0
+
+        for rel_path in files_to_process:
+            path = self._directory_path / rel_path
+            if not path.exists():
+                continue
+
+            try:
+                raw_tags = self._read_sidecar_tags(path, preserve_empty=True)
+            except OSError as e:
+                print(f"Error reading tags for {rel_path}: {e}")
+                continue
+
+            if not raw_tags:
+                continue
+
+            deduped_tags = list(dict.fromkeys(raw_tags))
+            if deduped_tags == raw_tags:
+                continue
+
+            removed_tag_count += len(raw_tags) - len(deduped_tags)
+            txt_path = path.with_suffix('.txt')
+            try:
+                txt_path.write_text(self.tag_separator.join(deduped_tags), encoding='utf-8')
+                image_id = self._db.get_image_id(rel_path) if self._db else None
+                if image_id:
+                    normalized_tags = self._normalize_tags(deduped_tags)
+                    if normalized_tags:
+                        self._db.set_tags_for_image(image_id, normalized_tags)
+                    else:
+                        self._db.set_tags_for_image(image_id, [])
+                        self._db.add_tag_to_image(image_id, '__no_tags__')
+
+                    txt_sidecar_mtime = None
+                    try:
+                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                    except OSError:
+                        pass
+                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                changed_image_count += 1
+            except OSError as e:
+                print(f"Error updating tags for {rel_path}: {e}")
+
+        return changed_image_count, removed_tag_count
+
     def remove_empty_tags(self) -> int:
         """
         Remove empty tags (tags that are empty strings or only contain
@@ -5046,21 +5421,91 @@ class ImageListModel(QAbstractListModel):
         """
         self.add_to_undo_stack(action_name='Remove Empty Tags',
                                should_ask_for_confirmation=True)
+        if self._paginated_mode:
+            changed_count, removed_tag_count = self._remove_empty_tags_paginated()
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return removed_tag_count
+
         changed_image_indices = []
         removed_tag_count = 0
         for image_index, image in enumerate(self.iter_all_images()):
+            raw_tags = []
+            try:
+                raw_tags = self._read_sidecar_tags(image.path, preserve_empty=True)
+            except OSError:
+                raw_tags = []
+
+            if raw_tags:
+                cleaned_tags = self._normalize_tags(raw_tags)
+                if cleaned_tags != raw_tags:
+                    changed_image_indices.append(image_index)
+                    removed_tag_count += len(raw_tags) - len(cleaned_tags)
+                    image.tags = cleaned_tags
+                    self.write_image_tags_to_disk(image)
+                    continue
+
             old_tag_count = len(image.tags)
-            image.tags = [tag for tag in image.tags if tag.strip()]
-            new_tag_count = len(image.tags)
+            cleaned_tags = [tag for tag in image.tags if tag.strip()]
+            new_tag_count = len(cleaned_tags)
             if old_tag_count == new_tag_count:
                 continue
             changed_image_indices.append(image_index)
             removed_tag_count += old_tag_count - new_tag_count
+            image.tags = cleaned_tags
             self.write_image_tags_to_disk(image)
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
         return removed_tag_count
+
+    def _remove_empty_tags_paginated(self) -> tuple[int, int]:
+        """Remove empty/whitespace-only sidecar tag entries in paginated mode."""
+        files_to_process = self._db.get_all_paths() if self._db else []
+        changed_image_count = 0
+        removed_tag_count = 0
+
+        for rel_path in files_to_process:
+            path = self._directory_path / rel_path
+            if not path.exists():
+                continue
+
+            try:
+                raw_tags = self._read_sidecar_tags(path, preserve_empty=True)
+            except OSError as e:
+                print(f"Error reading tags for {rel_path}: {e}")
+                continue
+
+            if not raw_tags:
+                continue
+
+            cleaned_tags = self._normalize_tags(raw_tags)
+            if cleaned_tags == raw_tags:
+                continue
+
+            removed_tag_count += len(raw_tags) - len(cleaned_tags)
+            txt_path = path.with_suffix('.txt')
+            try:
+                txt_path.write_text(self.tag_separator.join(cleaned_tags), encoding='utf-8')
+                image_id = self._db.get_image_id(rel_path) if self._db else None
+                if image_id:
+                    if cleaned_tags:
+                        self._db.set_tags_for_image(image_id, cleaned_tags)
+                    else:
+                        self._db.set_tags_for_image(image_id, [])
+                        self._db.add_tag_to_image(image_id, '__no_tags__')
+
+                    txt_sidecar_mtime = None
+                    try:
+                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                    except OSError:
+                        pass
+                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                changed_image_count += 1
+            except OSError as e:
+                print(f"Error updating tags for {rel_path}: {e}")
+
+        return changed_image_count, removed_tag_count
 
     def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
@@ -5221,12 +5666,7 @@ class ImageListModel(QAbstractListModel):
             
         if self._paginated_mode and scope == Scope.ALL_IMAGES:
             self._rename_tags_paginated(old_tags, new_tag, scope, use_regex)
-            # Reload currently loaded pages to reflect changes
-            current_pages = list(self._pages.keys())
-            self._pages.clear()
-            for page in current_pages:
-                self._load_page_sync(page)
-            self.modelReset.emit()
+            self._reload_loaded_pages_after_paginated_tag_change()
             return
             
         changed_image_indices = []
@@ -5262,12 +5702,7 @@ class ImageListModel(QAbstractListModel):
             
         if self._paginated_mode and scope == Scope.ALL_IMAGES:
             self._delete_tags_paginated(tags, scope, use_regex)
-            # Reload currently loaded pages to reflect changes
-            current_pages = list(self._pages.keys())
-            self._pages.clear()
-            for page in current_pages:
-                self._load_page_sync(page)
-            self.modelReset.emit()
+            self._reload_loaded_pages_after_paginated_tag_change()
             return
 
         changed_image_indices = []
