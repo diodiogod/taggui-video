@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-03-10
+
+### Added
+
+- Release 1.0.3
+- Toolbar groups remain movable and user-driven
+- Reset actions restore the default toolbar and window layout
+- Default toolbar packing is cleaner, with rating controls aligned to the right
 ## [1.0.2] - 2026-03-10
 
 ### Added
