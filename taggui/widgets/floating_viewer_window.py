@@ -2,8 +2,8 @@
 
 from PySide6.QtCore import QPoint, QRect, QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QCursor
-from PySide6.QtWidgets import (QFrame, QGraphicsColorizeEffect, QGraphicsView, QMenu, QPushButton,
-                               QSizeGrip, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsColorizeEffect, QGraphicsView, QMenu,
+                               QPushButton, QSizeGrip, QVBoxLayout, QWidget)
 
 
 class FloatingViewerWindow(QWidget):
@@ -747,6 +747,69 @@ class FloatingViewerWindow(QWidget):
 
         min_w = max(10, self.minimumWidth())
         min_h = max(10, self.minimumHeight())
+
+        preserve_aspect = False
+        try:
+            preserve_aspect = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        except Exception:
+            preserve_aspect = False
+
+        if preserve_aspect and start.height() > 0:
+            aspect_ratio = start.width() / start.height()
+            min_w = max(min_w, int(round(min_h * aspect_ratio)))
+            min_h = max(min_h, int(round(min_w / aspect_ratio)))
+
+            if self._resize_corner in ("left", "right"):
+                raw_w = max(min_w, w - dx) if self._resize_corner == "left" else max(min_w, w + dx)
+                w = raw_w
+                h = max(min_h, int(round(w / aspect_ratio)))
+                x = start.x() + (start.width() - w) if self._resize_corner == "left" else start.x()
+                y = start.y() + ((start.height() - h) // 2)
+                self.setGeometry(x, y, w, h)
+                return
+
+            if self._resize_corner in ("top", "bottom"):
+                raw_h = max(min_h, h - dy) if self._resize_corner == "top" else max(min_h, h + dy)
+                h = raw_h
+                w = max(min_w, int(round(h * aspect_ratio)))
+                x = start.x() + ((start.width() - w) // 2)
+                y = start.y() + (start.height() - h) if self._resize_corner == "top" else start.y()
+                self.setGeometry(x, y, w, h)
+                return
+
+            raw_w = w
+            raw_h = h
+            if self._resize_corner in ("top_left", "bottom_left"):
+                raw_w = max(min_w, w - dx)
+            elif self._resize_corner in ("top_right", "bottom_right"):
+                raw_w = max(min_w, w + dx)
+
+            if self._resize_corner in ("top_left", "top_right"):
+                raw_h = max(min_h, h - dy)
+            elif self._resize_corner in ("bottom_left", "bottom_right"):
+                raw_h = max(min_h, h + dy)
+
+            width_change = abs(raw_w - start.width())
+            height_change = abs(raw_h - start.height())
+            if width_change >= height_change:
+                w = raw_w
+                h = max(min_h, int(round(w / aspect_ratio)))
+            else:
+                h = raw_h
+                w = max(min_w, int(round(h * aspect_ratio)))
+
+            if self._resize_corner in ("top_left", "bottom_left"):
+                x = start.x() + (start.width() - w)
+            else:
+                x = start.x()
+
+            if self._resize_corner in ("top_left", "top_right"):
+                y = start.y() + (start.height() - h)
+            else:
+                y = start.y()
+
+            self.setGeometry(x, y, w, h)
+            return
 
         if self._resize_corner in ("top_left", "bottom_left", "left"):
             new_w = max(min_w, w - dx)

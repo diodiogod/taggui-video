@@ -76,6 +76,7 @@ Examples:
 - Move a floating viewer: `middle-click + drag`
 - Move a non-pannable floating viewer: `left-drag`
 - Resize a floating viewer: drag any edge or corner
+- Keep floating viewer aspect ratio while resizing: hold `Shift`
 - Close a floating viewer: click the hover `X` button near the top-right corner
 
 Hold mode freezes existing spawned viewers as dimmed, gray, click-through overlays so you can keep using the main app and spawn new viewers without the older ones getting in the way.

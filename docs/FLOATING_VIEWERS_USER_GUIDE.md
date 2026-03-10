@@ -26,6 +26,7 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - If media is fully fit and not pannable, `left-drag` moves the floating window.
 - If media is zoomed/pannable, `left-drag` pans media instead; use white edge handles or middle-drag to move window.
 - Resize from all corners and all borders (drag edge/corner zones).
+- Hold `Shift` while resizing to keep the floating viewer's current aspect ratio.
 - Close button (`x`) appears on hover near the top-right corner.
 
 ## Hold Mode
