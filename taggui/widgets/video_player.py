@@ -205,6 +205,9 @@ class VideoPlayerWidget(QWidget):
         self._mpv_reveal_timer = QTimer(self)
         self._mpv_reveal_timer.setInterval(16)
         self._mpv_reveal_timer.timeout.connect(self._try_reveal_mpv_surface)
+        self._mpv_paused_seek_cover_active = False
+        self._mpv_paused_seek_reveal_generation = 0
+        self._mpv_paused_seek_frame_painted_handler = None
         self._mpv_estimated_position_ms = 0.0
         self._mpv_play_started_monotonic = 0.0
         self._mpv_play_base_position_ms = 0.0
@@ -412,6 +415,9 @@ class VideoPlayerWidget(QWidget):
             and self.video_path is not None
             and paused_native_surface_visible
         ):
+            self._mpv_paused_seek_cover_active = False
+            self._clear_mpv_paused_seek_reveal_handler()
+            self._hide_opencv_cover_overlay()
             try:
                 if self.video_item:
                     self.video_item.hide()
@@ -1567,6 +1573,100 @@ class VideoPlayerWidget(QWidget):
         if isinstance(gl_widget, MpvGlWidget):
             gl_widget._emit_frame_painted = False
 
+    def _clear_mpv_paused_seek_reveal_handler(self):
+        gl_widget = getattr(self, 'mpv_widget', None)
+        handler = getattr(self, '_mpv_paused_seek_frame_painted_handler', None)
+        if handler is not None and isinstance(gl_widget, MpvGlWidget):
+            try:
+                gl_widget.frame_painted.disconnect(handler)
+            except Exception:
+                pass
+            try:
+                gl_widget._emit_frame_painted = False
+            except Exception:
+                pass
+        self._mpv_paused_seek_frame_painted_handler = None
+
+    def _capture_mpv_paused_seek_cover_pixmap(self) -> QPixmap:
+        """Capture the current visible paused frame for a temporary scrub cover."""
+        gl_widget = getattr(self, 'mpv_widget', None)
+        if (
+            isinstance(gl_widget, MpvGlWidget)
+            and bool(getattr(self, '_mpv_surface_active', False))
+        ):
+            try:
+                image = gl_widget.grabFramebuffer()
+                if image is not None and not image.isNull():
+                    pixmap = QPixmap.fromImage(image)
+                    if pixmap is not None and not pixmap.isNull():
+                        return pixmap
+            except Exception:
+                pass
+
+        item = self._get_live_pixmap_item()
+        if item is not None:
+            try:
+                pixmap = item.pixmap()
+                if pixmap is not None and not pixmap.isNull():
+                    return QPixmap(pixmap)
+            except Exception:
+                pass
+        return QPixmap()
+
+    def _prepare_mpv_paused_seek_cover(self) -> bool:
+        """Keep the last visible frame above MPV while a paused exact seek settles."""
+        cover_pixmap = self._capture_mpv_paused_seek_cover_pixmap()
+        if cover_pixmap.isNull():
+            self._mpv_paused_seek_cover_active = False
+            self._hide_opencv_cover_overlay()
+            return False
+        self._show_opencv_frame_as_overlay(cover_pixmap)
+        self._mpv_paused_seek_cover_active = True
+        self._set_mpv_visible(False)
+        return True
+
+    def _begin_mpv_paused_seek_reveal(self, timeout_ms: int = 260):
+        """Reveal MPV after a paused exact seek only once a real frame is painted."""
+        self._mpv_paused_seek_reveal_generation += 1
+        generation = int(self._mpv_paused_seek_reveal_generation)
+        gl_widget = getattr(self, 'mpv_widget', None)
+
+        self._clear_mpv_paused_seek_reveal_handler()
+
+        if not isinstance(gl_widget, MpvGlWidget):
+            self._set_mpv_visible(True)
+            self._mpv_paused_seek_cover_active = False
+            self._hide_opencv_cover_overlay()
+            return
+
+        gl_widget._emit_frame_painted = True
+
+        def _finish():
+            if generation != int(getattr(self, '_mpv_paused_seek_reveal_generation', 0) or 0):
+                return
+            self._clear_mpv_paused_seek_reveal_handler()
+            self._mpv_paused_seek_cover_active = False
+            self._hide_opencv_cover_overlay()
+            try:
+                self.sync_external_surface_geometry()
+            except Exception:
+                pass
+
+        def _on_first_frame():
+            _finish()
+
+        self._mpv_paused_seek_frame_painted_handler = _on_first_frame
+        gl_widget.frame_painted.connect(_on_first_frame)
+        self._set_mpv_visible(True)
+        self.sync_external_surface_geometry()
+
+        def _timeout_finish():
+            if generation != int(getattr(self, '_mpv_paused_seek_reveal_generation', 0) or 0):
+                return
+            _finish()
+
+        QTimer.singleShot(max(80, int(timeout_ms)), _timeout_finish)
+
     def _cancel_vlc_reveal(self):
         self._vlc_pending_reveal = False
         self._vlc_reveal_deadline_monotonic = 0.0
@@ -2028,6 +2128,8 @@ class VideoPlayerWidget(QWidget):
         seek_s = self._mpv_seek_pending_ms / 1000.0
         self._mpv_seek_pending_ms = None
         self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute+exact')
+        if (not self.is_playing) and bool(getattr(self, '_mpv_paused_seek_cover_active', False)):
+            self._begin_mpv_paused_seek_reveal()
         if self._mpv_seek_was_playing and self.is_playing:
             self._mpv_string_command('set', 'pause', 'no')
         self._mpv_seek_was_playing = False
@@ -2375,6 +2477,9 @@ class VideoPlayerWidget(QWidget):
     def play(self):
         """Start playback using QMediaPlayer (or OpenCV for negative speeds)."""
         self._refresh_backend_selection()
+        self._mpv_paused_seek_cover_active = False
+        self._clear_mpv_paused_seek_reveal_handler()
+        self._hide_opencv_cover_overlay()
         reveal_from_still = bool(self._vlc_next_start_from_still)
         self._vlc_next_start_from_still = False
         self._hide_vlc_cover_overlay()
@@ -2832,29 +2937,25 @@ class VideoPlayerWidget(QWidget):
         if self.vlc_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
             self._seek_vlc_position_ms(position_ms)
 
-        # If paused, keep the stable pixmap still-frame visible while seeking.
-        # Revealing the native paused surface immediately can flash black before
-        # the backend presents the exact target frame, especially while scrubbing.
+        # If paused, prefer the native backend path for scrub responsiveness.
+        # The paused zoom/fit edge cases are handled separately by
+        # set_view_transformed(), so scrubbing can stay on the fast seek path.
         if not self.is_playing:
             if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
                 # Route through the coalescing seek timer — rapid scrub events
                 # are collapsed to one seek per 50ms, always absolute+exact.
-                # Keep the backend in sync for instant resume, but do not switch
-                # the viewport to the native surface until playback resumes.
+                cover_active = bool(getattr(self, '_mpv_paused_seek_cover_active', False))
+                if not cover_active:
+                    cover_active = bool(self._prepare_mpv_paused_seek_cover())
                 self._seek_mpv_position_ms(position_ms)
                 try:
                     if self.video_item:
                         self.video_item.hide()
                 except RuntimeError:
                     self.video_item = None
-                self._set_mpv_visible(False)
-                self._set_vlc_visible(False)
-                try:
-                    if self.pixmap_item:
-                        self.pixmap_item.show()
-                except RuntimeError:
-                    self.pixmap_item = None
-            self._show_opencv_frame(frame_number)
+                self._set_mpv_visible(not cover_active)
+            else:
+                self._show_opencv_frame(frame_number)
 
         # Emit frame changed signal
         self.frame_changed.emit(frame_number, position_ms)
