@@ -3,10 +3,10 @@ import hashlib
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF
+from PySide6.QtCore import QEvent, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QMainWindow,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
                                QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu)
@@ -43,6 +43,7 @@ from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
+from widgets.fullscreen_viewer_window import FullscreenViewerWindow
 from widgets.media_comparison_widget import MediaComparisonWidget
 from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
 from widgets.compare_drop_feedback_overlay import CompareDropFeedbackOverlay
@@ -427,6 +428,9 @@ class MainWindow(QMainWindow):
         self._compare_drag_poll_timer.setInterval(16)
         self._compare_drag_poll_timer.timeout.connect(self._poll_compare_drag_cursor)
         self._active_viewer = self.image_viewer
+        self._fullscreen_viewer = None
+        self._fullscreen_window = None
+        self._fullscreen_restore_state = None
         self._sync_coordinator: VideoSyncCoordinator | None = None
         self._exclusive_video_controls_visibility = True
         self._video_controls_perf_profile = 'single'
@@ -454,6 +458,7 @@ class MainWindow(QMainWindow):
         self._perf_hud_user_placed = False
         self._perf_hud_saved_geometry = None
         self._hud_shortcut_last_toggle_at = 0.0
+        self._active_nav_mouse_buttons = set()
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
         self.image_viewer.view.customContextMenuRequested.connect(
@@ -770,6 +775,11 @@ class MainWindow(QMainWindow):
 
         if event_type in (event.Type.ShortcutOverride, event.Type.KeyPress):
             try:
+                if self._handle_global_video_key(event, event_type):
+                    return True
+            except Exception:
+                pass
+            try:
                 if not event.isAutoRepeat() and event.key() == Qt.Key.Key_J:
                     mods = event.modifiers()
                     has_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
@@ -789,6 +799,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        if event_type in (event.Type.MouseButtonPress, event.Type.MouseButtonRelease):
+            try:
+                if self._handle_global_media_mouse_button(event, event_type):
+                    return True
+            except Exception:
+                pass
         if event_type == event.Type.MouseButtonPress:
             try:
                 if event.button() == Qt.MouseButton.MiddleButton:
@@ -832,6 +848,89 @@ class MainWindow(QMainWindow):
                 pass
         # Base QObject.eventFilter returns False; avoid forwarding into C++ here
         # during teardown/startup edge-cases where wrapped objects may be invalid.
+        return False
+
+    def _navigate_media_by_direction(self, *, forward: bool) -> bool:
+        """Navigate media list in the requested direction."""
+        try:
+            row_count = self.proxy_image_list_model.rowCount()
+        except Exception:
+            row_count = 0
+        if row_count <= 0:
+            return False
+        if forward:
+            self.image_list.go_to_next_image()
+        else:
+            self.image_list.go_to_previous_image()
+        return True
+
+    def _handle_global_media_mouse_button(self, event, event_type) -> bool:
+        """Map browser mouse buttons to previous/next media app-wide."""
+        button = event.button()
+        supported_buttons = {
+            getattr(Qt.MouseButton, 'BackButton', None),
+            getattr(Qt.MouseButton, 'ForwardButton', None),
+            getattr(Qt.MouseButton, 'ExtraButton1', None),
+            getattr(Qt.MouseButton, 'ExtraButton2', None),
+        }
+        supported_buttons.discard(None)
+        if button not in supported_buttons:
+            return False
+
+        if QApplication.activePopupWidget() is not None:
+            return False
+
+        focus_widget = QApplication.focusWidget()
+        if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return False
+
+        back_buttons = {
+            getattr(Qt.MouseButton, 'BackButton', None),
+            getattr(Qt.MouseButton, 'ExtraButton1', None),
+        }
+        back_buttons.discard(None)
+        forward = button not in back_buttons
+
+        if event_type == QEvent.Type.MouseButtonPress:
+            if self._navigate_media_by_direction(forward=forward):
+                self._active_nav_mouse_buttons.add(button)
+                event.accept()
+                return True
+            return False
+
+        if event_type == QEvent.Type.MouseButtonRelease:
+            if button in self._active_nav_mouse_buttons:
+                self._active_nav_mouse_buttons.discard(button)
+                event.accept()
+                return True
+            if self._navigate_media_by_direction(forward=forward):
+                event.accept()
+                return True
+            return False
+
+        return False
+
+    def _handle_global_media_navigation_key(self, key, modifiers, event_type, event) -> bool:
+        """Support browser-style Back/Forward keys anywhere in the app."""
+        if modifiers != Qt.KeyboardModifier.NoModifier or self._focus_widget_accepts_text():
+            return False
+
+        back_key = getattr(Qt.Key, 'Key_Back', None)
+        forward_key = getattr(Qt.Key, 'Key_Forward', None)
+        if key not in {back_key, forward_key}:
+            return False
+
+        if event_type == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+
+        if event_type == QEvent.Type.KeyPress:
+            if self._navigate_media_by_direction(forward=(key == forward_key)):
+                event.accept()
+                return True
+            return False
+
+        event.accept()
         return False
 
     def resizeEvent(self, event):
@@ -1325,6 +1424,315 @@ class MainWindow(QMainWindow):
             return self.image_viewer
         return self.get_active_viewer()
 
+    def _focus_widget_accepts_text(self) -> bool:
+        """Return True when the current focus should keep raw key input."""
+        if QApplication.activePopupWidget() is not None:
+            return True
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None:
+            return False
+        return isinstance(
+            focus_widget,
+            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox),
+        )
+
+    def _resolve_active_video_viewer(self) -> ImageViewer | None:
+        """Return the active viewer when it currently owns a loaded video."""
+        viewer = self.get_active_viewer()
+        if viewer is None:
+            return None
+        try:
+            if not bool(getattr(viewer, '_is_video_loaded', False)):
+                return None
+            player = getattr(viewer, 'video_player', None)
+            if player is None or getattr(player, 'video_path', None) is None:
+                return None
+        except RuntimeError:
+            return None
+        return viewer
+
+    def _main_viewer_has_media(self) -> bool:
+        """Return True when the main viewer currently shows any image or video."""
+        try:
+            index = getattr(self.image_viewer, 'proxy_image_index', None)
+            if index is not None and index.isValid():
+                return True
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+        return False
+
+    def _viewer_is_fullscreen(self, viewer: ImageViewer | None = None) -> bool:
+        target = viewer or self.image_viewer
+        return target is self.image_viewer and target is getattr(self, '_fullscreen_viewer', None)
+
+    def _sync_viewer_fullscreen_control(self, viewer: ImageViewer | None = None):
+        """Compatibility no-op: fullscreen is managed by main-viewer controls now."""
+        return
+
+    def _sync_all_viewer_fullscreen_controls(self):
+        """Refresh fullscreen button state for every live viewer."""
+        for viewer in self._iter_all_viewers():
+            self._sync_viewer_fullscreen_control(viewer)
+        toolbar_mgr = getattr(self, 'toolbar_manager', None)
+        if toolbar_mgr is not None and hasattr(toolbar_mgr, 'set_main_viewer_fullscreen_state'):
+            toolbar_mgr.set_main_viewer_fullscreen_state(
+                self._viewer_is_fullscreen(self.image_viewer)
+            )
+
+    def toggle_viewer_play_pause(self, viewer: ImageViewer | None = None) -> bool:
+        """Toggle play/pause for one viewer when a video is loaded."""
+        target = viewer or self.get_active_viewer()
+        if target is None:
+            return False
+        try:
+            if not bool(getattr(target, '_is_video_loaded', False)):
+                return False
+            player = getattr(target, 'video_player', None)
+            controls = getattr(target, 'video_controls', None)
+            if player is None or controls is None:
+                return False
+            player.toggle_play_pause()
+            controls.set_playing(player.is_playing, update_auto_play=True)
+            return True
+        except RuntimeError:
+            return False
+
+    def toggle_active_video_play_pause(self) -> bool:
+        """Toggle play/pause for the currently active video viewer."""
+        target = self._resolve_active_video_viewer()
+        if target is None:
+            return False
+        return self.toggle_viewer_play_pause(target)
+
+    def _sync_viewer_surface_geometry(self, viewer: ImageViewer | None = None):
+        """Refresh external video surface geometry after viewer reparent/resize."""
+        target = viewer or self.get_active_viewer()
+        if target is None:
+            return
+        try:
+            player = getattr(target, 'video_player', None)
+            if player is not None:
+                player.sync_external_surface_geometry()
+        except RuntimeError:
+            return
+
+    def _refresh_viewer_after_fullscreen_transition(self, viewer: ImageViewer | None = None):
+        """Re-arm paused/playback presentation after a fullscreen reparent."""
+        target = viewer or self.get_active_viewer()
+        if target is None:
+            return
+        try:
+            player = getattr(target, 'video_player', None)
+            controls = getattr(target, 'video_controls', None)
+            if player is None:
+                QTimer.singleShot(0, lambda: self._sync_viewer_surface_geometry(target))
+                QTimer.singleShot(60, lambda: self._sync_viewer_surface_geometry(target))
+                return
+            is_video = bool(
+                getattr(target, '_is_video_loaded', False)
+                and getattr(player, 'video_path', None) is not None
+            )
+            if not is_video:
+                QTimer.singleShot(0, lambda: self._sync_viewer_surface_geometry(target))
+                QTimer.singleShot(60, lambda: self._sync_viewer_surface_geometry(target))
+                return
+            was_playing = bool(getattr(player, 'is_playing', False))
+            if was_playing:
+                player.pause()
+                if controls is not None:
+                    controls.set_playing(False)
+                QTimer.singleShot(0, player.play)
+            else:
+                player.pause()
+                if controls is not None:
+                    controls.set_playing(False)
+            QTimer.singleShot(0, lambda: self._sync_viewer_surface_geometry(target))
+            QTimer.singleShot(60, lambda: self._sync_viewer_surface_geometry(target))
+        except RuntimeError:
+            return
+
+    def _enter_viewer_fullscreen(self, viewer: ImageViewer) -> bool:
+        """Move the main viewer into a dedicated fullscreen host."""
+        if viewer is not self.image_viewer:
+            return False
+        if getattr(self, '_fullscreen_viewer', None) is viewer:
+            return True
+        if getattr(self, '_fullscreen_viewer', None) is not None:
+            self._restore_fullscreen_viewer(close_window=True)
+
+        central = self.centralWidget()
+        if central is None:
+            return False
+        stack_index = central.indexOf(viewer)
+        if stack_index >= 0:
+            central.removeWidget(viewer)
+        restore_state = {
+            'mode': 'main',
+            'stack_index': stack_index if stack_index >= 0 else 1,
+        }
+        # In fullscreen the toolbar is behind the app window, so always expose
+        # the shared main-viewer controls as an overlay above the media.
+        self.image_viewer.set_main_controls_overlay_attached(True)
+        central.setCurrentWidget(self._hidden_main_viewer_widget)
+        # Keep the central area alive so dock splitter widths do not rebalance
+        # while the main viewer is temporarily hosted in the fullscreen window.
+        central.setVisible(True)
+
+        fullscreen_window = FullscreenViewerWindow(viewer)
+        fullscreen_window.closing.connect(self._on_fullscreen_window_closing)
+        self._fullscreen_restore_state = restore_state
+        self._fullscreen_viewer = viewer
+        self._fullscreen_window = fullscreen_window
+        self.set_active_viewer(viewer)
+        fullscreen_window.showFullScreen()
+        fullscreen_window.raise_()
+        fullscreen_window.activateWindow()
+        self._sync_all_viewer_fullscreen_controls()
+        QTimer.singleShot(0, lambda: self._refresh_viewer_after_fullscreen_transition(viewer))
+        return True
+
+    def _restore_fullscreen_viewer(self, viewer: ImageViewer | None = None, *, close_window: bool) -> bool:
+        """Restore a fullscreen-hosted viewer back to its original container."""
+        target = viewer or getattr(self, '_fullscreen_viewer', None)
+        active_viewer = getattr(self, '_fullscreen_viewer', None)
+        if target is None or active_viewer is not target:
+            return False
+
+        fullscreen_window = getattr(self, '_fullscreen_window', None)
+        restore_state = getattr(self, '_fullscreen_restore_state', None) or {}
+        self._fullscreen_window = None
+        self._fullscreen_viewer = None
+        self._fullscreen_restore_state = None
+
+        if fullscreen_window is not None:
+            try:
+                layout = fullscreen_window.layout()
+                if layout is not None:
+                    layout.removeWidget(target)
+            except RuntimeError:
+                pass
+
+        mode = restore_state.get('mode')
+        if mode != 'main':
+            return False
+        central = self.centralWidget()
+        if central is not None and central.indexOf(target) < 0:
+            central.insertWidget(int(restore_state.get('stack_index', 1)), target)
+        self._set_central_content_page()
+        self._sync_main_viewer_controls_host()
+
+        if close_window and fullscreen_window is not None:
+            try:
+                fullscreen_window.close()
+            except RuntimeError:
+                pass
+
+        self.set_active_viewer(target)
+        self._sync_all_viewer_fullscreen_controls()
+        QTimer.singleShot(0, lambda: self._refresh_viewer_after_fullscreen_transition(target))
+        return True
+
+    def _on_fullscreen_window_closing(self, viewer: ImageViewer):
+        """Restore the viewer when the dedicated fullscreen host is closed."""
+        self._restore_fullscreen_viewer(viewer, close_window=False)
+
+    def toggle_viewer_fullscreen(self, viewer: ImageViewer | None = None) -> bool:
+        """Toggle dedicated fullscreen for the main viewer only."""
+        target = self.image_viewer
+        if viewer is not None and viewer is not target:
+            return False
+        if not self._main_viewer_has_media():
+            return False
+        if self._viewer_is_fullscreen(target):
+            return self._restore_fullscreen_viewer(target, close_window=True)
+        return self._enter_viewer_fullscreen(target)
+
+    def exit_active_viewer_fullscreen(self) -> bool:
+        """Exit fullscreen when the main viewer is currently fullscreen."""
+        target = self.image_viewer
+        if not self._viewer_is_fullscreen(target):
+            return False
+        return self._restore_fullscreen_viewer(target, close_window=True)
+
+    def _handle_global_video_key(self, event, event_type) -> bool:
+        """Handle app-wide video shortcuts against the active viewer."""
+        try:
+            if event.isAutoRepeat():
+                return False
+            modifiers = event.modifiers()
+            key = event.key()
+        except Exception:
+            return False
+
+        if self._handle_global_media_navigation_key(key, modifiers, event_type, event):
+            return True
+
+        if self._focus_widget_accepts_text():
+            return False
+
+        if key == Qt.Key.Key_Space and modifiers == Qt.KeyboardModifier.NoModifier:
+            if self._resolve_active_video_viewer() is None:
+                return False
+            if event_type == QEvent.Type.ShortcutOverride:
+                event.accept()
+                return True
+            if event_type == QEvent.Type.KeyPress:
+                if self.toggle_active_video_play_pause():
+                    event.accept()
+                    return True
+            return False
+
+        if key == Qt.Key.Key_F and modifiers == Qt.KeyboardModifier.NoModifier:
+            if not self._main_viewer_has_media():
+                return False
+            if event_type == QEvent.Type.ShortcutOverride:
+                event.accept()
+                return True
+            if event_type == QEvent.Type.KeyPress:
+                if self.toggle_viewer_fullscreen():
+                    event.accept()
+                    return True
+            return False
+
+        if key == Qt.Key.Key_Escape and modifiers == Qt.KeyboardModifier.NoModifier:
+            if not self._viewer_is_fullscreen(self.image_viewer):
+                return False
+            if event_type == QEvent.Type.ShortcutOverride:
+                event.accept()
+                return True
+            if event_type == QEvent.Type.KeyPress:
+                if self.exit_active_viewer_fullscreen():
+                    event.accept()
+                    return True
+            return False
+
+        if (
+            self._viewer_is_fullscreen(self.image_viewer)
+            and self._main_viewer_has_media()
+            and modifiers == Qt.KeyboardModifier.NoModifier
+            and key in (
+                Qt.Key.Key_Left,
+                Qt.Key.Key_Up,
+                Qt.Key.Key_Right,
+                Qt.Key.Key_Down,
+            )
+        ):
+            if event_type == QEvent.Type.ShortcutOverride:
+                event.accept()
+                return True
+            if event_type == QEvent.Type.KeyPress:
+                if key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+                    self.image_list.go_to_previous_image()
+                else:
+                    self.image_list.go_to_next_image()
+                event.accept()
+                return True
+            return False
+
+        return False
+
     def set_active_viewer(self, viewer: ImageViewer | None):
         """Set active viewer target used for image-list selection loading."""
         target = viewer or self.image_viewer
@@ -1354,6 +1762,7 @@ class MainWindow(QMainWindow):
         if self._exclusive_video_controls_visibility:
             self._sync_active_viewer_controls_visibility(target)
         self.refresh_video_controls_performance_profile()
+        self._sync_viewer_fullscreen_control(target)
 
     def _promote_floating_window_for_viewer(self, viewer: ImageViewer | None):
         """Track floating-window activation order so later entries are topmost."""
@@ -1451,8 +1860,7 @@ class MainWindow(QMainWindow):
         video_controls = viewer.video_controls
 
         def on_play_pause_requested():
-            video_player.toggle_play_pause()
-            video_controls.set_playing(video_player.is_playing, update_auto_play=True)
+            self.toggle_viewer_play_pause(viewer)
 
         video_controls.play_pause_requested.connect(on_play_pause_requested)
         video_controls.stop_requested.connect(video_player.stop)
@@ -2418,8 +2826,17 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_main_viewer_context_menu_spawn(self, pos):
         """Main-view right-click behavior with compare-exit support."""
+        view = self.image_viewer.view
+        global_pos = view.mapToGlobal(pos) if view is not None else QCursor.pos()
+        if self._viewer_is_fullscreen(self.image_viewer):
+            menu = QMenu(self)
+            exit_fullscreen_action = menu.addAction("Exit Fullscreen")
+            selected = menu.exec(global_pos)
+            if selected is exit_fullscreen_action:
+                self.exit_active_viewer_fullscreen()
+            return
+
         try:
-            view = self.image_viewer.view
             scene_pos = view.mapToScene(pos)
             item = view.scene().itemAt(scene_pos, view.transform())
         except Exception:
@@ -2465,7 +2882,6 @@ class MainWindow(QMainWindow):
                     pass
             menu.addSeparator()
             spawn_action = menu.addAction("Spawn Floating Viewer")
-            global_pos = view.mapToGlobal(pos) if view is not None else QCursor.pos()
             selected = menu.exec(global_pos)
             if selected is exit_action:
                 self.image_viewer.exit_compare_mode(reset_split=False)
@@ -2622,6 +3038,8 @@ class MainWindow(QMainWindow):
         initial_size_fraction: float | None = None,
     ):
         """Create a floating viewer for a specific index and optional global position."""
+        if self._viewer_is_fullscreen(self.image_viewer):
+            return None
         source_viewer = self.get_active_viewer()
         source_video_state = self._capture_viewer_video_state(source_viewer)
 

@@ -8,6 +8,7 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 
 - Previous or next image: `Ctrl` + `Up` / `Down`
 - Previous or next image fallback: `Up` / `Down`
+- Previous or next image with mouse side buttons: mouse `Back` / `Forward`
 - Jump to the first untagged image: `Ctrl` + `J`
 - Focus `Filter Images`: `Alt` + `F`
 - Focus `Add Tag`: `Alt` + `A`
@@ -24,6 +25,17 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 - Open image context menu: right-click an image
 
 The image context menu includes actions such as copying or pasting tags and moving or copying selected files.
+
+Typing letters in the image list no longer jumps selection. Use the filter box when you want text-based searching.
+
+## Main Viewer Fullscreen
+
+- Toggle fullscreen for the main viewer: `F`
+- Exit fullscreen: `Esc`
+- Navigate previous or next media while fullscreen is active: `Left` / `Up` and `Right` / `Down`
+- Open the fullscreen context menu: right-click the main viewer while fullscreen is active
+
+Fullscreen applies to the main viewer only and works for both images and videos.
 
 ## Image Tags Pane
 
@@ -94,6 +106,8 @@ Hold mode freezes existing spawned viewers as dimmed, gray, click-through overla
 - Sync videos: right-click a floating viewer and choose `Sync video`
 - Close all spawned viewers: right-click a floating viewer and choose `Close all spawned viewers`
 - Exit compare mode: right-click a floating viewer and choose `Exit compare mode` when compare mode is active
+
+Floating viewers do not have their own fullscreen mode.
 
 ## Notes
 

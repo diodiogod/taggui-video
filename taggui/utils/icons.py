@@ -26,6 +26,46 @@ def show_labels_icon():
 def show_marking_latent_icon():
     return QIcon(str(get_resource_path(SHOW_MARKING_LATENT_ICON_PATH)))
 
+def create_fullscreen_icon(*, exit_fullscreen: bool = False) -> QIcon:
+    """Create fullscreen icons with diagonal arrows independent of theme."""
+    try:
+        pixmap = QPixmap(32, 32)
+        if pixmap.isNull():
+            return QIcon()
+
+        pixmap.fill(QColor('transparent'))
+        painter = QPainter(pixmap)
+        if not painter.isActive():
+            return QIcon()
+
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(245, 248, 252), 3.0, Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+
+        def _draw_arrow(x1, y1, x2, y2, hx1, hy1, hx2, hy2):
+            painter.drawLine(x1, y1, x2, y2)
+            painter.drawLine(x2, y2, hx1, hy1)
+            painter.drawLine(x2, y2, hx2, hy2)
+
+        if exit_fullscreen:
+            # Inward-pointing arrows.
+            _draw_arrow(7, 7, 13, 13, 13, 9, 9, 13)
+            _draw_arrow(25, 7, 19, 13, 23, 13, 19, 9)
+            _draw_arrow(7, 25, 13, 19, 9, 19, 13, 23)
+            _draw_arrow(25, 25, 19, 19, 23, 19, 19, 23)
+        else:
+            # Outward-pointing arrows.
+            _draw_arrow(13, 13, 7, 7, 13, 7, 7, 13)
+            _draw_arrow(19, 13, 25, 7, 19, 7, 25, 13)
+            _draw_arrow(13, 19, 7, 25, 7, 19, 13, 25)
+            _draw_arrow(19, 19, 25, 25, 19, 25, 25, 19)
+
+        painter.end()
+        return QIcon(pixmap)
+    except Exception:
+        return QIcon()
+
 def create_add_box_icon(color: QColor) -> QPixmap:
     """Create a QPixmap for an icon"""
     try:

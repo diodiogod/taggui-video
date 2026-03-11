@@ -2767,6 +2767,7 @@ class VideoControlsWidget(QWidget):
             """)
         self._last_playing_visual_state = playing
 
+
     def set_performance_profile(self, profile: str, *, is_active_owner: bool = False):
         """Apply profile hints while preserving single-view UX quality."""
         self._perf_profile = str(profile or 'single')

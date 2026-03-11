@@ -9,9 +9,15 @@ High-level capabilities of TagGUI Video 1M.
 - Image and video tagging/caption workflows
 - Masonry/list browsing for large media folders
 - Video playback and frame tools
-- Main viewer hover controls for zoom/player options, with toolbar fallback when detached or when the main viewer is hidden
+- Main viewer hover controls for zoom, previous/next media, and fullscreen, with toolbar fallback when detached or when the main viewer is hidden
 - Floating/spawned viewers for multi-view workflows
 - Custom skin system for player controls
+
+## Viewer Experience
+
+- Main-viewer fullscreen works for both images and videos
+- Fullscreen navigation keeps normal next/previous media browsing available
+- Floating viewers stay windowed for comparison and multi-view workflows
 
 ## Tooling Highlights
 

@@ -5,6 +5,15 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-03-11
+
+### Added
+
+- Add main-viewer fullscreen mode
+- add fullscreen for images and videos in the main viewer with F to toggle and Esc to exit
+- keep previous and next media controls available in the viewer overlay and fullscreen mode
+- support mouse back and forward buttons for media navigation across the app
+- document the new fullscreen workflow, shortcuts, and floating-viewer behavior
 ## [1.0.6] - 2026-03-11
 
 ### Added

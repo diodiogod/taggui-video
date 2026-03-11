@@ -347,6 +347,10 @@ class ImageListView(
         source_model.modelAboutToBeReset.connect(self._clear_selection_cache)
         source_model.modelReset.connect(self._clear_selection_cache)
 
+    def keyboardSearch(self, search: str):
+        """Disable Qt type-to-select; typing should not jump the media list."""
+        return
+
     @Slot(QItemSelection, QItemSelection)
     def _on_selection_changed_cache(self, selected: QItemSelection, deselected: QItemSelection):
         """Maintain a paint-safe snapshot of selected proxy rows."""

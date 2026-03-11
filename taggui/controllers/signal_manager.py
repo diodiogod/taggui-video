@@ -55,6 +55,18 @@ class SignalManager:
             ))
         toolbar_manager.zoom_out_action.triggered.connect(
             lambda: self.main_window.image_viewer.zoom_out())
+        if getattr(toolbar_manager, 'previous_media_action', None) is not None:
+            toolbar_manager.previous_media_action.triggered.connect(
+                self.main_window.image_list.go_to_previous_image
+            )
+        if getattr(toolbar_manager, 'next_media_action', None) is not None:
+            toolbar_manager.next_media_action.triggered.connect(
+                self.main_window.image_list.go_to_next_image
+            )
+        if getattr(toolbar_manager, 'main_viewer_fullscreen_action', None) is not None:
+            toolbar_manager.main_viewer_fullscreen_action.triggered.connect(
+                lambda: self.main_window.toggle_viewer_fullscreen(self.main_window.image_viewer)
+            )
         if toolbar_manager.zoom_follow_mode_action is not None:
             toolbar_manager.zoom_follow_mode_action.triggered.connect(
                 self.main_window.cycle_main_viewer_zoom_follow_mode)
@@ -319,8 +331,7 @@ class SignalManager:
         # Connect video controls to video player
         def on_play_pause_requested():
             """Handle manual play/pause toggle from user."""
-            video_player.toggle_play_pause()
-            video_controls.set_playing(video_player.is_playing, update_auto_play=True)
+            self.main_window.toggle_viewer_play_pause(self.main_window.image_viewer)
 
         video_controls.play_pause_requested.connect(on_play_pause_requested)
         video_controls.stop_requested.connect(video_player.stop)
@@ -369,6 +380,7 @@ class SignalManager:
             lambda value: self._on_marker_size_changed(value))
         # Initialize video_controls.fixed_marker_size from saved settings
         video_controls.fixed_marker_size = toolbar_manager.fixed_marker_size_spinbox.value()
+
 
         # Always show controls toggle
         def on_always_show_toggled(checked):

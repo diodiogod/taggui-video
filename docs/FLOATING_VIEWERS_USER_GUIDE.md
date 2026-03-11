@@ -4,6 +4,9 @@
 
 This guide covers spawned/floating viewers (PiP-style windows): how to open them, move/resize them, and use the new smart zoom behaviors.
 
+> [!NOTE]
+> Fullscreen is now a main-viewer feature. Floating viewers stay windowed by design.
+
 ## What They Are
 
 - The main viewer stays anchored in the app.
@@ -19,6 +22,8 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - Hold existing spawned viewers: `H`
 - Right-click in the main viewer area and spawn.
 - Drag a thumbnail from list/masonry and release on empty screen area to spawn at drop location.
+
+Spawn actions are blocked while the main viewer is in fullscreen mode.
 
 ## Move, Resize, Close
 
@@ -91,6 +96,7 @@ How to exit compare mode:
 - A spawned viewer can inherit speed and loop state from the source viewer when opening the same video.
 - Speed is per viewer.
 - Loop markers are persisted with viewer scopes (`main`, `floating_*`) so different viewers can keep different marker ranges for the same media.
+- Fullscreen playback/review belongs to the main viewer; floating viewers are intended for side-by-side review, sync, and compare work.
 
 ## Related Docs
 

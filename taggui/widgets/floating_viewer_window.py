@@ -102,13 +102,8 @@ class FloatingViewerWindow(QWidget):
 
         self.viewer.installEventFilter(self)
         self.installEventFilter(self)
-        if hasattr(self.viewer, "view"):
-            self.viewer.view.installEventFilter(self)
-            self.viewer.view.viewport().installEventFilter(self)
-        self._refresh_video_surface_event_filters()
         self._video_controls_widget = getattr(self.viewer, "video_controls", None)
-        if self._video_controls_widget is not None:
-            self._video_controls_widget.installEventFilter(self)
+        self._install_hosted_viewer_event_filters()
         if hasattr(self.viewer, "activated"):
             self.viewer.activated.connect(self._emit_activated)
 
@@ -159,6 +154,65 @@ class FloatingViewerWindow(QWidget):
             except RuntimeError:
                 # Surface may be recreated while switching videos/backends.
                 continue
+
+    def _install_hosted_viewer_event_filters(self):
+        """Attach this window as the event filter for its hosted viewer tree."""
+        try:
+            if hasattr(self.viewer, "view"):
+                self.viewer.view.installEventFilter(self)
+                self.viewer.view.viewport().installEventFilter(self)
+        except RuntimeError:
+            pass
+        self._refresh_video_surface_event_filters()
+        if self._video_controls_widget is not None:
+            try:
+                self._video_controls_widget.installEventFilter(self)
+            except RuntimeError:
+                self._video_controls_widget = None
+
+    def _remove_hosted_viewer_event_filters(self):
+        """Detach this window from the hosted viewer tree before external reparenting."""
+        try:
+            self.viewer.removeEventFilter(self)
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(self.viewer, "view"):
+                self.viewer.view.removeEventFilter(self)
+                self.viewer.view.viewport().removeEventFilter(self)
+        except RuntimeError:
+            pass
+        for widget in self._iter_video_surface_widgets():
+            try:
+                widget.removeEventFilter(self)
+            except RuntimeError:
+                continue
+        if self._video_controls_widget is not None:
+            try:
+                self._video_controls_widget.removeEventFilter(self)
+            except RuntimeError:
+                self._video_controls_widget = None
+
+    def detach_hosted_viewer_for_external_reparent(self):
+        """Hide this host and release the viewer for temporary fullscreen hosting."""
+        self._remove_hosted_viewer_event_filters()
+        layout = self.layout()
+        if layout is not None:
+            layout.removeWidget(self.viewer)
+        self.viewer.setParent(None)
+        self.hide()
+
+    def attach_hosted_viewer_after_external_reparent(self):
+        """Restore a viewer previously detached for temporary fullscreen hosting."""
+        layout = self.layout()
+        if layout is not None:
+            layout.addWidget(self.viewer)
+        self._video_controls_widget = getattr(self.viewer, "video_controls", None)
+        self._install_hosted_viewer_event_filters()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._reposition_overlay_controls()
 
     def refresh_video_controls_performance_profile(self):
         """Proxy performance-profile refresh request to main window."""

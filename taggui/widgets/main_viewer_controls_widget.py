@@ -34,6 +34,9 @@ class MainViewerControlsWidget(QFrame):
 
         self._buttons = [self._host_toggle_button]
         for action in (
+            toolbar_manager.previous_media_action,
+            toolbar_manager.next_media_action,
+            toolbar_manager.main_viewer_fullscreen_action,
             toolbar_manager.zoom_fit_best_action,
             toolbar_manager.zoom_in_action,
             toolbar_manager.zoom_original_action,

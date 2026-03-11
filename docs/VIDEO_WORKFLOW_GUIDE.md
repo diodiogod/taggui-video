@@ -12,6 +12,7 @@ The basic video workflow is simple:
 2. Click a video in the image list.
 3. If autoplay is enabled, playback starts automatically.
 4. Use the timeline, frame controls, loop markers, and speed controls to inspect the clip.
+5. Press `F` when you want to switch the main viewer into fullscreen playback or review mode.
 
 This makes TagGUI a practical video media viewer even before you use the editing tools.
 
@@ -20,6 +21,7 @@ This makes TagGUI a practical video media viewer even before you use the editing
 The main video tasks supported in TagGUI Video 1M are:
 
 - play and inspect videos inside the main viewer
+- review videos in dedicated main-viewer fullscreen mode
 - navigate by timeline and frames
 - set loop ranges for review or extraction
 - compare multiple videos visually
@@ -46,6 +48,19 @@ You can use them to:
 - loop markers are persistent, so they are restored when you load the file again
 
 Loop work is especially important for dataset preparation, because it gives you direct frame-range control before editing.
+
+## Fullscreen Review
+
+Fullscreen is a main-viewer feature, not a spawned-viewer feature.
+
+- `F` toggles fullscreen for the main viewer
+- `Esc` exits fullscreen
+- fullscreen works for both videos and still images
+- the shared main-viewer controls remain available in fullscreen
+- while fullscreen is active, `Left` / `Up` move to the previous media item and `Right` / `Down` move to the next one
+- right-click in fullscreen exposes an `Exit Fullscreen` action
+
+This keeps fullscreen focused on single-media review while leaving spawned viewers dedicated to comparison and multi-window workflows.
 
 ## Playback Speed and Reverse
 
@@ -126,6 +141,7 @@ Important behavior:
 - one viewer is the active controls owner at a time
 - right-click actions include `Sync video`
 - sync is useful for comparison, even if it should not be described as perfectly frame-accurate
+- spawned viewers remain windowed; fullscreen belongs to the main viewer only
 
 <p align="center">
   <img src="../images/video-guide-sync-viewers.gif" alt="Syncing spawned video viewers" width="78%">

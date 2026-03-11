@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QTimer
 from utils.icons import (
     create_add_box_icon,
     create_apply_crop_icon,
+    create_fullscreen_icon,
     toggle_marking_icon,
     show_markings_icon,
     show_labels_icon,
@@ -35,6 +36,9 @@ class ToolbarManager:
         self.toolbar = None
         self.toolbars = {}
         self.main_viewer_controls_host_toggle_action = None
+        self.previous_media_action = None
+        self.next_media_action = None
+        self.main_viewer_fullscreen_action = None
         self.zoom_fit_best_action = None
         self.zoom_in_action = None
         self.zoom_original_action = None
@@ -272,6 +276,31 @@ class ToolbarManager:
             self.main_viewer_controls_host_toggle_action,
             role="host_toggle",
         )
+
+        self.previous_media_action = QAction(
+            QIcon.fromTheme('go-previous'),
+            'Previous media',
+            self.main_window,
+        )
+        self.previous_media_action.setToolTip('Previous image or video')
+        self._add_toolbar_action_button(toolbar, self.previous_media_action)
+
+        self.next_media_action = QAction(
+            QIcon.fromTheme('go-next'),
+            'Next media',
+            self.main_window,
+        )
+        self.next_media_action.setToolTip('Next image or video')
+        self._add_toolbar_action_button(toolbar, self.next_media_action)
+
+        self.main_viewer_fullscreen_action = QAction(
+            create_fullscreen_icon(exit_fullscreen=False),
+            'Fullscreen',
+            self.main_window,
+        )
+        self.main_viewer_fullscreen_action.setCheckable(True)
+        self.main_viewer_fullscreen_action.setToolTip('Fullscreen (F)')
+        self._add_toolbar_action_button(toolbar, self.main_viewer_fullscreen_action)
 
         self.zoom_fit_best_action = QAction(
             QIcon.fromTheme('zoom-fit-best'),
@@ -677,6 +706,21 @@ class ToolbarManager:
             self.main_viewer_controls_host_toggle_action.setToolTip(
                 'Attach controls to the main viewer overlay'
             )
+
+    def set_main_viewer_fullscreen_state(self, fullscreen: bool):
+        """Update the shared main-viewer fullscreen action icon and tooltip."""
+        if self.main_viewer_fullscreen_action is None:
+            return
+        fullscreen = bool(fullscreen)
+        self.main_viewer_fullscreen_action.setChecked(fullscreen)
+        if fullscreen:
+            self.main_viewer_fullscreen_action.setIcon(create_fullscreen_icon(exit_fullscreen=True))
+            self.main_viewer_fullscreen_action.setText('Exit Fullscreen')
+            self.main_viewer_fullscreen_action.setToolTip('Exit Fullscreen (F, Esc)')
+        else:
+            self.main_viewer_fullscreen_action.setIcon(create_fullscreen_icon(exit_fullscreen=False))
+            self.main_viewer_fullscreen_action.setText('Fullscreen')
+            self.main_viewer_fullscreen_action.setToolTip('Fullscreen (F)')
 
     def create_main_viewer_controls_widget(self, *, overlay_mode: bool, parent=None):
         """Create one host widget for the shared main-viewer controls."""
