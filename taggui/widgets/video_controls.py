@@ -19,6 +19,7 @@ class LoopSlider(QSlider):
 
     loop_start_changed = Signal(int)
     loop_end_changed = Signal(int)
+    scrub_started = Signal()
     marker_drag_started = Signal()  # Emitted when marker drag starts
     marker_drag_ended = Signal()  # Emitted when marker drag ends
     marker_preview_frame = Signal(int)  # Emitted during drag to preview frame
@@ -202,6 +203,7 @@ class LoopSlider(QSlider):
 
         # Jump to clicked position on slider, then allow dragging
         if event.button() == Qt.MouseButton.LeftButton:
+            self.scrub_started.emit()
             # Use the same calculation as _position_to_value for consistency
             new_value = self._position_to_value(event.pos().x(), groove)
 

@@ -205,6 +205,7 @@ class VideoPlayerWidget(QWidget):
         self._mpv_reveal_timer = QTimer(self)
         self._mpv_reveal_timer.setInterval(16)
         self._mpv_reveal_timer.timeout.connect(self._try_reveal_mpv_surface)
+        self._timeline_scrub_active = False
         self._mpv_paused_seek_cover_active = False
         self._mpv_paused_seek_reveal_generation = 0
         self._mpv_paused_seek_frame_painted_handler = None
@@ -519,7 +520,7 @@ class VideoPlayerWidget(QWidget):
             print(f"[VIDEO] Failed to configure mpv A/B loop: {e}")
             return False
 
-    def _set_mpv_visible(self, visible: bool):
+    def _set_mpv_visible(self, visible: bool, *, keep_opencv_cover: bool = False):
         """Show/hide MPV output (QOpenGLWidget) and the pixmap_item cover.
 
         With vo=libmpv (render API) the mpv_widget is a QOpenGLWidget child of the
@@ -547,7 +548,8 @@ class VideoPlayerWidget(QWidget):
                 pass
         else:
             self._mpv_surface_active = True
-            self._hide_opencv_cover_overlay()
+            if not bool(keep_opencv_cover):
+                self._hide_opencv_cover_overlay()
             self._sync_mpv_widget_to_viewport()
             try:
                 if self.mpv_widget:
@@ -1613,7 +1615,7 @@ class VideoPlayerWidget(QWidget):
                 pass
         return QPixmap()
 
-    def _prepare_mpv_paused_seek_cover(self) -> bool:
+    def _prepare_mpv_paused_seek_cover(self, *, hide_surface: bool = True) -> bool:
         """Keep the last visible frame above MPV while a paused exact seek settles."""
         cover_pixmap = self._capture_mpv_paused_seek_cover_pixmap()
         if cover_pixmap.isNull():
@@ -1622,7 +1624,7 @@ class VideoPlayerWidget(QWidget):
             return False
         self._show_opencv_frame_as_overlay(cover_pixmap)
         self._mpv_paused_seek_cover_active = True
-        self._set_mpv_visible(False)
+        self._set_mpv_visible(not bool(hide_surface), keep_opencv_cover=not bool(hide_surface))
         return True
 
     def _begin_mpv_paused_seek_reveal(self, timeout_ms: int = 260):
@@ -1657,7 +1659,7 @@ class VideoPlayerWidget(QWidget):
 
         self._mpv_paused_seek_frame_painted_handler = _on_first_frame
         gl_widget.frame_painted.connect(_on_first_frame)
-        self._set_mpv_visible(True)
+        self._set_mpv_visible(True, keep_opencv_cover=True)
         self.sync_external_surface_geometry()
 
         def _timeout_finish():
@@ -1666,6 +1668,55 @@ class VideoPlayerWidget(QWidget):
             _finish()
 
         QTimer.singleShot(max(80, int(timeout_ms)), _timeout_finish)
+
+    def _prime_mpv_for_paused_scrub(self) -> bool:
+        """Lazily load the current clip into MPV when the user starts paused scrubbing."""
+        if not self._is_using_mpv_backend() or not self.video_path:
+            return False
+        if self.mpv_player is not None and (not bool(getattr(self, '_mpv_needs_reload', False))):
+            return True
+        if not self._setup_mpv_for_current_video():
+            return False
+        start_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else 0.0
+        self._mpv_estimated_position_ms = float(start_ms)
+        self._seek_mpv_position_ms(start_ms)
+        return True
+
+    def begin_timeline_scrub(self):
+        """Start a timeline scrub session so paused cover stays stable until release."""
+        self._timeline_scrub_active = True
+        self._mpv_paused_seek_reveal_generation += 1
+        self._clear_mpv_paused_seek_reveal_handler()
+        if not self.is_playing:
+            try:
+                self._prime_mpv_for_paused_scrub()
+            except Exception:
+                pass
+        if (
+            (not self.is_playing)
+            and self._is_using_mpv_backend()
+            and self.mpv_player is not None
+            and self._mpv_ready_for_seeks
+            and (not bool(getattr(self, '_mpv_needs_reload', False)))
+        ):
+            if not bool(getattr(self, '_mpv_paused_seek_cover_active', False)):
+                self._prepare_mpv_paused_seek_cover(hide_surface=False)
+            else:
+                self._set_mpv_visible(True, keep_opencv_cover=True)
+                try:
+                    self.sync_external_surface_geometry()
+                except Exception:
+                    pass
+
+    def end_timeline_scrub(self):
+        """Finish a timeline scrub session and reveal the settled paused MPV frame."""
+        self._timeline_scrub_active = False
+        if (
+            (not self.is_playing)
+            and bool(getattr(self, '_mpv_paused_seek_cover_active', False))
+            and self._mpv_seek_pending_ms is None
+        ):
+            self._begin_mpv_paused_seek_reveal()
 
     def _cancel_vlc_reveal(self):
         self._vlc_pending_reveal = False
@@ -2128,7 +2179,11 @@ class VideoPlayerWidget(QWidget):
         seek_s = self._mpv_seek_pending_ms / 1000.0
         self._mpv_seek_pending_ms = None
         self._mpv_string_command('seek', f'{seek_s:.6f}', 'absolute+exact')
-        if (not self.is_playing) and bool(getattr(self, '_mpv_paused_seek_cover_active', False)):
+        if (
+            (not self.is_playing)
+            and bool(getattr(self, '_mpv_paused_seek_cover_active', False))
+            and (not bool(getattr(self, '_timeline_scrub_active', False)))
+        ):
             self._begin_mpv_paused_seek_reveal()
         if self._mpv_seek_was_playing and self.is_playing:
             self._mpv_string_command('set', 'pause', 'no')
@@ -2351,7 +2406,13 @@ class VideoPlayerWidget(QWidget):
         self.pixmap_item = pixmap_item
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         self._mpv_needs_reload = True
+        self._mpv_ready_for_seeks = False
+        self._mpv_vo_ready = False
         self._mpv_pending_play_speed = None  # cancel any deferred play from previous clip
+        self._timeline_scrub_active = False
+        self._mpv_paused_seek_cover_active = False
+        self._clear_mpv_paused_seek_reveal_handler()
+        self._hide_opencv_cover_overlay()
         self._vlc_needs_reload = True
         self._qt_video_source_path = None
         # Pause MPV before switching to a new clip.
@@ -2859,6 +2920,9 @@ class VideoPlayerWidget(QWidget):
         """
         was_playing = self.is_playing
         self.is_playing = False
+        self._timeline_scrub_active = False
+        self._mpv_paused_seek_cover_active = False
+        self._clear_mpv_paused_seek_reveal_handler()
 
         self._cancel_mpv_reveal()
         self._cancel_vlc_reveal()
@@ -2876,6 +2940,8 @@ class VideoPlayerWidget(QWidget):
                 self._mpv_set_property('pause', True)
             except Exception:
                 pass
+        self._mpv_ready_for_seeks = False
+        self._mpv_vo_ready = False
         if self.vlc_player is not None:
             try:
                 self._set_vlc_paused(True)
@@ -2941,19 +3007,31 @@ class VideoPlayerWidget(QWidget):
         # The paused zoom/fit edge cases are handled separately by
         # set_view_transformed(), so scrubbing can stay on the fast seek path.
         if not self.is_playing:
-            if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
+            if (
+                self._is_using_mpv_backend()
+                and self.mpv_player is not None
+                and self._mpv_ready_for_seeks
+                and (not bool(getattr(self, '_mpv_needs_reload', False)))
+            ):
                 # Route through the coalescing seek timer — rapid scrub events
                 # are collapsed to one seek per 50ms, always absolute+exact.
                 cover_active = bool(getattr(self, '_mpv_paused_seek_cover_active', False))
                 if not cover_active:
-                    cover_active = bool(self._prepare_mpv_paused_seek_cover())
+                    cover_active = bool(
+                        self._prepare_mpv_paused_seek_cover(
+                            hide_surface=not bool(getattr(self, '_timeline_scrub_active', False))
+                        )
+                    )
                 self._seek_mpv_position_ms(position_ms)
                 try:
                     if self.video_item:
                         self.video_item.hide()
                 except RuntimeError:
                     self.video_item = None
-                self._set_mpv_visible(not cover_active)
+                if cover_active and bool(getattr(self, '_timeline_scrub_active', False)):
+                    self._set_mpv_visible(True)
+                else:
+                    self._set_mpv_visible(not cover_active)
             else:
                 self._show_opencv_frame(frame_number)
 

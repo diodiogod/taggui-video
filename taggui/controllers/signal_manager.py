@@ -325,6 +325,8 @@ class SignalManager:
         video_controls.play_pause_requested.connect(on_play_pause_requested)
         video_controls.stop_requested.connect(video_player.stop)
         video_controls.frame_changed.connect(video_player.seek_to_frame)
+        video_controls.timeline_slider.scrub_started.connect(video_player.begin_timeline_scrub)
+        video_controls.timeline_slider.sliderReleased.connect(video_player.end_timeline_scrub)
         # Connect marker preview - seeks video without updating controls
         video_controls.marker_preview_requested.connect(video_player.seek_to_frame)
         video_controls.skip_backward_requested.connect(
