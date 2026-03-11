@@ -382,6 +382,7 @@ class MainWindow(QMainWindow):
         self._workspace_apply_timer_active = False
         self._workspace_apply_retry_count = 0
         self._workspace_applying = False
+        self._workspace_active_id = None
         self._default_window_state = None
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
@@ -1070,17 +1071,26 @@ class MainWindow(QMainWindow):
         toolbar_mgr = getattr(self, 'toolbar_manager', None)
         if toolbar_mgr is None:
             return
+        workspace_id = self._current_workspace_id() if hasattr(self, '_current_workspace_id') else 'media_viewer'
+        workspace_forces_toolbar_hidden = workspace_id == 'full_masonry'
         toolbar_mgr.set_main_viewer_controls_attached(self._main_viewer_controls_attached)
         overlay = getattr(self, '_main_viewer_controls_overlay', None)
         if overlay is not None:
             overlay.set_overlay_mode(True)
         self.image_viewer.set_main_controls_overlay_attached(
-            self._main_viewer_controls_attached and bool(self._main_viewer_visible)
+            (
+                self._main_viewer_controls_attached
+                and bool(self._main_viewer_visible)
+                and not workspace_forces_toolbar_hidden
+            )
         )
         viewer_toolbar = toolbar_mgr.toolbars.get('viewer')
         if viewer_toolbar is not None:
             viewer_toolbar.setVisible(
-                (not self._main_viewer_controls_attached) or (not bool(self._main_viewer_visible))
+                (
+                    ((not self._main_viewer_controls_attached) or (not bool(self._main_viewer_visible)))
+                    and not workspace_forces_toolbar_hidden
+                )
             )
 
     def _update_main_window_title(self, selected_file_name: str | None = None):
@@ -1119,11 +1129,14 @@ class MainWindow(QMainWindow):
 
     def _current_workspace_id(self) -> str:
         """Return the active workspace id with a safe fallback."""
+        presets = {preset["id"] for preset in self.get_workspace_presets()}
+        live_workspace_id = str(getattr(self, '_workspace_active_id', '') or '').strip()
+        if live_workspace_id in presets:
+            return live_workspace_id
         workspace_id = str(
             settings.value('workspace_preset', 'media_viewer', type=str)
             or 'media_viewer'
         ).strip()
-        presets = {preset["id"] for preset in self.get_workspace_presets()}
         if workspace_id not in presets:
             workspace_id = 'media_viewer'
         return workspace_id
@@ -4030,6 +4043,7 @@ class MainWindow(QMainWindow):
         self._workspace_applying = True
 
         try:
+            self._workspace_active_id = workspace_id
             left_dock = self.image_list
             right_dock_map = {
                 "image_tags_editor": self.image_tags_editor,

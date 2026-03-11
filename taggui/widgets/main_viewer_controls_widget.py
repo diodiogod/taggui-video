@@ -72,7 +72,7 @@ class MainViewerControlsWidget(QFrame):
                 #mainViewerControlsWidget {
                     background: rgba(18, 22, 28, 150);
                     border: 1px solid rgba(210, 220, 235, 80);
-                    border-radius: 12px;
+                    border-radius: 8px;
                 }
                 #mainViewerControlsWidget QToolButton[controlRole="viewer_action"] {
                     background: rgba(34, 40, 50, 150);

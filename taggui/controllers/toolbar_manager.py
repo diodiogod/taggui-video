@@ -198,7 +198,7 @@ class ToolbarManager:
             widget_width += width + 6
         return max(60, max(hint_width, widget_width) + 8)
 
-    def _add_toolbar_action_button(self, toolbar: QToolBar, action: QAction):
+    def _add_toolbar_action_button(self, toolbar: QToolBar, action: QAction, *, role: str = "viewer_action"):
         """Add a compact action-backed button to the toolbar."""
         from PySide6.QtWidgets import QToolButton
 
@@ -206,13 +206,18 @@ class ToolbarManager:
         button.setDefaultAction(action)
         button.setAutoRaise(False)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setFixedSize(32, 32)
-        if action.icon().isNull():
+        button.setProperty("toolbarRole", role)
+        if role == "host_toggle":
+            button.setFixedSize(22, 32)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         else:
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            button.setFixedSize(32, 32)
+            if action.icon().isNull():
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            else:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         button.setStyleSheet("""
-            QToolButton {
+            QToolButton[toolbarRole="viewer_action"] {
                 font-size: 16px;
                 font-weight: 700;
                 border: 2px solid #555;
@@ -221,13 +226,35 @@ class ToolbarManager:
                 color: #f8fafc;
                 padding: 0px;
             }
-            QToolButton:hover {
+            QToolButton[toolbarRole="viewer_action"]:hover {
                 border-color: #777;
                 background-color: #353535;
             }
-            QToolButton:checked {
+            QToolButton[toolbarRole="viewer_action"]:checked {
                 border-color: #4CAF50;
                 background-color: #2d5a2d;
+            }
+            QToolButton[toolbarRole="host_toggle"] {
+                font-size: 11px;
+                font-weight: 700;
+                border: 1px solid #616874;
+                border-radius: 4px;
+                background-color: #353b45;
+                color: #dfe6ef;
+                padding: 0px;
+            }
+            QToolButton[toolbarRole="host_toggle"]:hover {
+                border-color: #838d9c;
+                background-color: #414854;
+                color: #f8fafc;
+            }
+            QToolButton[toolbarRole="host_toggle"]:pressed {
+                background-color: #2c313a;
+            }
+            QToolButton[toolbarRole="host_toggle"]:checked {
+                border-color: #67c587;
+                background-color: #294033;
+                color: #9ae6b4;
             }
         """)
         toolbar.addWidget(button)
@@ -240,7 +267,11 @@ class ToolbarManager:
         self.main_viewer_controls_host_toggle_action.setToolTip(
             'Attach controls to the main viewer overlay'
         )
-        self._add_toolbar_action_button(toolbar, self.main_viewer_controls_host_toggle_action)
+        self._add_toolbar_action_button(
+            toolbar,
+            self.main_viewer_controls_host_toggle_action,
+            role="host_toggle",
+        )
 
         self.zoom_fit_best_action = QAction(
             QIcon.fromTheme('zoom-fit-best'),
