@@ -159,6 +159,9 @@ class ImageViewer(QWidget):
             self.video_controls_auto_hide = not always_show
         self._controls_visible = False
         self._controls_hover_inside = False
+        self._main_controls_overlay = None
+        self._main_controls_overlay_attached = False
+        self._main_controls_overlay_zone_height = 54
         self._is_video_loaded = False
         self._floating_double_click_return_scale = None
         self._floating_last_auto_double_click_zoom_scale = None
@@ -174,6 +177,9 @@ class ImageViewer(QWidget):
         self._controls_hide_timer = QTimer(self)
         self._controls_hide_timer.setSingleShot(True)
         self._controls_hide_timer.timeout.connect(self._hide_controls)
+        self._main_controls_overlay_poll_timer = QTimer(self)
+        self._main_controls_overlay_poll_timer.setInterval(50)
+        self._main_controls_overlay_poll_timer.timeout.connect(self._poll_main_controls_overlay_hover)
 
         # Guard against stale index access during proxy/source model resets.
         self.proxy_image_list_model.modelAboutToBeReset.connect(self._on_proxy_model_about_to_reset)
@@ -1579,6 +1585,7 @@ class ImageViewer(QWidget):
         # Store visibility state
         was_visible = self.video_controls.isVisible()
         self._position_video_controls()
+        self._position_main_controls_overlay()
         # Restore visibility after resize (force controls to update)
         if was_visible:
             self.video_controls.setVisible(True)
@@ -1597,6 +1604,99 @@ class ImageViewer(QWidget):
         if self._is_video_loaded:
             self._process_controls_hover(event.pos())
         super().mouseMoveEvent(event)
+
+    def set_main_controls_overlay(self, overlay):
+        """Register the main-viewer controls overlay widget."""
+        self._main_controls_overlay = overlay
+        if overlay is None:
+            return
+        overlay.hide()
+        self._position_main_controls_overlay()
+
+    def set_main_controls_overlay_attached(self, attached: bool):
+        """Enable or disable the hover overlay host."""
+        self._main_controls_overlay_attached = bool(attached)
+        if self._main_controls_overlay is None:
+            return
+        if not self._main_controls_overlay_attached:
+            self._main_controls_overlay_poll_timer.stop()
+            self._main_controls_overlay.hide()
+            return
+        self._position_main_controls_overlay()
+        self._main_controls_overlay_poll_timer.start()
+
+    def _position_main_controls_overlay(self):
+        overlay = self._main_controls_overlay
+        if overlay is None:
+            return False
+        hint = overlay.sizeHint()
+        target_w = min(max(hint.width(), 220), max(120, self.width() - 16))
+        target_h = hint.height()
+        x_pos = max(8, (self.width() - target_w) // 2)
+        y_pos = 8
+        target_rect = QRect(x_pos, y_pos, target_w, target_h)
+        if overlay.geometry() == target_rect:
+            return False
+        overlay.setGeometry(target_rect)
+        return True
+
+    def _show_main_controls_overlay(self):
+        overlay = self._main_controls_overlay
+        if overlay is None or not self._main_controls_overlay_attached:
+            return
+        geometry_changed = self._position_main_controls_overlay()
+        if overlay.isVisible():
+            if geometry_changed:
+                overlay.raise_()
+            return
+        overlay.show()
+        overlay.raise_()
+
+    def _hide_main_controls_overlay(self):
+        overlay = self._main_controls_overlay
+        if overlay is None:
+            return
+        if not overlay.isVisible():
+            return
+        overlay.hide()
+
+    def _process_main_controls_overlay_hover(self, viewer_pos):
+        if (
+            not self._main_controls_overlay_attached
+            or self._main_controls_overlay is None
+            or viewer_pos is None
+        ):
+            return
+        hover_zone_h = max(
+            self._main_controls_overlay_zone_height,
+            self._main_controls_overlay.geometry().bottom() + 12,
+        )
+        in_top_zone = (
+            0 <= viewer_pos.x() < self.width()
+            and 0 <= viewer_pos.y() <= hover_zone_h
+        )
+        in_overlay = self._main_controls_overlay.geometry().contains(viewer_pos)
+        if in_top_zone or in_overlay:
+            self._show_main_controls_overlay()
+        else:
+            self._hide_main_controls_overlay()
+
+    def _poll_main_controls_overlay_hover(self):
+        """Use global cursor polling for reliable top-zone hover on HiDPI/native surfaces."""
+        if (
+            not self._main_controls_overlay_attached
+            or self._main_controls_overlay is None
+            or not self.isVisible()
+        ):
+            return
+        try:
+            viewer_pos = self.mapFromGlobal(QCursor.pos())
+        except Exception:
+            return
+        if not self.rect().contains(viewer_pos):
+            self._hide_main_controls_overlay()
+            return
+        self._process_main_controls_overlay_hover(viewer_pos)
 
     def _event_pos_to_viewer(self, watched, event):
         """Map an event local position from watched object to viewer coordinates."""

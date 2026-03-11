@@ -38,23 +38,26 @@ class SignalManager:
         )
 
         image_viewer.zoom.connect(self.main_window.zoom)
+        toolbar_manager.main_viewer_controls_host_toggle_action.triggered.connect(
+            self.main_window.toggle_main_viewer_controls_attachment
+        )
         toolbar_manager.zoom_fit_best_action.triggered.connect(
             lambda: (
-                self.main_window.get_active_viewer().clear_saved_double_click_detail_zoom(),
-                self.main_window.get_active_viewer().zoom_fit(),
+                self.main_window.image_viewer.clear_saved_double_click_detail_zoom(),
+                self.main_window.image_viewer.zoom_fit(),
             ))
         toolbar_manager.zoom_in_action.triggered.connect(
-            lambda: self.main_window.get_active_viewer().zoom_in())
+            lambda: self.main_window.image_viewer.zoom_in())
         toolbar_manager.zoom_original_action.triggered.connect(
             lambda: (
-                self.main_window.get_active_viewer().clear_saved_double_click_detail_zoom(),
-                self.main_window.get_active_viewer().zoom_original(),
+                self.main_window.image_viewer.clear_saved_double_click_detail_zoom(),
+                self.main_window.image_viewer.zoom_original(),
             ))
         toolbar_manager.zoom_out_action.triggered.connect(
-            lambda: self.main_window.get_active_viewer().zoom_out())
-        if toolbar_manager.zoom_follow_mode_btn is not None:
-            toolbar_manager.zoom_follow_mode_btn.clicked.connect(
-                self.main_window.cycle_active_viewer_zoom_follow_mode)
+            lambda: self.main_window.image_viewer.zoom_out())
+        if toolbar_manager.zoom_follow_mode_action is not None:
+            toolbar_manager.zoom_follow_mode_action.triggered.connect(
+                self.main_window.cycle_main_viewer_zoom_follow_mode)
         if toolbar_manager.rating_widget is not None:
             toolbar_manager.rating_widget.rating_selected.connect(
                 lambda stars, event: self.main_window.set_rating(float(stars) / 5.0, True, event)
@@ -124,7 +127,8 @@ class SignalManager:
         image_viewer.rating_changed.connect(self.main_window.set_rating)
         image_viewer.reaction_flags_changed.connect(self.main_window.set_reactions)
         image_viewer.zoom_follow_mode_changed.connect(
-            lambda mode: self.main_window.sync_zoom_follow_mode_button())
+            lambda mode: self.main_window.sync_zoom_follow_mode_button(image_viewer)
+        )
 
     def connect_image_list_signals(self):
         """Connect image list-related signals."""
@@ -369,7 +373,7 @@ class SignalManager:
             self.main_window.image_viewer.set_always_show_controls(checked)
             settings.setValue('video_always_show_controls', checked)
 
-        toolbar_manager.always_show_controls_btn.toggled.connect(on_always_show_toggled)
+        toolbar_manager.always_show_controls_action.toggled.connect(on_always_show_toggled)
 
         # Connect video editing buttons
         toolbar_manager.extract_range_action.triggered.connect(

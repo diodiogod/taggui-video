@@ -385,6 +385,7 @@ class MainWindow(QMainWindow):
         self._default_window_state = None
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
+        self._main_viewer_controls_attached = True
         self._floating_hold_mode = False
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
@@ -466,6 +467,11 @@ class MainWindow(QMainWindow):
 
         # Create toolbar and menus
         self.toolbar_manager.create_toolbar()
+        self._main_viewer_controls_overlay = self.toolbar_manager.create_main_viewer_controls_widget(
+            overlay_mode=True,
+            parent=self.image_viewer,
+        )
+        self.image_viewer.set_main_controls_overlay(self._main_viewer_controls_overlay)
         self.rating = self.toolbar_manager.rating
         self.rating_widget = self.toolbar_manager.rating_widget
         self.love_button = self.toolbar_manager.love_button
@@ -523,6 +529,15 @@ class MainWindow(QMainWindow):
         self.toolbar_manager.reset_toolbars_layout()
         self._default_window_state = self.saveState()
         self._sync_perf_hud_menu_action()
+        self._main_viewer_controls_attached = settings.value(
+            'main_viewer_controls_attached',
+            True,
+            type=bool,
+        )
+        self.set_main_viewer_controls_attached(
+            self._main_viewer_controls_attached,
+            save=False,
+        )
         self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
         self.set_main_viewer_visible(self._main_viewer_visible, save=False)
 
@@ -1027,6 +1042,7 @@ class MainWindow(QMainWindow):
         """Show/hide anchored main viewer without detaching it."""
         self._main_viewer_visible = bool(visible)
         self._set_central_content_page()
+        self._sync_main_viewer_controls_host()
         action = getattr(getattr(self, 'menu_manager', None), 'toggle_main_viewer_action', None)
         if action is not None:
             action.blockSignals(True)
@@ -1034,6 +1050,38 @@ class MainWindow(QMainWindow):
             action.blockSignals(False)
         if save:
             settings.setValue('main_viewer_visible', self._main_viewer_visible)
+
+    def toggle_main_viewer_controls_attachment(self):
+        """Toggle whether main-viewer controls live on the viewer or toolbar."""
+        self.set_main_viewer_controls_attached(not self._main_viewer_controls_attached)
+
+    def set_main_viewer_controls_attached(self, attached: bool, *, save: bool = True):
+        """Attach or detach the shared main-viewer controls overlay."""
+        self._main_viewer_controls_attached = bool(attached)
+        self._sync_main_viewer_controls_host()
+        if save:
+            settings.setValue(
+                'main_viewer_controls_attached',
+                self._main_viewer_controls_attached,
+            )
+
+    def _sync_main_viewer_controls_host(self):
+        """Route the shared main-viewer controls to overlay or toolbar fallback."""
+        toolbar_mgr = getattr(self, 'toolbar_manager', None)
+        if toolbar_mgr is None:
+            return
+        toolbar_mgr.set_main_viewer_controls_attached(self._main_viewer_controls_attached)
+        overlay = getattr(self, '_main_viewer_controls_overlay', None)
+        if overlay is not None:
+            overlay.set_overlay_mode(True)
+        self.image_viewer.set_main_controls_overlay_attached(
+            self._main_viewer_controls_attached and bool(self._main_viewer_visible)
+        )
+        viewer_toolbar = toolbar_mgr.toolbars.get('viewer')
+        if viewer_toolbar is not None:
+            viewer_toolbar.setVisible(
+                (not self._main_viewer_controls_attached) or (not bool(self._main_viewer_visible))
+            )
 
     def _update_main_window_title(self, selected_file_name: str | None = None):
         """Show folder and selected file name in the main window title."""
@@ -1273,16 +1321,12 @@ class MainWindow(QMainWindow):
             target = self.image_viewer
         self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
-            self.sync_zoom_follow_mode_button(target)
             self._sync_rating_controls_from_viewer(target)
             if self._exclusive_video_controls_visibility:
                 self._sync_active_viewer_controls_visibility(target)
             return
         self._active_viewer = target
 
-        active_zoom = -1 if getattr(target, 'is_zoom_to_fit', False) else target.view.transform().m11()
-        self.zoom(active_zoom)
-        self.sync_zoom_follow_mode_button(target)
         self._sync_rating_controls_from_viewer(target)
 
         live_windows = []
@@ -1380,9 +1424,6 @@ class MainWindow(QMainWindow):
     def _connect_floating_viewer(self, viewer: ImageViewer):
         """Bind floating viewer signals to existing main-window slots."""
         viewer.activated.connect(lambda: self.set_active_viewer(viewer))
-        viewer.zoom.connect(self.zoom)
-        viewer.zoom_follow_mode_changed.connect(
-            lambda mode, source=viewer: self.sync_zoom_follow_mode_button(source))
         viewer.rating_changed.connect(self.set_rating)
         viewer.reaction_flags_changed.connect(self.set_reactions)
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
@@ -2799,6 +2840,16 @@ class MainWindow(QMainWindow):
             return
         self.sync_zoom_follow_mode_button(target)
 
+    @Slot()
+    def cycle_main_viewer_zoom_follow_mode(self):
+        target = self.image_viewer
+        try:
+            target.clear_saved_double_click_detail_zoom()
+            target.cycle_zoom_follow_mode()
+        except Exception:
+            return
+        self.sync_zoom_follow_mode_button(target)
+
     def sync_zoom_follow_mode_button(self, viewer: ImageViewer | None = None):
         toolbar_mgr = getattr(self, 'toolbar_manager', None)
         if toolbar_mgr is None:
@@ -2807,8 +2858,8 @@ class MainWindow(QMainWindow):
         if not callable(updater):
             return
 
-        target = viewer or self.get_active_viewer()
-        if target is not self.get_active_viewer():
+        target = viewer or self.image_viewer
+        if target is not self.image_viewer:
             return
         mode = 'default'
         try:
@@ -3747,6 +3798,7 @@ class MainWindow(QMainWindow):
         if toolbar_manager is None:
             return
         toolbar_manager.reset_toolbars_layout()
+        self._sync_main_viewer_controls_host()
         action = getattr(getattr(self, 'menu_manager', None), 'toggle_toolbar_action', None)
         if action is not None:
             action.setChecked(toolbar_manager.any_toolbar_visible())

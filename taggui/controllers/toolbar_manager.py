@@ -13,6 +13,7 @@ from utils.icons import (
     show_marking_latent_icon,
 )
 from utils.settings import settings
+from widgets.main_viewer_controls_widget import MainViewerControlsWidget
 from widgets.rating_controls import ReactionToggleButton, StarRatingWidget
 
 
@@ -20,9 +21,8 @@ class ToolbarManager:
     """Manages toolbar creation and setup."""
 
     DEFAULT_TOOLBAR_ORDER = (
-        'zoom',
+        'viewer',
         'marking',
-        'player',
         'marker',
         'video_edit',
         'video_fix',
@@ -34,6 +34,7 @@ class ToolbarManager:
         self.main_window = main_window
         self.toolbar = None
         self.toolbars = {}
+        self.main_viewer_controls_host_toggle_action = None
         self.zoom_fit_best_action = None
         self.zoom_in_action = None
         self.zoom_original_action = None
@@ -49,8 +50,8 @@ class ToolbarManager:
         self.add_show_marking_action = None
         self.add_show_labels_action = None
         self.add_show_marking_latent_action = None
-        self.always_show_controls_btn = None
-        self.zoom_follow_mode_btn = None
+        self.always_show_controls_action = None
+        self.zoom_follow_mode_action = None
         self.fixed_marker_size_spinbox = None
         self.extract_range_action = None
         self.extract_range_rough_btn = None
@@ -72,25 +73,23 @@ class ToolbarManager:
 
     def create_toolbar(self):
         """Create and setup grouped toolbars for native Qt reordering."""
-        zoom_toolbar = self._create_toolbar_group('Main toolbar', key='zoom')
+        viewer_toolbar = self._create_toolbar_group('Main Viewer Controls', key='viewer')
         marking_toolbar = self._create_toolbar_group('Marking toolbar', key='marking')
-        player_toolbar = self._create_toolbar_group('Player toolbar', key='player')
         marker_toolbar = self._create_toolbar_group('Marker toolbar', key='marker')
         video_edit_toolbar = self._create_toolbar_group('Video edit toolbar', key='video_edit')
         video_fix_toolbar = self._create_toolbar_group('Video tools toolbar', key='video_fix')
         rating_toolbar = self._create_toolbar_group('Rating toolbar', key='rating')
 
-        self.toolbar = zoom_toolbar
+        self.toolbar = viewer_toolbar
 
-        self._create_zoom_controls(zoom_toolbar)
+        self._create_viewer_controls(viewer_toolbar)
         self._create_marking_controls(marking_toolbar)
-        self._create_player_controls(player_toolbar)
         self._create_marker_controls(marker_toolbar)
         self._create_video_edit_controls(video_edit_toolbar)
         self._create_video_fix_controls(video_fix_toolbar)
         self._create_rating_stars(rating_toolbar)
 
-        return zoom_toolbar
+        return viewer_toolbar
 
     def _create_toolbar_group(self, title: str, *, key: str) -> QToolBar:
         """Create a movable toolbar group tracked by semantic key."""
@@ -199,22 +198,64 @@ class ToolbarManager:
             widget_width += width + 6
         return max(60, max(hint_width, widget_width) + 8)
 
-    def _create_zoom_controls(self, toolbar: QToolBar):
-        """Create zoom toolbar actions."""
+    def _add_toolbar_action_button(self, toolbar: QToolBar, action: QAction):
+        """Add a compact action-backed button to the toolbar."""
+        from PySide6.QtWidgets import QToolButton
+
+        button = QToolButton(toolbar)
+        button.setDefaultAction(action)
+        button.setAutoRaise(False)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedSize(32, 32)
+        if action.icon().isNull():
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        else:
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setStyleSheet("""
+            QToolButton {
+                font-size: 16px;
+                font-weight: 700;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                color: #f8fafc;
+                padding: 0px;
+            }
+            QToolButton:hover {
+                border-color: #777;
+                background-color: #353535;
+            }
+            QToolButton:checked {
+                border-color: #4CAF50;
+                background-color: #2d5a2d;
+            }
+        """)
+        toolbar.addWidget(button)
+        return button
+
+    def _create_viewer_controls(self, toolbar: QToolBar):
+        """Create the combined main-viewer controls group."""
+        self.main_viewer_controls_host_toggle_action = QAction('⋮', self.main_window)
+        self.main_viewer_controls_host_toggle_action.setCheckable(True)
+        self.main_viewer_controls_host_toggle_action.setToolTip(
+            'Attach controls to the main viewer overlay'
+        )
+        self._add_toolbar_action_button(toolbar, self.main_viewer_controls_host_toggle_action)
+
         self.zoom_fit_best_action = QAction(
             QIcon.fromTheme('zoom-fit-best'),
             'Zoom to fit',
             self.main_window,
         )
         self.zoom_fit_best_action.setCheckable(True)
-        toolbar.addAction(self.zoom_fit_best_action)
+        self._add_toolbar_action_button(toolbar, self.zoom_fit_best_action)
 
         self.zoom_in_action = QAction(
             QIcon.fromTheme('zoom-in'),
             'Zoom in',
             self.main_window,
         )
-        toolbar.addAction(self.zoom_in_action)
+        self._add_toolbar_action_button(toolbar, self.zoom_in_action)
 
         self.zoom_original_action = QAction(
             QIcon.fromTheme('zoom-original'),
@@ -222,14 +263,29 @@ class ToolbarManager:
             self.main_window,
         )
         self.zoom_original_action.setCheckable(True)
-        toolbar.addAction(self.zoom_original_action)
+        self._add_toolbar_action_button(toolbar, self.zoom_original_action)
 
         self.zoom_out_action = QAction(
             QIcon.fromTheme('zoom-out'),
             'Zoom out',
             self.main_window,
         )
-        toolbar.addAction(self.zoom_out_action)
+        self._add_toolbar_action_button(toolbar, self.zoom_out_action)
+
+        self.always_show_controls_action = QAction('👁', self.main_window)
+        self.always_show_controls_action.setCheckable(True)
+        self.always_show_controls_action.setChecked(
+            settings.value('video_always_show_controls', False, type=bool)
+        )
+        self.always_show_controls_action.setToolTip(
+            'Always show video controls for the main viewer'
+        )
+        self._add_toolbar_action_button(toolbar, self.always_show_controls_action)
+
+        self.zoom_follow_mode_action = QAction('⛶', self.main_window)
+        self.zoom_follow_mode_action.setToolTip('Default: Per-image zoom behavior')
+        self._add_toolbar_action_button(toolbar, self.zoom_follow_mode_action)
+        self.set_zoom_follow_mode_button('default')
 
     def _create_marking_controls(self, toolbar: QToolBar):
         """Create marking toolbar actions."""
@@ -339,54 +395,6 @@ class ToolbarManager:
         self.add_show_marking_latent_action.setCheckable(True)
         self.add_show_marking_latent_action.setChecked(True)
         toolbar.addAction(self.add_show_marking_latent_action)
-
-    def _create_player_controls(self, toolbar: QToolBar):
-        """Create viewer/player state toolbar controls."""
-        self.always_show_controls_btn = QPushButton('👁')
-        self.always_show_controls_btn.setCheckable(True)
-        self.always_show_controls_btn.setToolTip('Always show video controls')
-        self.always_show_controls_btn.setMaximumWidth(32)
-        self.always_show_controls_btn.setMaximumHeight(32)
-        always_show = settings.value('video_always_show_controls', False, type=bool)
-        self.always_show_controls_btn.setChecked(always_show)
-        self.always_show_controls_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 4px;
-            }
-            QPushButton:hover {
-                border-color: #777;
-                background-color: #353535;
-            }
-            QPushButton:checked {
-                border-color: #4CAF50;
-                background-color: #2d5a2d;
-            }
-        """)
-        toolbar.addWidget(self.always_show_controls_btn)
-
-        self.zoom_follow_mode_btn = QPushButton('⛶')
-        self.zoom_follow_mode_btn.setToolTip('Default: Per-image zoom behavior')
-        self.zoom_follow_mode_btn.setFixedSize(32, 32)
-        self.zoom_follow_mode_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 18px;
-                font-weight: 600;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                padding: 2px;
-            }
-            QPushButton:hover {
-                border-color: #777;
-                background-color: #353535;
-            }
-        """)
-        toolbar.addWidget(self.zoom_follow_mode_btn)
-        self.set_zoom_follow_mode_button('default')
 
     def _create_marker_controls(self, toolbar: QToolBar):
         """Create auto-marking toolbar controls."""
@@ -609,7 +617,7 @@ class ToolbarManager:
 
     def set_zoom_follow_mode_button(self, mode: str):
         """Update compact zoom-follow button icon and tooltip."""
-        if self.zoom_follow_mode_btn is None:
+        if self.zoom_follow_mode_action is None:
             return
         normalized = str(mode or 'default').strip().lower()
         if normalized == 'fit_lock':
@@ -621,8 +629,27 @@ class ToolbarManager:
         else:
             icon = '⛶'
             tip = 'Default: Per-image zoom behavior'
-        self.zoom_follow_mode_btn.setText(icon)
-        self.zoom_follow_mode_btn.setToolTip(tip)
+        self.zoom_follow_mode_action.setText(icon)
+        self.zoom_follow_mode_action.setToolTip(tip)
+
+    def set_main_viewer_controls_attached(self, attached: bool):
+        """Update attach/detach label for the shared controls cluster."""
+        if self.main_viewer_controls_host_toggle_action is None:
+            return
+        self.main_viewer_controls_host_toggle_action.setText('⋮')
+        self.main_viewer_controls_host_toggle_action.setChecked(bool(attached))
+        if attached:
+            self.main_viewer_controls_host_toggle_action.setToolTip(
+                'Return controls to the toolbar'
+            )
+        else:
+            self.main_viewer_controls_host_toggle_action.setToolTip(
+                'Attach controls to the main viewer overlay'
+            )
+
+    def create_main_viewer_controls_widget(self, *, overlay_mode: bool, parent=None):
+        """Create one host widget for the shared main-viewer controls."""
+        return MainViewerControlsWidget(self, overlay_mode=overlay_mode, parent=parent)
 
     def _delete_all_marked(self):
         """Delete all marked images."""
