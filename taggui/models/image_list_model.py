@@ -900,6 +900,7 @@ class ImageListModel(QAbstractListModel):
     background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
+    thumbnail_updates_ready = Signal()  # Batched visual refresh for paginated thumbnails
     stale_index_paths_detected = Signal(list, int)  # rel_paths, page_num
 
     # Default threshold for enabling pagination mode (overridden by settings)
@@ -2850,6 +2851,7 @@ class ImageListModel(QAbstractListModel):
         # every row calling sizeHintForIndex(). That's 800ms-1300ms of frozen event loop.
         if self._paginated_mode:
             self._pending_thumbnail_updates.clear()
+            self.thumbnail_updates_ready.emit()
             return
 
         # Emit single dataChanged for contiguous ranges (more efficient than individual)

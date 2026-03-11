@@ -61,6 +61,7 @@ class ImageListView(
 
         # Handle dimension updates from enrichment (no layout invalidation)
         source_model.dimensions_updated.connect(lambda: self._recalculate_masonry_if_needed("dimensions_updated"))
+        source_model.thumbnail_updates_ready.connect(self._on_thumbnail_updates_ready)
         
         # Handle full paginated enrichment completion (requires reloading pages)
         if hasattr(source_model, 'enrichment_complete'):

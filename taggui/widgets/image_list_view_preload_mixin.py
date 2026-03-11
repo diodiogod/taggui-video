@@ -1,6 +1,12 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewPreloadMixin:
+    def _on_thumbnail_updates_ready(self):
+        """Refresh visible items when paginated thumbnails arrive without dataChanged."""
+        if not self.model():
+            return
+        self.viewport().update()
+
     def _proxy_index_from_global(self, global_idx: int):
         """Map a masonry global index to a valid proxy index for thumbnail prefetch."""
         model = self.model()
