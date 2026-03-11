@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-03-11
+
+### Added
+
+- allow dragging folders from the file manager into the app to open them
+- allow dragging supported image or video files into the app to open their folder and select the dropped file
+- make external drops work across the main window, image list, and main viewer
+
+### Removed
+
+- Add drag-and-drop folder loading
 ## [1.0.7] - 2026-03-11
 
 ### Added

@@ -66,6 +66,7 @@ Use this path only if you already installed the dependencies yourself. The launc
 After the app opens:
 
 - load a media folder
+- or drag a folder or supported media file from your file manager into the app to open it
 - wait for the initial scan if the folder is large
 - use the media selector to switch between `All`, `Images`, and `Videos`
 - confirm that browsing, filtering, and tagging behave as expected for your folder

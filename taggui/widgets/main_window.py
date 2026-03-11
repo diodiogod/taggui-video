@@ -371,6 +371,7 @@ class PerfHudOverlay(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self, app: QApplication):
         super().__init__()
+        self.setAcceptDrops(True)
         self.app = app
         self.directory_path = None
         self.is_running = True
@@ -516,6 +517,7 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
         self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
         self.all_tags_editor.raise_()
+        self._install_external_drop_targets()
         # Set default widths for the dock widgets.
         # Temporarily set a size for the window so that the dock widgets can be
         # expanded to their default widths. If the window geometry was
@@ -773,6 +775,17 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+        if event_type in (
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.Drop,
+        ):
+            try:
+                if self._handle_external_drop_event(event_type, event):
+                    return True
+            except Exception:
+                pass
+
         if event_type in (event.Type.ShortcutOverride, event.Type.KeyPress):
             try:
                 if self._handle_global_video_key(event, event_type):
@@ -955,6 +968,24 @@ class MainWindow(QMainWindow):
         if self._workspace_apply_pending_id:
             # Let startup restore/layout settle before touching docks.
             self._schedule_workspace_apply(700)
+
+    def dragEnterEvent(self, event):
+        """Accept external folder/media drops that can load a directory."""
+        if self._handle_external_drop_event(QEvent.Type.DragEnter, event):
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        """Keep external folder/media drops accepted while hovering the window."""
+        if self._handle_external_drop_event(QEvent.Type.DragMove, event):
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        """Load a dropped folder or a dropped file's parent folder."""
+        if not self._handle_external_drop_event(QEvent.Type.Drop, event):
+            super().dropEvent(event)
+        return
 
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
@@ -1202,6 +1233,151 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"{base_title} - {selected_file_name}")
         else:
             self.setWindowTitle(base_title)
+
+    def _install_external_drop_targets(self):
+        """Mark main interactive surfaces as able to receive external drops."""
+        candidate_widgets = [
+            self,
+            self.centralWidget(),
+            self.image_viewer,
+            getattr(self.image_viewer, 'view', None),
+            (
+                self.image_viewer.view.viewport()
+                if getattr(self.image_viewer, 'view', None) is not None
+                else None
+            ),
+            self.image_list,
+            self.image_list.widget() if self.image_list is not None else None,
+            self.image_list.list_view if self.image_list is not None else None,
+            (
+                self.image_list.list_view.viewport()
+                if getattr(self.image_list, 'list_view', None) is not None
+                else None
+            ),
+        ]
+        for widget in candidate_widgets:
+            if widget is None:
+                continue
+            try:
+                widget.setAcceptDrops(True)
+            except Exception:
+                continue
+
+    def _handle_external_drop_event(self, event_type, event) -> bool:
+        """Handle external folder/media drag events anywhere in the main app."""
+        mime_data = event.mimeData() if hasattr(event, 'mimeData') else None
+        drop_target = self._resolve_external_drop_target(mime_data)
+        if drop_target is None:
+            return False
+
+        if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            event.acceptProposedAction()
+            return True
+
+        if event_type != QEvent.Type.Drop:
+            return False
+
+        directory_path, select_path = drop_target
+        current_directory = getattr(self, 'directory_path', None)
+        if (
+            select_path
+            and current_directory is not None
+            and directory_path == current_directory.resolve()
+            and self._select_media_by_path(Path(select_path))
+        ):
+            event.acceptProposedAction()
+            return True
+
+        self.load_directory(
+            directory_path,
+            save_path_to_settings=True,
+            select_path=select_path,
+        )
+        event.acceptProposedAction()
+        return True
+
+    def _supported_external_drop_suffixes(self) -> set[str]:
+        """Return local media suffixes that should trigger folder loading."""
+        image_suffixes_string = settings.value(
+            'image_list_file_formats',
+            defaultValue=DEFAULT_SETTINGS['image_list_file_formats'],
+            type=str,
+        )
+        image_suffixes = set()
+        for suffix in image_suffixes_string.split(','):
+            normalized = suffix.strip().lower()
+            if not normalized:
+                continue
+            if not normalized.startswith('.'):
+                normalized = '.' + normalized
+            image_suffixes.add(normalized)
+        video_suffixes = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        return image_suffixes | video_suffixes
+
+    def _resolve_external_drop_target(self, mime_data) -> tuple[Path, str | None] | None:
+        """Map a drop to a folder load target and an optional file to select."""
+        if mime_data is None or not mime_data.hasUrls():
+            return None
+
+        local_paths: list[Path] = []
+        for url in mime_data.urls():
+            try:
+                if not url.isLocalFile():
+                    continue
+                path = Path(url.toLocalFile()).expanduser()
+                if path.exists():
+                    local_paths.append(path.resolve())
+            except Exception:
+                continue
+
+        if not local_paths:
+            return None
+
+        directory_paths = [path for path in local_paths if path.is_dir()]
+        if directory_paths:
+            return directory_paths[0], None
+
+        supported_suffixes = self._supported_external_drop_suffixes()
+        file_paths = [
+            path for path in local_paths
+            if path.is_file() and path.suffix.lower() in supported_suffixes
+        ]
+        if not file_paths:
+            return None
+
+        parent_directory = file_paths[0].parent.resolve()
+        if any(path.parent.resolve() != parent_directory for path in file_paths):
+            return None
+        return parent_directory, str(file_paths[0])
+
+    def _select_media_by_path(self, media_path: Path) -> bool:
+        """Select an already-loaded media item by absolute path."""
+        try:
+            source_row = self.image_list_model.get_index_for_path(media_path.resolve())
+        except Exception:
+            source_row = -1
+        if source_row < 0:
+            return False
+
+        source_index = self.image_list_model.index(source_row, 0)
+        proxy_index = self.proxy_image_list_model.mapFromSource(source_index)
+        if not proxy_index.isValid():
+            return False
+
+        view = self.image_list.list_view
+        selection_model = view.selectionModel()
+        if selection_model is not None:
+            selection_model.setCurrentIndex(
+                proxy_index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+        else:
+            view.setCurrentIndex(proxy_index)
+        try:
+            view.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+        except Exception:
+            view.scrollTo(proxy_index)
+        return True
 
     def _folder_view_settings_prefix(self, path: Path | None = None) -> str:
         """Stable per-folder key prefix for UI view preferences."""
