@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-03-11
+
+### Added
+
+- Reduce black-frame flashes when scrubbing paused videos, including zoomed views
+- Make paused timeline scrubbing smoother even before a clip has been played once
+- Prevent paused seek interactions from leaking stale frames across video switches
+
+### Changed
+
+- Improve paused video scrubbing and masonry thumbnail paint stability
+- Improve first paint reliability in paginated masonry so thumbnails replace placeholders sooner
 ## [1.0.5] - 2026-03-11
 
 ### Added
