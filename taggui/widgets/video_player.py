@@ -392,7 +392,45 @@ class VideoPlayerWidget(QWidget):
 
     def set_view_transformed(self, transformed: bool):
         """Hint from viewer zoom/pan state to choose compatible render path."""
-        _ = bool(transformed)
+        transformed = bool(transformed)
+        paused_native_surface_visible = False
+        if not self.is_playing:
+            try:
+                paused_native_surface_visible = bool(self._mpv_surface_active)
+            except Exception:
+                paused_native_surface_visible = False
+            if not paused_native_surface_visible:
+                try:
+                    paused_native_surface_visible = bool(
+                        self.vlc_widget is not None and self.vlc_widget.isVisible()
+                    )
+                except RuntimeError:
+                    self.vlc_widget = None
+                    paused_native_surface_visible = False
+        if (
+            (not self.is_playing)
+            and self.video_path is not None
+            and paused_native_surface_visible
+        ):
+            try:
+                if self.video_item:
+                    self.video_item.hide()
+            except RuntimeError:
+                self.video_item = None
+            self._set_mpv_visible(False)
+            self._set_vlc_visible(False)
+            try:
+                if self.pixmap_item:
+                    self.pixmap_item.show()
+            except RuntimeError:
+                self.pixmap_item = None
+            # Paused native surfaces can repaint black after zoom/resize before
+            # their backend presents another frame. Rebind the still frame to the
+            # pixmap path so transformed paused views remain stable.
+            try:
+                self._show_opencv_frame(int(self.current_frame or 0))
+            except Exception:
+                pass
         # Keep native backend active; only refresh geometry against the new transform.
         self.sync_external_surface_geometry()
 
@@ -2794,25 +2832,29 @@ class VideoPlayerWidget(QWidget):
         if self.vlc_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
             self._seek_vlc_position_ms(position_ms)
 
-        # If paused, show exact frame via MPV seek (or OpenCV fallback).
+        # If paused, keep the stable pixmap still-frame visible while seeking.
+        # Revealing the native paused surface immediately can flash black before
+        # the backend presents the exact target frame, especially while scrubbing.
         if not self.is_playing:
             if self._is_using_mpv_backend() and self.mpv_player is not None and self._mpv_ready_for_seeks:
                 # Route through the coalescing seek timer — rapid scrub events
                 # are collapsed to one seek per 50ms, always absolute+exact.
+                # Keep the backend in sync for instant resume, but do not switch
+                # the viewport to the native surface until playback resumes.
                 self._seek_mpv_position_ms(position_ms)
                 try:
                     if self.video_item:
                         self.video_item.hide()
                 except RuntimeError:
-                    pass
+                    self.video_item = None
+                self._set_mpv_visible(False)
+                self._set_vlc_visible(False)
                 try:
                     if self.pixmap_item:
-                        self.pixmap_item.hide()
+                        self.pixmap_item.show()
                 except RuntimeError:
-                    pass
-                self._set_mpv_visible(True)
-            else:
-                self._show_opencv_frame(frame_number)
+                    self.pixmap_item = None
+            self._show_opencv_frame(frame_number)
 
         # Emit frame changed signal
         self.frame_changed.emit(frame_number, position_ms)
@@ -2896,6 +2938,18 @@ class VideoPlayerWidget(QWidget):
                 self.video_item.setSize(pixmap.size())
             self._update_mpv_geometry_from_pixmap()
             self._update_vlc_geometry_from_pixmap()
+            try:
+                scene = item.scene()
+                if scene is not None:
+                    scene.update()
+            except Exception:
+                pass
+            try:
+                view = self._resolve_mpv_target_view()
+                if view is not None and view.viewport() is not None:
+                    view.viewport().update()
+            except Exception:
+                pass
         except RuntimeError:
             self.pixmap_item = None
             return
