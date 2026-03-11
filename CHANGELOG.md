@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-03-11
+
+### Added
+
+- Add a hover controls strip for the main viewer
+- Let the controls switch between main-viewer overlay and toolbar fallback
+
+### Changed
+
+- Improve main viewer controls layout
+- Improve hover stability and behavior on high-DPI displays
 ## [1.0.4] - 2026-03-10
 
 ### Added
