@@ -4454,8 +4454,7 @@ class MainWindow(QMainWindow):
                 workspace_group.setExclusive(True)
 
     def _add_to_recent_directories(self, dir_path: str):
-        """Add directory to recent list, maintaining max size."""
-        MAX_RECENT = 10
+        """Add directory to recent list and move it to the top."""
         recent_dirs = settings.value(
             'recent_directories',
             defaultValue=DEFAULT_SETTINGS['recent_directories'],
@@ -4471,9 +4470,6 @@ class MainWindow(QMainWindow):
 
         # Add to beginning
         recent_dirs.insert(0, dir_path)
-
-        # Limit size
-        recent_dirs = recent_dirs[:MAX_RECENT]
 
         # Save and update menu
         settings.setValue('recent_directories', recent_dirs)

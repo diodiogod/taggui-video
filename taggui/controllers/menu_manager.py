@@ -1,11 +1,137 @@
 """Manager for main window menu bar."""
 
 from pathlib import Path
-from PySide6.QtWidgets import QMenuBar, QPushButton, QWidgetAction
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMenuBar,
+    QPushButton,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+)
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QDesktopServices
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 
 from utils.settings import settings, DEFAULT_SETTINGS
+
+
+class RecentFoldersListWidget(QListWidget):
+    """Scrollable recent-folders list embedded inside the File menu."""
+
+    open_requested = Signal(str)
+    delete_requested = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.setUniformItemSizes(True)
+        self.setAlternatingRowColors(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.setSpacing(0)
+        self.setStyleSheet(
+            "QListWidget { border: none; outline: none; background: transparent; }"
+            "QListWidget::item { padding: 4px 8px; min-height: 22px; }"
+        )
+        self.itemClicked.connect(self._open_item)
+        self.itemEntered.connect(self._track_hover_item)
+
+    def mouseMoveEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item is not None:
+            self.setCurrentItem(item)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.clearSelection()
+        self.setCurrentRow(-1)
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete:
+            item = self.currentItem()
+            if item is not None:
+                folder_path = item.data(Qt.ItemDataRole.UserRole)
+                if folder_path:
+                    self.delete_requested.emit(str(folder_path))
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    def _track_hover_item(self, item: QListWidgetItem):
+        if item is not None:
+            self.setCurrentItem(item)
+
+    def _open_item(self, item: QListWidgetItem):
+        folder_path = item.data(Qt.ItemDataRole.UserRole)
+        if folder_path:
+            self.open_requested.emit(str(folder_path))
+
+
+class RecentFolderRowWidget(QWidget):
+    """One row in the recent-folders menu list."""
+
+    open_requested = Signal(str)
+    delete_requested = Signal(str)
+    hover_requested = Signal(str)
+
+    def __init__(self, folder_path: str, exists: bool, parent=None):
+        super().__init__(parent)
+        self.folder_path = str(folder_path)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 6, 2)
+        layout.setSpacing(6)
+
+        self.label = QLabel(self.folder_path if exists else f"{self.folder_path}  [missing]", self)
+        self.label.setToolTip(self.folder_path)
+        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        if not exists:
+            self.label.setStyleSheet("color: #7a7a7a;")
+
+        self.delete_button = QToolButton(self)
+        self.delete_button.setText("×")
+        self.delete_button.setToolTip("Remove this folder from the recent list")
+        self.delete_button.setAutoRaise(True)
+        self.delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_button.clicked.connect(self._emit_delete_requested)
+        self.delete_button.setFixedSize(16, 16)
+        self.delete_button.setStyleSheet(
+            "QToolButton { border: none; padding: 0; margin: 0; background: transparent; color: rgba(235, 235, 235, 0.72); font-size: 13px; }"
+            "QToolButton:hover { color: rgba(196, 64, 64, 0.90); background: transparent; }"
+        )
+
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.delete_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def enterEvent(self, event):
+        self.hover_requested.emit(self.folder_path)
+        super().enterEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.hover_requested.emit(self.folder_path)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.open_requested.emit(self.folder_path)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _emit_delete_requested(self):
+        self.delete_requested.emit(self.folder_path)
 
 
 class MenuManager:
@@ -28,6 +154,9 @@ class MenuManager:
         self.toggle_auto_markings_action = None
         self.toggle_perf_hud_action = None
         self.recent_folders_menu = None
+        self.recent_folders_list_widget = None
+        self.recent_folders_list_action = None
+        self._recent_folders_preferred_path = None
         self.workspace_actions = {}
         self.workspace_action_group = None
         self.spawn_floating_viewer_action = None
@@ -137,6 +266,7 @@ class MenuManager:
         file_menu.addSeparator()
 
         self.recent_folders_menu = file_menu.addMenu('Recent Folders')
+        self.recent_folders_menu.aboutToShow.connect(self._focus_recent_folders_list)
         self._update_recent_folders_menu()
 
         file_menu.addSeparator()
@@ -319,6 +449,8 @@ class MenuManager:
             defaultValue=DEFAULT_SETTINGS['recent_directories'],
             type=list
         )
+        if not isinstance(recent_dirs, list):
+            recent_dirs = []
 
         if not recent_dirs:
             no_recent_action = QAction('No recent folders', self.main_window)
@@ -326,14 +458,42 @@ class MenuManager:
             self.recent_folders_menu.addAction(no_recent_action)
             return
 
+        container = QWidget(self.recent_folders_menu)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.recent_folders_list_widget = RecentFoldersListWidget(container)
+        self.recent_folders_list_widget.open_requested.connect(self._open_recent_folder)
+        self.recent_folders_list_widget.delete_requested.connect(self._remove_recent_folder)
+
+        self.recent_folders_list_widget.setMinimumWidth(520)
+
         for dir_path in recent_dirs:
-            if Path(dir_path).exists():
-                action = QAction(dir_path, self.main_window)
-                action.triggered.connect(
-                    lambda checked=False, p=dir_path:
-                        self.main_window.load_directory(Path(p), save_path_to_settings=True)
-                )
-                self.recent_folders_menu.addAction(action)
+            folder_path = str(dir_path)
+            exists = Path(folder_path).exists()
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, folder_path)
+            self.recent_folders_list_widget.addItem(item)
+            row_widget = RecentFolderRowWidget(folder_path, exists, self.recent_folders_list_widget)
+            row_widget.open_requested.connect(self._open_recent_folder)
+            row_widget.delete_requested.connect(self._remove_recent_folder)
+            row_widget.hover_requested.connect(self._set_current_recent_folder)
+            item.setSizeHint(row_widget.sizeHint())
+            self.recent_folders_list_widget.setItemWidget(item, row_widget)
+
+        visible_count = min(10, len(recent_dirs))
+        row_height = max(24, self.recent_folders_list_widget.sizeHintForRow(0))
+        if row_height <= 0:
+            row_height = 24
+        list_height = (row_height * visible_count) + 4
+        self.recent_folders_list_widget.setMinimumHeight(list_height)
+        self.recent_folders_list_widget.setMaximumHeight(list_height)
+
+        layout.addWidget(self.recent_folders_list_widget)
+        self.recent_folders_list_action = QWidgetAction(self.recent_folders_menu)
+        self.recent_folders_list_action.setDefaultWidget(container)
+        self.recent_folders_menu.addAction(self.recent_folders_list_action)
 
         self.recent_folders_menu.addSeparator()
         clear_action = QAction('Clear Recent Folders', self.main_window)
@@ -344,6 +504,67 @@ class MenuManager:
         """Clear the recent folders list."""
         settings.setValue('recent_directories', [])
         self._update_recent_folders_menu()
+
+    def _focus_recent_folders_list(self):
+        """Keep the embedded list keyboard-active while the menu is open."""
+        if self.recent_folders_list_widget is None:
+            return
+        self.recent_folders_list_widget.setFocus()
+        preferred = str(getattr(self, '_recent_folders_preferred_path', '') or '').strip()
+        if preferred:
+            for row in range(self.recent_folders_list_widget.count()):
+                item = self.recent_folders_list_widget.item(row)
+                if item is not None and str(item.data(Qt.ItemDataRole.UserRole)) == preferred:
+                    self.recent_folders_list_widget.setCurrentRow(row)
+                    return
+        if self.recent_folders_list_widget.count() > 0:
+            self.recent_folders_list_widget.setCurrentRow(0)
+
+    def _open_recent_folder(self, dir_path: str):
+        """Open a folder from the embedded recent-folders list."""
+        folder_path = Path(dir_path)
+        if not folder_path.exists():
+            self._remove_recent_folder(dir_path)
+            return
+        self.recent_folders_menu.hide()
+        self.main_window.load_directory(folder_path, save_path_to_settings=True)
+
+    def _set_current_recent_folder(self, dir_path: str):
+        """Highlight a recent-folder row by path."""
+        if self.recent_folders_list_widget is None:
+            return
+        target_path = str(dir_path)
+        for row in range(self.recent_folders_list_widget.count()):
+            item = self.recent_folders_list_widget.item(row)
+            if item is not None and str(item.data(Qt.ItemDataRole.UserRole)) == target_path:
+                self.recent_folders_list_widget.setCurrentRow(row)
+                return
+
+    def _remove_recent_folder(self, dir_path: str):
+        """Remove one folder from the persisted recent-folders list."""
+        recent_dirs = settings.value(
+            'recent_directories',
+            defaultValue=DEFAULT_SETTINGS['recent_directories'],
+            type=list,
+        )
+        if not isinstance(recent_dirs, list):
+            recent_dirs = []
+        target_path = str(dir_path)
+        removal_index = -1
+        for idx, entry in enumerate(recent_dirs):
+            if str(entry) == target_path:
+                removal_index = idx
+                break
+        updated_dirs = [entry for entry in recent_dirs if str(entry) != target_path]
+        preferred_path = None
+        if updated_dirs:
+            fallback_index = max(0, min(removal_index, len(updated_dirs) - 1))
+            preferred_path = str(updated_dirs[fallback_index])
+        self._recent_folders_preferred_path = preferred_path
+        settings.setValue('recent_directories', updated_dirs)
+        self._update_recent_folders_menu()
+        if self.recent_folders_menu.isVisible():
+            QTimer.singleShot(0, self._focus_recent_folders_list)
 
     def _create_delete_marked_menu(self, menu_bar):
         """Create Delete Marked menu (shown only when images are marked)."""
