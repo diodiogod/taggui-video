@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.12] - 2026-03-11
+
+### Added
+
+- Shift-resizing spawned viewers now keeps manual zoom focused on the same image detail while resizing the window
+- Floating viewer corners now show a clearer animated aspect-lock cue when using Shift
+- Masonry resize and splitter changes now guide the eye to the selected image's new position
+- Small selected-image position changes in masonry now still get a visible tracking cue
+
+### Changed
+
+- Improve resize guidance and masonry tracking
 ## [1.0.11] - 2026-03-11
 
 ### Added
