@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.10] - 2026-03-11
+
+### Added
+
+- Reduce aliasing and shimmer when shrinking images in the main viewer
+- Make zoomed-out images look closer to thumbnail quality
+- Keep panning responsive by preserving the existing fast-pan fallback
+- Avoid changing video rendering behavior
+
+### Changed
+
+- Improve zoomed-out still-image quality
 ## [1.0.9] - 2026-03-11
 
 ### Added

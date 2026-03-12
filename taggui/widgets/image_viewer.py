@@ -47,6 +47,10 @@ def pil_to_qimage(pil_image):
     return qimage
 
 
+STATIC_IMAGE_MIP_DIVISORS = (1, 2, 4, 8, 16, 32)
+STATIC_IMAGE_MIP_OVERSAMPLE = 1.35
+
+
 
 
 class ImageViewer(QWidget):
@@ -172,6 +176,10 @@ class ImageViewer(QWidget):
         self._zoom_follow_pan_ratio = QPointF(0.5, 0.5)
         self._suspend_zoom_follow_locked_scale_sync = False
         self._fast_pan_visual_mode = False
+        self._static_source_qimage = None
+        self._static_source_size = QSize()
+        self._static_mipmap_pixmaps: dict[int, QPixmap] = {}
+        self._static_current_mip_divisor = 1
 
         # Timer for auto-hiding controls
         self._controls_hide_timer = QTimer(self)
@@ -253,8 +261,132 @@ class ImageViewer(QWidget):
         if item is None:
             return
         padding = int(getattr(self, '_scene_padding_px', 0))
-        rect = item.boundingRect().adjusted(-padding, -padding, padding, padding)
+        rect = item.sceneBoundingRect().adjusted(-padding, -padding, padding, padding)
         self.scene.setSceneRect(rect)
+
+    def _clear_static_image_render_cache(self):
+        self._static_source_qimage = None
+        self._static_source_size = QSize()
+        self._static_mipmap_pixmaps = {}
+        self._static_current_mip_divisor = 1
+
+    def _effective_static_source_size(self) -> QSize:
+        size = getattr(self, "_static_source_size", QSize())
+        if isinstance(size, QSize) and size.width() > 0 and size.height() > 0:
+            return size
+        if self.current_image_item is not None:
+            try:
+                pixmap = self.current_image_item.pixmap()
+                if pixmap is not None and not pixmap.isNull():
+                    return pixmap.size()
+            except Exception:
+                pass
+        return QSize()
+
+    def _target_static_mip_divisor(self, scale: float | None = None) -> int:
+        if bool(getattr(self, "_compare_mode_active", False)):
+            return 1
+
+        source_size = self._effective_static_source_size()
+        if source_size.width() <= 0 or source_size.height() <= 0:
+            return 1
+
+        zoom_scale = float(scale if scale is not None else MarkingItem.zoom_factor or 1.0)
+        if zoom_scale >= 0.999:
+            return 1
+
+        max_divisor = 1
+        max_dimension = max(int(source_size.width()), int(source_size.height()))
+        for divisor in STATIC_IMAGE_MIP_DIVISORS:
+            if divisor <= 1:
+                continue
+            if (max_dimension / float(divisor)) < 256.0:
+                break
+            max_divisor = divisor
+
+        desired_divisor = 1.0 / max(1e-6, zoom_scale * STATIC_IMAGE_MIP_OVERSAMPLE)
+        selected = 1
+        for divisor in STATIC_IMAGE_MIP_DIVISORS:
+            if divisor > max_divisor:
+                break
+            if float(divisor) <= desired_divisor:
+                selected = divisor
+        return max(1, int(selected))
+
+    def _get_static_mipmap_pixmap(self, divisor: int) -> QPixmap:
+        divisor = max(1, int(divisor))
+        cached = self._static_mipmap_pixmaps.get(divisor)
+        if cached is not None and not cached.isNull():
+            return cached
+
+        if divisor <= 1:
+            fallback = self._static_mipmap_pixmaps.get(1, QPixmap())
+            return fallback if fallback is not None else QPixmap()
+
+        source = getattr(self, "_static_source_qimage", None)
+        if source is None or source.isNull():
+            fallback = self._static_mipmap_pixmaps.get(1, QPixmap())
+            return fallback if fallback is not None else QPixmap()
+
+        target_width = max(1, int(round(float(source.width()) / float(divisor))))
+        target_height = max(1, int(round(float(source.height()) / float(divisor))))
+        scaled = source.scaled(
+            target_width,
+            target_height,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        pixmap = QPixmap.fromImage(scaled)
+        self._static_mipmap_pixmaps[divisor] = pixmap
+        return pixmap
+
+    def _apply_static_image_quality_for_scale(self, scale: float | None = None, *, force_full: bool = False):
+        if self._is_video_loaded or self.current_image_item is None:
+            return
+        if bool(getattr(self, "_fast_pan_visual_mode", False)):
+            return
+
+        source_size = self._effective_static_source_size()
+        if source_size.width() <= 0 or source_size.height() <= 0:
+            return
+
+        divisor = 1 if force_full else self._target_static_mip_divisor(scale)
+        pixmap = self._get_static_mipmap_pixmap(divisor)
+        if pixmap.isNull():
+            return
+
+        current_scale = 1.0
+        try:
+            current_scale = float(self.current_image_item.scale())
+        except Exception:
+            current_scale = 1.0
+        try:
+            current_pixmap = self.current_image_item.pixmap()
+        except Exception:
+            current_pixmap = QPixmap()
+        if (
+            int(getattr(self, "_static_current_mip_divisor", 1)) == divisor
+            and abs(current_scale - float(divisor)) <= 1e-6
+            and current_pixmap is not None
+            and not current_pixmap.isNull()
+            and current_pixmap.size() == pixmap.size()
+        ):
+            return
+
+        self.current_image_item.setPixmap(pixmap)
+        self.current_image_item.setScale(float(divisor))
+        self.current_image_item.setCacheMode(QGraphicsItem.NoCache)
+        self.current_image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self._static_current_mip_divisor = divisor
+        MarkingItem.image_size = QRect(QPoint(0, 0), source_size)
+        self._set_scene_rect_for_item(self.current_image_item)
+        if bool(getattr(self, "_compare_mode_active", False)):
+            self._refresh_compare_overlay_pixmap(reset_reveal=False)
+        try:
+            self.current_image_item.update()
+            self.view.viewport().update()
+        except Exception:
+            pass
 
     def is_compare_mode_active(self) -> bool:
         return bool(self._compare_mode_active)
@@ -827,6 +959,7 @@ class ImageViewer(QWidget):
         if reset_split:
             self._compare_split_ratio_x = 0.5
             self._compare_split_ratio_y = 0.5
+        self._apply_static_image_quality_for_scale(MarkingItem.zoom_factor)
         return had_compare
 
     def enter_compare_mode(
@@ -861,6 +994,7 @@ class ImageViewer(QWidget):
         if self._is_video_loaded or self.current_image_item is None:
             return False
 
+        self._apply_static_image_quality_for_scale(1.0, force_full=True)
         base_pixmap = self.current_image_item.pixmap()
         if base_pixmap.isNull():
             return False
@@ -1975,6 +2109,7 @@ class ImageViewer(QWidget):
 
             # Check if this is a video
             if image.is_video:
+                self._clear_static_image_render_cache()
                 self._set_fast_pan_visual_mode(False)
                 try:
                     # Image -> video handoff needs a slightly stricter native-reveal policy
@@ -2073,18 +2208,22 @@ class ImageViewer(QWidget):
                     qimage = pil_to_qimage(pil_image)
 
                 pixmap = QPixmap.fromImage(qimage)
+                self._static_source_qimage = qimage
+                self._static_source_size = qimage.size()
+                self._static_mipmap_pixmaps = {1: pixmap}
+                self._static_current_mip_divisor = 1
 
                 # Use standard pixmap item with SmoothTransformation
-                # OpenGL viewport + render hints should provide high-quality GPU scaling
                 image_item = QGraphicsPixmapItem(pixmap)
                 image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-                image_item.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+                image_item.setCacheMode(QGraphicsItem.NoCache)
                 image_item.setZValue(0)
                 self._set_scene_rect_for_item(image_item)
                 self.scene.addItem(image_item)
                 self.current_image_item = image_item  # Keep reference to prevent garbage collection!
                 self.current_video_item = None
-                MarkingItem.image_size = image_item.boundingRect().toRect()
+                MarkingItem.image_size = QRect(QPoint(0, 0), qimage.size())
+                self._fast_pan_visual_mode = True
                 self._set_fast_pan_visual_mode(False)
 
             mode = self.get_zoom_follow_mode()
@@ -2294,6 +2433,7 @@ class ImageViewer(QWidget):
             self.video_player.set_view_transformed(not self.is_zoom_to_fit)
         except Exception:
             pass
+        self._apply_static_image_quality_for_scale(MarkingItem.zoom_factor)
         for marking in self.marking_items:
             marking.adjust_layout()
         if self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
