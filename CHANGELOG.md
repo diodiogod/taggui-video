@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.16] - 2026-03-12
+
+### Added
+
+- Opening thumbnails now requires a left-button double-click
+- Compare hover activation resets after large cursor movement
+- Crop guides stay visible during resize and no longer render red triangle artifacts
+
+### Changed
+
+- Improve compare and marking stability
+
+### Fixed
+
+- Marker dragging is more responsive and avoids crash-prone state
 ## [1.0.15] - 2026-03-12
 
 ### Added
