@@ -17,6 +17,12 @@ class MarkingLabel(QGraphicsTextItem):
         self.setDefaultTextColor(Qt.black)
         self.setTextInteractionFlags(Qt.TextEditorInteraction)
 
+    def _sync_background_rect(self):
+        parent = self.parentItem()
+        if parent is None:
+            return
+        parent.setRect(self.mapRectToParent(self.boundingRect()).normalized())
+
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self.editingFinished.emit()
@@ -27,7 +33,7 @@ class MarkingLabel(QGraphicsTextItem):
             self.editingFinished.emit()
         else:
             super().keyPressEvent(event)
-            self.parentItem().setRect(self.sceneBoundingRect())
+            self._sync_background_rect()
 
     def insertFromMimeData(self, source):
         if source.hasText():
@@ -36,8 +42,8 @@ class MarkingLabel(QGraphicsTextItem):
             cursor.insertText(source.text())
         else:
             super().insertFromMimeData(source)
-        self.parentItem().setRect(self.sceneBoundingRect())
+        self._sync_background_rect()
 
     def changeZoom(self, zoom_factor):
         self.setScale(1/zoom_factor)
-        self.parentItem().setRect(self.sceneBoundingRect())
+        self._sync_background_rect()

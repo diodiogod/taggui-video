@@ -538,7 +538,11 @@ class ImageListViewInteractionMixin:
 
     def mouseDoubleClickEvent(self, event):
         """Handle double-click events."""
-        # Double-click opens image in default app
+        # Only a left-button double-click should open media in the default app.
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mouseDoubleClickEvent(event)
+            return
+
         index = self.indexAt(event.pos())
         if index.isValid():
             # Get the image at this index

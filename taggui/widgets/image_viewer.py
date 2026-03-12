@@ -2308,7 +2308,8 @@ class ImageViewer(QWidget):
                     self.zoom_fit()
             else:
                 self.zoom_fit()
-            self.hud_item = ResizeHintHUD(MarkingItem.image_size, image_item)
+            self.hud_item = ResizeHintHUD(MarkingItem.image_size)
+            self.scene.addItem(self.hud_item)
             if auto_play_after_layout:
                 QTimer.singleShot(0, self.video_player.play)
         else:
@@ -2324,7 +2325,7 @@ class ImageViewer(QWidget):
         else:
             # No crop - reset HUD state
             if hasattr(self, 'hud_item'):
-                self.hud_item.has_crop = False
+                self.hud_item.clear_crop()
             calculate_grid(MarkingItem.image_size)
         for marking in image.markings:
             self.add_rectangle(marking.rect, marking.type, interactive=False,
@@ -2488,8 +2489,11 @@ class ImageViewer(QWidget):
     @Slot()
     def change_marking(self, items: list[MarkingItem] | None = None,
                        new_marking: ImageMarking = ImageMarking.NONE):
-        self.proxy_image_index.model().sourceModel().add_to_undo_stack(
-            action_name=f'Change marking', should_ask_for_confirmation=False)
+        self.proxy_image_index.model().sourceModel().add_image_to_undo_stack(
+            self.proxy_image_index.data(Qt.ItemDataRole.UserRole),
+            action_name='Change marking',
+            should_ask_for_confirmation=False,
+        )
         if items is None:
             items = self.scene.selectedItems()
         for item in items:
@@ -2522,10 +2526,11 @@ class ImageViewer(QWidget):
 
     @Slot(bool)
     def show_marking_latent(self, checked: bool):
+        self.show_marking_latent_state = bool(checked)
         MarkingItem.show_marking_latent = checked
         for marking in self.marking_items:
             if marking.rect_type in [ImageMarking.INCLUDE, ImageMarking.EXCLUDE]:
-                marking.area.setVisible(checked)
+                marking.area.setVisible(bool(checked))
 
     def wheelEvent(self, event):
         shift_pressed = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
@@ -2642,13 +2647,7 @@ class ImageViewer(QWidget):
             marking_item.size_changed() # call after self.crop_marking was set!
             # Enable HUD text display when crop marking exists
             if hasattr(self, 'hud_item'):
-                self.hud_item.has_crop = True
-                self.hud_item.rect = marking_item.rect()
-                self.hud_item.update()
-            if interactive:
-                image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
-                image.crop = rect
-                self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+                self.hud_item.set_crop_rect(marking_item.rect())
         elif name == '' and rect_type != ImageMarking.NONE:
             image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
             name = {ImageMarking.HINT: 'hint',
@@ -2707,21 +2706,18 @@ class ImageViewer(QWidget):
         in the image."""
         from widgets.marking import grid
 
-        assert self.proxy_image_index != None
-        assert self.proxy_image_index.isValid()
+        if self.proxy_image_index is None or not self.proxy_image_index.isValid():
+            return
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
 
         if marking.rect_type == ImageMarking.CROP:
             self.inhibit_reload_image = True
-            self.proxy_image_list_model.sourceModel().layoutAboutToBeChanged.emit()
             image.thumbnail = None
             image.crop = marking.rect().toRect() # ensure int!
             image.target_dimension = grid.target
             # Update HUD rect for crop display
             if hasattr(self, 'hud_item'):
-                self.hud_item.has_crop = True
-                self.hud_item.rect = marking.rect()
-                self.hud_item.update()
+                self.hud_item.set_crop_rect(marking.rect())
             if not self.proxy_image_list_model.does_image_match_filter(
                     image, self.proxy_image_list_model.filter):
                 # don't call .invalidate() as the displayed list shouldn't
@@ -2737,7 +2733,6 @@ class ImageViewer(QWidget):
                 self.proxy_image_index, self.proxy_image_index,
                 [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
                  Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
-            self.proxy_image_list_model.sourceModel().layoutChanged.emit()
             self.inhibit_reload_image = False
         else:
             image.markings = [Marking(m.data(0),
@@ -2756,9 +2751,12 @@ class ImageViewer(QWidget):
     def delete_markings(self, items: list[MarkingItem] | None = None):
         """Slot to delete the list of items or when items = None all currently
         selected marking items."""
-        self.proxy_image_index.model().sourceModel().add_to_undo_stack(
-            action_name=f'Delete marking', should_ask_for_confirmation=False)
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        self.proxy_image_index.model().sourceModel().add_image_to_undo_stack(
+            image,
+            action_name='Delete marking',
+            should_ask_for_confirmation=False,
+        )
         if items is None:
             items = self.scene.selectedItems()
         for item in items:
@@ -2769,8 +2767,7 @@ class ImageViewer(QWidget):
                 image.target_dimension = None
                 # Reset HUD when crop is deleted
                 if hasattr(self, 'hud_item'):
-                    self.hud_item.has_crop = False
-                    self.hud_item.update()
+                    self.hud_item.clear_crop()
                 self.accept_crop_addition.emit(True)
                 calculate_grid(MarkingItem.image_size)
                 self.proxy_image_list_model.sourceModel().dataChanged.emit(

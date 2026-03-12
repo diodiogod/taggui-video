@@ -40,13 +40,27 @@ def select_best_target(
 class CompareDragCoordinator:
     """Tracks one compare drag session with hold threshold and block state."""
 
-    def __init__(self, hold_seconds: float = 2.0):
+    def __init__(self, hold_seconds: float = 2.0, movement_reset_distance: float = 96.0):
         self.hold_seconds = max(0.1, float(hold_seconds))
+        self.movement_reset_distance = max(0.0, float(movement_reset_distance))
         self._active = False
         self._source_key: str | None = None
         self._target_key: str | None = None
         self._target_blocked = False
         self._target_since = 0.0
+        self._target_anchor_pos: tuple[float, float] | None = None
+
+    @staticmethod
+    def _normalize_hover_pos(hover_pos) -> tuple[float, float] | None:
+        if hover_pos is None:
+            return None
+        try:
+            if hasattr(hover_pos, "x") and hasattr(hover_pos, "y"):
+                return (float(hover_pos.x()), float(hover_pos.y()))
+            x_value, y_value = hover_pos
+            return (float(x_value), float(y_value))
+        except Exception:
+            return None
 
     def begin_drag(self, source_key: str, *, now: float | None = None):
         now = time.monotonic() if now is None else float(now)
@@ -55,6 +69,7 @@ class CompareDragCoordinator:
         self._target_key = None
         self._target_blocked = False
         self._target_since = now
+        self._target_anchor_pos = None
 
     def cancel_drag(self):
         self._active = False
@@ -62,6 +77,7 @@ class CompareDragCoordinator:
         self._target_key = None
         self._target_blocked = False
         self._target_since = 0.0
+        self._target_anchor_pos = None
 
     @property
     def active(self) -> bool:
@@ -95,6 +111,7 @@ class CompareDragCoordinator:
         target_key: str | None,
         *,
         blocked: bool = False,
+        hover_pos=None,
         now: float | None = None,
     ) -> dict:
         now = time.monotonic() if now is None else float(now)
@@ -108,10 +125,12 @@ class CompareDragCoordinator:
                 "source_key": None,
             }
 
+        normalized_hover_pos = self._normalize_hover_pos(hover_pos)
         if not target_key:
             self._target_key = None
             self._target_blocked = False
             self._target_since = now
+            self._target_anchor_pos = None
             return self._state_snapshot(now=now, state="none")
 
         target_key = str(target_key)
@@ -120,6 +139,17 @@ class CompareDragCoordinator:
             self._target_key = target_key
             self._target_blocked = blocked
             self._target_since = now
+            self._target_anchor_pos = normalized_hover_pos
+        elif (
+            normalized_hover_pos is not None
+            and self._target_anchor_pos is not None
+            and self.movement_reset_distance > 0.0
+        ):
+            dx = normalized_hover_pos[0] - self._target_anchor_pos[0]
+            dy = normalized_hover_pos[1] - self._target_anchor_pos[1]
+            if ((dx * dx) + (dy * dy)) >= (self.movement_reset_distance * self.movement_reset_distance):
+                self._target_since = now
+                self._target_anchor_pos = normalized_hover_pos
 
         state = "blocked" if self._target_blocked else "hovering"
         snapshot = self._state_snapshot(now=now, state=state)

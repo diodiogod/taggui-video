@@ -199,8 +199,15 @@ class ImageGraphicsView(QGraphicsView):
                 else:
                     rect_type = ImageMarking.HINT
 
-            self.image_viewer.proxy_image_index.model().sourceModel().add_to_undo_stack(
-                action_name=f'Add {rect_type.value}', should_ask_for_confirmation=False)
+            proxy_index = self.image_viewer.proxy_image_index
+            source_model = proxy_index.model().sourceModel() if proxy_index.isValid() else None
+            image = proxy_index.data(Qt.ItemDataRole.UserRole) if proxy_index.isValid() else None
+            if source_model is not None:
+                source_model.add_image_to_undo_stack(
+                    image,
+                    action_name=f'Add {rect_type.value}',
+                    should_ask_for_confirmation=False,
+                )
 
             self.image_viewer.add_rectangle(QRect(self.last_pos, QSize(0, 0)),
                                             rect_type, interactive=True)

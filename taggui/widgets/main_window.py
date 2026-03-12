@@ -420,7 +420,10 @@ class MainWindow(QMainWindow):
         self._floating_viewers = []
         self._comparison_windows = []
         self._floating_viewer_spawn_count = 0
-        self._compare_drag_coordinator = CompareDragCoordinator(hold_seconds=1.0)
+        self._compare_drag_coordinator = CompareDragCoordinator(
+            hold_seconds=1.0,
+            movement_reset_distance=96.0,
+        )
         self._compare_drop_overlay = CompareDropFeedbackOverlay(self)
         self._compare_drag_source = None
         self._compare_drag_last_target = None
@@ -2813,7 +2816,11 @@ class MainWindow(QMainWindow):
         else:
             pair_kind = self._compare_pair_kind(source_index, target_index)
             blocked = pair_kind is None
-        state = self._compare_drag_coordinator.update_target(target.get("key"), blocked=blocked)
+        state = self._compare_drag_coordinator.update_target(
+            target.get("key"),
+            blocked=blocked,
+            hover_pos=global_pos,
+        )
         self._compare_drag_last_target = target
         if state.get("state") == "none":
             self._compare_drop_overlay.hide_feedback()
