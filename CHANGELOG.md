@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.13] - 2026-03-12
+
+### Added
+
+- Spawned viewers no longer stay black after hold/unhold
+- Frozen floating viewers behave like passthrough overlays again
+- The H shortcut works again for floating hold mode
+- Hold mode keeps the familiar grayed-out visual without breaking spawned images
+
+### Fixed
+
+- Fix floating viewer hold mode regressions
 ## [1.0.12] - 2026-03-11
 
 ### Added

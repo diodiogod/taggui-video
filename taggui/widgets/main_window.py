@@ -459,6 +459,7 @@ class MainWindow(QMainWindow):
         self._perf_hud_user_placed = False
         self._perf_hud_saved_geometry = None
         self._hud_shortcut_last_toggle_at = 0.0
+        self._floating_hold_shortcut_last_toggle_at = 0.0
         self._active_nav_mouse_buttons = set()
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
@@ -809,6 +810,24 @@ class MainWindow(QMainWindow):
                             self._toggle_perf_hud()
                         event.accept()
                         return True
+            except Exception:
+                pass
+            try:
+                if (
+                    not event.isAutoRepeat()
+                    and event.key() == Qt.Key.Key_H
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and not self._focus_widget_accepts_text()
+                ):
+                    if event.type() == event.Type.ShortcutOverride:
+                        event.accept()
+                        return True
+                    now = time.monotonic()
+                    if (now - self._floating_hold_shortcut_last_toggle_at) >= 0.10:
+                        self._floating_hold_shortcut_last_toggle_at = now
+                        self.toggle_floating_hold_mode()
+                    event.accept()
+                    return True
             except Exception:
                 pass
 

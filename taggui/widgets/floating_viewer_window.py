@@ -4,7 +4,7 @@ import math
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QEvent, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
-from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsColorizeEffect, QGraphicsView, QMenu,
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsView, QMenu,
                                QPushButton, QSizeGrip, QVBoxLayout, QWidget)
 
 
@@ -222,14 +222,15 @@ class FloatingViewerWindow(QWidget):
         self._shift_resize_glow_phase = 0.0
         self._video_controls_widget = None
         self._frozen_passthrough_mode = False
-        self._colorize_effect = QGraphicsColorizeEffect(self.viewer)
-        self._colorize_effect.setColor(QColor(128, 128, 128))
-        self._colorize_effect.setStrength(0.0)
-        self.viewer.setGraphicsEffect(self._colorize_effect)
+        self._frozen_tint_overlay = QWidget(self)
+        self._frozen_tint_overlay.setObjectName("floatingViewerFrozenTint")
+        self._frozen_tint_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._frozen_tint_overlay.hide()
         self._frozen_outline = QWidget(self)
         self._frozen_outline.setObjectName("floatingViewerFrozenOutline")
         self._frozen_outline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._frozen_outline.hide()
+        self._frozen_tint_overlay.raise_()
         self._frozen_outline.raise_()
         self._shift_resize_corner_cue = ShiftResizeCornerCue(self)
         self._shift_resize_corner_cue.hide()
@@ -685,6 +686,77 @@ class FloatingViewerWindow(QWidget):
     def _emit_activated(self):
         self.activated.emit(self.viewer)
 
+    def _set_widget_tree_mouse_passthrough(self, enabled: bool):
+        widgets = [self]
+        widgets.extend(self.findChildren(QWidget))
+        for widget in widgets:
+            try:
+                widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, bool(enabled))
+            except Exception:
+                pass
+
+        # Keep passive overlays passive regardless of mode.
+        for overlay in (self._frozen_tint_overlay, self._frozen_outline, self._shift_resize_corner_cue):
+            try:
+                overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            except Exception:
+                pass
+
+    def _set_native_mouse_passthrough(self, enabled: bool) -> bool:
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            get_style = getattr(user32, "GetWindowLongPtrW", None) or getattr(user32, "GetWindowLongW", None)
+            set_style = getattr(user32, "SetWindowLongPtrW", None) or getattr(user32, "SetWindowLongW", None)
+            if get_style is None or set_style is None:
+                return False
+
+            hwnd = int(self.winId())
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            current_style = int(get_style(hwnd, GWL_EXSTYLE))
+            target_style = (
+                current_style | WS_EX_TRANSPARENT
+                if enabled else
+                current_style & ~WS_EX_TRANSPARENT
+            )
+            if target_style == current_style:
+                return True
+
+            set_style(hwnd, GWL_EXSTYLE, target_style)
+            SWP_NOMOVE = 0x0001
+            SWP_NOSIZE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+            user32.SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _refresh_viewer_after_window_transition(self):
+        refresher = getattr(self.viewer, "refresh_after_host_window_transition", None)
+        if callable(refresher):
+            try:
+                refresher()
+                return
+            except Exception:
+                pass
+        try:
+            view = getattr(self.viewer, "view", None)
+            if view is not None and hasattr(view, "viewport"):
+                view.viewport().update()
+        except Exception:
+            pass
+
     def _force_activate_viewer_owner(self):
         """Force main-window active viewer switch for strict single-controls mode."""
         parent = self.parentWidget()
@@ -705,25 +777,21 @@ class FloatingViewerWindow(QWidget):
 
         opacity = 0.46 if enabled else 1.0
         self.setWindowOpacity(opacity)
-        if self._colorize_effect is not None:
-            self._colorize_effect.setStrength(0.55 if enabled else 0.0)
-
-        transparent_flag = getattr(Qt.WindowType, "WindowTransparentForInput", None)
-        if transparent_flag is not None:
-            self.setWindowFlag(transparent_flag, enabled)
-            self.show()
-        else:
-            # Fallback for builds without WindowTransparentForInput.
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
+        used_native_passthrough = self._set_native_mouse_passthrough(enabled)
+        self._set_widget_tree_mouse_passthrough(False if used_native_passthrough else enabled)
 
         if enabled:
             self._show_close_button(False)
             self._hide_all_drag_handles()
+            self._frozen_tint_overlay.show()
+            self._frozen_tint_overlay.raise_()
             self._frozen_outline.show()
             self._frozen_outline.raise_()
         else:
+            self._frozen_tint_overlay.hide()
             self._frozen_outline.hide()
         self._apply_style()
+        QTimer.singleShot(0, self._refresh_viewer_after_window_transition)
 
     def set_active(self, active: bool):
         self._active = bool(active)
@@ -777,6 +845,10 @@ class FloatingViewerWindow(QWidget):
                 background: transparent;
                 border: none;
             }}
+            #floatingViewerFrozenTint {{
+                border: none;
+                background: rgba(136, 142, 156, 104);
+            }}
             #floatingViewerFrozenOutline {{
                 border: 3px solid rgba(28, 112, 255, 255);
                 background: transparent;
@@ -786,6 +858,7 @@ class FloatingViewerWindow(QWidget):
 
     def _reposition_overlay_controls(self):
         margin = self._close_button_margin_px
+        self._frozen_tint_overlay.setGeometry(0, 0, self.width(), self.height())
         self._frozen_outline.setGeometry(0, 0, self.width(), self.height())
         corner_size = 18
         corner_gap = self._close_button_clearance_px

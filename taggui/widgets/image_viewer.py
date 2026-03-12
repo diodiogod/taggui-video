@@ -507,6 +507,42 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
+    def refresh_after_host_window_transition(self):
+        """Recover viewer rendering after host-window native flag/visibility changes."""
+        try:
+            self.scene.invalidate()
+        except Exception:
+            pass
+
+        if bool(getattr(self, "_is_video_loaded", False)):
+            try:
+                self.video_player.sync_external_surface_geometry()
+            except Exception:
+                pass
+        else:
+            try:
+                self._set_fast_pan_visual_mode(False)
+            except Exception:
+                pass
+            try:
+                self._apply_static_image_quality_for_scale(MarkingItem.zoom_factor, force_full=False)
+            except Exception:
+                pass
+            try:
+                if self.current_image_item is not None:
+                    self.current_image_item.update()
+            except Exception:
+                pass
+
+        try:
+            self.view.resetCachedContent()
+        except Exception:
+            pass
+        try:
+            self.view.viewport().update()
+        except Exception:
+            pass
+
     def get_compare_fit_mode(self) -> str:
         mode = str(getattr(self, "_compare_fit_mode", COMPARE_FIT_MODE_PRESERVE) or COMPARE_FIT_MODE_PRESERVE).strip().lower()
         if mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
