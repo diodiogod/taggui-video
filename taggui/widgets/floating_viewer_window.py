@@ -1,9 +1,175 @@
 """Frameless floating host window for spawned image viewers."""
 
-from PySide6.QtCore import QPoint, QRect, QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QCursor
+import math
+
+from PySide6.QtCore import QPoint, QPointF, QRect, QEvent, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsColorizeEffect, QGraphicsView, QMenu,
                                QPushButton, QSizeGrip, QVBoxLayout, QWidget)
+
+
+class ShiftResizeCornerCue(QWidget):
+    """Painted L-corner cue with a moving highlight runner."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._corner = None
+        self._runner_progress = 0.0
+        self._pulse = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.hide()
+
+    def set_corner_state(self, corner: str | None, runner_progress: float, pulse: float):
+        if corner not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+            self._corner = None
+            self.hide()
+            return
+        self._corner = str(corner)
+        self._runner_progress = max(0.0, min(1.0, float(runner_progress)))
+        self._pulse = max(0.0, min(1.0, float(pulse)))
+        self.show()
+        self.update()
+
+    @staticmethod
+    def _draw_polyline_segment(painter: QPainter, pen: QPen, points: list[QPointF], start_pos: float, span: float):
+        if len(points) < 2 or span <= 0:
+            return
+        painter.save()
+        painter.setPen(pen)
+        cursor = max(0.0, float(start_pos))
+        remaining = float(span)
+        for index in range(len(points) - 1):
+            start_point = points[index]
+            end_point = points[index + 1]
+            seg_dx = float(end_point.x()) - float(start_point.x())
+            seg_dy = float(end_point.y()) - float(start_point.y())
+            seg_len = math.hypot(seg_dx, seg_dy)
+            if seg_len <= 1e-6:
+                continue
+            if cursor >= seg_len:
+                cursor -= seg_len
+                continue
+            local_start = cursor
+            local_end = min(seg_len, local_start + remaining)
+            t0 = local_start / seg_len
+            t1 = local_end / seg_len
+            seg_start = QPointF(
+                float(start_point.x()) + (seg_dx * t0),
+                float(start_point.y()) + (seg_dy * t0),
+            )
+            seg_end = QPointF(
+                float(start_point.x()) + (seg_dx * t1),
+                float(start_point.y()) + (seg_dy * t1),
+            )
+            painter.drawLine(seg_start, seg_end)
+            remaining -= (local_end - local_start)
+            if remaining <= 1e-6:
+                break
+            cursor = 0.0
+        painter.restore()
+
+    @classmethod
+    def _draw_wrapped_polyline_segment(
+        cls,
+        painter: QPainter,
+        pen: QPen,
+        points: list[QPointF],
+        start_pos: float,
+        span: float,
+        total_length: float,
+    ):
+        if total_length <= 1e-6 or span <= 0:
+            return
+        wrapped_start = float(start_pos) % total_length
+        first_span = min(span, total_length - wrapped_start)
+        cls._draw_polyline_segment(painter, pen, points, wrapped_start, first_span)
+        remaining = span - first_span
+        if remaining > 1e-6:
+            cls._draw_polyline_segment(painter, pen, points, 0.0, remaining)
+
+    def paintEvent(self, event):
+        if self._corner is None:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        width = float(self.width())
+        height = float(self.height())
+        inset = 3.0
+        arm = max(8.0, min(width, height) - (2.0 * inset))
+        if self._corner == "top_left":
+            corner = QPointF(inset, inset)
+            horizontal_end = QPointF(inset + arm, inset)
+            vertical_end = QPointF(inset, inset + arm)
+        elif self._corner == "top_right":
+            corner = QPointF(width - inset, inset)
+            horizontal_end = QPointF(width - inset - arm, inset)
+            vertical_end = QPointF(width - inset, inset + arm)
+        elif self._corner == "bottom_left":
+            corner = QPointF(inset, height - inset)
+            horizontal_end = QPointF(inset + arm, height - inset)
+            vertical_end = QPointF(inset, height - inset - arm)
+        else:
+            corner = QPointF(width - inset, height - inset)
+            horizontal_end = QPointF(width - inset - arm, height - inset)
+            vertical_end = QPointF(width - inset, height - inset - arm)
+
+        points = [horizontal_end, corner, vertical_end]
+        total_length = max(1e-6, 2.0 * arm)
+        runner_head = float(self._runner_progress) * total_length
+        runner_span = max(12.0, arm * 0.30)
+        trail_step = max(6.0, runner_span * 0.32)
+
+        glow_pen = QPen(QColor(84, 255, 148, 42))
+        glow_pen.setWidthF(7.0)
+        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        base_pen = QPen(QColor(154, 255, 190, 132))
+        base_pen.setWidthF(2.6)
+        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        base_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        painter.setPen(glow_pen)
+        painter.drawLine(corner, horizontal_end)
+        painter.drawLine(corner, vertical_end)
+        painter.setPen(base_pen)
+        painter.drawLine(corner, horizontal_end)
+        painter.drawLine(corner, vertical_end)
+
+        trail_specs = (
+            (0.0, runner_span, QColor(212, 255, 222, int(round(118 + (36 * self._pulse)))), 8.0),
+            (trail_step, runner_span * 0.78, QColor(144, 255, 178, int(round(84 + (28 * self._pulse)))), 5.6),
+            (trail_step * 1.9, runner_span * 0.54, QColor(88, 245, 146, int(round(52 + (20 * self._pulse)))), 3.8),
+        )
+        for offset, span, color, width_value in trail_specs:
+            runner_pen = QPen(color)
+            runner_pen.setWidthF(width_value)
+            runner_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            runner_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            self._draw_wrapped_polyline_segment(
+                painter,
+                runner_pen,
+                points,
+                runner_head - offset,
+                span,
+                total_length,
+            )
+
+        head_glow_pen = QPen(QColor(255, 255, 255, 238))
+        head_glow_pen.setWidthF(3.2)
+        head_glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        head_glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        self._draw_wrapped_polyline_segment(
+            painter,
+            head_glow_pen,
+            points,
+            runner_head - (runner_span * 0.24),
+            max(7.0, runner_span * 0.34),
+            total_length,
+        )
 
 
 class FloatingViewerWindow(QWidget):
@@ -49,6 +215,11 @@ class FloatingViewerWindow(QWidget):
         self._resize_start_geometry = QRect()
         self._resize_start_global_pos = QPoint()
         self._resize_prev_anchor = None
+        self._resize_start_zoom_factor = 1.0
+        self._resize_start_zoom_to_fit = True
+        self._resize_start_focus_scene_pos = QPointF()
+        self._shift_resize_visual_zone = None
+        self._shift_resize_glow_phase = 0.0
         self._video_controls_widget = None
         self._frozen_passthrough_mode = False
         self._colorize_effect = QGraphicsColorizeEffect(self.viewer)
@@ -60,6 +231,12 @@ class FloatingViewerWindow(QWidget):
         self._frozen_outline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._frozen_outline.hide()
         self._frozen_outline.raise_()
+        self._shift_resize_corner_cue = ShiftResizeCornerCue(self)
+        self._shift_resize_corner_cue.hide()
+        self._shift_resize_corner_cue.raise_()
+        self._shift_resize_glow_timer = QTimer(self)
+        self._shift_resize_glow_timer.setInterval(40)
+        self._shift_resize_glow_timer.timeout.connect(self._tick_shift_resize_glow)
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setObjectName("floatingViewerWindow")
@@ -124,6 +301,86 @@ class FloatingViewerWindow(QWidget):
                 zone.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             except Exception:
                 pass
+
+    def _shift_resize_modifiers_active(self) -> bool:
+        try:
+            return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        except Exception:
+            return False
+
+    def _tick_shift_resize_glow(self):
+        if self._shift_resize_visual_zone is None:
+            self._shift_resize_glow_timer.stop()
+            return
+        self._shift_resize_glow_phase = (float(self._shift_resize_glow_phase) + 0.24) % (2.0 * math.pi)
+        self._apply_shift_resize_visuals()
+
+    def _apply_shift_resize_visuals(self):
+        zone_name = self._shift_resize_visual_zone
+        pulse = 0.5 + (0.5 * math.sin(float(self._shift_resize_glow_phase)))
+        clear_style = "background: transparent; border: none;"
+        cue = self._shift_resize_corner_cue
+        for name, zone in self._corner_resize_widgets.items():
+            zone.setStyleSheet(clear_style)
+            zone.hide()
+        for name, zone in self._edge_resize_widgets.items():
+            zone.setStyleSheet(clear_style)
+            zone.hide()
+
+        if zone_name not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+            cue.set_corner_state(None, 0.0, 0.0)
+            return
+
+        cue_size = 34
+        edge_margin = 1
+        if zone_name == "top_left":
+            cue_x = edge_margin
+            cue_y = edge_margin
+        elif zone_name == "top_right":
+            cue_x = max(0, self.width() - cue_size - edge_margin)
+            cue_y = edge_margin
+        elif zone_name == "bottom_left":
+            cue_x = edge_margin
+            cue_y = max(0, self.height() - cue_size - edge_margin)
+        else:
+            cue_x = max(0, self.width() - cue_size - edge_margin)
+            cue_y = max(0, self.height() - cue_size - edge_margin)
+
+        cue.setGeometry(cue_x, cue_y, cue_size, cue_size)
+        cue.set_corner_state(
+            zone_name,
+            runner_progress=(float(self._shift_resize_glow_phase) / (2.0 * math.pi)) % 1.0,
+            pulse=pulse,
+        )
+        cue.raise_()
+
+    def _update_shift_resize_visuals(self, global_pos: QPoint | None = None):
+        zone_name = None
+        if self._shift_resize_modifiers_active():
+            if self._resize_active and self._resize_corner:
+                zone_name = self._resize_corner
+            else:
+                probe_pos = global_pos if global_pos is not None else QCursor.pos()
+                try:
+                    local_pos = self.mapFromGlobal(probe_pos)
+                except Exception:
+                    local_pos = QPoint(-1, -1)
+                zone_name = self._resize_zone_from_local_pos(local_pos)
+
+        if zone_name != self._shift_resize_visual_zone:
+            self._shift_resize_visual_zone = zone_name
+            if zone_name is None:
+                self._shift_resize_glow_timer.stop()
+                self._shift_resize_glow_phase = 0.0
+            elif not self._shift_resize_glow_timer.isActive():
+                self._shift_resize_glow_timer.start()
+            self._apply_shift_resize_visuals()
+            return
+
+        if zone_name is not None and not self._shift_resize_glow_timer.isActive():
+            self._shift_resize_glow_timer.start()
+        if zone_name is None:
+            self._apply_shift_resize_visuals()
 
     def _event_global_pos(self, event) -> QPoint:
         try:
@@ -726,6 +983,7 @@ class FloatingViewerWindow(QWidget):
     def _update_overlay_hover_from_global_pos(self, global_pos: QPoint):
         local_pos = self.mapFromGlobal(global_pos)
         self._show_close_button(self._is_in_close_hover_zone(local_pos))
+        self._update_shift_resize_visuals(global_pos)
         if not self._uses_handle_only_window_drag():
             self._hide_all_drag_handles()
             return
@@ -787,6 +1045,7 @@ class FloatingViewerWindow(QWidget):
     def _apply_corner_resize(self, global_pos: QPoint):
         if not self._resize_active or not self._resize_corner:
             return
+        self._update_shift_resize_visuals(global_pos)
         start = self._resize_start_geometry
         if not start.isValid():
             return
@@ -820,6 +1079,7 @@ class FloatingViewerWindow(QWidget):
                 x = start.x() + (start.width() - w) if self._resize_corner == "left" else start.x()
                 y = start.y() + ((start.height() - h) // 2)
                 self.setGeometry(x, y, w, h)
+                self._sync_viewer_scale_for_shift_resize(w, h)
                 return
 
             if self._resize_corner in ("top", "bottom"):
@@ -829,6 +1089,7 @@ class FloatingViewerWindow(QWidget):
                 x = start.x() + ((start.width() - w) // 2)
                 y = start.y() + (start.height() - h) if self._resize_corner == "top" else start.y()
                 self.setGeometry(x, y, w, h)
+                self._sync_viewer_scale_for_shift_resize(w, h)
                 return
 
             raw_w = w
@@ -863,6 +1124,7 @@ class FloatingViewerWindow(QWidget):
                 y = start.y()
 
             self.setGeometry(x, y, w, h)
+            self._sync_viewer_scale_for_shift_resize(w, h)
             return
 
         if self._resize_corner in ("top_left", "bottom_left", "left"):
@@ -880,6 +1142,54 @@ class FloatingViewerWindow(QWidget):
             h = max(min_h, h + dy)
 
         self.setGeometry(x, y, w, h)
+
+    def _sync_viewer_scale_for_shift_resize(self, width: int, height: int):
+        """Scale manual zoom together with Shift-resize on spawned viewers."""
+        if bool(getattr(self, "_resize_start_zoom_to_fit", True)):
+            return
+
+        viewer = getattr(self, "viewer", None)
+        if viewer is None:
+            return
+        apply_zoom = getattr(viewer, "_apply_uniform_zoom_scale", None)
+        if not callable(apply_zoom):
+            return
+
+        start = getattr(self, "_resize_start_geometry", QRect())
+        if not start.isValid() or start.width() <= 0 or start.height() <= 0:
+            return
+
+        scale_ratio_w = float(width) / float(start.width())
+        scale_ratio_h = float(height) / float(start.height())
+        scale_ratio = min(scale_ratio_w, scale_ratio_h)
+        if scale_ratio <= 0:
+            return
+
+        base_zoom = max(1e-9, float(getattr(self, "_resize_start_zoom_factor", 1.0) or 1.0))
+        target_scale = max(1e-9, min(16.0, base_zoom * scale_ratio))
+
+        try:
+            current_scale = abs(float(viewer.view.transform().m11()))
+        except Exception:
+            current_scale = 0.0
+        if current_scale > 0 and abs(current_scale - target_scale) <= max(1e-4, target_scale * 1e-4):
+            return
+
+        try:
+            viewport = getattr(viewer, "view", None).viewport() if getattr(viewer, "view", None) is not None else None
+            anchor_view_pos = viewport.rect().center() if viewport is not None else None
+            focus_scene_pos = getattr(self, "_resize_start_focus_scene_pos", None)
+            if focus_scene_pos is not None and hasattr(focus_scene_pos, "x") and hasattr(focus_scene_pos, "y"):
+                apply_zoom(
+                    target_scale,
+                    zoom_to_fit_state=False,
+                    focus_scene_pos=focus_scene_pos,
+                    anchor_view_pos=anchor_view_pos,
+                )
+            else:
+                apply_zoom(target_scale, zoom_to_fit_state=False)
+        except Exception:
+            pass
 
     def _set_view_resize_anchor_for_window_resize(self, active: bool):
         """Keep zoom stable while resizing the floating window."""
@@ -912,11 +1222,28 @@ class FloatingViewerWindow(QWidget):
         self._resize_corner = zone_name
         self._resize_start_geometry = self.geometry()
         self._resize_start_global_pos = self._event_global_pos(event)
+        try:
+            self._resize_start_zoom_factor = abs(float(self.viewer.view.transform().m11()))
+        except Exception:
+            self._resize_start_zoom_factor = 1.0
+        if self._resize_start_zoom_factor <= 0:
+            self._resize_start_zoom_factor = 1.0
+        self._resize_start_zoom_to_fit = bool(getattr(self.viewer, "is_zoom_to_fit", True))
+        try:
+            view = getattr(self.viewer, "view", None)
+            viewport = view.viewport() if view is not None else None
+            if view is not None and viewport is not None:
+                self._resize_start_focus_scene_pos = view.mapToScene(viewport.rect().center())
+            else:
+                self._resize_start_focus_scene_pos = QPointF()
+        except Exception:
+            self._resize_start_focus_scene_pos = QPointF()
         self._window_drag_active = False
         self._window_drag_button = Qt.MouseButton.NoButton
         self._active_drag_handle = None
         self._set_view_resize_anchor_for_window_resize(True)
         self._emit_activated()
+        self._update_shift_resize_visuals(self._resize_start_global_pos)
 
     def _end_window_resize(self, event=None):
         self._resize_active = False
@@ -924,6 +1251,8 @@ class FloatingViewerWindow(QWidget):
         self._set_view_resize_anchor_for_window_resize(False)
         if event is not None:
             self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+        else:
+            self._update_shift_resize_visuals(QCursor.pos())
 
     def _resize_zone_from_local_pos(self, local_pos: QPoint):
         """Return resize zone name from a local position near window borders."""
@@ -932,6 +1261,8 @@ class FloatingViewerWindow(QWidget):
         y = local_pos.y()
         w = max(1, self.width())
         h = max(1, self.height())
+        if x < 0 or y < 0 or x >= w or y >= h:
+            return None
         near_left = x <= margin
         near_right = x >= (w - margin)
         near_top = y <= margin
@@ -1073,12 +1404,14 @@ class FloatingViewerWindow(QWidget):
                 if self._resize_active:
                     self._apply_corner_resize(self._event_global_pos(event))
                     return True
+                event_global = self._event_global_pos(event)
                 try:
-                    local_pos = self.mapFromGlobal(self._event_global_pos(event))
+                    local_pos = self.mapFromGlobal(event_global)
                     zone_name = self._resize_zone_from_local_pos(local_pos)
                     resize_cursor = self._cursor_for_resize_zone(zone_name)
                     if resize_cursor is not None:
                         watched.setCursor(resize_cursor)
+                        self._update_overlay_hover_from_global_pos(event_global)
                     else:
                         watched.unsetCursor()
                 except Exception:
@@ -1141,35 +1474,36 @@ class FloatingViewerWindow(QWidget):
                 if self._resize_active:
                     self._apply_corner_resize(self._event_global_pos(event))
                     return True
+                event_global = self._event_global_pos(event)
                 # Force handoff on hover even if child event propagation differs.
                 if self._video_controls_widget is not None:
                     try:
                         if self._video_controls_widget.geometry().adjusted(-20, -20, 20, 20).contains(
-                            self.viewer.mapFromGlobal(self._event_global_pos(event))
+                            self.viewer.mapFromGlobal(event_global)
                         ):
                             self._force_activate_viewer_owner()
                     except Exception:
                         pass
                 if self._is_window_drag_button_down(event):
-                    global_pos = self._event_global_pos(event)
-                    self.move(global_pos - self._window_drag_offset)
-                    self._update_overlay_hover_from_global_pos(global_pos)
+                    self.move(event_global - self._window_drag_offset)
+                    self._update_overlay_hover_from_global_pos(event_global)
                     if self._compare_drag_signal_active:
-                        self.compare_drag_moved.emit(self, global_pos)
+                        self.compare_drag_moved.emit(self, event_global)
                     return True
                 try:
-                    local_pos = self.mapFromGlobal(self._event_global_pos(event))
+                    local_pos = self.mapFromGlobal(event_global)
                     zone_name = self._resize_zone_from_local_pos(local_pos)
                     resize_cursor = self._cursor_for_resize_zone(zone_name)
                     if resize_cursor is not None:
                         if hasattr(watched, "setCursor"):
                             watched.setCursor(resize_cursor)
+                        self._update_overlay_hover_from_global_pos(event_global)
                         return False
                     if hasattr(watched, "unsetCursor"):
                         watched.unsetCursor()
                 except Exception:
                     pass
-                self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                self._update_overlay_hover_from_global_pos(event_global)
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 if self._resize_active and event.button() == Qt.MouseButton.LeftButton:
                     self._end_window_resize(event)
@@ -1194,6 +1528,9 @@ class FloatingViewerWindow(QWidget):
         elif watched is self and event.type() == QEvent.Type.WindowActivate:
             self._emit_activated()
 
+        if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            self._update_shift_resize_visuals(QCursor.pos())
+
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event):
@@ -1209,6 +1546,7 @@ class FloatingViewerWindow(QWidget):
         self._show_close_button(False)
         if not self._window_drag_active:
             self._hide_all_drag_handles()
+        self._update_shift_resize_visuals(QPoint(-1, -1))
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -1222,6 +1560,7 @@ class FloatingViewerWindow(QWidget):
     def closeEvent(self, event):
         if self._resize_active:
             self._end_window_resize()
+        self._shift_resize_glow_timer.stop()
         self._cancel_compare_drag_signal()
         self.closing.emit(self.viewer)
         super().closeEvent(event)
