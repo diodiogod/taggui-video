@@ -14,7 +14,7 @@ Current known constraints in TagGUI Video 1M.
 ## Video Captioning
 
 - Current video captioning support is frame-based.
-- TagGUI can caption or tag the current frame or cropped frame region.
+- TagGUI captions one frame per video plus any saved crop region: the current viewer frame for a single loaded video, or for batch captioning the saved loop-start frame when available and otherwise frame `0`.
 - It does not yet perform full-video timeline-aware captioning across an entire clip.
 
 ## Video and Playback

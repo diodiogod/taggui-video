@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.14] - 2026-03-12
+
+### Added
+
+- Batch video captioning no longer reuses the first loaded video's frame for other selections
+- Single selected videos still caption the frame currently shown in the viewer
+- Batch captioning now uses each video's saved loop start when available, otherwise frame 0
+- Saved crop regions continue to apply during video captioning
+
+### Fixed
+
+- Fix video captioning frame selection
 ## [1.0.13] - 2026-03-12
 
 ### Added

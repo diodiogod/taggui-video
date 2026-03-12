@@ -3,6 +3,7 @@ import re
 from contextlib import nullcontext
 from datetime import datetime
 
+import cv2
 import numpy as np
 import torch
 import pillow_jxl
@@ -13,6 +14,7 @@ from transformers import (AutoModelForVision2Seq, AutoProcessor,
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
 import auto_captioning.captioning_thread as captioning_thread
+from models.image_list_model import _video_lock
 from utils.enums import CaptionDevice
 from utils.image import Image
 
@@ -209,27 +211,90 @@ class AutoCaptioningModel:
             text = image_prompt or self.caption_start
         return text
 
-    def load_image(self, image: Image, crop: bool) -> PilImage:
-        # Handle video frames by extracting current frame from video player
-        if image.is_video and self.image_viewer:
-            video_player = self.image_viewer.video_player
-            if video_player:
-                frame_array = video_player.get_current_frame_as_numpy()
-                if frame_array is not None:
-                    # Convert numpy array (RGB) to PIL Image
-                    pil_image = PilImage.fromarray(frame_array, mode='RGB')
-                    pil_image = pil_image.convert(self.image_mode)
-                    if crop and image.crop is not None:
-                        pil_image = pil_image.crop(image.crop.getCoords())
-                    return pil_image
-                else:
-                    # Frame extraction failed, raise error
-                    raise UnidentifiedImageError(
-                        f'Could not extract frame from video: {image.path.name}')
-            else:
-                # No video player available
+    @staticmethod
+    def _get_marked_video_start_frame(image: Image) -> int:
+        if isinstance(getattr(image, 'loop_start_frame', None), int):
+            return max(0, int(image.loop_start_frame))
+
+        viewer_markers = getattr(image, 'viewer_loop_markers', None)
+        if not isinstance(viewer_markers, dict):
+            return 0
+
+        for scope in ('main', 'floating_last'):
+            marker = viewer_markers.get(scope)
+            if isinstance(marker, dict) and isinstance(marker.get('loop_start_frame'), int):
+                return max(0, int(marker['loop_start_frame']))
+
+        for marker in viewer_markers.values():
+            if isinstance(marker, dict) and isinstance(marker.get('loop_start_frame'), int):
+                return max(0, int(marker['loop_start_frame']))
+
+        return 0
+
+    def _load_video_frame(self, image: Image, crop: bool) -> PilImage:
+        target_frame = self._get_marked_video_start_frame(image)
+
+        with _video_lock:
+            cap = cv2.VideoCapture(str(image.path), cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE)
+            if not cap.isOpened():
                 raise UnidentifiedImageError(
-                    f'Video player not available for: {image.path.name}')
+                    f'Could not open video for captioning: {image.path.name}'
+                )
+
+            try:
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if frame_count > 0:
+                    target_frame = min(target_frame, frame_count - 1)
+
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    raise UnidentifiedImageError(
+                        f'Could not extract frame {target_frame} from video: {image.path.name}'
+                    )
+            finally:
+                cap.release()
+
+        pil_image = PilImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), mode='RGB')
+        pil_image = pil_image.convert(self.image_mode)
+        if crop and image.crop is not None:
+            pil_image = pil_image.crop(image.crop.getCoords())
+        return pil_image
+
+    def _should_use_current_viewer_video_frame(self, image: Image) -> bool:
+        if self.image_viewer is None:
+            return False
+        if len(getattr(self.thread, 'selected_image_indices', [])) != 1:
+            return False
+        if not bool(getattr(self.image_viewer, '_is_video_loaded', False)):
+            return False
+
+        video_player = getattr(self.image_viewer, 'video_player', None)
+        if video_player is None or getattr(video_player, 'video_path', None) is None:
+            return False
+
+        return str(video_player.video_path) == str(image.path)
+
+    def _load_current_viewer_video_frame(self, image: Image, crop: bool) -> PilImage:
+        video_player = self.image_viewer.video_player
+        frame_array = video_player.get_current_frame_as_numpy()
+        if frame_array is None:
+            raise UnidentifiedImageError(
+                f'Could not extract current viewer frame from video: {image.path.name}'
+            )
+
+        pil_image = PilImage.fromarray(frame_array, mode='RGB')
+        pil_image = pil_image.convert(self.image_mode)
+        if crop and image.crop is not None:
+            pil_image = pil_image.crop(image.crop.getCoords())
+        return pil_image
+
+    def load_image(self, image: Image, crop: bool) -> PilImage:
+        if image.is_video:
+            if self._should_use_current_viewer_video_frame(image):
+                return self._load_current_viewer_video_frame(image, crop)
+            return self._load_video_frame(image, crop)
 
         # Handle regular image files
         pil_image = PilImage.open(image.path)
