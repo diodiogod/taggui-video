@@ -184,6 +184,11 @@ class ImageListViewStrategyMixin:
         if source_model is None:
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
         selected_global = self._get_current_or_selected_global_index(source_model=source_model)
+        signal = getattr(self, "_last_masonry_signal", None)
+        if signal in {"resize", "resize_drag", "zoom_resize", "thumbnail_size_button"}:
+            if isinstance(selected_global, int) and selected_global >= 0:
+                return int(selected_global)
+
         selected_item = self._get_masonry_item_for_global_index(selected_global) if isinstance(selected_global, int) else None
         if selected_item is not None and self._is_masonry_item_near_viewport(selected_item):
             return int(selected_global)

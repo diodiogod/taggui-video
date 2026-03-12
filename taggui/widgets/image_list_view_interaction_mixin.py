@@ -1545,6 +1545,9 @@ class ImageListViewInteractionMixin:
 
                 # Save to settings
                 settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)
+                parent_widget = self.parent()
+                if parent_widget is not None and hasattr(parent_widget, 'update_thumbnail_size_controls'):
+                    parent_widget.update_thumbnail_size_controls()
 
             event.accept()
             return

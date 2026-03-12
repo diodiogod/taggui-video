@@ -4532,17 +4532,30 @@ class MainWindow(QMainWindow):
         if hasattr(list_view, "_target_thumbnail_size"):
             list_view._target_thumbnail_size = int(size)
         if int(getattr(list_view, 'current_thumbnail_size', size)) == size:
+            if hasattr(self.image_list, 'update_thumbnail_size_controls'):
+                self.image_list.update_thumbnail_size_controls()
             return
         list_view.current_thumbnail_size = size
         list_view.setIconSize(QSize(size, size * 3))
         list_view._update_view_mode()
         if bool(getattr(list_view, 'use_masonry', False)) and hasattr(list_view, '_resize_timer'):
+            # Explicit button/dialog size changes should relayout immediately,
+            # not wait for the masonry grace period or a later scroll event.
+            list_view._last_masonry_done_time = 0
+            list_view._zoom_resize_wait_for_ctrl_release = False
+            list_view._zoom_resize_snap_defer_until = 0.0
+            list_view._last_masonry_signal = "thumbnail_size_button"
+            if hasattr(list_view, '_on_resize_finished'):
+                list_view._on_resize_finished()
+            list_view.viewport().update()
             list_view._resize_timer.stop()
-            list_view._resize_timer.start(180)
+            list_view._resize_timer.start(90)
         else:
             list_view.viewport().update()
         if persist:
             settings.setValue('image_list_thumbnail_size', size)
+        if hasattr(self.image_list, 'update_thumbnail_size_controls'):
+            self.image_list.update_thumbnail_size_controls()
 
     def _compute_full_masonry_initial_size(self) -> int:
         """Pick a medium-density masonry size that also minimizes right-side slack."""

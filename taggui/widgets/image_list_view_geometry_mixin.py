@@ -509,6 +509,9 @@ class ImageListViewGeometryMixin:
         self._target_thumbnail_size = int(target_size)
         self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
         self._update_view_mode()
+        parent_widget = self.parent()
+        if parent_widget is not None and hasattr(parent_widget, 'update_thumbnail_size_controls'):
+            parent_widget.update_thumbnail_size_controls()
         return True
 
     def _on_zoom_resize_idle_finished(self):
@@ -1620,14 +1623,22 @@ class ImageListViewGeometryMixin:
                 self._resize_timer.start(90)
                 return
 
-            if (not self._is_full_width_masonry_mode()) and self._snap_masonry_dock_to_columns():
+            explicit_thumbnail_resize = (
+                getattr(self, "_last_masonry_signal", None) == "thumbnail_size_button"
+            )
+            if (
+                (not explicit_thumbnail_resize)
+                and (not self._is_full_width_masonry_mode())
+                and self._snap_masonry_dock_to_columns()
+            ):
                 return
 
             # In strict paginated mode, explicit page/global anchoring above is
             # more stable than recentering via possibly stale proxy row index.
             self._recenter_after_layout = not strict_paginated
             self._last_masonry_window_signature = None
-            self._last_masonry_signal = "resize"
+            if not explicit_thumbnail_resize:
+                self._last_masonry_signal = "resize"
             self._calculate_masonry_layout()
             self.viewport().update()
 

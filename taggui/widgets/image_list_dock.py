@@ -56,14 +56,45 @@ class ImageList(QDockWidget):
         # Status bar with image index (left) and cache status (right) on same line
         self.image_index_label = ClickableLabel()
         self.cache_status_label = QLabel()
+        self.decrease_thumbnail_size_button = QPushButton('-')
+        self.thumbnail_size_label = ClickableLabel()
+        self.increase_thumbnail_size_button = QPushButton('+')
         self.image_index_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.image_index_label.setToolTip("Click to jump to image index")
         self.image_index_label.clicked.connect(self._on_image_index_label_clicked)
+        self.cache_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        for button, tooltip in (
+            (self.decrease_thumbnail_size_button, 'Smaller thumbnails'),
+            (self.increase_thumbnail_size_button, 'Larger thumbnails'),
+        ):
+            button.setFixedSize(22, 20)
+            button.setToolTip(tooltip)
+
+        self.thumbnail_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumbnail_size_label.setMinimumWidth(54)
+        self.thumbnail_size_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.thumbnail_size_label.setToolTip('Click to set thumbnail size')
+        self.thumbnail_size_label.clicked.connect(
+            self._on_thumbnail_size_label_clicked
+        )
+
+        self.decrease_thumbnail_size_button.clicked.connect(
+            lambda: self._adjust_thumbnail_size(-20)
+        )
+        self.increase_thumbnail_size_button.clicked.connect(
+            lambda: self._adjust_thumbnail_size(20)
+        )
+
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(5, 2, 5, 2)
         status_layout.addWidget(self.image_index_label)
         status_layout.addStretch()  # Push cache label to the right
         status_layout.addWidget(self.cache_status_label)
+        status_layout.addSpacing(8)
+        status_layout.addWidget(self.decrease_thumbnail_size_button)
+        status_layout.addWidget(self.thumbnail_size_label)
+        status_layout.addWidget(self.increase_thumbnail_size_button)
 
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
@@ -90,6 +121,7 @@ class ImageList(QDockWidget):
         #     source_model.cache_warm_progress.connect(self._update_cache_status)
         #     # Trigger initial update
         #     QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
+        self.update_thumbnail_size_controls()
 
     def set_selection_mode(self, selection_mode: str):
         if selection_mode == SelectionMode.DEFAULT:
@@ -135,6 +167,74 @@ class ImageList(QDockWidget):
     def _on_image_index_label_clicked(self):
         """Open quick jump dialog for image index."""
         self.list_view.show_go_to_image_index_dialog()
+
+    def _on_thumbnail_size_label_clicked(self):
+        """Open direct-entry dialog for thumbnail size."""
+        from PySide6.QtWidgets import QInputDialog
+
+        list_view = getattr(self, 'list_view', None)
+        if list_view is None:
+            return
+
+        current_size = int(getattr(list_view, 'current_thumbnail_size', 0) or 0)
+        min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
+        max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
+
+        target_size, ok = QInputDialog.getInt(
+            self,
+            'Set Thumbnail Size',
+            'Thumbnail size (px):',
+            current_size,
+            min_size,
+            max_size,
+            1,
+        )
+        if not ok:
+            return
+
+        main_window = self.window()
+        apply_size = getattr(main_window, '_set_image_list_thumbnail_size', None)
+        if callable(apply_size):
+            apply_size(target_size, persist=True)
+        else:
+            self._adjust_thumbnail_size(target_size - current_size)
+
+    def update_thumbnail_size_controls(self):
+        """Refresh footer thumbnail-size readout and button enabled state."""
+        list_view = getattr(self, 'list_view', None)
+        if list_view is None:
+            return
+
+        current_size = int(getattr(list_view, 'current_thumbnail_size', 0) or 0)
+        min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
+        max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
+
+        self.thumbnail_size_label.setText(f'{current_size}px')
+        self.decrease_thumbnail_size_button.setEnabled(current_size > min_size)
+        self.increase_thumbnail_size_button.setEnabled(current_size < max_size)
+
+    def _adjust_thumbnail_size(self, delta_px: int):
+        """Adjust list thumbnail size using the same stepping as Ctrl+wheel."""
+        list_view = getattr(self, 'list_view', None)
+        if list_view is None:
+            return
+
+        current_size = int(getattr(list_view, 'current_thumbnail_size', 0) or 0)
+        target_size = current_size + int(delta_px)
+
+        main_window = self.window()
+        apply_size = getattr(main_window, '_set_image_list_thumbnail_size', None)
+        if callable(apply_size):
+            apply_size(target_size, persist=True)
+        else:
+            min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
+            max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
+            size = max(min_size, min(max_size, int(target_size)))
+            list_view.current_thumbnail_size = size
+            list_view.setIconSize(QSize(size, size * 3))
+            list_view._update_view_mode()
+            settings.setValue('image_list_thumbnail_size', size)
+            self.update_thumbnail_size_controls()
 
     # DISABLED: Cache warming causes UI blocking
     # def _update_cache_status(self, progress: int, total: int):

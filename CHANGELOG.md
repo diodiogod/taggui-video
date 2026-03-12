@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.15] - 2026-03-12
+
+### Added
+
+- Add thumbnail size minus/plus controls to the image-list footer
+- Allow direct thumbnail size entry by clicking the px readout
+- Footer thumbnail size changes no longer resize the image-list panel width
+
+### Changed
+
+- Improve image-list thumbnail size controls
+- Thumbnail size changes now update masonry immediately without requiring scroll
+- Selected-image landing cues and anchoring behave better during thumbnail size changes
 ## [1.0.14] - 2026-03-12
 
 ### Added

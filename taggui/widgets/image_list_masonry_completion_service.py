@@ -57,7 +57,12 @@ class MasonryCompletionService:
 
             # 2. Update model data
             reflow_guide_snapshot = None
-            if getattr(v, "_last_masonry_signal", None) in {"resize", "resize_drag", "zoom_resize"}:
+            if getattr(v, "_last_masonry_signal", None) in {
+                "resize",
+                "resize_drag",
+                "zoom_resize",
+                "thumbnail_size_button",
+            }:
                 capture_reflow_guide = getattr(v, "_capture_selected_reflow_guide_snapshot", None)
                 if callable(capture_reflow_guide):
                     try:
