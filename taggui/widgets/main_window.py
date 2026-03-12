@@ -4223,8 +4223,11 @@ class MainWindow(QMainWindow):
         if interactive:
             if self._current_viewer_image() is None:
                 return
-            self.image_list_model.add_to_undo_stack(
-                action_name='Change rating', should_ask_for_confirmation=False)
+            self.image_list_model.add_image_to_undo_stack(
+                self._current_viewer_image(),
+                action_name='Change rating',
+                should_ask_for_confirmation=False,
+            )
             self.get_active_viewer().rating_change(rating)
             # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
             # Re-apply filter only when the active filter actually depends on rating.
@@ -4245,8 +4248,11 @@ class MainWindow(QMainWindow):
         if interactive:
             if self._current_viewer_image() is None:
                 return
-            self.image_list_model.add_to_undo_stack(
-                action_name='Change reactions', should_ask_for_confirmation=False)
+            self.image_list_model.add_image_to_undo_stack(
+                self._current_viewer_image(),
+                action_name='Change reactions',
+                should_ask_for_confirmation=False,
+            )
             self.get_active_viewer().reaction_flags_change(love=love, bomb=bomb)
 
     def _arm_masonry_refresh_anchor(self):

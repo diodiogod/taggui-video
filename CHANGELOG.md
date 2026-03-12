@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.11] - 2026-03-11
+
+### Added
+
+- Keep undo and redo support for these actions while avoiding unnecessary whole-model work
+- Preserve the existing save behavior after the UI updates
+
+### Changed
+
+- Improve rating and reaction responsiveness
+- Make heart, bomb, and star interactions update immediately in the viewer toolbar
+
+### Removed
+
+- Remove long pauses caused by reaction and rating changes blocking the UI thread
 ## [1.0.10] - 2026-03-11
 
 ### Added

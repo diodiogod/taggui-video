@@ -569,6 +569,7 @@ class HistoryItem:
     tags: list[dict[str, list[str] | QRect | None | list[Marking]]]
     should_ask_for_confirmation: bool
     paginated_snapshot: dict[str, list[str]] | None = None
+    image_snapshots: list[dict[str, Any]] | None = None
 
 
 class Scope(str, Enum):
@@ -4505,6 +4506,83 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    def _capture_history_image_state(self, image: Image) -> dict[str, Any]:
+        return {
+            'tags': image.tags.copy(),
+            'rating': image.rating,
+            'love': bool(getattr(image, 'love', False)),
+            'bomb': bool(getattr(image, 'bomb', False)),
+            'crop': QRect(image.crop) if image.crop is not None else None,
+            'markings': image.markings.copy(),
+            'loop_start_frame': image.loop_start_frame,
+            'loop_end_frame': image.loop_end_frame,
+        }
+
+    def _history_image_key(self, image: Image) -> str:
+        try:
+            return str(getattr(image, 'path', '') or '')
+        except Exception:
+            return ''
+
+    def add_image_to_undo_stack(
+        self,
+        image: Image | None,
+        action_name: str,
+        should_ask_for_confirmation: bool,
+    ):
+        """Add a lightweight undo snapshot for a single image."""
+        if image is None:
+            self.add_to_undo_stack(action_name, should_ask_for_confirmation)
+            return
+
+        self.undo_stack.append(HistoryItem(
+            action_name,
+            [],
+            should_ask_for_confirmation,
+            image_snapshots=[{
+                'image': image,
+                'path': self._history_image_key(image),
+                'state': self._capture_history_image_state(image),
+            }],
+        ))
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+
+    def _resolve_history_snapshot_image(self, snapshot: dict[str, Any]) -> tuple[Image | None, int | None]:
+        target_image = snapshot.get('image')
+        target_path = str(snapshot.get('path') or '')
+
+        if target_image is not None:
+            try:
+                image_path = str(getattr(target_image, 'path', '') or '')
+                if not target_path or image_path == target_path:
+                    index = self.images.index(target_image)
+                    return target_image, index
+            except ValueError:
+                pass
+            except Exception:
+                pass
+
+        if target_path:
+            for image_index, image in enumerate(self.images):
+                try:
+                    if str(getattr(image, 'path', '') or '') == target_path:
+                        return image, image_index
+                except Exception:
+                    continue
+
+        return None, None
+
+    def _restore_history_image_state(self, image: Image, state: dict[str, Any]):
+        image.tags = state['tags']
+        image.rating = state['rating']
+        image.love = bool(state.get('love', False))
+        image.bomb = bool(state.get('bomb', False))
+        image.crop = state['crop']
+        image.markings = state['markings']
+        image.loop_start_frame = state.get('loop_start_frame')
+        image.loop_end_frame = state.get('loop_end_frame')
+
     def _capture_paginated_tag_snapshot(self) -> dict[str, list[str]]:
         """Capture current tag state for all paths in paginated mode."""
         snapshot: dict[str, list[str]] = {}
@@ -4816,6 +4894,39 @@ class ImageListModel(QAbstractListModel):
                 paginated_snapshot=self._capture_paginated_tag_snapshot(),
             ))
             self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
+            self.update_undo_and_redo_actions_requested.emit()
+            return
+        if history_item.image_snapshots is not None:
+            reverse_snapshots: list[dict[str, Any]] = []
+            changed_image_indices: list[int] = []
+            for snapshot in history_item.image_snapshots:
+                image, image_index = self._resolve_history_snapshot_image(snapshot)
+                if image is None:
+                    continue
+                reverse_snapshots.append({
+                    'image': image,
+                    'path': self._history_image_key(image),
+                    'state': self._capture_history_image_state(image),
+                })
+                self._restore_history_image_state(image, snapshot['state'])
+                self.write_image_tags_to_disk(image)
+                self.write_meta_to_disk(image)
+                self.save_reactions_to_db(image)
+                if isinstance(image_index, int):
+                    changed_image_indices.append(image_index)
+            if reverse_snapshots:
+                destination_stack.append(HistoryItem(
+                    history_item.action_name,
+                    [],
+                    history_item.should_ask_for_confirmation,
+                    image_snapshots=reverse_snapshots,
+                ))
+            if changed_image_indices:
+                changed_image_indices = sorted(set(changed_image_indices))
+                self.dataChanged.emit(
+                    self.index(changed_image_indices[0]),
+                    self.index(changed_image_indices[-1]),
+                )
             self.update_undo_and_redo_actions_requested.emit()
             return
 

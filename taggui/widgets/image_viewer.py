@@ -2299,7 +2299,8 @@ class ImageViewer(QWidget):
             image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
             if image.rating != rating:
                 image.rating = rating
-                self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+                source_model = self.proxy_image_list_model.sourceModel()
+                QTimer.singleShot(0, lambda img=image, model=source_model: model.write_meta_to_disk(img))
 
     def reaction_flags_change(self, love: bool | None = None, bomb: bool | None = None):
         if self.proxy_image_index.isValid():
@@ -2316,9 +2317,9 @@ class ImageViewer(QWidget):
             if changed:
                 source_model = self.proxy_image_list_model.sourceModel()
                 saver = getattr(source_model, 'save_reactions_to_db', None)
-                if callable(saver):
-                    saver(image)
                 self.reaction_flags_changed.emit(bool(image.love), bool(image.bomb))
+                if callable(saver):
+                    QTimer.singleShot(0, lambda img=image, save_fn=saver: save_fn(img))
 
     @Slot()
     def setting_change(self, key, value):
