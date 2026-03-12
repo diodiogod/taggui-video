@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenuBar,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -18,6 +19,14 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QDesktopServices
 from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 
 from utils.settings import settings, DEFAULT_SETTINGS
+try:
+    from version import APP_DISPLAY_NAME, __version__
+except ImportError:
+    from ..version import APP_DISPLAY_NAME, __version__
+
+
+GITHUB_REPOSITORY_URL = 'https://github.com/diodiogod/taggui-video'
+DOCUMENTATION_HUB_URL = f'{GITHUB_REPOSITORY_URL}/blob/main/docs/HUB.md'
 
 
 class RecentFoldersListWidget(QListWidget):
@@ -417,11 +426,46 @@ class MenuManager:
     def _create_help_menu(self, menu_bar):
         """Create Help menu."""
         help_menu = menu_bar.addMenu('Help')
-        GITHUB_REPOSITORY_URL = 'https://github.com/jhc13/taggui'
-        open_github_repository_action = QAction('GitHub', parent=self.main_window)
+        open_documentation_hub_action = QAction(
+            'Documentation Hub', parent=self.main_window
+        )
+        open_documentation_hub_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(DOCUMENTATION_HUB_URL))
+        )
+        help_menu.addAction(open_documentation_hub_action)
+
+        open_github_repository_action = QAction(
+            'GitHub Repository', parent=self.main_window
+        )
         open_github_repository_action.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPOSITORY_URL)))
         help_menu.addAction(open_github_repository_action)
+        help_menu.addSeparator()
+
+        about_action = QAction(
+            f'About {APP_DISPLAY_NAME}', parent=self.main_window
+        )
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
+    def _show_about_dialog(self):
+        """Show application metadata and entry points."""
+        about_box = QMessageBox(self.main_window)
+        about_box.setWindowTitle(f'About {APP_DISPLAY_NAME}')
+        about_box.setIcon(QMessageBox.Icon.Information)
+        about_box.setTextFormat(Qt.TextFormat.RichText)
+        about_box.setText(
+            f'<b>{APP_DISPLAY_NAME}</b><br>'
+            f'Version {__version__}'
+        )
+        about_box.setInformativeText(
+            'Desktop app for browsing, tagging, captioning, and reviewing large '
+            'image and video datasets.<br><br>'
+            f'Documentation Hub:<br><a href="{DOCUMENTATION_HUB_URL}">{DOCUMENTATION_HUB_URL}</a><br><br>'
+            f'GitHub Repository:<br><a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_URL}</a>'
+        )
+        about_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        about_box.exec()
 
     def update_undo_and_redo_actions(self):
         """Update undo/redo menu action text and enabled state."""
