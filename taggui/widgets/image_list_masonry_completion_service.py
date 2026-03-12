@@ -53,13 +53,23 @@ class MasonryCompletionService:
                     anchor_index = visible_before[0]['index']
                     anchor_offset = visible_before[0]['rect'].y() - scroll_val
 
+            source_model = v.proxy_image_list_model.sourceModel()
+
             # 2. Update model data
+            reflow_guide_snapshot = None
+            if getattr(v, "_last_masonry_signal", None) in {"resize", "resize_drag", "zoom_resize"}:
+                capture_reflow_guide = getattr(v, "_capture_selected_reflow_guide_snapshot", None)
+                if callable(capture_reflow_guide):
+                    try:
+                        reflow_guide_snapshot = capture_reflow_guide(source_model=source_model)
+                    except Exception:
+                        reflow_guide_snapshot = None
+
             v._masonry_items = result_dict.get('items', [])
             v._masonry_index_map = None
             total_height_chunk = result_dict.get('total_height', 0)
 
             # 3. Determine if buffered mode
-            source_model = v.proxy_image_list_model.sourceModel()
             is_buffered = source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode
             strategy = v._get_masonry_strategy(source_model) if source_model else "full_compat"
             strict_mode = strategy == "windowed_strict"
@@ -633,6 +643,14 @@ class MasonryCompletionService:
                             idx = v.currentIndex()
                             if idx.isValid():
                                 v.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+                    if reflow_guide_snapshot is not None:
+                        show_reflow_guide = getattr(v, "_show_selected_reflow_guide_from_snapshot", None)
+                        if callable(show_reflow_guide):
+                            try:
+                                show_reflow_guide(reflow_guide_snapshot)
+                            except Exception:
+                                pass
 
                     # Resume enrichment
                     def resume_enrichment_delayed():

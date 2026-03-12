@@ -166,7 +166,291 @@ class _DragIndicatorWidget(QWidget):
                 painter.drawRoundedRect(glow_rect, glow_radius, glow_radius)
 
 
+class _MasonryReflowGuideOverlay(QWidget):
+    """Viewport overlay that guides the eye to a selected item's new position."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._start_rect = QRect()
+        self._end_rect = QRect()
+        self._progress = 0.0
+        self.hide()
+
+    def get_progress(self) -> float:
+        try:
+            return max(0.0, min(1.0, float(self._progress)))
+        except Exception:
+            return 0.0
+
+    def set_progress(self, value):
+        try:
+            progress = float(value)
+        except Exception:
+            progress = 0.0
+        progress = max(0.0, min(1.0, progress))
+        if abs(progress - float(getattr(self, "_progress", 0.0) or 0.0)) <= 1e-4:
+            return
+        self._progress = progress
+        self.update()
+
+    progress = Property(float, get_progress, set_progress)
+
+    def clear(self):
+        self._start_rect = QRect()
+        self._end_rect = QRect()
+        self._progress = 0.0
+        self.hide()
+
+    def set_guide(self, start_rect: QRect, end_rect: QRect):
+        self._start_rect = QRect(start_rect)
+        self._end_rect = QRect(end_rect)
+        self._progress = 0.0
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+        self.update()
+
+    @staticmethod
+    def _lerp_point(start: QPoint, end: QPoint, t: float) -> QPoint:
+        return QPoint(
+            int(round(start.x() + ((end.x() - start.x()) * t))),
+            int(round(start.y() + ((end.y() - start.y()) * t))),
+        )
+
+    def _draw_runner_segment(self, painter: QPainter, start: QPoint, end: QPoint, head_t: float, span_t: float, pen: QPen):
+        if span_t <= 0.0:
+            return
+        tail_t = max(0.0, head_t - span_t)
+        if head_t <= tail_t:
+            return
+        painter.save()
+        painter.setPen(pen)
+        painter.drawLine(
+            self._lerp_point(start, end, tail_t),
+            self._lerp_point(start, end, head_t),
+        )
+        painter.restore()
+
+    @staticmethod
+    def _clamp_point_to_rect(point: QPoint, rect: QRect) -> QPoint:
+        if not rect.isValid():
+            return QPoint(point)
+        return QPoint(
+            max(rect.left(), min(rect.right(), point.x())),
+            max(rect.top(), min(rect.bottom(), point.y())),
+        )
+
+    @classmethod
+    def _clamp_rect_to_bounds(cls, rect: QRect, bounds: QRect) -> QRect:
+        if not rect.isValid():
+            return QRect()
+        top_left = cls._clamp_point_to_rect(rect.topLeft(), bounds)
+        bottom_right = cls._clamp_point_to_rect(rect.bottomRight(), bounds)
+        return QRect(top_left, bottom_right).normalized()
+
+    def _draw_target_brackets(self, painter: QPainter, rect: QRect, alpha_scale: float):
+        if rect.width() <= 0 or rect.height() <= 0 or alpha_scale <= 0.0:
+            return
+
+        bracket_len = max(10, min(20, min(rect.width(), rect.height()) // 4))
+        glow_pen = QPen(QColor(82, 255, 146, int(round(70 * alpha_scale))))
+        glow_pen.setWidthF(7.0)
+        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        base_pen = QPen(QColor(178, 255, 206, int(round(185 * alpha_scale))))
+        base_pen.setWidthF(2.2)
+        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        base_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        corners = (
+            (QPoint(rect.left(), rect.top()), 1, 1),
+            (QPoint(rect.right(), rect.top()), -1, 1),
+            (QPoint(rect.left(), rect.bottom()), 1, -1),
+            (QPoint(rect.right(), rect.bottom()), -1, -1),
+        )
+
+        for pen in (glow_pen, base_pen):
+            painter.setPen(pen)
+            for corner, x_dir, y_dir in corners:
+                painter.drawLine(corner, QPoint(corner.x() + (bracket_len * x_dir), corner.y()))
+                painter.drawLine(corner, QPoint(corner.x(), corner.y() + (bracket_len * y_dir)))
+
+    def paintEvent(self, event):
+        if not self._start_rect.isValid() or not self._end_rect.isValid():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        progress = self.get_progress()
+        fade_out = 1.0 - max(0.0, (progress - 0.72) / 0.28)
+        fade_out = max(0.0, min(1.0, fade_out))
+        if fade_out <= 0.0:
+            return
+
+        safe_bounds = self.rect().adjusted(10, 10, -10, -10)
+        clamped_end_rect = self._clamp_rect_to_bounds(self._end_rect.adjusted(1, 1, -1, -1), safe_bounds)
+        start = self._clamp_point_to_rect(self._start_rect.center(), safe_bounds)
+        end = self._clamp_point_to_rect(self._end_rect.center(), safe_bounds)
+        dx = float(end.x() - start.x())
+        dy = float(end.y() - start.y())
+        distance = math.hypot(dx, dy)
+        if distance <= 1.0:
+            self._draw_target_brackets(painter, clamped_end_rect, fade_out)
+            return
+
+        path_glow_pen = QPen(QColor(64, 255, 136, int(round(38 * fade_out))))
+        path_glow_pen.setWidthF(6.0)
+        path_glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        path_glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        path_pen = QPen(QColor(150, 255, 192, int(round(88 * fade_out))))
+        path_pen.setWidthF(1.7)
+        path_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        path_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        painter.setPen(path_glow_pen)
+        painter.drawLine(start, end)
+        painter.setPen(path_pen)
+        painter.drawLine(start, end)
+
+        head_t = max(0.10, min(1.0, 0.14 + (progress * 0.86)))
+        min_runner_pixels = 18.0
+        max_runner_pixels = 52.0
+        runner_span = min(
+            0.92,
+            max(
+                0.18,
+                min_runner_pixels / distance,
+                min(0.34, max_runner_pixels / distance),
+            ),
+        )
+        trail_specs = (
+            (0.0, runner_span, QColor(214, 255, 222, int(round(170 * fade_out))), 7.0),
+            (runner_span * 0.30, runner_span * 0.72, QColor(138, 255, 178, int(round(122 * fade_out))), 4.8),
+            (runner_span * 0.58, runner_span * 0.40, QColor(86, 244, 140, int(round(76 * fade_out))), 3.0),
+        )
+        for offset, span, color, width_value in trail_specs:
+            runner_pen = QPen(color)
+            runner_pen.setWidthF(width_value)
+            runner_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            runner_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            self._draw_runner_segment(
+                painter,
+                start,
+                end,
+                max(0.0, head_t - offset),
+                span,
+                runner_pen,
+            )
+
+        bracket_progress = min(1.0, max(0.0, (progress - 0.16) / 0.34))
+        self._draw_target_brackets(
+            painter,
+            clamped_end_rect,
+            fade_out * (0.35 + (0.65 * bracket_progress)),
+        )
+
+
 class ImageListViewGeometryMixin:
+    def _selected_masonry_viewport_rect(self, global_index: int, *, scroll_value: int | None = None) -> QRect:
+        """Return a masonry item's rect in viewport coordinates."""
+        if not (isinstance(global_index, int) and global_index >= 0):
+            return QRect()
+        rect = self._get_masonry_item_rect(int(global_index))
+        if not rect.isValid():
+            return QRect()
+        if scroll_value is None:
+            try:
+                scroll_value = int(self.verticalScrollBar().value())
+            except Exception:
+                scroll_value = 0
+        return rect.translated(0, -int(scroll_value or 0))
+
+    def _capture_selected_reflow_guide_snapshot(self, source_model=None):
+        """Capture the selected item's current viewport rect before masonry reflow."""
+        if not (self.use_masonry and self._masonry_items):
+            return None
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        resolver = getattr(self, "_get_current_or_selected_global_index", None)
+        target_global = resolver(source_model=source_model) if callable(resolver) else getattr(self, "_selected_global_index", None)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            return None
+
+        viewport_rect = self.viewport().rect()
+        item_rect = self._selected_masonry_viewport_rect(int(target_global))
+        if not item_rect.isValid():
+            return None
+        if not item_rect.adjusted(-36, -36, 36, 36).intersects(viewport_rect):
+            return None
+        return {
+            "global_index": int(target_global),
+            "viewport_rect": QRect(item_rect),
+        }
+
+    def _show_selected_reflow_guide_from_snapshot(self, snapshot):
+        """Animate a guide from the previous selected-item position to the new one."""
+        if not isinstance(snapshot, dict):
+            return
+        target_global = snapshot.get("global_index")
+        start_rect = snapshot.get("viewport_rect")
+        if not (isinstance(target_global, int) and target_global >= 0):
+            return
+        if not isinstance(start_rect, QRect) or not start_rect.isValid():
+            return
+
+        end_rect = self._selected_masonry_viewport_rect(int(target_global))
+        if not end_rect.isValid():
+            return
+
+        viewport_rect = self.viewport().rect()
+        if not end_rect.adjusted(-24, -24, 24, 24).intersects(viewport_rect):
+            return
+
+        start_center = start_rect.center()
+        end_center = end_rect.center()
+        overlay = getattr(self, "_masonry_reflow_guide_overlay", None)
+        if overlay is None:
+            overlay = _MasonryReflowGuideOverlay(self.viewport())
+            self._masonry_reflow_guide_overlay = overlay
+        else:
+            try:
+                if overlay.parentWidget() is not self.viewport():
+                    overlay.setParent(self.viewport())
+            except Exception:
+                pass
+
+        animation = getattr(self, "_masonry_reflow_guide_animation", None)
+        if animation is not None:
+            try:
+                animation.stop()
+            except Exception:
+                pass
+
+        overlay.set_guide(start_rect, end_rect)
+
+        from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+
+        animation = QPropertyAnimation(overlay, b"progress", self)
+        animation.setDuration(560)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _cleanup():
+            try:
+                overlay.clear()
+            except Exception:
+                pass
+
+        animation.finished.connect(_cleanup)
+        self._masonry_reflow_guide_animation = animation
+        animation.start()
+
     def _is_full_width_masonry_mode(self) -> bool:
         """Whether masonry currently owns the full workspace width."""
         if not self.use_masonry:
