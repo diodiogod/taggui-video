@@ -139,17 +139,24 @@ class CompareDragCoordinator:
             self._target_key = target_key
             self._target_blocked = blocked
             self._target_since = now
-            self._target_anchor_pos = normalized_hover_pos
+            self._target_anchor_pos = None
         elif (
             normalized_hover_pos is not None
-            and self._target_anchor_pos is not None
             and self.movement_reset_distance > 0.0
         ):
-            dx = normalized_hover_pos[0] - self._target_anchor_pos[0]
-            dy = normalized_hover_pos[1] - self._target_anchor_pos[1]
-            if ((dx * dx) + (dy * dy)) >= (self.movement_reset_distance * self.movement_reset_distance):
-                self._target_since = now
-                self._target_anchor_pos = normalized_hover_pos
+            elapsed = max(0.0, now - self._target_since)
+            ready_for_reset = (not self._target_blocked) and elapsed >= self.hold_seconds
+            if ready_for_reset:
+                if self._target_anchor_pos is None:
+                    # Arm movement resets only after the hold has already completed,
+                    # so the blue/loading stage is stable even if the cursor shifts.
+                    self._target_anchor_pos = normalized_hover_pos
+                else:
+                    dx = normalized_hover_pos[0] - self._target_anchor_pos[0]
+                    dy = normalized_hover_pos[1] - self._target_anchor_pos[1]
+                    if ((dx * dx) + (dy * dy)) >= (self.movement_reset_distance * self.movement_reset_distance):
+                        self._target_since = now
+                        self._target_anchor_pos = None
 
         state = "blocked" if self._target_blocked else "hovering"
         snapshot = self._state_snapshot(now=now, state=state)

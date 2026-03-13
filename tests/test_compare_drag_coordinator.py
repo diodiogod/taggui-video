@@ -73,15 +73,33 @@ def test_small_hover_jitter_keeps_hold_progress():
     assert state["ready"] is False
 
 
-def test_large_hover_move_restarts_hold_progress():
+def test_large_hover_move_during_loading_keeps_hold_progress():
     coordinator = CompareDragCoordinator(hold_seconds=2.0, movement_reset_distance=96.0)
     coordinator.begin_drag("source", now=0.0)
     coordinator.update_target("target", blocked=False, hover_pos=(100, 100), now=0.0)
 
     state = coordinator.update_target("target", blocked=False, hover_pos=(250, 100), now=1.0)
+    assert 0.49 < state["progress"] < 0.51
+    assert state["ready"] is False
+
+    state = coordinator.update_target("target", blocked=False, hover_pos=(252, 102), now=2.0)
+    assert state["state"] == "ready"
+    assert state["progress"] == 1.0
+
+
+def test_large_hover_move_after_ready_restarts_hold_progress():
+    coordinator = CompareDragCoordinator(hold_seconds=2.0, movement_reset_distance=96.0)
+    coordinator.begin_drag("source", now=0.0)
+    coordinator.update_target("target", blocked=False, hover_pos=(100, 100), now=0.0)
+
+    state = coordinator.update_target("target", blocked=False, hover_pos=(250, 100), now=2.0)
+    assert state["state"] == "ready"
+    assert state["progress"] == 1.0
+
+    state = coordinator.update_target("target", blocked=False, hover_pos=(400, 100), now=2.1)
     assert state["progress"] == 0.0
     assert state["ready"] is False
 
-    state = coordinator.update_target("target", blocked=False, hover_pos=(252, 102), now=3.0)
+    state = coordinator.update_target("target", blocked=False, hover_pos=(402, 102), now=4.1)
     assert state["state"] == "ready"
     assert state["progress"] == 1.0
