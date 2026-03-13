@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.17] - 2026-03-12
+
+### Added
+
+- Refine compare drag reset timing
+- Large cursor movement no longer resets compare loading while the target is still blue
+- Reset behavior still applies after the target reaches the green ready state
+- Compare drag feedback is more stable for thumbnails and floating viewers
 ## [1.0.16] - 2026-03-12
 
 ### Added
