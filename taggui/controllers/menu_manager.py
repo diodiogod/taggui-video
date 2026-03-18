@@ -152,6 +152,7 @@ class MenuManager:
         self.undo_action = None
         self.redo_action = None
         self.reload_directory_action = None
+        self.refresh_new_media_only_action = None
         self.toggle_toolbar_action = None
         self.reset_toolbars_action = None
         self.reset_layout_action = None
@@ -201,6 +202,8 @@ class MenuManager:
         """Create menu actions."""
         self.reload_directory_action = QAction('Reload Directory', parent=self.main_window)
         self.reload_directory_action.setDisabled(True)
+        self.refresh_new_media_only_action = QAction('Refresh New Media Only', parent=self.main_window)
+        self.refresh_new_media_only_action.setDisabled(True)
         self.undo_action = QAction('Undo', parent=self.main_window)
         self.redo_action = QAction('Redo', parent=self.main_window)
         self.toggle_toolbar_action = QAction('Toolbars', parent=self.main_window)
@@ -271,6 +274,8 @@ class MenuManager:
             [QKeySequence('Ctrl+Shift+L'), QKeySequence('F5')])
         self.reload_directory_action.triggered.connect(self.main_window.reload_directory)
         file_menu.addAction(self.reload_directory_action)
+        self.refresh_new_media_only_action.triggered.connect(self.main_window.refresh_new_media_only)
+        file_menu.addAction(self.refresh_new_media_only_action)
 
         file_menu.addSeparator()
 

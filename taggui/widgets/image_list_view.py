@@ -489,6 +489,10 @@ class ImageListView(
 
     @Slot()
     def _on_model_about_to_reset(self):
+        try:
+            self._get_masonry_incremental_service().invalidate("model_reset")
+        except Exception:
+            pass
         self._model_resetting = True
         # Reset strict/domain anchors so folder switches don't inherit stale
         # virtual heights or edge snaps from the previous dataset.

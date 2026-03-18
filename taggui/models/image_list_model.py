@@ -2,6 +2,7 @@ import random
 import re
 import sys
 import time
+import multiprocessing
 from typing import List, Dict, Any, Optional
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication
 import pillow_jxl
 from PIL import Image as pilimage  # Import Pillow's Image class
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import threading
 
 
@@ -426,14 +427,21 @@ def scan_image_paths_in_subtrees(
     subtree_roots: list[str],
     image_suffixes: set[str],
     progress_callback=None,
+    cooperative_yield: bool = False,
 ) -> tuple[set[str], dict[str, float]]:
     """Scan image files and directory mtimes for the specified subtree roots."""
     import os
     import stat as stat_module
+    import time as time_module
 
     image_rel_paths: set[str] = set()
     dir_mtimes: dict[str, float] = {}
     image_count = 0
+    entry_count = 0
+    yield_check_interval = 128
+    yield_interval_seconds = 0.004
+    yield_sleep_seconds = 0.001
+    last_yield_ts = time_module.monotonic()
 
     if not subtree_roots:
         return image_rel_paths, dir_mtimes
@@ -458,6 +466,12 @@ def scan_image_paths_in_subtrees(
         try:
             with os.scandir(current_path) as entries:
                 for entry in entries:
+                    entry_count += 1
+                    if cooperative_yield and entry_count % yield_check_interval == 0:
+                        now = time_module.monotonic()
+                        if now - last_yield_ts >= yield_interval_seconds:
+                            time_module.sleep(yield_sleep_seconds)
+                            last_yield_ts = time_module.monotonic()
                     if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
                         continue
                     try:
@@ -503,6 +517,37 @@ def scan_image_paths_in_subtrees(
 
     print(f"[SCAN] Refresh complete: {image_count:,} image files found")
     return image_rel_paths, dir_mtimes
+
+
+def _set_low_priority_worker_process():
+    """Best-effort low priority for a background helper process."""
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                BELOW_NORMAL_PRIORITY_CLASS,
+            )
+        else:
+            import os
+            os.nice(19)
+    except Exception:
+        pass
+
+
+def _scan_image_paths_in_subtrees_worker(
+    directory_path_str: str,
+    subtree_roots: tuple[str, ...],
+    image_suffixes: tuple[str, ...],
+) -> tuple[set[str], dict[str, float]]:
+    """Process-safe wrapper for additions-only subtree discovery."""
+    return scan_image_paths_in_subtrees(
+        Path(directory_path_str),
+        list(subtree_roots),
+        set(image_suffixes),
+        cooperative_yield=False,
+    )
 
 
 def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict | None, QImage | None]:
@@ -899,6 +944,7 @@ class ImageListModel(QAbstractListModel):
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
     dimensions_updated = Signal()  # Emitted when aspect ratios change (no layout invalidation)
     background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
+    new_media_refresh_finished = Signal(dict)  # Async additions-only refresh result
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
     thumbnail_updates_ready = Signal()  # Batched visual refresh for paginated thumbnails
@@ -928,6 +974,61 @@ class ImageListModel(QAbstractListModel):
         except Exception as e:
             # Silently ignore if setting priority fails
             pass
+
+    def _ensure_scan_process_executor(self):
+        """Create the process pool used for subtree discovery on demand."""
+        if self._scan_process_disabled or self._scan_process_executor is not None:
+            return
+        try:
+            spawn_context = multiprocessing.get_context("spawn")
+            self._scan_process_executor = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=spawn_context,
+                initializer=_set_low_priority_worker_process,
+            )
+        except Exception as e:
+            self._scan_process_disabled = True
+            print(f"[REFRESH_NEW] Process scan disabled; falling back to thread scan: {e}")
+
+    def _scan_changed_subtrees(
+        self,
+        directory_path: Path,
+        changed_roots: list[str],
+        image_suffixes: set[str],
+    ) -> tuple[set[str], dict[str, float]]:
+        """Discover media paths for changed subtrees, preferring a helper process."""
+        if not self._scan_process_disabled:
+            self._ensure_scan_process_executor()
+            executor = self._scan_process_executor
+            if executor is not None:
+                try:
+                    future = executor.submit(
+                        _scan_image_paths_in_subtrees_worker,
+                        str(directory_path),
+                        tuple(changed_roots),
+                        tuple(sorted(image_suffixes)),
+                    )
+                    return future.result()
+                except Exception as e:
+                    print(
+                        "[REFRESH_NEW] Process scan failed; falling back to "
+                        f"thread scan: {e}"
+                    )
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        executor.shutdown(wait=False)
+                    except Exception:
+                        pass
+                    self._scan_process_executor = None
+                    self._scan_process_disabled = True
+
+        return scan_image_paths_in_subtrees(
+            directory_path,
+            changed_roots,
+            image_suffixes,
+            cooperative_yield=True,
+        )
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
@@ -959,6 +1060,10 @@ class ImageListModel(QAbstractListModel):
         self._background_validation_dialog = None
         self._paginated_maintenance_lock = threading.Lock()
         self._paginated_maintenance_running = False
+        self._new_media_refresh_running = False
+        self._new_media_refresh_generation = 0
+        self._scan_process_executor = None
+        self._scan_process_disabled = False
         self._sort_field = 'mtime'
         self._sort_dir = 'DESC'
         self._filter_sql = ""       # Combined SQL passed to DB calls
@@ -976,6 +1081,11 @@ class ImageListModel(QAbstractListModel):
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
         # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
         self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        self._refresh_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="folder_refresh",
+            initializer=self._set_low_priority_thread,
+        )
         # Save executor: single worker keeps disk pressure predictable during scroll.
         self._save_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -1509,27 +1619,40 @@ class ImageListModel(QAbstractListModel):
             with self._page_load_lock:
                 self._loading_pages.discard(page_num)
 
-    def _load_images_from_db(self, page_num: int) -> tuple[list[Image], list[str]]:
+    def _load_images_from_db(
+        self,
+        page_num: int,
+        *,
+        db: ImageIndexDB | None = None,
+        directory_path: Path | None = None,
+        sort_field: str | None = None,
+        sort_dir: str | None = None,
+        filter_sql: str | None = None,
+        filter_bindings: tuple | None = None,
+        random_seed: int | None = None,
+    ) -> tuple[list[Image], list[str]]:
         """Load images from database for a specific page."""
-        if not self._db or not self._directory_path:
+        active_db = db or self._db
+        base_dir = directory_path or self._directory_path
+        if not active_db or not base_dir:
             return [], []
 
-        rows = self._db.get_page(
+        rows = active_db.get_page(
             page=page_num,
             page_size=self.PAGE_SIZE,
-            sort_field=self._sort_field,
-            sort_dir=self._sort_dir,
-            filter_sql=self._filter_sql,
-            bindings=self._filter_bindings,
-            random_seed=self._random_seed
+            sort_field=sort_field if sort_field is not None else self._sort_field,
+            sort_dir=sort_dir if sort_dir is not None else self._sort_dir,
+            filter_sql=filter_sql if filter_sql is not None else self._filter_sql,
+            bindings=filter_bindings if filter_bindings is not None else self._filter_bindings,
+            random_seed=random_seed if random_seed is not None else self._random_seed,
         )
         images = []
         missing_rel_paths: list[str] = []
         image_ids = [row['id'] for row in rows]
-        tags_map = self._db.get_tags_for_images(image_ids)
+        tags_map = active_db.get_tags_for_images(image_ids)
 
         for row in rows:
-            file_path = self._directory_path / row['file_name']
+            file_path = base_dir / row['file_name']
             img_id = row['id']
             tags = self._filter_internal_db_tags(tags_map.get(img_id, []))
 
@@ -2026,6 +2149,22 @@ class ImageListModel(QAbstractListModel):
         self._log_flow("PAGE", f"Emitted pages_updated with {len(loaded_pages)} pages",
                        throttle_key="pages_updated", every_s=0.3)
 
+    @Slot()
+    def _finalize_paginated_bootstrap_refresh(self):
+        """Return buffered-mode layout handling to post-bootstrap behavior."""
+        if not self._paginated_mode:
+            return
+        self._bootstrap_complete = bool(getattr(self, "_pages", {}))
+
+    def _emit_paginated_layout_refresh(self):
+        """Mirror the initial paginated bootstrap signal ordering after page rebuilds."""
+        if self._paginated_mode:
+            self._bootstrap_complete = False
+        self._emit_pages_updated()
+        self.layoutChanged.emit()
+        if self._paginated_mode:
+            QTimer.singleShot(0, self._finalize_paginated_bootstrap_refresh)
+
     @Slot(list, int)
     def _on_stale_index_paths_detected(self, rel_paths: list, page_num: int):
         """Reconcile stale DB rows discovered during asynchronous page loads."""
@@ -2050,6 +2189,351 @@ class ImageListModel(QAbstractListModel):
         self.total_count_changed.emit(int(new_total))
         self.modelReset.emit()
         self._emit_pages_updated()
+
+    def _compute_new_media_refresh_result(
+        self,
+        directory_path: Path,
+        *,
+        generation: int,
+        filter_sql: str,
+        filter_bindings: tuple,
+        loaded_pages_snapshot: tuple[int, ...],
+        sort_field: str,
+        sort_dir: str,
+        random_seed: int,
+    ) -> dict[str, Any]:
+        """Scan and index newly added media without touching Qt model state."""
+        result: dict[str, Any] = {
+            'supported': False,
+            'requires_full_reload': False,
+            'added_count': 0,
+            'removed_count': 0,
+            'tag_updates_count': 0,
+            'changed_root_count': 0,
+            'scanned_image_count': 0,
+            'directory_path': str(directory_path),
+            'generation': int(generation),
+            'elapsed_ms': 0,
+        }
+        if not directory_path:
+            return result
+
+        start_ts = time.monotonic()
+        db = None
+
+        result['supported'] = True
+        try:
+            db = ImageIndexDB(directory_path)
+            cached_paths = db.get_all_paths()
+            norm_to_cached_paths: dict[str, list[str]] = {}
+            for rel_path in cached_paths:
+                normalized = _normalize_relative_path(rel_path)
+                norm_to_cached_paths.setdefault(normalized, []).append(rel_path)
+
+            current_rel_map: dict[str, str] = {}
+            for normalized, rel_variants in norm_to_cached_paths.items():
+                current_rel_map[normalized] = sorted(set(rel_variants))[0]
+            current_rel_paths = set(current_rel_map.keys())
+
+            stored_dir_mtimes = db.get_directory_signatures()
+            if stored_dir_mtimes:
+                changed_roots = get_changed_directory_roots(directory_path, stored_dir_mtimes)
+            else:
+                changed_roots = [""]
+            result['changed_root_count'] = len(changed_roots)
+
+            if not changed_roots:
+                print("[REFRESH_NEW] No directory changes detected")
+                return result
+
+            image_suffixes_string = settings.value(
+                'image_list_file_formats',
+                defaultValue=DEFAULT_SETTINGS['image_list_file_formats'],
+                type=str,
+            )
+            image_suffixes: set[str] = set()
+            for suffix in image_suffixes_string.split(','):
+                suffix = suffix.strip().lower()
+                if not suffix:
+                    continue
+                if not suffix.startswith('.'):
+                    suffix = '.' + suffix
+                image_suffixes.add(suffix)
+
+            refreshed_rel_paths, refreshed_dir_mtimes = self._scan_changed_subtrees(
+                directory_path,
+                changed_roots,
+                image_suffixes,
+            )
+            result['scanned_image_count'] = len(refreshed_rel_paths)
+
+            scoped_current_rel_paths = {
+                rel_path for rel_path in current_rel_paths
+                if any(
+                    _path_is_within_subtree(rel_path, changed_root)
+                    for changed_root in changed_roots
+                )
+            }
+            removed_rel_paths = sorted(scoped_current_rel_paths - refreshed_rel_paths)
+            if removed_rel_paths:
+                result['requires_full_reload'] = True
+                result['removed_count'] = len(removed_rel_paths)
+                print(
+                    "[REFRESH_NEW] Additions-only refresh aborted; detected "
+                    f"{len(removed_rel_paths):,} removed or renamed media path(s)"
+                )
+                return result
+
+            added_rel_paths = sorted(refreshed_rel_paths - current_rel_paths)
+            added_db_paths = [_to_native_relative_path(rel_path) for rel_path in added_rel_paths]
+            result['added_count'] = len(added_db_paths)
+
+            if stored_dir_mtimes:
+                merged_dir_mtimes = {
+                    rel_dir: mtime
+                    for rel_dir, mtime in stored_dir_mtimes.items()
+                    if not any(
+                        _path_is_within_subtree(rel_dir, changed_root)
+                        for changed_root in changed_roots
+                    )
+                }
+            else:
+                merged_dir_mtimes = {}
+            merged_dir_mtimes.update(refreshed_dir_mtimes)
+            db.replace_directory_signatures(merged_dir_mtimes)
+
+            if added_db_paths:
+                db.bulk_insert_relative_paths(
+                    added_db_paths,
+                    directory_path,
+                )
+
+            tag_updates_count = 0
+            if added_db_paths:
+                tag_updates_count = int(
+                    self._index_tags_for_relative_paths(
+                        added_db_paths,
+                        db=db,
+                        directory_path=directory_path,
+                    ) or 0
+                )
+            result['tag_updates_count'] = tag_updates_count
+
+            if not added_db_paths:
+                print("[REFRESH_NEW] No new media detected")
+                return result
+
+            new_total = int(
+                db.count(
+                    filter_sql=filter_sql,
+                    bindings=filter_bindings,
+                ) or 0
+            )
+            result['new_total'] = new_total
+
+            total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+            pages_to_reload = [
+                int(page_num) for page_num in loaded_pages_snapshot
+                if 0 <= int(page_num) < total_pages
+            ]
+            if not pages_to_reload and total_pages > 0:
+                pages_to_reload = list(range(min(3, total_pages)))
+            result['pages_to_reload'] = list(pages_to_reload)
+
+            preloaded_pages: dict[int, list[Image]] = {}
+            for page_num in pages_to_reload:
+                page_images, _missing_rel_paths = self._load_images_from_db(
+                    int(page_num),
+                    db=db,
+                    directory_path=directory_path,
+                    sort_field=sort_field,
+                    sort_dir=sort_dir,
+                    filter_sql=filter_sql,
+                    filter_bindings=filter_bindings,
+                    random_seed=random_seed,
+                )
+                preloaded_pages[int(page_num)] = page_images
+            result['preloaded_pages'] = preloaded_pages
+
+            print(
+                "[REFRESH_NEW] Added "
+                f"{result['added_count']:,} new media item(s)"
+            )
+            return result
+        finally:
+            result['elapsed_ms'] = int((time.monotonic() - start_ts) * 1000)
+            if db is not None:
+                db.close()
+
+    def start_refresh_new_media_only_async(self) -> bool:
+        """Run additions-only refresh in the background."""
+        if not self._paginated_mode or not self._directory_path:
+            return False
+        if self._new_media_refresh_running:
+            return False
+
+        self._new_media_refresh_running = True
+        self._new_media_refresh_generation += 1
+        generation = int(self._new_media_refresh_generation)
+        directory_path = Path(self._directory_path)
+        filter_sql = str(self._filter_sql or '')
+        filter_bindings = tuple(self._filter_bindings or ())
+        sort_field = str(self._sort_field or 'mtime')
+        sort_dir = str(self._sort_dir or 'DESC')
+        random_seed = int(self._random_seed or 0)
+        with self._page_load_lock:
+            loaded_pages_snapshot = tuple(sorted(int(page_num) for page_num in self._pages.keys()))
+
+        def worker():
+            try:
+                result = self._compute_new_media_refresh_result(
+                    directory_path,
+                    generation=generation,
+                    filter_sql=filter_sql,
+                    filter_bindings=filter_bindings,
+                    loaded_pages_snapshot=loaded_pages_snapshot,
+                    sort_field=sort_field,
+                    sort_dir=sort_dir,
+                    random_seed=random_seed,
+                )
+            except Exception as e:
+                result = {
+                    'supported': True,
+                    'requires_full_reload': True,
+                    'added_count': 0,
+                    'removed_count': 0,
+                    'tag_updates_count': 0,
+                    'changed_root_count': 0,
+                    'scanned_image_count': 0,
+                    'directory_path': str(directory_path),
+                    'generation': generation,
+                    'elapsed_ms': 0,
+                    'error': str(e),
+                }
+                print(f"[REFRESH_NEW] Background refresh failed: {e}")
+            finally:
+                self._new_media_refresh_running = False
+
+            self.new_media_refresh_finished.emit(result)
+
+        self._refresh_executor.submit(worker)
+        return True
+
+    def apply_refresh_new_media_only_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Apply a completed additions-only refresh result on the UI thread."""
+        if not result.get('supported', False):
+            return result
+        if result.get('requires_full_reload', False):
+            return result
+        if 'new_total' not in result:
+            return result
+        if int(result.get('generation', -1) or -1) != int(self._new_media_refresh_generation):
+            result['stale'] = True
+            return result
+
+        result_directory = Path(str(result.get('directory_path') or ''))
+        if not result_directory or self._directory_path != result_directory:
+            result['stale'] = True
+            return result
+
+        new_total = int(result.get('new_total', 0) or 0)
+        pages_to_reload = [int(page_num) for page_num in (result.get('pages_to_reload') or [])]
+        preloaded_pages = {
+            int(page_num): list(images or [])
+            for page_num, images in (result.get('preloaded_pages') or {}).items()
+        }
+        if not pages_to_reload and preloaded_pages:
+            pages_to_reload = sorted(int(page_num) for page_num in preloaded_pages.keys())
+
+        if self._db is not None:
+            try:
+                self._db.close()
+            except Exception:
+                pass
+        self._db = ImageIndexDB(self._directory_path)
+
+        self.beginResetModel()
+        try:
+            with self._page_load_lock:
+                self._pages.clear()
+                self._loading_pages.clear()
+                self._page_load_order.clear()
+
+            self.images = []
+            self._total_count = new_total
+        finally:
+            self.endResetModel()
+
+        for page_num in pages_to_reload:
+            page_images = preloaded_pages.get(int(page_num))
+            if page_images is None:
+                self._load_page_sync(int(page_num))
+                continue
+            self._store_page(int(page_num), page_images)
+
+        self.total_count_changed.emit(self._total_count)
+        self._emit_paginated_layout_refresh()
+        result['reloaded_page_count'] = len(pages_to_reload)
+        result['refreshed_model'] = True
+
+        if pages_to_reload:
+            self._start_paginated_enrichment(window_pages=pages_to_reload, scope='window')
+
+        print(
+            "[REFRESH_NEW] Applied background refresh; "
+            f"reloaded {len(pages_to_reload)} page(s)"
+        )
+        return result
+
+    def _index_tags_for_relative_paths(
+        self,
+        rel_paths: list[str],
+        *,
+        db: ImageIndexDB | None = None,
+        directory_path: Path | None = None,
+    ) -> int:
+        """Index .txt sidecar tags for specific relative media paths."""
+        active_db = db or self._db
+        base_dir = directory_path or self._directory_path
+        if not active_db or not base_dir or not rel_paths:
+            return 0
+
+        updated_count = 0
+        for rel_path in rel_paths:
+            if not rel_path:
+                continue
+
+            image_id = active_db.get_image_id(rel_path)
+            if not image_id:
+                continue
+
+            txt_path = (base_dir / rel_path).with_suffix('.txt')
+            txt_sidecar_mtime = None
+            tags: list[str] = []
+
+            if txt_path.exists():
+                try:
+                    txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                except OSError:
+                    txt_sidecar_mtime = None
+
+                try:
+                    caption = txt_path.read_text(encoding='utf-8', errors='replace')
+                except OSError:
+                    caption = ''
+
+                if caption:
+                    tags = self._normalize_tags(caption.split(self.tag_separator))
+
+            if tags:
+                active_db.set_tags_for_image(image_id, tags)
+            else:
+                active_db.set_tags_for_image(image_id, [])
+                active_db.add_tag_to_image(image_id, '__no_tags__')
+            active_db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+            updated_count += 1
+
+        return updated_count
 
 
     def _process_enrichment_queue(self):
@@ -2734,7 +3218,13 @@ class ImageListModel(QAbstractListModel):
             self._pending_db_cache_flags.clear()
 
         # Cancel queued jobs in all executors to prevent minute-long shutdown hangs.
-        for executor_name in ('_page_executor', '_load_executor', '_save_executor'):
+        for executor_name in (
+            '_page_executor',
+            '_load_executor',
+            '_refresh_executor',
+            '_save_executor',
+            '_scan_process_executor',
+        ):
             executor = getattr(self, executor_name, None)
             if executor is None:
                 continue
@@ -4371,8 +4861,7 @@ class ImageListModel(QAbstractListModel):
         # Trigger masonry calculation now that we have initial pages
         # CRITICAL: Emit pages_updated BEFORE layoutChanged so proxy invalidates first
         # Otherwise proxy.rowCount() returns 0 during masonry calculation
-        self._emit_pages_updated()
-        self.layoutChanged.emit()
+        self._emit_paginated_layout_refresh()
         QTimer.singleShot(
             250,
             lambda path=Path(directory_path): self._schedule_paginated_maintenance(path),

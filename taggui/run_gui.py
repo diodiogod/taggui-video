@@ -267,7 +267,9 @@ def run_gui():
 
 
 if __name__ == '__main__':
+    from multiprocessing import freeze_support
     # Suppress all warnings when not in a development environment.
+    freeze_support()
     suppress_warnings()
     install_crash_handlers()
     try:

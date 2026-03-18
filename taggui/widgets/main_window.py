@@ -385,6 +385,7 @@ class MainWindow(QMainWindow):
         self._workspace_apply_retry_count = 0
         self._workspace_applying = False
         self._workspace_active_id = None
+        self._pending_new_media_refresh_state = None
         self._default_window_state = None
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
@@ -402,6 +403,9 @@ class MainWindow(QMainWindow):
         self.proxy_image_list_model = ProxyImageListModel(
             self.image_list_model, tokenizer, tag_separator)
         self.image_list_model.proxy_image_list_model = self.proxy_image_list_model
+        self.image_list_model.new_media_refresh_finished.connect(
+            self._on_new_media_refresh_finished
+        )
         self.tag_counter_model = TagCounterModel()
         self.image_tag_list_model = ImageTagListModel()
 
@@ -3837,34 +3841,26 @@ class MainWindow(QMainWindow):
         self.image_list.list_view.setFocus()
 
         self.menu_manager.reload_directory_action.setDisabled(False)
+        refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
+        if refresh_new_media_action is not None:
+            refresh_new_media_action.setDisabled(
+                not bool(getattr(self.image_list_model, '_paginated_mode', False))
+            )
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
 
-    @Slot()
-    def select_and_load_directory(self):
-        initial_directory = (str(self.directory_path)
-                             if self.directory_path else '')
-        load_directory_path = QFileDialog.getExistingDirectory(
-            parent=self, caption='Select directory to load images from',
-            dir=initial_directory)
-        if not load_directory_path:
-            return
-        self.load_directory(Path(load_directory_path),
-                            save_path_to_settings=True)
-
-    @Slot()
-    def reload_directory(self):
-        # Save the filter text and the index of the selected image to restore
-        # them after reloading the directory.
+    def _capture_reload_restore_state(self) -> tuple[str, int, str | None]:
+        """Capture filter and selection state before a directory refresh."""
         filter_text = self.image_list.filter_line_edit.text()
-        select_index_key = ('image_index'
-                            if self.proxy_image_list_model.filter is None
-                            else 'filtered_image_index')
+        select_index_key = (
+            'image_index'
+            if self.proxy_image_list_model.filter is None
+            else 'filtered_image_index'
+        )
 
-        # If we have a post-deletion index, use that instead of the saved index
         if self.post_deletion_index is not None:
             select_index = self.post_deletion_index
-            self.post_deletion_index = None  # Clear it after use
+            self.post_deletion_index = None
         else:
             select_index = settings.value(select_index_key, type=int) or 0
 
@@ -3872,13 +3868,18 @@ class MainWindow(QMainWindow):
         if not select_path and settings.contains('last_selected_path'):
             select_path = settings.value('last_selected_path', type=str)
 
-        self.load_directory(
-            self.directory_path,
-            select_index=select_index,
-            select_path=select_path,
-        )
-        load_session_id = self._load_session_id
-        self.image_list.filter_line_edit.setText(filter_text)
+        return filter_text, select_index, select_path
+
+    def _restore_directory_selection(
+        self,
+        *,
+        select_index: int,
+        select_path: str | None,
+        load_session_id: int | None = None,
+    ):
+        """Restore the current selection after a reload or incremental refresh."""
+        if load_session_id is None:
+            load_session_id = self._load_session_id
 
         target_index = QModelIndex()
         if select_path:
@@ -3891,8 +3892,6 @@ class MainWindow(QMainWindow):
                 target_index = QModelIndex()
 
         if not target_index.isValid():
-            # If the selected image index is out of bounds due to images being
-            # deleted, select the last image.
             if select_index >= self.proxy_image_list_model.rowCount():
                 select_index = self.proxy_image_list_model.rowCount() - 1
             target_index = self.proxy_image_list_model.index(select_index, 0)
@@ -3900,7 +3899,6 @@ class MainWindow(QMainWindow):
         if target_index.isValid():
             self.image_list.list_view.setCurrentIndex(target_index)
 
-        # Scroll to selected image after layout is ready (same pattern as load_directory)
         scroll_done = [False]
 
         def do_scroll():
@@ -3923,15 +3921,185 @@ class MainWindow(QMainWindow):
                     fresh_target_index = current_model.index(row, 0)
             if fresh_target_index.isValid():
                 self.image_list.list_view.scrollTo(
-                    fresh_target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    fresh_target_index,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
             try:
                 self.image_list.list_view.layout_ready.disconnect(do_scroll)
-            except:
+            except Exception:
                 pass
 
         self.image_list.list_view.layout_ready.connect(do_scroll)
-        # Fallback timeout in case layout_ready doesn't fire
         QTimer.singleShot(2000, do_scroll)
+
+    def _reload_directory_from_state(
+        self,
+        *,
+        filter_text: str,
+        select_index: int,
+        select_path: str | None,
+    ):
+        """Reload the current directory and restore prior filter/selection state."""
+        self.load_directory(
+            self.directory_path,
+            select_index=select_index,
+            select_path=select_path,
+        )
+        self.image_list.filter_line_edit.setText(filter_text)
+        self._restore_directory_selection(
+            select_index=select_index,
+            select_path=select_path,
+        )
+
+    def _log_new_media_refresh_message(self, message: str):
+        """Emit refresh diagnostics without creating UI chrome."""
+        print(f"[REFRESH_NEW_UI] {message}")
+
+    @Slot()
+    def select_and_load_directory(self):
+        initial_directory = (str(self.directory_path)
+                             if self.directory_path else '')
+        load_directory_path = QFileDialog.getExistingDirectory(
+            parent=self, caption='Select directory to load images from',
+            dir=initial_directory)
+        if not load_directory_path:
+            return
+        self.load_directory(Path(load_directory_path),
+                            save_path_to_settings=True)
+
+    @Slot()
+    def reload_directory(self):
+        filter_text, select_index, select_path = self._capture_reload_restore_state()
+        self._reload_directory_from_state(
+            filter_text=filter_text,
+            select_index=select_index,
+            select_path=select_path,
+        )
+
+    @Slot()
+    def refresh_new_media_only(self):
+        if not self.directory_path:
+            return
+
+        if getattr(self.image_list_model, '_new_media_refresh_running', False):
+            self._log_new_media_refresh_message("Refresh New Media Only is already running.")
+            return
+
+        filter_text, select_index, select_path = self._capture_reload_restore_state()
+        self._pending_new_media_refresh_state = {
+            'directory_path': str(self.directory_path),
+            'filter_text': filter_text,
+            'select_index': select_index,
+            'select_path': select_path,
+        }
+        refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
+        if refresh_new_media_action is not None:
+            refresh_new_media_action.setDisabled(True)
+        QTimer.singleShot(50, self._begin_refresh_new_media_only)
+
+    @Slot()
+    def _begin_refresh_new_media_only(self):
+        pending_state = self._pending_new_media_refresh_state or {}
+        expected_directory = str(pending_state.get('directory_path') or '')
+        if not expected_directory or str(self.directory_path or '') != expected_directory:
+            refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
+            if refresh_new_media_action is not None:
+                refresh_new_media_action.setDisabled(
+                    not bool(getattr(self.image_list_model, '_paginated_mode', False))
+                )
+            return
+
+        started = self.image_list_model.start_refresh_new_media_only_async()
+        if not started:
+            refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
+            if refresh_new_media_action is not None:
+                refresh_new_media_action.setDisabled(
+                    not bool(getattr(self.image_list_model, '_paginated_mode', False))
+                )
+            filter_text = str(pending_state.get('filter_text') or self.image_list.filter_line_edit.text())
+            select_index = int(pending_state.get('select_index', 0) or 0)
+            select_path = pending_state.get('select_path')
+            self._reload_directory_from_state(
+                filter_text=filter_text,
+                select_index=select_index,
+                select_path=select_path,
+            )
+            return
+
+        self._log_new_media_refresh_message("Refreshing new media in background.")
+
+    @Slot(dict)
+    def _on_new_media_refresh_finished(self, refresh_stats: dict):
+        refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
+        if refresh_new_media_action is not None:
+            refresh_new_media_action.setDisabled(
+                not bool(getattr(self.image_list_model, '_paginated_mode', False))
+            )
+
+        pending_state = self._pending_new_media_refresh_state or {}
+        self._pending_new_media_refresh_state = None
+
+        if refresh_stats.get('stale', False):
+            self._log_new_media_refresh_message("Ignored stale new-media refresh result.")
+            return
+
+        expected_directory = str(pending_state.get('directory_path') or '')
+        actual_directory = str(refresh_stats.get('directory_path') or '')
+        if expected_directory and actual_directory and expected_directory != actual_directory:
+            self._log_new_media_refresh_message("Ignored new-media refresh result from previous folder.")
+            return
+
+        filter_text = str(pending_state.get('filter_text') or self.image_list.filter_line_edit.text())
+        select_index = int(pending_state.get('select_index', 0) or 0)
+        select_path = pending_state.get('select_path')
+
+        if not refresh_stats.get('supported', False):
+            self._reload_directory_from_state(
+                filter_text=filter_text,
+                select_index=select_index,
+                select_path=select_path,
+            )
+            return
+
+        if refresh_stats.get('requires_full_reload', False):
+            removed_count = int(refresh_stats.get('removed_count', 0) or 0)
+            self._log_new_media_refresh_message(
+                f"Detected {removed_count:,} removed or renamed {pluralize('file', removed_count)}. "
+                "Running full reload instead."
+            )
+            self._reload_directory_from_state(
+                filter_text=filter_text,
+                select_index=select_index,
+                select_path=select_path,
+            )
+            return
+
+        refresh_stats = self.image_list_model.apply_refresh_new_media_only_result(refresh_stats)
+        added_count = int(refresh_stats.get('added_count', 0) or 0)
+        tag_updates_count = int(refresh_stats.get('tag_updates_count', 0) or 0)
+        elapsed_ms = int(refresh_stats.get('elapsed_ms', 0) or 0)
+        refreshed_model = bool(refresh_stats.get('refreshed_model', False))
+
+        if refreshed_model:
+            if self.image_list.filter_line_edit.text() != filter_text:
+                self.image_list.filter_line_edit.setText(filter_text)
+            self._restore_directory_selection(
+                select_index=select_index,
+                select_path=select_path,
+            )
+
+        if added_count > 0:
+            self._log_new_media_refresh_message(
+                f"Indexed {added_count:,} new media {pluralize('item', added_count)} "
+                f"in {elapsed_ms / 1000:.2f}s."
+            )
+        elif tag_updates_count > 0:
+            self._log_new_media_refresh_message(
+                f"Refreshed {tag_updates_count:,} tag sidecar {pluralize('change', tag_updates_count)} "
+                f"in {elapsed_ms / 1000:.2f}s."
+            )
+        else:
+            self._log_new_media_refresh_message("No new media detected.")
 
     @Slot()
     def export_images_dialog(self):
