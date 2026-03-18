@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.19] - 2026-03-18
+
+### Added
+
+- Add reaction shortcuts and reaction filter gestures
+- love and bomb can now be toggled with L and B when focus is not in a text field
+- Ctrl+click on the love or bomb button now applies the matching filter like the star control
+
+### Changed
+
+- Update the rating and reaction tooltips to show the new shortcut and filter behavior
 ## [1.0.18] - 2026-03-18
 
 ### Added
