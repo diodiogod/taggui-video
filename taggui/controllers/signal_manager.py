@@ -75,6 +75,9 @@ class SignalManager:
                 lambda stars, event: self.main_window.set_rating(float(stars) / 5.0, True, event)
             )
         if toolbar_manager.love_button is not None:
+            toolbar_manager.love_button.filter_requested.connect(
+                self.main_window.apply_reaction_filter
+            )
             toolbar_manager.love_button.toggled.connect(
                 lambda checked: self.main_window.set_reactions(
                     bool(checked),
@@ -83,6 +86,9 @@ class SignalManager:
                 )
             )
         if toolbar_manager.bomb_button is not None:
+            toolbar_manager.bomb_button.filter_requested.connect(
+                self.main_window.apply_reaction_filter
+            )
             toolbar_manager.bomb_button.toggled.connect(
                 lambda checked: self.main_window.set_reactions(
                     bool(self.main_window.love_button.isChecked()) if self.main_window.love_button is not None else False,

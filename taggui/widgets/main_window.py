@@ -837,6 +837,26 @@ class MainWindow(QMainWindow):
                     return True
             except Exception:
                 pass
+            try:
+                reaction_shortcuts = {
+                    Qt.Key.Key_L: 'love',
+                    Qt.Key.Key_B: 'bomb',
+                }
+                reaction_name = reaction_shortcuts.get(event.key())
+                if (
+                    reaction_name is not None
+                    and not event.isAutoRepeat()
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and not self._focus_widget_accepts_text()
+                ):
+                    if event.type() == event.Type.ShortcutOverride:
+                        event.accept()
+                        return True
+                    if self._toggle_current_reaction(reaction_name):
+                        event.accept()
+                        return True
+            except Exception:
+                pass
 
         if event_type in (event.Type.MouseButtonPress, event.Type.MouseButtonRelease):
             try:
@@ -1163,6 +1183,27 @@ class MainWindow(QMainWindow):
         if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
             return
         self.toggle_floating_hold_mode()
+
+    def _toggle_current_reaction(self, reaction: str) -> bool:
+        """Toggle one reaction flag for the active media."""
+        if self._focus_widget_accepts_text():
+            return False
+        if self._current_viewer_image() is None:
+            return False
+
+        reaction_name = str(reaction or '').strip().lower()
+        love = bool(self.love_button.isChecked()) if self.love_button is not None else False
+        bomb = bool(self.bomb_button.isChecked()) if self.bomb_button is not None else False
+
+        if reaction_name == 'love':
+            love = not love
+        elif reaction_name == 'bomb':
+            bomb = not bomb
+        else:
+            return False
+
+        self.set_reactions(love, bomb, True)
+        return True
 
     def set_floating_hold_mode(self, enabled: bool):
         """Freeze/unfreeze existing spawned viewers as gray click-through overlays."""
@@ -4429,6 +4470,14 @@ class MainWindow(QMainWindow):
                 self._arm_masonry_refresh_anchor()
                 self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
 
+    @Slot(str)
+    def apply_reaction_filter(self, reaction: str):
+        """Apply a filter that targets one reaction flag."""
+        reaction_name = str(reaction or '').strip().lower()
+        if reaction_name not in {'love', 'bomb'}:
+            return
+        self.image_list.filter_line_edit.setText(f'{reaction_name}:true')
+
     def set_reactions(self, love: bool, bomb: bool, interactive: bool = False):
         if self.love_button is not None:
             blocker = self.love_button.blockSignals(True)
@@ -4448,6 +4497,9 @@ class MainWindow(QMainWindow):
                 should_ask_for_confirmation=False,
             )
             self.get_active_viewer().reaction_flags_change(love=love, bomb=bomb)
+            if self._filter_uses_reactions(self.proxy_image_list_model.filter):
+                self._arm_masonry_refresh_anchor()
+                self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
 
     def _arm_masonry_refresh_anchor(self):
         """Keep selected masonry item stable across filter-triggered relayout."""
@@ -4492,21 +4544,39 @@ class MainWindow(QMainWindow):
 
     def _filter_uses_star_rating(self, filter_node) -> bool:
         """Return True if a filter tree contains a `stars` predicate."""
+        return self._filter_uses_predicates(filter_node, 'stars')
+
+    def _filter_uses_reactions(self, filter_node) -> bool:
+        """Return True if a filter tree contains `love` or `bomb` predicates."""
+        return self._filter_uses_predicates(filter_node, 'love', 'bomb')
+
+    def _filter_uses_predicates(self, filter_node, *predicates: str) -> bool:
+        """Return True if a filter tree contains any named predicate."""
         if filter_node is None:
+            return False
+        predicate_names = {
+            str(name).strip().lower()
+            for name in predicates
+            if str(name).strip()
+        }
+        if not predicate_names:
             return False
         stack = [filter_node]
         while stack:
             node = stack.pop()
             if isinstance(node, list):
-                if node and node[0] == 'stars':
+                if node and str(node[0]).lower() in predicate_names:
                     return True
                 for part in node:
                     if isinstance(part, list):
                         stack.append(part)
-                    elif isinstance(part, str) and 'stars:' in part.lower():
-                        return True
+                    elif isinstance(part, str):
+                        lowered = part.lower()
+                        if any(f'{predicate}:' in lowered for predicate in predicate_names):
+                            return True
             elif isinstance(node, str):
-                if 'stars:' in node.lower():
+                lowered = node.lower()
+                if any(f'{predicate}:' in lowered for predicate in predicate_names):
                     return True
         return False
 

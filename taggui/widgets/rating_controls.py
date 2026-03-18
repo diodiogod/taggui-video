@@ -51,7 +51,12 @@ class StarRatingWidget(QWidget):
         self._margin = 2.0
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip('Click or drag for half-star ratings. Ctrl-click filters.')
+        self.setToolTip(
+            'Click or drag for half-star ratings.\n'
+            'Ctrl+click filters exact stars.\n'
+            'Ctrl+Shift+click filters minimum stars.\n'
+            'Ctrl+0..5 sets rating.'
+        )
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def sizeHint(self) -> QSize:
@@ -210,20 +215,26 @@ class StarRatingWidget(QWidget):
 class ReactionToggleButton(QAbstractButton):
     """Painted toggle button for simple binary media reactions."""
 
+    filter_requested = Signal(str)
+
     def __init__(self, kind: str, parent=None):
         super().__init__(parent)
         self._kind = str(kind or '').strip().lower()
+        self._filter_click_active = False
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setFixedSize(30, 30)
-        if self._kind == 'love':
-            self.setToolTip('Love this item')
-        else:
-            self.setToolTip('Bomb this item')
+        self._update_tooltip()
 
     def sizeHint(self) -> QSize:
         return QSize(30, 30)
+
+    def _update_tooltip(self):
+        if self._kind == 'love':
+            self.setToolTip('Love this item (L)\nCtrl+click filters loved items')
+        else:
+            self.setToolTip('Bomb this item (B)\nCtrl+click filters bombed items')
 
     def _icon_path(self, rect: QRectF) -> QPainterPath:
         if self._kind == 'love':
@@ -269,6 +280,42 @@ class ReactionToggleButton(QAbstractButton):
             radius * 0.16,
         )
         return path
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and (event.modifiers() & Qt.KeyboardModifier.ControlModifier) == Qt.KeyboardModifier.ControlModifier
+        ):
+            self._filter_click_active = True
+            self.setDown(True)
+            self.update()
+            event.accept()
+            return
+        self._filter_click_active = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._filter_click_active:
+            is_inside = self.rect().contains(event.position().toPoint())
+            if self.isDown() != is_inside:
+                self.setDown(is_inside)
+                self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._filter_click_active:
+            self._filter_click_active = False
+            was_inside = self.rect().contains(event.position().toPoint())
+            self.setDown(False)
+            self.update()
+            if was_inside:
+                self.filter_requested.emit(self._kind)
+            event.accept()
+            return
+        self._filter_click_active = False
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
