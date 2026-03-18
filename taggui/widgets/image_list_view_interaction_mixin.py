@@ -129,6 +129,86 @@ class ImageListViewInteractionMixin:
             mw._restore_in_progress = False
             mw._restore_target_global_rank = -1
 
+    def _resolve_pressed_index(self, click_pos: QPoint, source_model=None) -> QModelIndex:
+        """Resolve the model index under the cursor without mutating selection."""
+        model = self.model()
+        if model is None:
+            return QModelIndex()
+
+        index = QModelIndex()
+        if self.use_masonry and self._masonry_items:
+            try:
+                import time as _t
+                clicked_global = -1
+
+                painted = getattr(self, '_painted_hit_regions', None)
+                painted_age = _t.time() - float(getattr(self, '_painted_hit_regions_time', 0.0) or 0.0)
+                if painted and painted_age < 2.0:
+                    snap_scroll = int(getattr(self, '_painted_hit_regions_scroll_offset', 0) or 0)
+                    adjusted_point = QPoint(click_pos.x(), click_pos.y() + snap_scroll)
+                    for g_idx, rect in painted.items():
+                        if rect.contains(adjusted_point):
+                            clicked_global = int(g_idx)
+                            break
+                else:
+                    scroll_offset = int(self.verticalScrollBar().value())
+                    adjusted_point = QPoint(click_pos.x(), click_pos.y() + scroll_offset)
+                    for item in reversed(self._masonry_items):
+                        g_idx = int(item.get('index', -1))
+                        if g_idx < 0:
+                            continue
+                        item_rect = QRect(
+                            int(item.get('x', 0)),
+                            int(item.get('y', 0)),
+                            int(item.get('width', 0)),
+                            int(item.get('height', 0)),
+                        )
+                        if item_rect.contains(adjusted_point):
+                            clicked_global = g_idx
+                            break
+
+                if clicked_global >= 0 and source_model is not None:
+                    if hasattr(source_model, 'get_loaded_row_for_global_index'):
+                        src_row = source_model.get_loaded_row_for_global_index(clicked_global)
+                    else:
+                        src_row = clicked_global
+                    if isinstance(src_row, int) and src_row >= 0:
+                        src_idx = source_model.index(src_row, 0)
+                        if hasattr(model, 'mapFromSource'):
+                            index = model.mapFromSource(src_idx)
+                        else:
+                            index = src_idx
+            except Exception:
+                index = QModelIndex()
+
+        if not index.isValid():
+            index = self.indexAt(click_pos)
+
+        if not index.isValid():
+            return QModelIndex()
+
+        row = int(index.row())
+        if row < 0 or row >= int(model.rowCount()):
+            return QModelIndex()
+
+        fresh_index = model.index(row, 0)
+        return fresh_index if fresh_index.isValid() else QModelIndex()
+
+    def _should_preserve_selection_on_context_click(self, event, source_model=None) -> bool:
+        """Keep the current selection when right-clicking within it or on empty space."""
+        if event.button() != Qt.MouseButton.RightButton:
+            return False
+
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return False
+
+        clicked_index = self._resolve_pressed_index(event.pos(), source_model)
+        if clicked_index.isValid():
+            return bool(selection_model.isSelected(clicked_index))
+
+        return bool(self.selectedIndexes())
+
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
@@ -155,6 +235,10 @@ class ImageListViewInteractionMixin:
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
             source_model._enrichment_timer.stop()
             # Will resume after 500ms idle (see mouseReleaseEvent)
+
+        if self._should_preserve_selection_on_context_click(event, source_model):
+            event.accept()
+            return
 
         virtual_list_active = bool(
             hasattr(self, '_virtual_list_is_active') and self._virtual_list_is_active(source_model)
