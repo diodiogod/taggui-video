@@ -15,9 +15,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Improve paginated refresh and batch context actions
 
-### Removed
+### Fixed
 
-- right-clicking a selected thumbnail now keeps the full multi-selection for actions like delete
+- right-clicking a selected thumbnail no longer collapses an existing multi-selection before batch actions
 ## [1.0.17] - 2026-03-12
 
 ### Added
