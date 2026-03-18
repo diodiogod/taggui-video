@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.18] - 2026-03-18
+
+### Added
+
+- paginated folders can pick up newly discovered media without requiring a full reload
+
+### Changed
+
+- Improve paginated refresh and batch context actions
+
+### Removed
+
+- right-clicking a selected thumbnail now keeps the full multi-selection for actions like delete
 ## [1.0.17] - 2026-03-12
 
 ### Added
