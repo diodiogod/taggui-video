@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.23] - 2026-03-19
+
+### Added
+
+- Harden crop persistence during image switches
+- Cropped areas now stick more reliably when switching images and coming back
+- Reduce stale Qt callback errors from late marking release events
+
+### Fixed
+
+- Fix a release-time crop save path that could fail during fast image changes
 ## [1.0.22] - 2026-03-18
 
 ### Added

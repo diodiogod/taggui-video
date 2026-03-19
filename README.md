@@ -4,10 +4,10 @@
 [![Stars](https://img.shields.io/github/stars/diodiogod/taggui-video?style=for-the-badge)](https://github.com/diodiogod/taggui-video/stargazers)
 [![Issues](https://img.shields.io/github/issues/diodiogod/taggui-video?style=for-the-badge)](https://github.com/diodiogod/taggui-video/issues)
 [![Forks](https://img.shields.io/github/forks/diodiogod/taggui-video?style=for-the-badge)](https://github.com/diodiogod/taggui-video/network/members)
-[![Version](https://img.shields.io/badge/version-1.0.22-1f6feb?style=for-the-badge)](https://github.com/diodiogod/taggui-video)
+[![Version](https://img.shields.io/badge/version-1.0.23-1f6feb?style=for-the-badge)](https://github.com/diodiogod/taggui-video)
 [![Ko-Fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/diogogo)
 
-# TagGUI Video 1M v1.0.22
+# TagGUI Video 1M v1.0.23
 
 <p align="center">
   <img src="images/icon.png" alt="TagGUI Video 1M icon" width="96">

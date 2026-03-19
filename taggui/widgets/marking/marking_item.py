@@ -13,6 +13,11 @@ from utils.rect import (change_rect, change_rect_to_match_size,
                         flip_rect_position, get_rect_position, RectPosition)
 from math import sqrt, floor, ceil
 
+try:
+    from shiboken6 import isValid as _shiboken_is_valid
+except Exception:
+    _shiboken_is_valid = None
+
 # The (inverse) golden ratio for showing hints during cropping
 golden_ratio = 2 / (1 + sqrt(5))
 
@@ -395,7 +400,10 @@ class MarkingItem(QGraphicsRectItem):
         self.ungrabMouse()
         super().mouseReleaseEvent(event)
         image_viewer = getattr(self.image_view, "image_viewer", None)
-        if image_viewer is not None:
+        if (
+            image_viewer is not None
+            and (_shiboken_is_valid is None or _shiboken_is_valid(image_viewer))
+        ):
             image_viewer.marking_changed(self)
 
     def paint(self, painter, option, widget=None):

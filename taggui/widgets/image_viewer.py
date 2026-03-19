@@ -21,6 +21,11 @@ from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
 from widgets.marking_view import ImageGraphicsView
 
+try:
+    from shiboken6 import isValid as _shiboken_is_valid
+except Exception:
+    _shiboken_is_valid = None
+
 COMPARE_FIT_MODE_PRESERVE = 'preserve'
 COMPARE_FIT_MODE_FILL = 'fill'
 COMPARE_FIT_MODE_STRETCH = 'stretch'
@@ -2845,41 +2850,55 @@ class ImageViewer(QWidget):
         in the image."""
         from widgets.marking import grid
 
+        if _shiboken_is_valid is not None and not _shiboken_is_valid(self):
+            return
         if self.proxy_image_index is None or not self.proxy_image_index.isValid():
             return
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
+        source_model = self.proxy_image_list_model.sourceModel()
 
         if marking.rect_type == ImageMarking.CROP:
             self.inhibit_reload_image = True
-            image.thumbnail = None
-            image.crop = marking.rect().toRect() # ensure int!
-            image.target_dimension = grid.target
-            # Update HUD rect for crop display
-            if hasattr(self, 'hud_item'):
-                self.hud_item.set_crop_rect(marking.rect())
-            if not self.proxy_image_list_model.does_image_match_filter(
-                    image, self.proxy_image_list_model.filter):
-                # don't call .invalidate() as the displayed list shouldn't
-                # update
-                self.proxy_image_list_model.filter = [['path', str(image.path)],
-                                                      'OR',
-                                                      self.proxy_image_list_model.filter]
-            self.crop_changed.emit(None)
-            self.proxy_image_list_model.sourceModel().changePersistentIndex(
-                self.proxy_image_index, self.proxy_image_index)
-
-            self.proxy_image_list_model.sourceModel().dataChanged.emit(
-                self.proxy_image_index, self.proxy_image_index,
-                [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
-                 Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
-            self.inhibit_reload_image = False
+            try:
+                image.thumbnail = None
+                image.crop = marking.rect().toRect() # ensure int!
+                image.target_dimension = grid.target
+                # Persist first so a later UI-only failure cannot lose the crop.
+                source_model.write_meta_to_disk(image)
+                # Update HUD rect for crop display
+                if hasattr(self, 'hud_item'):
+                    self.hud_item.set_crop_rect(marking.rect())
+                if not self.proxy_image_list_model.does_image_match_filter(
+                        image, self.proxy_image_list_model.filter):
+                    # don't call .invalidate() as the displayed list shouldn't
+                    # update
+                    self.proxy_image_list_model.filter = [['path', str(image.path)],
+                                                          'OR',
+                                                          self.proxy_image_list_model.filter]
+                try:
+                    self.crop_changed.emit(None)
+                except RuntimeError:
+                    pass
+                try:
+                    source_model.changePersistentIndex(
+                        self.proxy_image_index, self.proxy_image_index)
+                    source_model.dataChanged.emit(
+                        self.proxy_image_index, self.proxy_image_index,
+                        [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
+                         Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
+                except RuntimeError:
+                    pass
+            finally:
+                self.inhibit_reload_image = False
         else:
             image.markings = [Marking(m.data(0),
                                       m.rect_type,
                                       m.rect().toRect(),
                                       m.data(1))
                 for m in self.marking_items if m.rect_type != ImageMarking.CROP]
-        self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+            source_model.write_meta_to_disk(image)
 
     def get_selected_type(self) -> ImageMarking:
         if len(self.scene.selectedItems()) > 0:
