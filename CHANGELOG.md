@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.20] - 2026-03-18
+
+### Added
+
+- Reuse an existing Windows Explorer window for the same folder when revealing media
+- Add Alt-drag to send the real file to other apps instead of spawning a floating viewer
+- Add Alt-double-click to reveal media in Windows Explorer
+- Automatically reinstall normal dependencies when requirements.txt changes
+- Document the new launcher and shortcut behavior
+
+### Changed
+
+- Improve Explorer integration and launcher dependency refresh
 ## [1.0.19] - 2026-03-18
 
 ### Added

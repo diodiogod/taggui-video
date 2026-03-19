@@ -22,7 +22,13 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 - Select multiple images: hold `Ctrl` or `Shift` and click
 - Select all images: `Ctrl` + `A`
 - Invert selection: `Ctrl` + `I`
+- Duplicate selected images: `Ctrl` + `D`
+- Open selected image in Windows Explorer: `Ctrl` + `E`
 - Open image context menu: right-click an image
+- Open selected image in its default app: double-click
+- Open selected image in Windows Explorer: `Alt` + double-click
+- Drag a real file to another app instead of spawning a floating viewer: hold `Alt` while dragging from the image list
+- Spawn a floating viewer by drag and release: drag a thumbnail from the list or masonry view and release it on empty screen space
 
 The image context menu includes actions such as copying or pasting tags and moving or copying selected files.
 
@@ -84,7 +90,6 @@ Examples:
 - Close all spawned viewers: `Ctrl` + `Shift` + `W`
 - Toggle hold for existing spawned viewers: `H`
 - Toggle hold for existing spawned viewers with the mouse: middle-click in the main window or image list area
-- Spawn a floating viewer by drag and drop: drag a thumbnail from the list or masonry view and release it on empty screen space
 - Move a floating viewer: `middle-click + drag`
 - Move a non-pannable floating viewer: `left-drag`
 - Resize a floating viewer: drag any edge or corner

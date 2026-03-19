@@ -22,7 +22,7 @@ On first run, the launcher will:
 The launcher looks for a `venv` in the current directory first, then one level above it.
 
 > [!NOTE]
-> The launcher installs dependencies automatically when it creates a new virtual environment. If you already have an existing `venv`, it reuses it and starts the app without reinstalling `requirements.txt`. After a project update, run `pip install -r requirements.txt` manually if new dependencies were added.
+> The launcher now fingerprints `requirements.txt` inside the active `venv`. On first run it installs dependencies normally, and on later runs it automatically reruns `pip install -r requirements.txt` only when the dependency file changed.
 
 > [!IMPORTANT]
 > Do not use `pip install -r requirements.txt` to repair PyTorch or `torchvision`.

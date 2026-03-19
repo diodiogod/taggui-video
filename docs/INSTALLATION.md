@@ -45,13 +45,7 @@ The launcher looks for a virtual environment in:
 > [!NOTE]
 > The launcher installs dependencies automatically when it creates a new virtual environment.
 
-If the launcher finds an existing `venv`, it reuses it and starts the app without reinstalling `requirements.txt`.
-
-That means after pulling project updates, you may need to run this manually inside the environment:
-
-```bash
-pip install -r requirements.txt
-```
+If the launcher finds an existing `venv`, it now fingerprints `requirements.txt` and automatically reruns `pip install -r requirements.txt` only when dependencies changed.
 
 If the update changes the Torch stack or model features start failing with
 errors such as `torchvision::nms`, do not repair it with `pip install -r requirements.txt`.
@@ -116,7 +110,7 @@ For video editing workflows, make sure `ffmpeg` is installed and available on yo
 
 - `Python not installed`: install Python 3.10 or newer
 - `requirements.txt not found`: run the launcher from the project root
-- launcher reuses an old environment after update: run `pip install -r requirements.txt` for normal deps, or `--refresh-torch` for Torch stack issues
+- launcher reused an old environment after update: launch again so it can detect the new `requirements.txt` fingerprint, or run `pip install -r requirements.txt` manually if you are bypassing the launcher
 - launcher falls back to CPU because it cannot parse the NVIDIA driver: rerun with `--refresh-torch --cuda=cu128` if you know the machine should use the CUDA 12.8 wheel channel
 - video editing actions fail: install `ffmpeg`
 - backend-specific playback issues: check the configured backend and runtime availability in settings
