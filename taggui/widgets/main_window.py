@@ -406,6 +406,9 @@ class MainWindow(QMainWindow):
         self.image_list_model.new_media_refresh_finished.connect(
             self._on_new_media_refresh_finished
         )
+        self.image_list_model.background_validation_applied.connect(
+            self._on_background_validation_applied
+        )
         self.tag_counter_model = TagCounterModel()
         self.image_tag_list_model = ImageTagListModel()
 
@@ -3991,6 +3994,29 @@ class MainWindow(QMainWindow):
             select_index=select_index,
             select_path=select_path,
         )
+
+    @Slot(dict)
+    def _on_background_validation_applied(self, refresh_stats: dict):
+        refreshed_directory = str(refresh_stats.get('directory_path') or '')
+        if not refreshed_directory or refreshed_directory != str(self.directory_path or ''):
+            return
+        if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
+            return
+
+        current_sort = str(self.image_list.sort_combo_box.currentText() or '')
+        if not current_sort:
+            return
+
+        def _replay_current_sort():
+            if refreshed_directory != str(self.directory_path or ''):
+                return
+            if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
+                return
+            sort_text = str(self.image_list.sort_combo_box.currentText() or current_sort)
+            if sort_text:
+                self.image_list._on_sort_changed(sort_text, preserve_selection=True)
+
+        QTimer.singleShot(0, _replay_current_sort)
 
     def _log_new_media_refresh_message(self, message: str):
         """Emit refresh diagnostics without creating UI chrome."""

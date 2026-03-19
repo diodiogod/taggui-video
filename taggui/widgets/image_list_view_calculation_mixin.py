@@ -281,7 +281,11 @@ class ImageListViewCalculationMixin:
                 except Exception:
                     unenriched_count = 0
                 if unenriched_count >= 5:
-                    if self._hold_strict_layout_for_window_enrichment(
+                    has_existing_layout = bool(getattr(self, "_masonry_items", None))
+                    if not has_existing_layout:
+                        self._strict_enrich_wait_signature = None
+                        self._strict_enrich_wait_count = 0
+                    elif self._hold_strict_layout_for_window_enrichment(
                         source_model,
                         int(ctx.window_start_page),
                         int(ctx.window_end_page),

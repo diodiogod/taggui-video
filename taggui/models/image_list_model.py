@@ -944,6 +944,7 @@ class ImageListModel(QAbstractListModel):
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
     dimensions_updated = Signal()  # Emitted when aspect ratios change (no layout invalidation)
     background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
+    background_validation_applied = Signal(dict)  # applied background index refresh metadata
     new_media_refresh_finished = Signal(dict)  # Async additions-only refresh result
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
@@ -4013,6 +4014,12 @@ class ImageListModel(QAbstractListModel):
             skip_background_validation=True,
             db_synced=bool(result.get('db_synced')),
         )
+        self.background_validation_applied.emit({
+            'directory_path': str(directory_path),
+            'added_count': added_count,
+            'removed_count': removed_count,
+            'tag_updates_count': tag_updates,
+        })
 
     def _validate_cached_paths_in_background(
         self,
