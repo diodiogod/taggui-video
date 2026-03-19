@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_view import ImageListView
+from PySide6.QtWidgets import QSizePolicy, QComboBox
 
 class ClickableLabel(QLabel):
     clicked = Signal()
@@ -25,24 +26,58 @@ class ImageList(QDockWidget):
         self.setWindowTitle('Images')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self.filter_line_edit = FilterLineEdit()
+        self.filter_line_edit.setMinimumWidth(0)
+        self.filter_line_edit.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
 
         # Selection mode and Sort on same row
         selection_sort_layout = QHBoxLayout()
+        selection_sort_layout.setContentsMargins(0, 0, 0, 0)
         selection_mode_label = QLabel('Selection')
+        selection_mode_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
         self.selection_mode_combo_box = SettingsComboBox(
             key='image_list_selection_mode')
         self.selection_mode_combo_box.addItems(list(SelectionMode))
+        self.selection_mode_combo_box.setMinimumWidth(0)
+        self.selection_mode_combo_box.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
 
         sort_label = QLabel('Sort')
+        sort_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
         self.sort_combo_box = SettingsComboBox(key='image_list_sort_by')
         self.sort_combo_box.addItems(['Default', 'Name', 'Modified', 'Created',
                                        'Size', 'Type', 'Love / Rate / Bomb', 'Random'])
+        self.sort_combo_box.setMinimumWidth(0)
+        self.sort_combo_box.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
 
         self.media_type_combo_box = SettingsComboBox(key='media_type_filter')
         self.media_type_combo_box.addItems(['All', 'Images', 'Videos'])
-        self.media_type_combo_box.setMinimumWidth(70)
+        self.media_type_combo_box.setMinimumContentsLength(4)
+        self.media_type_combo_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.media_type_combo_box.setMinimumWidth(56)
+        self.media_type_combo_box.setSizePolicy(
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
 
         selection_sort_layout.addWidget(selection_mode_label)
         selection_sort_layout.addWidget(self.selection_mode_combo_box, stretch=1)
@@ -72,7 +107,11 @@ class ImageList(QDockWidget):
             button.setToolTip(tooltip)
 
         self.thumbnail_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumbnail_size_label.setMinimumWidth(54)
+        self.thumbnail_size_label.setMinimumWidth(0)
+        self.thumbnail_size_label.setSizePolicy(
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Preferred,
+        )
         self.thumbnail_size_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.thumbnail_size_label.setToolTip('Click to set thumbnail size')
         self.thumbnail_size_label.clicked.connect(
@@ -88,6 +127,14 @@ class ImageList(QDockWidget):
 
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(5, 2, 5, 2)
+        self.image_index_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.cache_status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         status_layout.addWidget(self.image_index_label)
         status_layout.addStretch()  # Push cache label to the right
         status_layout.addWidget(self.cache_status_label)
@@ -98,11 +145,21 @@ class ImageList(QDockWidget):
 
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
+        container.setMinimumWidth(0)
+        container.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
         layout.setSpacing(0)  # Remove spacing between widgets
         layout.addWidget(self.filter_line_edit)
         layout.addLayout(selection_sort_layout)
+        self.list_view.setMinimumWidth(0)
+        self.list_view.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
         layout.addWidget(self.list_view)
         layout.addLayout(status_layout)
         self.setWidget(container)
@@ -122,6 +179,10 @@ class ImageList(QDockWidget):
         #     # Trigger initial update
         #     QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
         self.update_thumbnail_size_controls()
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
 
     def set_selection_mode(self, selection_mode: str):
         if selection_mode == SelectionMode.DEFAULT:
