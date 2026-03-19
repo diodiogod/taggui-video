@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.21] - 2026-03-18
+
+### Added
+
+- Long recent-folder paths now stay easier to scan in the File menu
+- The last folder stands out more clearly without breaking the path layout
+- Hovered recent-folder rows are easier to read on dark themes
+
+### Changed
+
+- Improve recent folders menu readability
 ## [1.0.20] - 2026-03-18
 
 ### Added

@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
 )
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QDesktopServices
-from PySide6.QtCore import QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence, QPalette
+from PySide6.QtCore import QSize, QTimer, QUrl, Qt, Signal
 
 from utils.settings import settings, DEFAULT_SETTINGS
 try:
@@ -50,6 +50,7 @@ class RecentFoldersListWidget(QListWidget):
             "QListWidget { border: none; outline: none; background: transparent; }"
             "QListWidget::item { padding: 4px 8px; min-height: 22px; }"
         )
+        self.currentItemChanged.connect(lambda *_: self._refresh_row_states())
         self.itemClicked.connect(self._open_item)
         self.itemEntered.connect(self._track_hover_item)
 
@@ -62,6 +63,7 @@ class RecentFoldersListWidget(QListWidget):
     def leaveEvent(self, event):
         self.clearSelection()
         self.setCurrentRow(-1)
+        self._refresh_row_states()
         super().leaveEvent(event)
 
     def keyPressEvent(self, event):
@@ -84,6 +86,14 @@ class RecentFoldersListWidget(QListWidget):
         if folder_path:
             self.open_requested.emit(str(folder_path))
 
+    def _refresh_row_states(self):
+        current_item = self.currentItem()
+        for index in range(self.count()):
+            item = self.item(index)
+            row_widget = self.itemWidget(item)
+            if isinstance(row_widget, RecentFolderRowWidget):
+                row_widget.set_selected(item is current_item)
+
 
 class RecentFolderRowWidget(QWidget):
     """One row in the recent-folders menu list."""
@@ -95,16 +105,20 @@ class RecentFolderRowWidget(QWidget):
     def __init__(self, folder_path: str, exists: bool, parent=None):
         super().__init__(parent)
         self.folder_path = str(folder_path)
+        self._exists = bool(exists)
+        self._selected = False
+        self._folder_label, self._parent_label = self._build_display_labels(self.folder_path)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 6, 2)
         layout.setSpacing(6)
 
-        self.label = QLabel(self.folder_path if exists else f"{self.folder_path}  [missing]", self)
-        self.label.setToolTip(self.folder_path)
-        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-        if not exists:
-            self.label.setStyleSheet("color: #7a7a7a;")
+        self.path_label = QLabel(self)
+        self.path_label.setToolTip(self.folder_path)
+        self.path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.path_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.path_label.setTextFormat(Qt.TextFormat.RichText)
+        self.path_label.setWordWrap(False)
 
         self.delete_button = QToolButton(self)
         self.delete_button.setText("×")
@@ -114,16 +128,39 @@ class RecentFolderRowWidget(QWidget):
         self.delete_button.clicked.connect(self._emit_delete_requested)
         self.delete_button.setFixedSize(16, 16)
         self.delete_button.setStyleSheet(
-            "QToolButton { border: none; padding: 0; margin: 0; background: transparent; color: rgba(235, 235, 235, 0.72); font-size: 13px; }"
+            "QToolButton { border: none; padding: 0; margin: 0; background: transparent; font-size: 13px; }"
             "QToolButton:hover { color: rgba(196, 64, 64, 0.90); background: transparent; }"
         )
 
-        layout.addWidget(self.label, 1)
+        layout.addWidget(self.path_label, 1, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.delete_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        row_height = max(26, self.sizeHint().height())
+        self.setMinimumHeight(row_height)
+        self.setMaximumHeight(row_height)
+        self._apply_palette()
+
+    @classmethod
+    def _build_display_labels(cls, folder_path: str) -> tuple[str, str]:
+        """Return (folder_name, parent_path) for recent-folder rows."""
+        try:
+            path_obj = Path(folder_path)
+            folder_name = path_obj.name or str(path_obj)
+            parent_path = str(path_obj.parent) if str(path_obj.parent) not in {"", "."} else ""
+        except Exception:
+            folder_name = str(folder_path)
+            parent_path = ""
+        return folder_name, parent_path
 
     def enterEvent(self, event):
         self.hover_requested.emit(self.folder_path)
         super().enterEvent(event)
+
+    def sizeHint(self):
+        margins = self.layout().contentsMargins()
+        text_height = self.path_label.sizeHint().height()
+        button_height = self.delete_button.sizeHint().height()
+        row_height = max(text_height, button_height) + margins.top() + margins.bottom() + 2
+        return QSize(super().sizeHint().width(), row_height)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -141,6 +178,101 @@ class RecentFolderRowWidget(QWidget):
 
     def _emit_delete_requested(self):
         self.delete_requested.emit(self.folder_path)
+
+    def set_selected(self, selected: bool):
+        selected = bool(selected)
+        if self._selected == selected:
+            return
+        self._selected = selected
+        self._apply_palette()
+
+    def _apply_palette(self):
+        palette = self.palette()
+        text_color = palette.color(QPalette.ColorRole.Text)
+        highlight_text_color = palette.color(QPalette.ColorRole.HighlightedText)
+        accent_color = palette.color(QPalette.ColorRole.Link)
+        highlight_color = palette.color(QPalette.ColorRole.Highlight)
+
+        name_color = highlight_text_color if self._selected else accent_color
+
+        if self._selected:
+            path_color = QColor(highlight_text_color)
+        elif self._exists:
+            path_color = palette.color(QPalette.ColorRole.PlaceholderText)
+        else:
+            path_color = palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text)
+
+        row_bg = QColor(highlight_color)
+        row_bg.setAlpha(90 if self._selected else 0)
+
+        border_color = QColor(highlight_color)
+        border_color.setAlpha(120 if self._selected else 0)
+
+        delete_color = QColor(name_color if self._selected else text_color)
+        delete_color.setAlpha(max(160, delete_color.alpha()))
+
+        self.setStyleSheet(
+            "RecentFolderRowWidget {"
+            f"background-color: {row_bg.name(QColor.NameFormat.HexArgb)};"
+            f"border: 1px solid {border_color.name(QColor.NameFormat.HexArgb)};"
+            "border-radius: 5px;"
+            "}"
+        )
+        self.path_label.setText(self._build_display_html(path_color, name_color))
+        self.delete_button.setStyleSheet(
+            "QToolButton { border: none; padding: 0; margin: 0; background: transparent; "
+            f"color: {delete_color.name(QColor.NameFormat.HexArgb)}; font-size: 13px; }}"
+            "QToolButton:hover { color: rgba(196, 64, 64, 0.90); background: transparent; }"
+        )
+
+    def _build_display_html(self, path_color: QColor, folder_color: QColor) -> str:
+        prefix = self._trim_middle_keep_root(self._parent_label, max_chars=44)
+        separator = "\\" if "\\" in self.folder_path else "/"
+        if prefix and not prefix.endswith(("/", "\\")):
+            prefix = f"{prefix}{separator}"
+        if not self._exists:
+            prefix = f"{prefix}[missing] " if prefix else "[missing] "
+        return (
+            f"<span style=\"color:{path_color.name()};\">{self._escape_html(prefix)}</span>"
+            f"<span style=\"color:{folder_color.name()}; font-weight:600;\">{self._escape_html(self._folder_label)}</span>"
+        )
+
+    @staticmethod
+    def _trim_middle_keep_root(text: str, max_chars: int = 44) -> str:
+        normalized = str(text or "").strip()
+        if len(normalized) <= max_chars:
+            return normalized
+
+        separator = "\\" if "\\" in normalized else "/"
+        root = ""
+        remainder = normalized
+        if separator == "\\" and len(normalized) >= 2 and normalized[1] == ":":
+            root = normalized[:2] + separator
+            remainder = normalized[2:].lstrip("\\/")
+        elif normalized.startswith(separator):
+            root = separator
+            remainder = normalized.lstrip(separator)
+
+        parts = [part for part in remainder.split(separator) if part]
+        if not parts:
+            return normalized
+
+        tail_parts = parts[-2:] if len(parts) >= 2 else parts[-1:]
+        tail = separator.join(tail_parts)
+        trimmed = f"{root}...{separator}{tail}" if root else f"...{separator}{tail}"
+        if len(trimmed) <= max_chars:
+            return trimmed
+        tail_keep = max(10, max_chars - len(root) - 4)
+        return f"{root}...{tail[-tail_keep:]}" if root else f"...{tail[-tail_keep:]}"
+
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return (
+            str(text or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
 
 
 class MenuManager:
