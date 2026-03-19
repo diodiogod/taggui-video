@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.25] - 2026-03-19
+
+### Added
+
+- Refine reaction feedback and footer layout
+- restore the bottom-left folder image count in the image list footer
+- smooth the bomb burst timing, glow, and off-state readability
+- make the love-off state animate as a visible crack through the heart
+
+### Changed
+
+- improve heart and bomb keyboard reaction overlays so feedback is clearer
 ## [1.0.24] - 2026-03-19
 
 ### Added

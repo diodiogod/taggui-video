@@ -89,6 +89,10 @@ def _burst_path(center: QPointF, inner_radius: float, outer_radius: float, point
 class ReactionFeedbackOverlay(QWidget):
     """Transient animated feedback HUD for reactions and star ratings."""
 
+    _BASE_SIZE = QSize(260, 186)
+    _MIN_SCALE = 0.72
+    _MAX_SCALE = 1.18
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -127,7 +131,7 @@ class ReactionFeedbackOverlay(QWidget):
         self._animation_group.finished.connect(self._handle_animation_finished)
 
     def sizeHint(self) -> QSize:
-        return QSize(260, 186)
+        return QSize(self._BASE_SIZE)
 
     def minimumSizeHint(self) -> QSize:
         return QSize(190, 138)
@@ -169,18 +173,30 @@ class ReactionFeedbackOverlay(QWidget):
         if parent is None:
             return False
         parent_rect = parent.rect()
+        base_w = float(self._BASE_SIZE.width())
+        base_h = float(self._BASE_SIZE.height())
+        base_diag = math.hypot(base_w, base_h)
+        margin = 10
+        available_w = max(1.0, float(parent_rect.width()) - (margin * 2))
+        available_h = max(1.0, float(parent_rect.height()) - (margin * 2))
+        fit_scale = min(available_w / base_w, available_h / base_h)
         if self._anchor_rect.isValid():
-            width = min(max(168, int(self._anchor_rect.width() * 1.9)), 238)
-            height = min(max(138, int(self._anchor_rect.height() * 2.0)), 210)
-            x_pos = int(round(self._anchor_rect.center().x() - (width / 2.0)))
-            y_pos = int(round(self._anchor_rect.center().y() - (height * 0.64)))
-            x_pos = max(6, min(x_pos, parent_rect.width() - width - 6))
-            y_pos = max(6, min(y_pos, parent_rect.height() - height - 6))
+            reference_diag = math.hypot(
+                max(1.0, float(self._anchor_rect.width()) * 1.55),
+                max(1.0, float(self._anchor_rect.height()) * 1.55),
+            )
         else:
-            width = min(max(196, int(parent_rect.width() * 0.34)), 300)
-            height = min(max(154, int(parent_rect.height() * 0.28)), 224)
-            x_pos = max(8, (parent_rect.width() - width) // 2)
-            y_pos = max(28, int(parent_rect.height() * 0.16))
+            reference_diag = math.hypot(max(1.0, float(parent_rect.width()) * 0.42), max(1.0, float(parent_rect.height()) * 0.42))
+        preferred_scale = reference_diag / base_diag
+        scale = min(self._MAX_SCALE, max(self._MIN_SCALE, preferred_scale), fit_scale)
+        width = int(round(base_w * scale))
+        height = int(round(base_h * scale))
+
+        x_pos = int(round((parent_rect.width() - width) / 2.0))
+        y_pos = int(round((parent_rect.height() - height) / 2.0))
+
+        x_pos = max(margin, min(x_pos, parent_rect.width() - width - margin))
+        y_pos = max(margin, min(y_pos, parent_rect.height() - height - margin))
         target = QRect(x_pos, y_pos, width, height)
         if self.geometry() == target:
             return False
@@ -217,6 +233,20 @@ class ReactionFeedbackOverlay(QWidget):
                 ("bomb", True): "Bombed",
                 ("bomb", False): "Bomb Off",
             }.get((feedback_kind, self._enabled), "")
+
+        if feedback_kind == "bomb":
+            duration_ms = 1160
+            fade_peak_at = 0.20
+            fade_hold_until = 0.98
+        else:
+            duration_ms = 820
+            fade_peak_at = 0.16
+            fade_hold_until = 0.86
+
+        self._progress_animation.setDuration(duration_ms)
+        self._fade_animation.setDuration(duration_ms)
+        self._fade_animation.setKeyValueAt(fade_peak_at, 1.0)
+        self._fade_animation.setKeyValueAt(fade_hold_until, 1.0)
 
         self._animation_group.stop()
         self.reposition(anchor_rect)
@@ -262,31 +292,98 @@ class ReactionFeedbackOverlay(QWidget):
 
     def _draw_heart_feedback(self, painter: QPainter, rect: QRectF, progress: float, enabled: bool):
         icon_rect = QRectF(
-            rect.left() + (rect.width() * 0.29),
-            rect.top() + 12,
+            rect.left() + (rect.width() * 0.30),
+            rect.top() + 70,
             rect.width() * 0.42,
-            rect.height() * 0.48,
+            rect.height() * 0.43,
         )
         center = icon_rect.center()
-        pulse = math.sin(min(1.0, progress / 0.42) * math.pi)
+        pulse_a = math.sin(min(1.0, progress / 0.20) * math.pi)
+        pulse_b = math.sin(max(0.0, min(1.0, (progress - 0.18) / 0.24)) * math.pi)
+        pulse = min(1.0, pulse_a + (0.92 * pulse_b))
         glow_radius = (icon_rect.width() * 0.58) + (12.0 * pulse)
         accent = QColor(255, 102, 132) if enabled else QColor(176, 184, 196, 220)
         glow = QColor(accent)
-        glow.setAlpha(160 if enabled else 90)
-        self._draw_soft_glow(painter, center, glow_radius, glow, 0)
-
-        heart_path = _heart_path(icon_rect)
+        glow.setAlpha(175 if enabled else 90)
         fill = QColor(255, 110, 138, 245) if enabled else QColor(115, 122, 134, 210)
         stroke = QColor(255, 222, 228, 230) if enabled else QColor(206, 212, 220, 170)
+
+        heart_scale = 1.0 + (0.10 * pulse)
+        heart_y_lift = 0.0
+        heart_path = _heart_path(icon_rect)
+
         painter.save()
-        painter.setPen(QPen(stroke, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.setBrush(fill)
-        painter.drawPath(heart_path)
+        painter.translate(0, heart_y_lift)
+        self._draw_soft_glow(painter, center, glow_radius, glow, 0)
+        painter.translate(center)
+        painter.scale(heart_scale, heart_scale)
+        painter.translate(-center)
+        if enabled:
+            painter.setPen(QPen(stroke, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(fill)
+            painter.drawPath(heart_path)
+        else:
+            crack = min(1.0, max(0.0, (progress - 0.08) / 0.92))
+            crack_motion = crack * crack * crack
+            heart_mid_x = icon_rect.left() + (icon_rect.width() * 0.50)
+            heart_join_y = icon_rect.top() + (icon_rect.height() * 0.28)
+            heart_tip_y = icon_rect.bottom() - (icon_rect.height() * 0.12)
+
+            crack_points = [
+                QPointF(heart_mid_x, heart_join_y + (icon_rect.height() * 0.03)),
+                QPointF(heart_mid_x + (icon_rect.width() * 0.05), icon_rect.top() + (icon_rect.height() * 0.33)),
+                QPointF(heart_mid_x - (icon_rect.width() * 0.05), icon_rect.top() + (icon_rect.height() * 0.45)),
+                QPointF(heart_mid_x + (icon_rect.width() * 0.04), icon_rect.top() + (icon_rect.height() * 0.58)),
+                QPointF(heart_mid_x, icon_rect.top() + (icon_rect.height() * 0.74)),
+                QPointF(heart_mid_x, heart_tip_y),
+            ]
+            crack_path = QPainterPath()
+            crack_path.moveTo(crack_points[0])
+            segment_lengths = []
+            total_length = 0.0
+            for index in range(1, len(crack_points)):
+                start_point = crack_points[index - 1]
+                end_point = crack_points[index]
+                segment_length = math.hypot(end_point.x() - start_point.x(), end_point.y() - start_point.y())
+                segment_lengths.append(segment_length)
+                total_length += segment_length
+
+            remaining_length = total_length * crack_motion
+            for index in range(1, len(crack_points)):
+                start_point = crack_points[index - 1]
+                end_point = crack_points[index]
+                segment_length = segment_lengths[index - 1]
+                if remaining_length >= segment_length:
+                    crack_path.lineTo(end_point)
+                    remaining_length -= segment_length
+                    continue
+                if segment_length > 0.0 and remaining_length > 0.0:
+                    segment_progress = remaining_length / segment_length
+                    interp_point = QPointF(
+                        start_point.x() + ((end_point.x() - start_point.x()) * segment_progress),
+                        start_point.y() + ((end_point.y() - start_point.y()) * segment_progress),
+                    )
+                    crack_path.lineTo(interp_point)
+                break
+
+            crack_alpha = max(0, int(170 + (70 * crack_motion)))
+            crack_pen = QPen(QColor(255, 246, 248, crack_alpha), 3.2,
+                             Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+
+            painter.setPen(QPen(stroke, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(fill)
+            painter.drawPath(heart_path)
+
+            painter.save()
+            painter.setPen(crack_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(crack_path)
+            painter.restore()
         painter.restore()
 
         self._draw_label(
             painter,
-            rect.adjusted(0, 0, 0, -14),
+            rect.adjusted(0, 0, 0, 0),
             self._title,
             QColor(255, 240, 244, 230) if enabled else QColor(220, 225, 232, 210),
         )
@@ -294,55 +391,70 @@ class ReactionFeedbackOverlay(QWidget):
     def _draw_bomb_feedback(self, painter: QPainter, rect: QRectF, progress: float, enabled: bool):
         icon_rect = QRectF(
             rect.left() + (rect.width() * 0.31),
-            rect.top() + 34,
+            rect.top() + 58,
             rect.width() * 0.38,
             rect.height() * 0.42,
         )
         center = icon_rect.center()
-        accent = QColor(255, 178, 92) if enabled else QColor(172, 178, 188, 205)
-        outer_burst = QColor(255, 136, 52, 150) if enabled else QColor(114, 120, 130, 80)
+        accent = QColor(255, 178, 92) if enabled else QColor(172, 178, 188, 230)
+        outer_burst = QColor(255, 136, 52, 220) if enabled else QColor(122, 128, 138, 176)
 
-        burst_progress = min(1.0, progress / 0.55)
-        burst_outer = (icon_rect.width() * 0.34) + (icon_rect.width() * 0.40 * burst_progress)
+        glow_pulse = math.sin(min(1.0, progress / 0.44) * math.pi)
+        glow_radius = (icon_rect.width() * 0.56) + (10.0 * glow_pulse)
+        glow_color = QColor(255, 208, 92, 150) if enabled else QColor(176, 184, 194, 128)
+        self._draw_soft_glow(painter, center, glow_radius, glow_color, 0)
+
+        eased_growth = max(0.0, min(1.0, progress))
+        bomb_scale = 1.0 + (0.03 * eased_growth) + (0.20 * (eased_growth * eased_growth))
+        bomb_y_lift = -2.0 * math.sin(eased_growth * math.pi)
+        bomb_rotation = -0.8 + (1.6 * eased_growth)
+
+        burst_delay_progress = max(0.0, progress - 0.10)
+        burst_progress = min(1.0, burst_delay_progress / 0.96)
+        burst_growth = burst_progress * burst_progress
+        burst_collapse = 1.0 - burst_growth
+        burst_outer = (icon_rect.width() * 0.16) + (icon_rect.width() * 0.50 * (burst_growth if enabled else burst_collapse))
         burst_inner = burst_outer * 0.46
-        burst = _burst_path(center, burst_inner, burst_outer, points=8, rotation_deg=(-90.0 + (burst_progress * 12.0)))
+        burst_rotation = -90.0 + (45.0 * progress)
+        burst = _burst_path(center, burst_inner, burst_outer, points=8, rotation_deg=burst_rotation)
+
+        spark_progress = burst_progress if enabled else (1.0 - burst_progress)
+        spark_outer = icon_rect.width() * (0.10 + (0.08 * math.sin(min(1.0, spark_progress / 0.35) * math.pi)))
+        spark_center = QPointF(icon_rect.right() - 4, icon_rect.top() + 6)
+        spark = _burst_path(spark_center, spark_outer * 0.38, spark_outer, points=5)
 
         painter.save()
+        painter.translate(center)
+        painter.rotate(bomb_rotation)
+        painter.scale(bomb_scale, bomb_scale)
+        painter.translate(-center)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(outer_burst)
         painter.drawPath(burst)
-        painter.restore()
 
-        ring_pen = QPen(QColor(accent.red(), accent.green(), accent.blue(), 170), 2.0)
+        ring_pen = QPen(QColor(accent.red(), accent.green(), accent.blue(), 190), 2.2)
         ring_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.save()
         painter.setPen(ring_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for ring_idx in range(2):
             ring_progress = max(0.0, min(1.0, (burst_progress * 1.18) - (ring_idx * 0.20)))
             if ring_progress <= 0.0:
                 continue
-            radius = (icon_rect.width() * (0.34 + (ring_idx * 0.14))) + (icon_rect.width() * 0.34 * ring_progress)
-            alpha = max(0, int(120 * (1.0 - ring_progress)))
+            ring_drive = ring_progress if enabled else (1.0 - ring_progress)
+            radius = (icon_rect.width() * (0.34 + (ring_idx * 0.14))) + (icon_rect.width() * 0.34 * ring_drive)
+            alpha = max(0, int((205 if enabled else 185) * (1.0 - (ring_progress * 0.88)))) if enabled else max(0, int(185 * (0.30 + (0.70 * ring_drive))))
             ring_pen.setColor(QColor(accent.red(), accent.green(), accent.blue(), alpha))
             painter.setPen(ring_pen)
             painter.drawEllipse(center, radius, radius)
-        painter.restore()
 
-        spark_outer = icon_rect.width() * (0.10 + (0.08 * math.sin(min(1.0, progress / 0.35) * math.pi)))
-        spark_center = QPointF(icon_rect.right() - 4, icon_rect.top() + 6)
-        spark = _burst_path(spark_center, spark_outer * 0.38, spark_outer, points=5)
-        painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 234, 164, 225 if enabled else 120))
+        painter.setBrush(QColor(255, 234, 164, 240 if enabled else 184))
         painter.drawPath(spark)
-        painter.restore()
 
         bomb_path = _bomb_path(icon_rect)
-        painter.save()
-        painter.setPen(QPen(QColor(255, 224, 186, 235) if enabled else QColor(214, 220, 226, 165), 2.1,
+        painter.setPen(QPen(QColor(255, 224, 186, 245) if enabled else QColor(214, 220, 226, 185), 2.1,
                             Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.setBrush(QColor(42, 44, 52, 228) if enabled else QColor(84, 88, 96, 190))
+        painter.setBrush(QColor(42, 44, 52, 244) if enabled else QColor(76, 80, 88, 226))
         painter.drawPath(bomb_path)
         painter.restore()
 

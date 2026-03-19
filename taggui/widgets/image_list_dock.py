@@ -127,16 +127,16 @@ class ImageList(QDockWidget):
 
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(5, 2, 5, 2)
+        self.image_index_label.setMinimumWidth(84)
         self.image_index_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.MinimumExpanding,
             QSizePolicy.Policy.Preferred,
         )
         self.cache_status_label.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
-        status_layout.addWidget(self.image_index_label)
-        status_layout.addStretch()  # Push cache label to the right
+        status_layout.addWidget(self.image_index_label, stretch=1)
         status_layout.addWidget(self.cache_status_label)
         status_layout.addSpacing(8)
         status_layout.addWidget(self.decrease_thumbnail_size_button)
