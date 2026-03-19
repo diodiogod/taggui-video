@@ -152,6 +152,7 @@ class SignalManager:
                     bool(checked),
                     bool(other.isChecked()) if other is not None else False,
                     True,
+                    changed_kind='love',
                 )
             )
         if bomb_button is not None:
@@ -163,6 +164,7 @@ class SignalManager:
                     bool(other.isChecked()) if other is not None else False,
                     bool(checked),
                     True,
+                    changed_kind='bomb',
                 )
             )
 

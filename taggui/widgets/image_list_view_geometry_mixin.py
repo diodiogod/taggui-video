@@ -1548,6 +1548,8 @@ class ImageListViewGeometryMixin:
     def resizeEvent(self, event):
         """Recalculate masonry layout on resize (debounced)."""
         super().resizeEvent(event)
+        if hasattr(self, "_position_reaction_feedback_overlay"):
+            self._position_reaction_feedback_overlay()
         if self.use_masonry:
             if getattr(self, '_skip_next_resize_recalc', False):
                 # This flag is meant to skip one stale *queued* recalc after a

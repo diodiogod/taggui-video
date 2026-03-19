@@ -1220,7 +1220,7 @@ class MainWindow(QMainWindow):
         else:
             return False
 
-        self.set_reactions(love, bomb, True)
+        self.set_reactions(love, bomb, True, changed_kind=reaction_name)
         return True
 
     def set_floating_hold_mode(self, enabled: bool):
@@ -1730,6 +1730,17 @@ class MainWindow(QMainWindow):
         if not bool(getattr(self, '_main_viewer_visible', True)):
             return self.image_viewer
         return self.get_active_viewer()
+
+    def _show_reaction_feedback(self, kind: str, *, enabled: bool | None = None, stars: float | None = None):
+        """Route reaction feedback to the visible host."""
+        if bool(getattr(self, '_main_viewer_visible', True)):
+            target = self.get_active_viewer()
+            if target is not None and hasattr(target, 'show_reaction_feedback'):
+                target.show_reaction_feedback(kind, enabled=enabled, stars=stars)
+                return
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is not None and hasattr(list_view, 'show_reaction_feedback'):
+            list_view.show_reaction_feedback(kind, enabled=enabled, stars=stars)
 
     def _focus_widget_accepts_text(self) -> bool:
         """Return True when the current focus should keep raw key input."""
@@ -4554,7 +4565,12 @@ class MainWindow(QMainWindow):
                 action_name='Change rating',
                 should_ask_for_confirmation=False,
             )
-            self.get_active_viewer().rating_change(rating)
+            active_viewer = self.get_active_viewer()
+            active_viewer.rating_change(rating)
+            self._show_reaction_feedback(
+                'stars',
+                stars=float(rating or 0.0) * 5.0,
+            )
             # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
             # Re-apply filter only when the active filter actually depends on rating.
             if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
@@ -4569,7 +4585,14 @@ class MainWindow(QMainWindow):
             return
         self.image_list.filter_line_edit.setText(f'{reaction_name}:true')
 
-    def set_reactions(self, love: bool, bomb: bool, interactive: bool = False):
+    def set_reactions(
+        self,
+        love: bool,
+        bomb: bool,
+        interactive: bool = False,
+        *,
+        changed_kind: str | None = None,
+    ):
         if self.love_button is not None:
             blocker = self.love_button.blockSignals(True)
             self.love_button.setChecked(bool(love))
@@ -4598,7 +4621,15 @@ class MainWindow(QMainWindow):
                 action_name='Change reactions',
                 should_ask_for_confirmation=False,
             )
-            self.get_active_viewer().reaction_flags_change(love=love, bomb=bomb)
+            active_viewer = self.get_active_viewer()
+            active_viewer.reaction_flags_change(love=love, bomb=bomb)
+            feedback_kind = str(changed_kind or '').strip().lower()
+            if feedback_kind == 'love':
+                feedback_enabled = bool(love)
+            else:
+                feedback_kind = 'bomb'
+                feedback_enabled = bool(bomb)
+            self._show_reaction_feedback(feedback_kind, enabled=feedback_enabled)
             if self._filter_uses_reactions(self.proxy_image_list_model.filter):
                 self._arm_masonry_refresh_anchor()
                 self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)

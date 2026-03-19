@@ -14,6 +14,7 @@ from widgets.image_list_masonry_lifecycle_service import MasonryLifecycleService
 from widgets.image_list_masonry_submission_service import MasonrySubmissionService
 from widgets.image_list_masonry_window_planner_service import MasonryWindowPlannerService
 from widgets.image_list_masonry_completion_service import MasonryCompletionService
+from widgets.reaction_feedback_overlay import ReactionFeedbackOverlay
 
 class ImageListView(
     ImageListViewStrategyMixin,
@@ -224,6 +225,7 @@ class ImageListView(
         self._spawn_drag_arrow_overlay = None
         self._active_drag_preview_animations = []
         self._suppress_virtual_auto_scroll_once = False
+        self._reaction_feedback_overlay = ReactionFeedbackOverlay(self.viewport())
         self._strict_domain_service = StrictScrollDomainService(self)
         self._masonry_lifecycle_service = MasonryLifecycleService(self)
         self._masonry_submission_service = MasonrySubmissionService(self)
@@ -349,6 +351,38 @@ class ImageListView(
         source_model.modelReset.connect(self._on_model_reset_complete)
         source_model.modelAboutToBeReset.connect(self._clear_selection_cache)
         source_model.modelReset.connect(self._clear_selection_cache)
+
+    def _reaction_feedback_anchor_rect(self) -> QRect:
+        index = self.currentIndex()
+        if not index.isValid():
+            return QRect()
+        rect = self.visualRect(index)
+        if not rect.isValid():
+            return QRect()
+        viewport_rect = self.viewport().rect()
+        if not viewport_rect.isValid():
+            return QRect()
+        return rect.intersected(viewport_rect)
+
+    def _position_reaction_feedback_overlay(self):
+        overlay = getattr(self, "_reaction_feedback_overlay", None)
+        if overlay is None or not overlay.isVisible():
+            return False
+        anchor_rect = self._reaction_feedback_anchor_rect()
+        if not anchor_rect.isValid():
+            return False
+        changed = overlay.reposition(anchor_rect)
+        overlay.raise_()
+        return changed
+
+    def show_reaction_feedback(self, kind: str, *, enabled: bool | None = None, stars: float | None = None):
+        overlay = getattr(self, "_reaction_feedback_overlay", None)
+        if overlay is None:
+            return
+        anchor_rect = self._reaction_feedback_anchor_rect()
+        if not anchor_rect.isValid():
+            return
+        overlay.show_feedback(kind, enabled=enabled, stars=stars, anchor_rect=anchor_rect)
 
     def keyboardSearch(self, search: str):
         """Disable Qt type-to-select; typing should not jump the media list."""

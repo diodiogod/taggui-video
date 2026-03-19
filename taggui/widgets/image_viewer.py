@@ -17,6 +17,7 @@ from widgets.compare_divider_utils import (
     COMPARE_DIVIDER_THICKNESS_PX,
     centered_divider_geometry,
 )
+from widgets.reaction_feedback_overlay import ReactionFeedbackOverlay
 from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
 from widgets.marking_view import ImageGraphicsView
@@ -172,6 +173,7 @@ class ImageViewer(QWidget):
         self._main_controls_overlay_attached = False
         self._reaction_controls_overlay = None
         self._reaction_controls_overlay_attached = False
+        self._reaction_feedback_overlay = ReactionFeedbackOverlay(self)
         self._top_controls_active_overlay = None
         self._main_controls_overlay_zone_height = 54
         self._is_video_loaded = False
@@ -1765,10 +1767,14 @@ class ImageViewer(QWidget):
         self._position_video_controls()
         self._position_main_controls_overlay()
         self._position_reaction_controls_overlay()
+        self._position_reaction_feedback_overlay()
         # Restore visibility after resize (force controls to update)
         if was_visible:
             self.video_controls.setVisible(True)
             self.video_controls.raise_()
+        overlay = getattr(self, "_reaction_feedback_overlay", None)
+        if overlay is not None and overlay.isVisible():
+            overlay.raise_()
         try:
             self.video_player.sync_external_surface_geometry()
         except Exception:
@@ -1800,6 +1806,18 @@ class ImageViewer(QWidget):
             return
         overlay.hide()
         self._position_reaction_controls_overlay()
+
+    def _position_reaction_feedback_overlay(self):
+        overlay = getattr(self, "_reaction_feedback_overlay", None)
+        if overlay is None:
+            return False
+        return overlay.reposition()
+
+    def show_reaction_feedback(self, kind: str, *, enabled: bool | None = None, stars: float | None = None):
+        overlay = getattr(self, "_reaction_feedback_overlay", None)
+        if overlay is None:
+            return
+        overlay.show_feedback(kind, enabled=enabled, stars=stars)
 
     def set_main_controls_overlay_attached(self, attached: bool):
         """Enable or disable the hover overlay host."""
@@ -2249,6 +2267,9 @@ class ImageViewer(QWidget):
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True):
         if self._viewer_model_resetting:
             return
+        overlay = getattr(self, "_reaction_feedback_overlay", None)
+        if overlay is not None:
+            overlay.hide_immediately()
         proxy_index = self._normalize_proxy_index(proxy_image_index)
         if is_complete and self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
             self._capture_zoom_follow_state_from_current_view()
