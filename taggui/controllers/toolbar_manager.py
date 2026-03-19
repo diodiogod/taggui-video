@@ -15,7 +15,7 @@ from utils.icons import (
 )
 from utils.settings import settings
 from widgets.main_viewer_controls_widget import MainViewerControlsWidget
-from widgets.rating_controls import ReactionToggleButton, StarRatingWidget
+from widgets.reaction_controls_widget import ReactionControlsWidget
 
 
 class ToolbarManager:
@@ -36,6 +36,7 @@ class ToolbarManager:
         self.toolbar = None
         self.toolbars = {}
         self.main_viewer_controls_host_toggle_action = None
+        self.reaction_controls_host_toggle_action = None
         self.previous_media_action = None
         self.next_media_action = None
         self.main_viewer_fullscreen_action = None
@@ -69,6 +70,7 @@ class ToolbarManager:
         self.apply_speed_btn = None
         self.change_fps_btn = None
         self.rating = 0
+        self.reaction_controls_widget = None
         self.rating_widget = None
         self.love_button = None
         self.bomb_button = None
@@ -612,20 +614,21 @@ class ToolbarManager:
         spring.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spring)
 
-        rating_widget = QWidget()
-        rating_layout = QHBoxLayout(rating_widget)
-        rating_layout.setContentsMargins(0, 0, 0, 0)
-        rating_layout.setSpacing(6)
+        self.reaction_controls_host_toggle_action = QAction('⋮', self.main_window)
+        self.reaction_controls_host_toggle_action.setCheckable(True)
+        self.reaction_controls_host_toggle_action.setToolTip(
+            'Attach reactions to the main viewer overlay'
+        )
 
         self.rating = 0
-        self.rating_widget = StarRatingWidget(self.main_window)
-        rating_layout.addWidget(self.rating_widget)
-
-        self.love_button = ReactionToggleButton('love', self.main_window)
-        rating_layout.addWidget(self.love_button)
-
-        self.bomb_button = ReactionToggleButton('bomb', self.main_window)
-        rating_layout.addWidget(self.bomb_button)
+        self.reaction_controls_widget = ReactionControlsWidget(
+            self,
+            overlay_mode=False,
+            parent=self.main_window,
+        )
+        self.rating_widget = self.reaction_controls_widget.rating_widget
+        self.love_button = self.reaction_controls_widget.love_button
+        self.bomb_button = self.reaction_controls_widget.bomb_button
 
         for i in range(6):
             shortcut = QShortcut(QKeySequence(f'Ctrl+{i}'), self.main_window)
@@ -633,7 +636,7 @@ class ToolbarManager:
                 lambda checked=False, rating=i: self.main_window.set_rating(rating / 5.0, True)
             )
 
-        toolbar.addWidget(rating_widget)
+        toolbar.addWidget(self.reaction_controls_widget)
 
     def _create_delete_marked_button(self):
         """Create delete marked images dropdown button."""
@@ -707,6 +710,21 @@ class ToolbarManager:
                 'Attach controls to the main viewer overlay'
             )
 
+    def set_reaction_controls_attached(self, attached: bool):
+        """Update attach/detach label for the shared reaction cluster."""
+        if self.reaction_controls_host_toggle_action is None:
+            return
+        self.reaction_controls_host_toggle_action.setText('⋮')
+        self.reaction_controls_host_toggle_action.setChecked(bool(attached))
+        if attached:
+            self.reaction_controls_host_toggle_action.setToolTip(
+                'Return reactions to the toolbar'
+            )
+        else:
+            self.reaction_controls_host_toggle_action.setToolTip(
+                'Attach reactions to the main viewer overlay'
+            )
+
     def set_main_viewer_fullscreen_state(self, fullscreen: bool):
         """Update the shared main-viewer fullscreen action icon and tooltip."""
         if self.main_viewer_fullscreen_action is None:
@@ -725,6 +743,10 @@ class ToolbarManager:
     def create_main_viewer_controls_widget(self, *, overlay_mode: bool, parent=None):
         """Create one host widget for the shared main-viewer controls."""
         return MainViewerControlsWidget(self, overlay_mode=overlay_mode, parent=parent)
+
+    def create_reaction_controls_widget(self, *, overlay_mode: bool, parent=None):
+        """Create one host widget for the shared reaction controls."""
+        return ReactionControlsWidget(self, overlay_mode=overlay_mode, parent=parent)
 
     def _delete_all_marked(self):
         """Delete all marked images."""

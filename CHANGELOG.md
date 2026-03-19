@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.22] - 2026-03-18
+
+### Added
+
+- Add detachable reaction controls overlay
+- Stars, love, and bomb can now live in a separate hover cluster on the main viewer
+- The reaction cluster can be attached to the viewer or returned to the toolbar like the main controls
+- Narrow windows now avoid overlay conflicts by revealing the hovered cluster instead of overlapping toolbars
 ## [1.0.21] - 2026-03-18
 
 ### Added

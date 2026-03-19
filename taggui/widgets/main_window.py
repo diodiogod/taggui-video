@@ -390,6 +390,7 @@ class MainWindow(QMainWindow):
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
         self._main_viewer_controls_attached = True
+        self._reaction_controls_attached = True
         self._floating_hold_mode = False
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
@@ -490,6 +491,11 @@ class MainWindow(QMainWindow):
             parent=self.image_viewer,
         )
         self.image_viewer.set_main_controls_overlay(self._main_viewer_controls_overlay)
+        self._reaction_controls_overlay = self.toolbar_manager.create_reaction_controls_widget(
+            overlay_mode=True,
+            parent=self.image_viewer,
+        )
+        self.image_viewer.set_reaction_controls_overlay(self._reaction_controls_overlay)
         self.rating = self.toolbar_manager.rating
         self.rating_widget = self.toolbar_manager.rating_widget
         self.love_button = self.toolbar_manager.love_button
@@ -553,8 +559,17 @@ class MainWindow(QMainWindow):
             True,
             type=bool,
         )
+        self._reaction_controls_attached = settings.value(
+            'reaction_controls_attached',
+            True,
+            type=bool,
+        )
         self.set_main_viewer_controls_attached(
             self._main_viewer_controls_attached,
+            save=False,
+        )
+        self.set_reaction_controls_attached(
+            self._reaction_controls_attached,
             save=False,
         )
         self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
@@ -1243,7 +1258,7 @@ class MainWindow(QMainWindow):
         """Show/hide anchored main viewer without detaching it."""
         self._main_viewer_visible = bool(visible)
         self._set_central_content_page()
-        self._sync_main_viewer_controls_host()
+        self._sync_main_viewer_overlay_hosts()
         action = getattr(getattr(self, 'menu_manager', None), 'toggle_main_viewer_action', None)
         if action is not None:
             action.blockSignals(True)
@@ -1259,12 +1274,31 @@ class MainWindow(QMainWindow):
     def set_main_viewer_controls_attached(self, attached: bool, *, save: bool = True):
         """Attach or detach the shared main-viewer controls overlay."""
         self._main_viewer_controls_attached = bool(attached)
-        self._sync_main_viewer_controls_host()
+        self._sync_main_viewer_overlay_hosts()
         if save:
             settings.setValue(
                 'main_viewer_controls_attached',
                 self._main_viewer_controls_attached,
             )
+
+    def toggle_reaction_controls_attachment(self):
+        """Toggle whether reaction controls live on the viewer or toolbar."""
+        self.set_reaction_controls_attached(not self._reaction_controls_attached)
+
+    def set_reaction_controls_attached(self, attached: bool, *, save: bool = True):
+        """Attach or detach the shared reaction controls overlay."""
+        self._reaction_controls_attached = bool(attached)
+        self._sync_reaction_controls_host()
+        if save:
+            settings.setValue(
+                'reaction_controls_attached',
+                self._reaction_controls_attached,
+            )
+
+    def _sync_main_viewer_overlay_hosts(self):
+        """Route overlay-hosted control clusters between viewer and toolbars."""
+        self._sync_main_viewer_controls_host()
+        self._sync_reaction_controls_host()
 
     def _sync_main_viewer_controls_host(self):
         """Route the shared main-viewer controls to overlay or toolbar fallback."""
@@ -1289,6 +1323,33 @@ class MainWindow(QMainWindow):
             viewer_toolbar.setVisible(
                 (
                     ((not self._main_viewer_controls_attached) or (not bool(self._main_viewer_visible)))
+                    and not workspace_forces_toolbar_hidden
+                )
+            )
+
+    def _sync_reaction_controls_host(self):
+        """Route the shared reaction controls to overlay or toolbar fallback."""
+        toolbar_mgr = getattr(self, 'toolbar_manager', None)
+        if toolbar_mgr is None:
+            return
+        workspace_id = self._current_workspace_id() if hasattr(self, '_current_workspace_id') else 'media_viewer'
+        workspace_forces_toolbar_hidden = workspace_id == 'full_masonry'
+        toolbar_mgr.set_reaction_controls_attached(self._reaction_controls_attached)
+        overlay = getattr(self, '_reaction_controls_overlay', None)
+        if overlay is not None:
+            overlay.set_overlay_mode(True)
+        self.image_viewer.set_reaction_controls_overlay_attached(
+            (
+                self._reaction_controls_attached
+                and bool(self._main_viewer_visible)
+                and not workspace_forces_toolbar_hidden
+            )
+        )
+        rating_toolbar = toolbar_mgr.toolbars.get('rating')
+        if rating_toolbar is not None:
+            rating_toolbar.setVisible(
+                (
+                    ((not self._reaction_controls_attached) or (not bool(self._main_viewer_visible)))
                     and not workspace_forces_toolbar_hidden
                 )
             )
@@ -1867,7 +1928,7 @@ class MainWindow(QMainWindow):
         if central is not None and central.indexOf(target) < 0:
             central.insertWidget(int(restore_state.get('stack_index', 1)), target)
         self._set_central_content_page()
-        self._sync_main_viewer_controls_host()
+        self._sync_main_viewer_overlay_hosts()
 
         if close_window and fullscreen_window is not None:
             try:
@@ -4481,6 +4542,10 @@ class MainWindow(QMainWindow):
         self.rating = rating
         if self.rating_widget is not None:
             self.rating_widget.set_rating(float(rating or 0.0) * 5.0)
+        overlay = getattr(self, '_reaction_controls_overlay', None)
+        overlay_rating_widget = getattr(overlay, 'rating_widget', None)
+        if overlay_rating_widget is not None:
+            overlay_rating_widget.set_rating(float(rating or 0.0) * 5.0)
         if interactive:
             if self._current_viewer_image() is None:
                 return
@@ -4513,6 +4578,17 @@ class MainWindow(QMainWindow):
             blocker = self.bomb_button.blockSignals(True)
             self.bomb_button.setChecked(bool(bomb))
             self.bomb_button.blockSignals(blocker)
+        overlay = getattr(self, '_reaction_controls_overlay', None)
+        overlay_love_button = getattr(overlay, 'love_button', None)
+        overlay_bomb_button = getattr(overlay, 'bomb_button', None)
+        if overlay_love_button is not None:
+            blocker = overlay_love_button.blockSignals(True)
+            overlay_love_button.setChecked(bool(love))
+            overlay_love_button.blockSignals(blocker)
+        if overlay_bomb_button is not None:
+            blocker = overlay_bomb_button.blockSignals(True)
+            overlay_bomb_button.setChecked(bool(bomb))
+            overlay_bomb_button.blockSignals(blocker)
 
         if interactive:
             if self._current_viewer_image() is None:
@@ -4703,7 +4779,7 @@ class MainWindow(QMainWindow):
         if toolbar_manager is None:
             return
         toolbar_manager.reset_toolbars_layout()
-        self._sync_main_viewer_controls_host()
+        self._sync_main_viewer_overlay_hosts()
         action = getattr(getattr(self, 'menu_manager', None), 'toggle_toolbar_action', None)
         if action is not None:
             action.setChecked(toolbar_manager.any_toolbar_visible())

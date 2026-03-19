@@ -165,6 +165,9 @@ class ImageViewer(QWidget):
         self._controls_hover_inside = False
         self._main_controls_overlay = None
         self._main_controls_overlay_attached = False
+        self._reaction_controls_overlay = None
+        self._reaction_controls_overlay_attached = False
+        self._top_controls_active_overlay = None
         self._main_controls_overlay_zone_height = 54
         self._is_video_loaded = False
         self._floating_double_click_return_scale = None
@@ -187,7 +190,7 @@ class ImageViewer(QWidget):
         self._controls_hide_timer.timeout.connect(self._hide_controls)
         self._main_controls_overlay_poll_timer = QTimer(self)
         self._main_controls_overlay_poll_timer.setInterval(50)
-        self._main_controls_overlay_poll_timer.timeout.connect(self._poll_main_controls_overlay_hover)
+        self._main_controls_overlay_poll_timer.timeout.connect(self._poll_top_controls_overlay_hover)
 
         # Guard against stale index access during proxy/source model resets.
         self.proxy_image_list_model.modelAboutToBeReset.connect(self._on_proxy_model_about_to_reset)
@@ -1756,6 +1759,7 @@ class ImageViewer(QWidget):
         was_visible = self.video_controls.isVisible()
         self._position_video_controls()
         self._position_main_controls_overlay()
+        self._position_reaction_controls_overlay()
         # Restore visibility after resize (force controls to update)
         if was_visible:
             self.video_controls.setVisible(True)
@@ -1773,6 +1777,7 @@ class ImageViewer(QWidget):
             self.set_compare_split_from_viewer_pos(event.pos())
         if self._is_video_loaded:
             self._process_controls_hover(event.pos())
+        self._process_top_controls_overlay_hover(event.pos())
         super().mouseMoveEvent(event)
 
     def set_main_controls_overlay(self, overlay):
@@ -1783,38 +1788,93 @@ class ImageViewer(QWidget):
         overlay.hide()
         self._position_main_controls_overlay()
 
+    def set_reaction_controls_overlay(self, overlay):
+        """Register the main-viewer reaction controls overlay widget."""
+        self._reaction_controls_overlay = overlay
+        if overlay is None:
+            return
+        overlay.hide()
+        self._position_reaction_controls_overlay()
+
     def set_main_controls_overlay_attached(self, attached: bool):
         """Enable or disable the hover overlay host."""
         self._main_controls_overlay_attached = bool(attached)
-        if self._main_controls_overlay is None:
-            return
-        if not self._main_controls_overlay_attached:
+        overlay = self._main_controls_overlay
+        if overlay is not None:
+            if not self._main_controls_overlay_attached:
+                overlay.hide()
+            else:
+                self._position_main_controls_overlay()
+        self._update_top_controls_overlay_polling()
+
+    def set_reaction_controls_overlay_attached(self, attached: bool):
+        """Enable or disable the hover reaction controls host."""
+        self._reaction_controls_overlay_attached = bool(attached)
+        overlay = self._reaction_controls_overlay
+        if overlay is not None:
+            if not self._reaction_controls_overlay_attached:
+                overlay.hide()
+            else:
+                self._position_reaction_controls_overlay()
+        self._update_top_controls_overlay_polling()
+
+    def _update_top_controls_overlay_polling(self):
+        has_attached_overlay = (
+            (self._main_controls_overlay_attached and self._main_controls_overlay is not None)
+            or (self._reaction_controls_overlay_attached and self._reaction_controls_overlay is not None)
+        )
+        if not has_attached_overlay:
+            self._top_controls_active_overlay = None
             self._main_controls_overlay_poll_timer.stop()
-            self._main_controls_overlay.hide()
             return
-        self._position_main_controls_overlay()
         self._main_controls_overlay_poll_timer.start()
 
-    def _position_main_controls_overlay(self):
-        overlay = self._main_controls_overlay
-        if overlay is None:
+    def _top_controls_overlap_mode(self) -> bool:
+        """Return True when attached top overlays would collide if both were shown."""
+        if not (
+            self._main_controls_overlay_attached
+            and self._reaction_controls_overlay_attached
+            and self._main_controls_overlay is not None
+            and self._reaction_controls_overlay is not None
+        ):
             return False
+        main_rect = self._overlay_target_rect(self._main_controls_overlay, alignment='center')
+        reaction_rect = self._overlay_target_rect(self._reaction_controls_overlay, alignment='right')
+        if not main_rect.isValid() or not reaction_rect.isValid():
+            return False
+        return main_rect.adjusted(0, 0, 12, 0).intersects(reaction_rect)
+
+    def _overlay_target_rect(self, overlay, *, alignment: str):
+        if overlay is None:
+            return QRect()
         hint = overlay.sizeHint()
         target_w = min(max(hint.width(), 220), max(120, self.width() - 16))
         target_h = hint.height()
-        x_pos = max(8, (self.width() - target_w) // 2)
-        y_pos = 8
-        target_rect = QRect(x_pos, y_pos, target_w, target_h)
+        if alignment == 'right':
+            x_pos = max(8, self.width() - target_w - 8)
+        else:
+            x_pos = max(8, (self.width() - target_w) // 2)
+        return QRect(x_pos, 8, target_w, target_h)
+
+    def _position_top_overlay(self, overlay, *, alignment: str):
+        target_rect = self._overlay_target_rect(overlay, alignment=alignment)
+        if not target_rect.isValid():
+            return False
         if overlay.geometry() == target_rect:
             return False
         overlay.setGeometry(target_rect)
         return True
 
-    def _show_main_controls_overlay(self):
-        overlay = self._main_controls_overlay
-        if overlay is None or not self._main_controls_overlay_attached:
+    def _position_main_controls_overlay(self):
+        return self._position_top_overlay(self._main_controls_overlay, alignment='center')
+
+    def _position_reaction_controls_overlay(self):
+        return self._position_top_overlay(self._reaction_controls_overlay, alignment='right')
+
+    def _show_top_overlay(self, overlay, *, attached: bool, alignment: str):
+        if overlay is None or not attached:
             return
-        geometry_changed = self._position_main_controls_overlay()
+        geometry_changed = self._position_top_overlay(overlay, alignment=alignment)
         if overlay.isVisible():
             if geometry_changed:
                 overlay.raise_()
@@ -1822,40 +1882,117 @@ class ImageViewer(QWidget):
         overlay.show()
         overlay.raise_()
 
-    def _hide_main_controls_overlay(self):
-        overlay = self._main_controls_overlay
-        if overlay is None:
-            return
-        if not overlay.isVisible():
+    def _hide_top_overlay(self, overlay):
+        if overlay is None or not overlay.isVisible():
             return
         overlay.hide()
 
-    def _process_main_controls_overlay_hover(self, viewer_pos):
-        if (
-            not self._main_controls_overlay_attached
-            or self._main_controls_overlay is None
-            or viewer_pos is None
-        ):
+    def _show_exclusive_top_overlay(self, active_name: str | None):
+        """Show only the requested overlay and hide the other one."""
+        self._top_controls_active_overlay = active_name
+        if active_name == 'main':
+            self._show_top_overlay(
+                self._main_controls_overlay,
+                attached=self._main_controls_overlay_attached,
+                alignment='center',
+            )
+            self._hide_top_overlay(self._reaction_controls_overlay)
             return
-        hover_zone_h = max(
-            self._main_controls_overlay_zone_height,
-            self._main_controls_overlay.geometry().bottom() + 12,
-        )
+        if active_name == 'reaction':
+            self._show_top_overlay(
+                self._reaction_controls_overlay,
+                attached=self._reaction_controls_overlay_attached,
+                alignment='right',
+            )
+            self._hide_top_overlay(self._main_controls_overlay)
+            return
+        self._hide_top_overlay(self._main_controls_overlay)
+        self._hide_top_overlay(self._reaction_controls_overlay)
+
+    def _select_top_overlay_for_hover(self, viewer_pos):
+        """Pick which top overlay owns the current hover in overlap mode."""
+        if viewer_pos is None:
+            return None
+        main_overlay = self._main_controls_overlay
+        reaction_overlay = self._reaction_controls_overlay
+        if main_overlay is None or reaction_overlay is None:
+            return None
+        main_rect = self._overlay_target_rect(main_overlay, alignment='center')
+        reaction_rect = self._overlay_target_rect(reaction_overlay, alignment='right')
+        active = self._top_controls_active_overlay
+        if active == 'main' and main_overlay.isVisible() and main_overlay.geometry().contains(viewer_pos):
+            return 'main'
+        if active == 'reaction' and reaction_overlay.isVisible() and reaction_overlay.geometry().contains(viewer_pos):
+            return 'reaction'
+        if main_rect.contains(viewer_pos):
+            return 'main'
+        if reaction_rect.contains(viewer_pos):
+            return 'reaction'
+        split_x = int(round((main_rect.center().x() + reaction_rect.center().x()) * 0.5))
+        hysteresis_px = 16
+        if active == 'main' and viewer_pos.x() <= split_x + hysteresis_px:
+            return 'main'
+        if active == 'reaction' and viewer_pos.x() >= split_x - hysteresis_px:
+            return 'reaction'
+        return 'reaction' if viewer_pos.x() >= split_x else 'main'
+
+    def _process_top_controls_overlay_hover(self, viewer_pos):
+        if viewer_pos is None:
+            return
+        overlays = []
+        if self._main_controls_overlay_attached and self._main_controls_overlay is not None:
+            overlays.append((self._main_controls_overlay, 'center'))
+        if self._reaction_controls_overlay_attached and self._reaction_controls_overlay is not None:
+            overlays.append((self._reaction_controls_overlay, 'right'))
+        if not overlays:
+            return
+        hover_zone_h = self._main_controls_overlay_zone_height
+        in_overlay = False
+        for overlay, _alignment in overlays:
+            hover_zone_h = max(hover_zone_h, overlay.geometry().bottom() + 12)
+            if overlay.geometry().contains(viewer_pos):
+                in_overlay = True
         in_top_zone = (
             0 <= viewer_pos.x() < self.width()
             and 0 <= viewer_pos.y() <= hover_zone_h
         )
-        in_overlay = self._main_controls_overlay.geometry().contains(viewer_pos)
+        if self._top_controls_overlap_mode():
+            if in_overlay or in_top_zone:
+                self._show_exclusive_top_overlay(
+                    self._select_top_overlay_for_hover(viewer_pos)
+                )
+                return
+            self._top_controls_active_overlay = None
+            self._show_exclusive_top_overlay(None)
+            return
         if in_top_zone or in_overlay:
-            self._show_main_controls_overlay()
-        else:
-            self._hide_main_controls_overlay()
+            self._top_controls_active_overlay = None
+            self._show_top_overlay(
+                self._main_controls_overlay,
+                attached=self._main_controls_overlay_attached,
+                alignment='center',
+            )
+            self._show_top_overlay(
+                self._reaction_controls_overlay,
+                attached=self._reaction_controls_overlay_attached,
+                alignment='right',
+            )
+            return
+        self._top_controls_active_overlay = None
+        self._hide_top_overlay(self._main_controls_overlay)
+        self._hide_top_overlay(self._reaction_controls_overlay)
 
-    def _poll_main_controls_overlay_hover(self):
+    def _poll_top_controls_overlay_hover(self):
         """Use global cursor polling for reliable top-zone hover on HiDPI/native surfaces."""
         if (
-            not self._main_controls_overlay_attached
-            or self._main_controls_overlay is None
+            (
+                not self._main_controls_overlay_attached
+                or self._main_controls_overlay is None
+            )
+            and (
+                not self._reaction_controls_overlay_attached
+                or self._reaction_controls_overlay is None
+            )
             or not self.isVisible()
         ):
             return
@@ -1864,9 +2001,11 @@ class ImageViewer(QWidget):
         except Exception:
             return
         if not self.rect().contains(viewer_pos):
-            self._hide_main_controls_overlay()
+            self._top_controls_active_overlay = None
+            self._hide_top_overlay(self._main_controls_overlay)
+            self._hide_top_overlay(self._reaction_controls_overlay)
             return
-        self._process_main_controls_overlay_hover(viewer_pos)
+        self._process_top_controls_overlay_hover(viewer_pos)
 
     def _event_pos_to_viewer(self, watched, event):
         """Map an event local position from watched object to viewer coordinates."""

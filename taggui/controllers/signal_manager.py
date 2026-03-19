@@ -41,6 +41,10 @@ class SignalManager:
         toolbar_manager.main_viewer_controls_host_toggle_action.triggered.connect(
             self.main_window.toggle_main_viewer_controls_attachment
         )
+        if getattr(toolbar_manager, 'reaction_controls_host_toggle_action', None) is not None:
+            toolbar_manager.reaction_controls_host_toggle_action.triggered.connect(
+                self.main_window.toggle_reaction_controls_attachment
+            )
         toolbar_manager.zoom_fit_best_action.triggered.connect(
             lambda: (
                 self.main_window.image_viewer.clear_saved_double_click_detail_zoom(),
@@ -70,32 +74,17 @@ class SignalManager:
         if toolbar_manager.zoom_follow_mode_action is not None:
             toolbar_manager.zoom_follow_mode_action.triggered.connect(
                 self.main_window.cycle_main_viewer_zoom_follow_mode)
-        if toolbar_manager.rating_widget is not None:
-            toolbar_manager.rating_widget.rating_selected.connect(
-                lambda stars, event: self.main_window.set_rating(float(stars) / 5.0, True, event)
-            )
-        if toolbar_manager.love_button is not None:
-            toolbar_manager.love_button.filter_requested.connect(
-                self.main_window.apply_reaction_filter
-            )
-            toolbar_manager.love_button.toggled.connect(
-                lambda checked: self.main_window.set_reactions(
-                    bool(checked),
-                    bool(self.main_window.bomb_button.isChecked()) if self.main_window.bomb_button is not None else False,
-                    True,
-                )
-            )
-        if toolbar_manager.bomb_button is not None:
-            toolbar_manager.bomb_button.filter_requested.connect(
-                self.main_window.apply_reaction_filter
-            )
-            toolbar_manager.bomb_button.toggled.connect(
-                lambda checked: self.main_window.set_reactions(
-                    bool(self.main_window.love_button.isChecked()) if self.main_window.love_button is not None else False,
-                    bool(checked),
-                    True,
-                )
-            )
+        self._connect_reaction_controls(
+            toolbar_manager.rating_widget,
+            toolbar_manager.love_button,
+            toolbar_manager.bomb_button,
+        )
+        reaction_overlay = getattr(self.main_window, '_reaction_controls_overlay', None)
+        self._connect_reaction_controls(
+            getattr(reaction_overlay, 'rating_widget', None),
+            getattr(reaction_overlay, 'love_button', None),
+            getattr(reaction_overlay, 'bomb_button', None),
+        )
 
         toolbar_manager.add_action_group.triggered.connect(
             lambda action: image_viewer.add_marking(
@@ -147,6 +136,35 @@ class SignalManager:
         image_viewer.zoom_follow_mode_changed.connect(
             lambda mode: self.main_window.sync_zoom_follow_mode_button(image_viewer)
         )
+
+    def _connect_reaction_controls(self, rating_widget, love_button, bomb_button):
+        """Connect one set of rating/reaction widgets to the shared handlers."""
+        if rating_widget is not None:
+            rating_widget.rating_selected.connect(
+                lambda stars, event: self.main_window.set_rating(float(stars) / 5.0, True, event)
+            )
+        if love_button is not None:
+            love_button.filter_requested.connect(
+                self.main_window.apply_reaction_filter
+            )
+            love_button.toggled.connect(
+                lambda checked, other=bomb_button: self.main_window.set_reactions(
+                    bool(checked),
+                    bool(other.isChecked()) if other is not None else False,
+                    True,
+                )
+            )
+        if bomb_button is not None:
+            bomb_button.filter_requested.connect(
+                self.main_window.apply_reaction_filter
+            )
+            bomb_button.toggled.connect(
+                lambda checked, other=love_button: self.main_window.set_reactions(
+                    bool(other.isChecked()) if other is not None else False,
+                    bool(checked),
+                    True,
+                )
+            )
 
     def connect_image_list_signals(self):
         """Connect image list-related signals."""
