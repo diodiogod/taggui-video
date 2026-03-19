@@ -6,7 +6,7 @@ from operator import or_
 from pathlib import Path
 
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
-                            QItemSelectionRange, QModelIndex, QSize, QUrl, Qt,
+                            QItemSelectionRange, QModelIndex, QSize, QUrl, Qt, QMimeData,
                             Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint)
 from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag, QPolygon, QCursor, QIcon
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,

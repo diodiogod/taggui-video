@@ -1,6 +1,72 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewFileOpsMixin:
+    @staticmethod
+    def _try_retarget_existing_windows_explorer(file_path: Path) -> bool:
+        """Reuse an existing Explorer window for the same folder when possible."""
+        try:
+            import pythoncom
+            import win32com.client
+            import win32con
+            import win32gui
+        except Exception:
+            return False
+
+        target_folder = str(file_path.parent.resolve())
+        target_name = file_path.name
+        pythoncom.CoInitialize()
+        try:
+            shell = win32com.client.Dispatch("Shell.Application")
+            windows = shell.Windows()
+            for window in windows:
+                try:
+                    document = window.Document
+                    folder = document.Folder
+                    current_path = str(Path(folder.Self.Path).resolve())
+                    if current_path.casefold() != target_folder.casefold():
+                        continue
+
+                    item = folder.ParseName(target_name)
+                    if item is None:
+                        continue
+
+                    hwnd = int(getattr(window, "HWND", 0) or 0)
+                    if hwnd:
+                        try:
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        except Exception:
+                            pass
+                        try:
+                            win32gui.SetForegroundWindow(hwnd)
+                        except Exception:
+                            pass
+
+                    # SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED
+                    document.SelectItem(item, 0x1 | 0x8 | 0x10)
+                    return True
+                except Exception:
+                    continue
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+        return False
+
+    def _show_in_windows_explorer(self, file_path: Path):
+        """Open Explorer and select the target file."""
+        import sys
+
+        if sys.platform != 'win32':
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path.parent)))
+            return
+
+        if self._try_retarget_existing_windows_explorer(file_path):
+            return
+
+        QProcess.startDetached('explorer.exe', ['/select,', str(file_path)])
+
     def _is_generated_derivative_media(self, path: Path) -> bool:
         """Return whether the path looks like an app-generated derivative clip/image."""
         stem = path.stem.casefold()
@@ -248,10 +314,8 @@ class ImageListViewFileOpsMixin:
     def open_folder(self):
         selected_images = self.get_selected_images()
         if selected_images:
-            folder_path = selected_images[0].path.parent
             file_path = selected_images[0].path
-            # Use explorer.exe with /select flag to highlight the file
-            QProcess.startDetached('explorer.exe', ['/select,', str(file_path)])
+            self._show_in_windows_explorer(file_path)
 
 
     @Slot()

@@ -127,116 +127,141 @@ source "$VENV_PATH/bin/activate" || {
     exit 1
 }
 
-# Only install when venv was just created or user explicitly refreshes Torch
+# Only install when the venv is new, requirements changed, or user refreshes Torch
 SHOULD_INSTALL=0
+SHOULD_INSTALL_REQUIREMENTS=0
 SHOULD_REFRESH_TORCH=0
+SHOULD_INSTALL_TORCH=0
+REQ_FINGERPRINT_FILE="$VENV_PATH/.requirements.sha256"
+CURRENT_REQUIREMENTS_HASH="$(python - <<'PY'
+import hashlib
+from pathlib import Path
+print(hashlib.sha256(Path("requirements.txt").read_bytes()).hexdigest())
+PY
+)"
+INSTALLED_REQUIREMENTS_HASH=""
+if [ -f "$REQ_FINGERPRINT_FILE" ]; then
+    INSTALLED_REQUIREMENTS_HASH="$(cat "$REQ_FINGERPRINT_FILE")"
+fi
+
 if [ $VENV_EXISTS -eq 0 ]; then
     SHOULD_INSTALL=1
+    SHOULD_INSTALL_TORCH=1
+    SHOULD_INSTALL_REQUIREMENTS=1
 elif [ $REFRESH_TORCH -eq 1 ]; then
     SHOULD_INSTALL=1
     SHOULD_REFRESH_TORCH=1
+    SHOULD_INSTALL_TORCH=1
+fi
+
+if [ "$CURRENT_REQUIREMENTS_HASH" != "$INSTALLED_REQUIREMENTS_HASH" ]; then
+    SHOULD_INSTALL=1
+    SHOULD_INSTALL_REQUIREMENTS=1
 fi
 
 if [ $SHOULD_INSTALL -eq 1 ]; then
     echo "Upgrading pip..."
     python -m pip install --upgrade pip >> "$LOGFILE" 2>&1
 
-    CUDA_VERSION="cpu"
-    if [ -n "$CUDA_OVERRIDE" ] && [ "$CUDA_OVERRIDE" != "auto" ]; then
-        case "$CUDA_OVERRIDE" in
-            cpu|cu118|cu126|cu128)
-                CUDA_VERSION="$CUDA_OVERRIDE"
-                echo "Using manual CUDA override: $CUDA_VERSION"
-                ;;
-            *)
-                echo "ERROR: Unsupported CUDA override '$CUDA_OVERRIDE'"
-                echo "Supported values: cpu, cu118, cu126, cu128, auto"
-                exit 1
-                ;;
-        esac
-    else
-        echo "Detecting CUDA version..."
-        if command -v nvidia-smi &> /dev/null; then
-            DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{print $1}')
-            if [ -z "$DRIVER_VERSION" ]; then
-                DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | awk '{print $1}')
-            fi
-            if [ -n "$DRIVER_VERSION" ]; then
-                echo "Found NVIDIA GPU with driver: $DRIVER_VERSION"
+    if [ $SHOULD_INSTALL_TORCH -eq 1 ]; then
+        CUDA_VERSION="cpu"
+        if [ -n "$CUDA_OVERRIDE" ] && [ "$CUDA_OVERRIDE" != "auto" ]; then
+            case "$CUDA_OVERRIDE" in
+                cpu|cu118|cu126|cu128)
+                    CUDA_VERSION="$CUDA_OVERRIDE"
+                    echo "Using manual CUDA override: $CUDA_VERSION"
+                    ;;
+                *)
+                    echo "ERROR: Unsupported CUDA override '$CUDA_OVERRIDE'"
+                    echo "Supported values: cpu, cu118, cu126, cu128, auto"
+                    exit 1
+                    ;;
+            esac
+        else
+            echo "Detecting CUDA version..."
+            if command -v nvidia-smi &> /dev/null; then
+                DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{print $1}')
+                if [ -z "$DRIVER_VERSION" ]; then
+                    DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | awk '{print $1}')
+                fi
+                if [ -n "$DRIVER_VERSION" ]; then
+                    echo "Found NVIDIA GPU with driver: $DRIVER_VERSION"
 
-                # Extract major driver version
-                DRIVER_MAJOR=$(echo "$DRIVER_VERSION" | cut -d'.' -f1)
+                    DRIVER_MAJOR=$(echo "$DRIVER_VERSION" | cut -d'.' -f1)
 
-                # Detect CUDA wheel channel from driver
-                if [ "$DRIVER_MAJOR" -ge 570 ]; then
-                    CUDA_VERSION="cu128"
-                    echo "Detected CUDA 12.8-capable driver"
-                elif [ "$DRIVER_MAJOR" -ge 560 ]; then
-                    CUDA_VERSION="cu126"
-                    echo "Detected CUDA 12.6-capable driver"
-                elif [ "$DRIVER_MAJOR" -ge 450 ]; then
-                    CUDA_VERSION="cu118"
-                    echo "Detected CUDA 11.8-capable driver"
+                    if [ "$DRIVER_MAJOR" -ge 570 ]; then
+                        CUDA_VERSION="cu128"
+                        echo "Detected CUDA 12.8-capable driver"
+                    elif [ "$DRIVER_MAJOR" -ge 560 ]; then
+                        CUDA_VERSION="cu126"
+                        echo "Detected CUDA 12.6-capable driver"
+                    elif [ "$DRIVER_MAJOR" -ge 450 ]; then
+                        CUDA_VERSION="cu118"
+                        echo "Detected CUDA 11.8-capable driver"
+                    fi
+                else
+                    echo "WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack"
+                    echo "If you know the correct wheel channel, rerun with --cuda=cu128 (or cu126 / cu118)"
                 fi
             else
-                echo "WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack"
-                echo "If you know the correct wheel channel, rerun with --cuda=cu128 (or cu126 / cu118)"
+                echo "No NVIDIA GPU detected, installing CPU-only PyTorch"
+                echo "If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 (or cu126 / cu118)"
             fi
-        else
-            echo "No NVIDIA GPU detected, installing CPU-only PyTorch"
-            echo "If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 (or cu126 / cu118)"
+        fi
+
+        if [ $SHOULD_REFRESH_TORCH -eq 1 ]; then
+            echo "Refreshing Torch stack in existing virtual environment..."
+            pip uninstall -y torch torchvision torchaudio xformers flash-attn >> "$LOGFILE" 2>&1 || true
+        fi
+
+        echo "Installing PyTorch $TORCH_VERSION / torchvision $TORCHVISION_VERSION for $CUDA_VERSION..."
+        if [ "$CUDA_VERSION" == "cpu" ]; then
+            pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cpu >> "$LOGFILE" 2>&1
+        elif [ "$CUDA_VERSION" == "cu118" ]; then
+            pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu118 >> "$LOGFILE" 2>&1
+        elif [ "$CUDA_VERSION" == "cu126" ]; then
+            pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu126 >> "$LOGFILE" 2>&1
+        elif [ "$CUDA_VERSION" == "cu128" ]; then
+            pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu128 >> "$LOGFILE" 2>&1
+        fi
+
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to install PyTorch"
+            echo "Check the log file for details: $LOGFILE"
+            exit 1
+        fi
+        echo "PyTorch installed successfully!"
+
+        if [ "$CUDA_VERSION" != "cpu" ]; then
+            echo "Installing flash-attention..."
+            pip install flash-attn --no-build-isolation >> "$LOGFILE" 2>&1 || {
+                echo "WARNING: Flash-attention installation failed (optional, continuing...)"
+            }
+            echo "Flash-attention installed!"
         fi
     fi
 
-    if [ $SHOULD_REFRESH_TORCH -eq 1 ]; then
-        echo "Refreshing Torch stack in existing virtual environment..."
-        pip uninstall -y torch torchvision torchaudio xformers flash-attn >> "$LOGFILE" 2>&1 || true
-    fi
-
-    echo "Installing PyTorch $TORCH_VERSION / torchvision $TORCHVISION_VERSION for $CUDA_VERSION..."
-    if [ "$CUDA_VERSION" == "cpu" ]; then
-        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cpu >> "$LOGFILE" 2>&1
-    elif [ "$CUDA_VERSION" == "cu118" ]; then
-        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu118 >> "$LOGFILE" 2>&1
-    elif [ "$CUDA_VERSION" == "cu126" ]; then
-        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu126 >> "$LOGFILE" 2>&1
-    elif [ "$CUDA_VERSION" == "cu128" ]; then
-        pip install --upgrade --force-reinstall torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" --index-url https://download.pytorch.org/whl/cu128 >> "$LOGFILE" 2>&1
-    fi
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to install PyTorch"
-        echo "Check the log file for details: $LOGFILE"
-        exit 1
-    fi
-    echo "PyTorch installed successfully!"
-
-    # Install flash-attn for CUDA only (Linux can compile from source)
-    if [ "$CUDA_VERSION" != "cpu" ]; then
-        echo "Installing flash-attention..."
-        pip install flash-attn --no-build-isolation >> "$LOGFILE" 2>&1 || {
-            echo "WARNING: Flash-attention installation failed (optional, continuing...)"
+    if [ $SHOULD_INSTALL_REQUIREMENTS -eq 1 ]; then
+        echo "Installing requirements..."
+        pip install -r requirements.txt >> "$LOGFILE" 2>&1 || {
+            echo ""
+            echo "======================================================"
+            echo "ERROR: Failed to install dependencies"
+            echo "======================================================"
+            echo "This usually means:"
+            echo " - Your internet connection is offline"
+            echo " - A Python package is not compatible with your system"
+            echo " - A package server is temporarily unavailable"
+            echo ""
+            echo "Check the log file for details: $LOGFILE"
+            echo ""
+            exit 1
         }
-        echo "Flash-attention installed!"
+        printf '%s\n' "$CURRENT_REQUIREMENTS_HASH" > "$REQ_FINGERPRINT_FILE"
+        echo "Dependencies installed successfully!"
+    else
+        echo "Requirements unchanged, skipping dependency installation"
     fi
-
-    echo "Installing requirements..."
-    pip install -r requirements.txt >> "$LOGFILE" 2>&1 || {
-        echo ""
-        echo "======================================================"
-        echo "ERROR: Failed to install dependencies"
-        echo "======================================================"
-        echo "This usually means:"
-        echo " - Your internet connection is offline"
-        echo " - A Python package is not compatible with your system"
-        echo " - A package server is temporarily unavailable"
-        echo ""
-        echo "Check the log file for details: $LOGFILE"
-        echo ""
-        exit 1
-    }
-
-    echo "Dependencies installed successfully!"
 else
     echo "Virtual environment already exists, skipping installation"
     echo "To refresh the Torch stack in this venv, run: ./start_linux.sh --refresh-torch"

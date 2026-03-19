@@ -343,13 +343,11 @@ class MenuManager:
         edit_menu.addAction(batch_reorder_tags_action)
 
         remove_duplicate_tags_action = QAction('Remove Duplicate Tags', parent=self.main_window)
-        remove_duplicate_tags_action.setShortcut(QKeySequence('Ctrl+D'))
         remove_duplicate_tags_action.triggered.connect(
             self.main_window.remove_duplicate_tags)
         edit_menu.addAction(remove_duplicate_tags_action)
 
         remove_empty_tags_action = QAction('Remove Empty Tags', parent=self.main_window)
-        remove_empty_tags_action.setShortcut(QKeySequence('Ctrl+E'))
         remove_empty_tags_action.triggered.connect(
             self.main_window.remove_empty_tags)
         edit_menu.addAction(remove_empty_tags_action)

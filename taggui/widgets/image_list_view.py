@@ -211,6 +211,7 @@ class ImageListView(
         self._spawn_drag_start_pos = None
         self._spawn_drag_index = QPersistentModelIndex()
         self._spawn_drag_active = False
+        self._spawn_drag_external_only = False
         self._suppress_selection_commit_until_release = False
         self._spawn_drag_active_index = QPersistentModelIndex()
         self._spawn_drag_last_global_pos = QPoint()
@@ -301,6 +302,7 @@ class ImageListView(
         self.copy_images_action.triggered.connect(
             self.copy_selected_images)
         self.duplicate_images_action = self.addAction('Duplicate Images')
+        self.duplicate_images_action.setShortcut('Ctrl+D')
         self.duplicate_images_action.triggered.connect(
             self.duplicate_selected_images)
         self.delete_images_action = self.addAction('Delete Images')
@@ -312,6 +314,7 @@ class ImageListView(
         self.open_image_action.setShortcut('Ctrl+O')
         self.open_image_action.triggered.connect(self.open_image)
         self.open_folder_action = self.addAction('Open on Windows Explorer')
+        self.open_folder_action.setShortcut('Ctrl+E')
         self.open_folder_action.triggered.connect(self.open_folder)
         self.restore_backup_action = self.addAction('Restore from Backup')
         self.restore_backup_action.triggered.connect(self.restore_backup)

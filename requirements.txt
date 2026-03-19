@@ -52,3 +52,4 @@ language-tool-python>=2.10
 
 # Skin system
 PyYAML>=6.0
+pywin32>=306; platform_system == "Windows"

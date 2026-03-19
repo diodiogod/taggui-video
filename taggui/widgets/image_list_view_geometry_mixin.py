@@ -1364,6 +1364,10 @@ class ImageListViewGeometryMixin:
         """Start drag/spawn flow from one explicit index (selection-independent)."""
         if not model_index.isValid():
             return
+        external_only = bool(
+            hasattr(self, "_drag_to_external_only_mode")
+            and self._drag_to_external_only_mode()
+        )
         indices = [model_index]
         dragged_index = QPersistentModelIndex(model_index)
         dragged_path = None
@@ -1373,8 +1377,13 @@ class ImageListViewGeometryMixin:
         except Exception:
             dragged_path = None
 
-        # Use mimeData from the model.
-        mime_data = self.model().mimeData(indices)
+        # Use an URLs-only payload for external file drags. Some targets (notably
+        # browsers) mis-handle the model's text/plain fallback as dropped text.
+        if external_only and dragged_path is not None:
+            mime_data = QMimeData()
+            mime_data.setUrls([QUrl.fromLocalFile(str(dragged_path))])
+        else:
+            mime_data = self.model().mimeData(indices)
         if not mime_data:
             return
 
@@ -1409,8 +1418,9 @@ class ImageListViewGeometryMixin:
         # Ultra-fast drag/release race: if button is already up by the time we
         # reach drag start, skip QDrag.exec() and spawn immediately.
         if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
-            live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
-            self._spawn_floating_from_drag_index(live_index, source_pixmap)
+            if not external_only:
+                live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
+                self._spawn_floating_from_drag_index(live_index, source_pixmap)
             return
 
         drag = QDrag(self)
@@ -1420,7 +1430,11 @@ class ImageListViewGeometryMixin:
         drop_action = drag.exec(supportedActions)
 
         # If dropped onto no external target, spawn a floating viewer at cursor.
-        if drop_action == Qt.DropAction.IgnoreAction and dragged_index.isValid():
+        if (
+            drop_action == Qt.DropAction.IgnoreAction
+            and dragged_index.isValid()
+            and not external_only
+        ):
             live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
             self._spawn_floating_from_drag_index(live_index, source_pixmap)
 

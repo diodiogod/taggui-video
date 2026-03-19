@@ -164,139 +164,168 @@ if errorlevel 1 (
 )
 
 set SHOULD_INSTALL=0
+set SHOULD_INSTALL_REQUIREMENTS=0
 set SHOULD_REFRESH_TORCH=0
+set SHOULD_INSTALL_TORCH=0
+set REQ_FINGERPRINT_FILE=%VENV_PATH%\.requirements.sha256
+set CURRENT_REQUIREMENTS_HASH=
+set INSTALLED_REQUIREMENTS_HASH=
+
+for /f "usebackq delims=" %%H in (`python -c "import hashlib, pathlib; print(hashlib.sha256(pathlib.Path('requirements.txt').read_bytes()).hexdigest())"`) do (
+    if not defined CURRENT_REQUIREMENTS_HASH set "CURRENT_REQUIREMENTS_HASH=%%H"
+)
+
+if exist "%REQ_FINGERPRINT_FILE%" (
+    set /p INSTALLED_REQUIREMENTS_HASH=<"%REQ_FINGERPRINT_FILE%"
+)
+
 if %VENV_EXISTS% EQU 0 (
     set SHOULD_INSTALL=1
+    set SHOULD_INSTALL_TORCH=1
+    set SHOULD_INSTALL_REQUIREMENTS=1
 ) else if %REFRESH_TORCH% EQU 1 (
     set SHOULD_INSTALL=1
     set SHOULD_REFRESH_TORCH=1
+    set SHOULD_INSTALL_TORCH=1
 )
 
-:: Only install when venv was just created or user explicitly refreshes Torch
+if /I not "%CURRENT_REQUIREMENTS_HASH%"=="%INSTALLED_REQUIREMENTS_HASH%" (
+    set SHOULD_INSTALL=1
+    set SHOULD_INSTALL_REQUIREMENTS=1
+)
+
+:: Install only when the venv is new, requirements changed, or the user refreshed Torch
 if %SHOULD_INSTALL% EQU 1 (
     echo Upgrading pip...
     python -m pip install --upgrade pip > "%LOGFILE%" 2>&1
-
-    set CUDA_VERSION=cpu
-    set DRIVER_VERSION=
-    if defined CUDA_OVERRIDE (
-        if /I "!CUDA_OVERRIDE!"=="auto" (
-            set CUDA_OVERRIDE=
-        ) else if /I "!CUDA_OVERRIDE!"=="cpu" (
-            set CUDA_VERSION=cpu
-        ) else if /I "!CUDA_OVERRIDE!"=="cu118" (
-            set CUDA_VERSION=cu118
-        ) else if /I "!CUDA_OVERRIDE!"=="cu126" (
-            set CUDA_VERSION=cu126
-        ) else if /I "!CUDA_OVERRIDE!"=="cu128" (
-            set CUDA_VERSION=cu128
-        ) else (
-            echo ERROR: Unsupported CUDA override "!CUDA_OVERRIDE!"
-            echo Supported values: cpu, cu118, cu126, cu128, auto
-            pause
-            exit /b 1
-        )
-    )
-
-    if defined CUDA_OVERRIDE (
-        echo Using manual CUDA override: !CUDA_VERSION!
-    ) else (
-        echo Detecting CUDA version...
-        nvidia-smi >nul 2>&1
-        if !ERRORLEVEL! EQU 0 (
-            for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2^>nul`) do (
-                if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
-            )
-            if not defined DRIVER_VERSION (
-                for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
-                    if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
-                )
-            )
-            if not defined DRIVER_VERSION (
-                for /f "tokens=6 delims= " %%i in ('nvidia-smi 2^>nul ^| findstr /C:"Driver Version"') do (
-                    if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
-                )
-            )
-            if defined DRIVER_VERSION (
-                echo !DRIVER_VERSION!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
-                if !ERRORLEVEL! NEQ 0 (
-                    set DRIVER_VERSION=
-                )
-            )
-            if defined DRIVER_VERSION (
-                echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+	
+    if !SHOULD_INSTALL_TORCH! EQU 1 (
+        set CUDA_VERSION=cpu
+        set DRIVER_VERSION=
+        if defined CUDA_OVERRIDE (
+            if /I "!CUDA_OVERRIDE!"=="auto" (
+                set CUDA_OVERRIDE=
+            ) else if /I "!CUDA_OVERRIDE!"=="cpu" (
+                set CUDA_VERSION=cpu
+            ) else if /I "!CUDA_OVERRIDE!"=="cu118" (
+                set CUDA_VERSION=cu118
+            ) else if /I "!CUDA_OVERRIDE!"=="cu126" (
+                set CUDA_VERSION=cu126
+            ) else if /I "!CUDA_OVERRIDE!"=="cu128" (
+                set CUDA_VERSION=cu128
             ) else (
-                echo WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack
-                echo If you know the correct wheel channel, rerun with --cuda=cu128 ^(or cu126 / cu118^)
+                echo ERROR: Unsupported CUDA override "!CUDA_OVERRIDE!"
+                echo Supported values: cpu, cu118, cu126, cu128, auto
+                pause
+                exit /b 1
             )
+        )
 
-            :: Detect CUDA wheel channel from driver
-            if defined DRIVER_VERSION (
-                for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
-                    if %%v GEQ 570 (
-                        set CUDA_VERSION=cu128
-                        echo Detected CUDA 12.8-capable driver
-                    ) else if %%v GEQ 560 (
-                        set CUDA_VERSION=cu126
-                        echo Detected CUDA 12.6-capable driver
-                    ) else if %%v GEQ 450 (
-                        set CUDA_VERSION=cu118
-                        echo Detected CUDA 11.8-capable driver
+        if defined CUDA_OVERRIDE (
+            echo Using manual CUDA override: !CUDA_VERSION!
+        ) else (
+            echo Detecting CUDA version...
+            nvidia-smi >nul 2>&1
+            if !ERRORLEVEL! EQU 0 (
+                for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2^>nul`) do (
+                    if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
+                )
+                if not defined DRIVER_VERSION (
+                    for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
+                        if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
                     )
                 )
+                if not defined DRIVER_VERSION (
+                    for /f "tokens=6 delims= " %%i in ('nvidia-smi 2^>nul ^| findstr /C:"Driver Version"') do (
+                        if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
+                    )
+                )
+                if defined DRIVER_VERSION (
+                    echo !DRIVER_VERSION!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
+                    if !ERRORLEVEL! NEQ 0 (
+                        set DRIVER_VERSION=
+                    )
+                )
+                if defined DRIVER_VERSION (
+                    echo Found NVIDIA GPU with driver: !DRIVER_VERSION!
+                ) else (
+                    echo WARNING: Could not parse NVIDIA driver version, defaulting to CPU Torch stack
+                    echo If you know the correct wheel channel, rerun with --cuda=cu128 ^(or cu126 / cu118^)
+                )
+
+                :: Detect CUDA wheel channel from driver
+                if defined DRIVER_VERSION (
+                    for /f "tokens=1 delims=." %%v in ("!DRIVER_VERSION!") do (
+                        if %%v GEQ 570 (
+                            set CUDA_VERSION=cu128
+                            echo Detected CUDA 12.8-capable driver
+                        ) else if %%v GEQ 560 (
+                            set CUDA_VERSION=cu126
+                            echo Detected CUDA 12.6-capable driver
+                        ) else if %%v GEQ 450 (
+                            set CUDA_VERSION=cu118
+                            echo Detected CUDA 11.8-capable driver
+                        )
+                    )
+                )
+            ) else (
+                echo No NVIDIA GPU detected, installing CPU-only PyTorch
+                echo If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 ^(or cu126 / cu118^)
             )
-        ) else (
-            echo No NVIDIA GPU detected, installing CPU-only PyTorch
-            echo If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 ^(or cu126 / cu118^)
+        )
+
+        if !SHOULD_REFRESH_TORCH! EQU 1 (
+            echo Refreshing Torch stack in existing virtual environment...
+            pip uninstall -y torch torchvision torchaudio xformers flash-attn > "%LOGFILE%" 2>&1
+        )
+
+        echo Installing PyTorch !TORCH_VERSION! / torchvision !TORCHVISION_VERSION! for !CUDA_VERSION!...
+        if "!CUDA_VERSION!"=="cpu" (
+            pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cpu >> "%LOGFILE%" 2>&1
+        ) else if "!CUDA_VERSION!"=="cu118" (
+            pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu118 >> "%LOGFILE%" 2>&1
+        ) else if "!CUDA_VERSION!"=="cu126" (
+            pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu126 >> "%LOGFILE%" 2>&1
+        ) else if "!CUDA_VERSION!"=="cu128" (
+            pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu128 >> "%LOGFILE%" 2>&1
+        )
+
+        if !ERRORLEVEL! NEQ 0 (
+            echo ERROR: Failed to install PyTorch
+            echo Check the log file for details: %LOGFILE%
+            pause & exit /b 1
+        )
+        echo PyTorch installed successfully!
+
+        :: Flash-attention wheels have historically been tightly coupled to specific Torch builds.
+        :: Keep this optional and avoid pinning old wheel URLs during refreshes.
+        if not "!CUDA_VERSION!"=="cpu" (
+            echo Skipping flash-attention wheel install on Windows ^(optional^).
         )
     )
 
-    if !SHOULD_REFRESH_TORCH! EQU 1 (
-        echo Refreshing Torch stack in existing virtual environment...
-        pip uninstall -y torch torchvision torchaudio xformers flash-attn > "%LOGFILE%" 2>&1
+    if !SHOULD_INSTALL_REQUIREMENTS! EQU 1 (
+        echo Installing requirements...
+        pip install -r requirements.txt > "%LOGFILE%" 2>&1
+        if !ERRORLEVEL! NEQ 0 (
+            echo.
+            echo ======================================================
+            echo ERROR: Failed to install dependencies
+            echo ======================================================
+            echo This usually means:
+            echo  - Your internet connection is offline
+            echo  - A Python package is not compatible with your system
+            echo  - A package server is temporarily unavailable
+            echo.
+            echo Check the log file for details: %LOGFILE%
+            echo.
+            pause & exit /b 1
+        )
+        >"%REQ_FINGERPRINT_FILE%" echo %CURRENT_REQUIREMENTS_HASH%
+        echo Dependencies installed successfully!
+    ) else (
+        echo Requirements unchanged, skipping dependency installation
     )
-
-    echo Installing PyTorch !TORCH_VERSION! / torchvision !TORCHVISION_VERSION! for !CUDA_VERSION!...
-    if "!CUDA_VERSION!"=="cpu" (
-        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cpu >> "%LOGFILE%" 2>&1
-    ) else if "!CUDA_VERSION!"=="cu118" (
-        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu118 >> "%LOGFILE%" 2>&1
-    ) else if "!CUDA_VERSION!"=="cu126" (
-        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu126 >> "%LOGFILE%" 2>&1
-    ) else if "!CUDA_VERSION!"=="cu128" (
-        pip install --upgrade --force-reinstall torch==!TORCH_VERSION! torchvision==!TORCHVISION_VERSION! --index-url https://download.pytorch.org/whl/cu128 >> "%LOGFILE%" 2>&1
-    )
-
-    if !ERRORLEVEL! NEQ 0 (
-        echo ERROR: Failed to install PyTorch
-        echo Check the log file for details: %LOGFILE%
-        pause & exit /b 1
-    )
-    echo PyTorch installed successfully!
-
-    :: Flash-attention wheels have historically been tightly coupled to specific Torch builds.
-    :: Keep this optional and avoid pinning old wheel URLs during refreshes.
-    if not "!CUDA_VERSION!"=="cpu" (
-        echo Skipping flash-attention wheel install on Windows ^(optional^).
-    )
-
-    echo Installing requirements...
-    pip install -r requirements.txt > "%LOGFILE%" 2>&1
-    if !ERRORLEVEL! NEQ 0 (
-        echo.
-        echo ======================================================
-        echo ERROR: Failed to install dependencies
-        echo ======================================================
-        echo This usually means:
-        echo  - Your internet connection is offline
-        echo  - A Python package is not compatible with your system
-        echo  - A package server is temporarily unavailable
-        echo.
-        echo Check the log file for details: %LOGFILE%
-        echo.
-        pause & exit /b 1
-    )
-    echo Dependencies installed successfully!
 ) else (
     echo Virtual environment already exists, skipping installation
     echo To refresh the Torch stack in this venv, run: start_windows.bat --refresh-torch

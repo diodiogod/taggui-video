@@ -1,6 +1,13 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewInteractionMixin:
+    def _drag_to_external_only_mode(self) -> bool:
+        """Alt+drag exports files to other apps instead of spawning a viewer."""
+        try:
+            return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        except Exception:
+            return False
+
     def _event_global_point(self, event) -> QPoint:
         """Get reliable global mouse point from event."""
         try:
@@ -17,10 +24,12 @@ class ImageListViewInteractionMixin:
         self._spawn_drag_start_pos = None
         self._spawn_drag_index = QPersistentModelIndex()
         self._spawn_drag_origin_global_pos = QPoint()
+        self._spawn_drag_external_only = False
 
     def _begin_spawn_drag_active(self, index: QPersistentModelIndex, global_pos: QPoint | None = None):
         """Arm internal spawn-drag mode until left button release."""
         self._spawn_drag_active = True
+        self._spawn_drag_external_only = bool(self._drag_to_external_only_mode())
         self._spawn_drag_active_index = QPersistentModelIndex(index)
         self._spawn_drag_last_global_pos = QPoint(global_pos) if global_pos is not None else QCursor.pos()
         try:
@@ -53,7 +62,9 @@ class ImageListViewInteractionMixin:
         self._suppress_selection_commit_until_release = False
         self._spawn_drag_active_index = QPersistentModelIndex()
         compare_handled = False
-        if should_spawn and host is not None and hasattr(host, "release_compare_drag"):
+        external_only = bool(getattr(self, "_spawn_drag_external_only", False))
+        self._spawn_drag_external_only = False
+        if should_spawn and (not external_only) and host is not None and hasattr(host, "release_compare_drag"):
             try:
                 compare_handled = bool(host.release_compare_drag(self._spawn_drag_last_global_pos))
             except Exception:
@@ -63,7 +74,7 @@ class ImageListViewInteractionMixin:
                 hide_ghost()
             return
         spawn_started = False
-        if should_spawn and active_index.isValid():
+        if should_spawn and (not external_only) and active_index.isValid():
             try:
                 live_index = self.model().index(active_index.row(), active_index.column())
             except Exception:
@@ -584,10 +595,15 @@ class ImageListViewInteractionMixin:
                     spawn_drag_index.column() if spawn_drag_index.isValid() else 0,
                 )
                 if drag_index.isValid():
-                    self._begin_spawn_drag_active(
-                        QPersistentModelIndex(drag_index),
-                        global_pos=self._event_global_point(event),
-                    )
+                    if self._drag_to_external_only_mode():
+                        start_drag = getattr(self, "_start_spawn_drag_for_index", None)
+                        if callable(start_drag):
+                            start_drag(drag_index, Qt.DropAction.CopyAction)
+                    else:
+                        self._begin_spawn_drag_active(
+                            QPersistentModelIndex(drag_index),
+                            global_pos=self._event_global_point(event),
+                        )
                     event.accept()
                     return
         elif self._spawn_drag_start_pos is not None and not (event.buttons() & Qt.MouseButton.LeftButton):
@@ -634,6 +650,12 @@ class ImageListViewInteractionMixin:
             if image:
                 # Visual feedback: flash the thumbnail
                 self._flash_thumbnail(index)
+                if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+                    show_in_explorer = getattr(self, "_show_in_windows_explorer", None)
+                    if callable(show_in_explorer):
+                        show_in_explorer(image.path)
+                        event.accept()
+                        return
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path)))
                 event.accept()
                 return
