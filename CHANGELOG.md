@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.24] - 2026-03-19
+
+### Added
+
+- The image list can now be resized much narrower without losing the media-type filter
+- Masonry view can collapse down to single-column layouts more reliably
+- Love, bomb, and star rating shortcuts now show on-screen feedback even when reaction controls are hidden
+- Bomb feedback uses a restrained burst animation, while love and stars get softer visual confirmation
+- When the main viewer is hidden, reaction feedback now appears on the current thumbnail instead
+
+### Changed
+
+- Improve narrow masonry layouts and reaction feedback
 ## [1.0.23] - 2026-03-19
 
 ### Added
