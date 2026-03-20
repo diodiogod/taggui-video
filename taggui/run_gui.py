@@ -186,12 +186,11 @@ def run_gui():
     def signal_handler(signum, frame):
         print("\n[SHUTDOWN] Console closing, saving settings...")
         # Save settings directly (closeEvent might not fire during forced shutdown)
-        geom = main_window.saveGeometry()
-        state = main_window.saveState()
-        print(f"[SHUTDOWN] Saving geometry: {len(geom)} bytes")
-        print(f"[SHUTDOWN] Saving state: {len(state)} bytes")
-        settings.setValue('geometry', geom)
-        settings.setValue('window_state', state)
+        main_window._save_main_window_layout_settings()
+        geom = settings.value('geometry', type=bytes)
+        state = settings.value('window_state', type=bytes)
+        print(f"[SHUTDOWN] Saving geometry: {len(geom) if geom else 0} bytes")
+        print(f"[SHUTDOWN] Saving state: {len(state) if state else 0} bytes")
         if hasattr(main_window, 'toolbar_manager'):
             settings.setValue('fixed_marker_size', main_window.toolbar_manager.fixed_marker_size_spinbox.value())
         settings.sync()  # Force write to disk

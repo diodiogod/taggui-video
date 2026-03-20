@@ -1058,8 +1058,7 @@ class MainWindow(QMainWindow):
         self.close_all_floating_viewers()
         self._save_image_list_dock_width()
         self._save_right_dock_width()
-        settings.setValue('geometry', self.saveGeometry())
-        settings.setValue('window_state', self.saveState())
+        self._save_main_window_layout_settings()
         # Save marker size setting
         if hasattr(self, 'toolbar_manager'):
             settings.setValue('fixed_marker_size', self.toolbar_manager.fixed_marker_size_spinbox.value())
@@ -1076,6 +1075,17 @@ class MainWindow(QMainWindow):
         self.shutdown_background_workers()
 
         super().closeEvent(event)
+
+    def _save_main_window_layout_settings(self):
+        """Persist main-window geometry, dock state, and window mode flags."""
+        settings.setValue('geometry', self.saveGeometry())
+        settings.setValue('window_state', self.saveState())
+        settings.setValue('main_window_is_fullscreen', self.isFullScreen())
+        settings.setValue('main_window_is_maximized', self.isMaximized())
+        try:
+            settings.setValue('main_window_normal_geometry', self.normalGeometry())
+        except Exception:
+            pass
 
     def shutdown_background_workers(self):
         """Stop/cancel background workers so process exit is fast."""
@@ -4769,11 +4779,37 @@ class MainWindow(QMainWindow):
     def restore(self):
         # Restore the window geometry and state.
         import time
-        if settings.contains('geometry'):
-            self.restoreGeometry(settings.value('geometry', type=bytes))
+        geometry_bytes = settings.value('geometry', type=bytes) if settings.contains('geometry') else None
+        window_state_bytes = settings.value('window_state', type=bytes) if settings.contains('window_state') else None
+        was_fullscreen = settings.value('main_window_is_fullscreen', False, type=bool)
+        was_maximized = settings.value('main_window_is_maximized', False, type=bool)
+
+        if geometry_bytes:
+            self.restoreGeometry(geometry_bytes)
         else:
-            self.showMaximized()
-        self.restoreState(settings.value('window_state', type=bytes))
+            normal_rect = settings.value('main_window_normal_geometry')
+            if normal_rect is not None and hasattr(normal_rect, 'isValid') and normal_rect.isValid():
+                self.setGeometry(normal_rect)
+            else:
+                self.showMaximized()
+
+        if window_state_bytes:
+            self.restoreState(window_state_bytes)
+
+        def _apply_saved_window_mode():
+            try:
+                if was_fullscreen:
+                    self.showFullScreen()
+                elif was_maximized:
+                    self.showMaximized()
+                else:
+                    self.showNormal()
+                    if geometry_bytes:
+                        self.restoreGeometry(geometry_bytes)
+            except Exception as e:
+                print(f"[RESTORE] Failed to reapply saved window mode: {e}")
+
+        QTimer.singleShot(0, _apply_saved_window_mode)
         # Keep the restored dock widths authoritative during startup. Without
         # this, the masonry auto-snap can immediately overwrite the user's
         # saved splitter position after the first relayout.
