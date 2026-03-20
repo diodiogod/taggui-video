@@ -1,6 +1,7 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_strict_domain_service import StrictScrollDomainService
 from widgets.image_list_masonry_incremental_service import MasonryIncrementalService
+from utils.diagnostic_logging import diagnostic_print, should_emit_trace_log
 
 class ImageListViewStrategyMixin:
     def _image_dimensions_need_enrichment(self, image) -> bool:
@@ -213,6 +214,12 @@ class ImageListViewStrategyMixin:
             return None
 
         now = time.time()
+        strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+        if now <= strict_jump_until:
+            target_global = getattr(self, "_strict_jump_target_global", None)
+            if isinstance(target_global, int) and target_global >= 0:
+                return int(target_global)
+
         idle_until = float(getattr(self, "_idle_anchor_until", 0.0) or 0.0)
         if now <= idle_until:
             target_global = getattr(self, "_idle_anchor_target_global", None)
@@ -377,27 +384,8 @@ class ImageListViewStrategyMixin:
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
         """Timestamped, optionally throttled flow logging for masonry/pagination diagnostics."""
-        # TRACE_RESTORE: temporary minimal diagnostics filter for strict drag debugging.
-        # Set `minimal_trace_logs` to False in settings to restore full flow logs.
-        try:
-            minimal_trace = bool(settings.value("minimal_trace_logs", True, type=bool))
-        except Exception:
-            minimal_trace = True
-        if minimal_trace:
-            keep = False
-            if component == "STRICT":
-                keep = True
-            elif component == "MASONRY" and (
-                message.startswith("Calc start")
-                or message.startswith("Strategy=")
-                or message.startswith("Waiting target page")
-                or message.startswith("Waiting window items")
-            ):
-                keep = True
-            elif component == "PAGINATION" and message.startswith("Triggered loads"):
-                keep = True
-            if not keep:
-                return
+        if not should_emit_trace_log(component, message, level=level):
+            return
 
         now = time.time()
         if throttle_key and every_s is not None:
@@ -716,6 +704,31 @@ class ImageListViewStrategyMixin:
             source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
         if not source_model or not hasattr(source_model, "get_loaded_row_for_global_index"):
             return False
+        virtual_list_active = bool(
+            hasattr(self, "_virtual_list_is_active") and self._virtual_list_is_active(source_model)
+        )
+
+        # In masonry drag-jump mode the lock exists only to preserve selection
+        # identity, not to pull the viewport back to the old selected item.
+        # Forcing page loads or scrollTo() here can yank the user back to the
+        # previous page while a far jump is still stabilizing.
+        if self.use_masonry and not virtual_list_active:
+            try:
+                cur = self.currentIndex()
+                if cur.isValid():
+                    proxy_model = self.model()
+                    cur_src = (
+                        proxy_model.mapToSource(cur)
+                        if proxy_model and hasattr(proxy_model, "mapToSource")
+                        else cur
+                    )
+                    if cur_src.isValid() and hasattr(source_model, "get_global_index_for_row"):
+                        cur_global = source_model.get_global_index_for_row(cur_src.row())
+                        if isinstance(cur_global, int) and int(cur_global) == int(target_global):
+                            self._selected_global_index = int(target_global)
+            except Exception:
+                pass
+            return False
 
         # Request the target page eagerly if not loaded yet.
         try:
@@ -787,6 +800,39 @@ class ImageListViewStrategyMixin:
 
         QTimer.singleShot(0, _run_rebind)
 
+    def _get_strict_canonical_scroll_for_global(self, target_global, source_model=None, domain_max=None):
+        """Map a global index into strict canonical scroll space."""
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return None
+        if target_global < 0:
+            return None
+
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if source_model is None:
+            return None
+
+        try:
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        except Exception:
+            total_items = 0
+        if total_items <= 0:
+            return None
+
+        if domain_max is None:
+            domain_max = self.verticalScrollBar().maximum()
+        domain_max = max(0, int(domain_max))
+
+        target_global = max(0, min(total_items - 1, target_global))
+        if total_items <= 1 or domain_max <= 0:
+            return 0
+
+        ratio = target_global / max(1, total_items - 1)
+        return max(0, min(int(round(ratio * domain_max)), domain_max))
+
     def _get_restore_anchor_scroll_value(self, source_model=None, domain_max=None):
         """Resolve restore-time scroll anchor from target global index (fallback: target page)."""
         try:
@@ -813,6 +859,19 @@ class ImageListViewStrategyMixin:
         if domain_max is None:
             domain_max = self.verticalScrollBar().maximum()
         domain_max = max(0, int(domain_max))
+
+        strict_mode = (
+            bool(getattr(self, "use_masonry", False))
+            and source_model is not None
+            and getattr(source_model, "_paginated_mode", False)
+            and self._get_masonry_strategy(source_model) == "windowed_strict"
+        )
+        if strict_mode:
+            return self._get_strict_canonical_scroll_for_global(
+                target_global,
+                source_model=source_model,
+                domain_max=domain_max,
+            )
 
         for item in (self._masonry_items or []):
             if int(item.get("index", -1)) == target_global:
@@ -861,6 +920,9 @@ class ImageListViewStrategyMixin:
                 self._restore_target_page = None
                 self._restore_target_global_index = None
                 self._restore_anchor_until = 0.0
+            self._suppress_masonry_auto_scroll_until = 0.0
+            self._strict_jump_target_global = None
+            self._strict_jump_until = 0.0
             self._idle_anchor_target_global = None
             self._idle_anchor_until = 0.0
             if getattr(self, '_resize_anchor_page', None) is not None:
@@ -1314,7 +1376,7 @@ class ImageListViewStrategyMixin:
                         show_reflow_guide(reflow_guide_snapshot)
                     except Exception:
                         pass
-            print(f"[ENRICH] Masonry refreshed ({len(new_items)} items)")
+            diagnostic_print(f"[ENRICH] Masonry refreshed ({len(new_items)} items)", detail="verbose")
 
             # Start pre-enrichment for fringe pages (±15 ahead) with 'preload' scope
             pre_enrich_buffer = 15
@@ -1627,7 +1689,10 @@ class ImageListViewStrategyMixin:
         if new_items is None:
             return False
 
-        print(f"[MASONRY-INCR] Extended {direction}: page {page_num}, +{len(new_items)} items")
+        diagnostic_print(
+            f"[MASONRY-INCR] Extended {direction}: page {page_num}, +{len(new_items)} items",
+            detail="verbose",
+        )
         return True
 
     def _check_and_enrich_loaded_pages(self):

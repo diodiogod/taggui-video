@@ -2,6 +2,7 @@ import threading
 import traceback
 import os
 from concurrent.futures import ThreadPoolExecutor
+from utils.diagnostic_logging import diagnostic_print
 
 try:
     from widgets.masonry_worker import calculate_masonry_layout
@@ -30,7 +31,10 @@ class MasonrySubmissionService:
         if self._view._masonry_calc_count % 20 != 0:
             return
 
-        print(f"[MASONRY] Recreating executor after {self._view._masonry_calc_count} calculations (diagnostic mode)")
+        diagnostic_print(
+            f"[MASONRY] Recreating executor after {self._view._masonry_calc_count} calculations (diagnostic mode)",
+            detail="verbose",
+        )
         try:
             old_executor = self._view._masonry_executor
             # Avoid swapping while a calc future is still running.

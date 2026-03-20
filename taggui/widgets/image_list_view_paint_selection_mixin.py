@@ -144,12 +144,29 @@ class ImageListViewPaintSelectionMixin:
                     total_items = source_model._total_count if hasattr(source_model, '_total_count') else 0
                     page_size = source_model.PAGE_SIZE if hasattr(source_model, 'PAGE_SIZE') else 1000
                     local_anchor_mode = self._use_local_anchor_masonry(source_model)
+                    waiting_window_pages = getattr(self, '_strict_waiting_window_pages', None)
+                    waiting_target_page = getattr(self, '_strict_waiting_target_page', None)
+                    strict_wait_window_active = (
+                        local_anchor_mode
+                        and isinstance(waiting_target_page, int)
+                        and isinstance(waiting_window_pages, tuple)
+                        and len(waiting_window_pages) == 2
+                        and not self._scrollbar_dragging
+                    )
 
                     real_visible = [it for it in visible_items if it.get('index', -1) >= 0]
                     req_start = None
                     req_end = None
 
-                    if local_anchor_mode and total_items > 0 and page_size > 0:
+                    if strict_wait_window_active and total_items > 0 and page_size > 0:
+                        wait_start_page = max(0, int(waiting_window_pages[0]))
+                        wait_end_page = max(wait_start_page, int(waiting_window_pages[1]))
+                        last_page = max(0, (total_items - 1) // page_size)
+                        wait_start_page = min(wait_start_page, last_page)
+                        wait_end_page = min(wait_end_page, last_page)
+                        req_start = wait_start_page * page_size
+                        req_end = min(total_items - 1, ((wait_end_page + 1) * page_size) - 1)
+                    elif local_anchor_mode and total_items > 0 and page_size > 0:
                         # Prevent load-range thrash: drive range from scrollbar fraction.
                         total_pages = (total_items + page_size - 1) // page_size
                         last_page = max(0, total_pages - 1)
@@ -193,7 +210,13 @@ class ImageListViewPaintSelectionMixin:
                             source_model.ensure_pages_for_range(req_start, req_end)
 
                     # If nothing is visible after a jump, force-load around current page immediately.
-                    if (not strict_drag_active) and not visible_items and total_items > 0 and page_size > 0:
+                    if (
+                        (not strict_drag_active)
+                        and (not strict_wait_window_active)
+                        and not visible_items
+                        and total_items > 0
+                        and page_size > 0
+                    ):
                         last_page = max(0, (total_items - 1) // page_size)
                         if self._scrollbar_dragging and self._drag_target_page is not None:
                             cur_page = max(0, min(last_page, int(self._drag_target_page)))
@@ -243,13 +266,17 @@ class ImageListViewPaintSelectionMixin:
                             if _rl_live and keep_max > 0:
                                 _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
                                 _lock_idx = int(_rl_page) * _ps
-                                _lock_it = None
-                                for _it in self._masonry_items:
-                                    if _it.get('index', -1) >= _lock_idx:
-                                        _lock_it = _it
-                                        break
-                                if _lock_it is not None:
-                                    sb.setValue(max(0, min(int(_lock_it['y']), keep_max)))
+                                _canonical_target = (
+                                    self._get_strict_canonical_scroll_for_global(
+                                        _lock_idx,
+                                        source_model=source_model,
+                                        domain_max=keep_max,
+                                    )
+                                    if hasattr(self, '_get_strict_canonical_scroll_for_global')
+                                    else None
+                                )
+                                if _canonical_target is not None:
+                                    sb.setValue(max(0, min(int(_canonical_target), keep_max)))
                                 else:
                                     _ti = int(getattr(source_model, '_total_count', 0) or 0)
                                     _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
@@ -307,13 +334,68 @@ class ImageListViewPaintSelectionMixin:
                             getattr(self, '_release_page_lock_page', None) is not None
                             and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
                         )
-                        if not _release_lock_live:
+                        _now = time.time()
+                        _strict_jump_target = getattr(self, '_strict_jump_target_global', None)
+                        _strict_jump_live = (
+                            isinstance(_strict_jump_target, int)
+                            and _strict_jump_target >= 0
+                            and _now < float(getattr(self, '_strict_jump_until', 0.0) or 0.0)
+                        )
+                        _restore_anchor_live = (
+                            _now <= float(getattr(self, '_restore_anchor_until', 0.0) or 0.0)
+                        )
+                        _strict_pending_target = (
+                            _release_lock_live
+                            or strict_wait_window_active
+                            or _strict_jump_live
+                            or _restore_anchor_live
+                        )
+                        total_items_i = int(total_items or 0)
+                        page_size_i = int(page_size or 1000)
+                        if _strict_pending_target:
+                            target_global = None
+                            for candidate in (
+                                _strict_jump_target,
+                                getattr(self, '_restore_target_global_index', None),
+                                getattr(self, '_selected_global_lock_value', None),
+                            ):
+                                if isinstance(candidate, int) and candidate >= 0:
+                                    target_global = int(candidate)
+                                    break
+                            if (
+                                target_global is None
+                                and total_items_i > 0
+                                and page_size_i > 0
+                                and hasattr(self, '_current_page')
+                            ):
+                                cur_page = max(
+                                    0,
+                                    min((total_items_i - 1) // page_size_i, int(getattr(self, '_current_page', 0) or 0)),
+                                )
+                                target_global = cur_page * page_size_i
+                            if (
+                                isinstance(target_global, int)
+                                and target_global >= 0
+                                and hasattr(self, '_get_strict_canonical_scroll_for_global')
+                            ):
+                                try:
+                                    sb = self.verticalScrollBar()
+                                    snap_y = self._get_strict_canonical_scroll_for_global(
+                                        target_global,
+                                        source_model=source_model,
+                                        domain_max=int(sb.maximum()),
+                                    )
+                                    if snap_y is not None:
+                                        snap_y = max(0, min(int(snap_y), int(sb.maximum())))
+                                        if int(sb.value()) != snap_y:
+                                            sb.setValue(snap_y)
+                                except Exception:
+                                    pass
+                        else:
                             real_items_all = [it for it in self._masonry_items if it.get('index', -1) >= 0]
                             if real_items_all:
                                 target_item = None
                                 try:
-                                    total_items_i = int(getattr(source_model, '_total_count', 0) or 0)
-                                    page_size_i = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
                                     if total_items_i > 0 and page_size_i > 0:
                                         cur_page = max(0, min((total_items_i - 1) // page_size_i, int(getattr(self, '_current_page', 0) or 0)))
                                         p_start = cur_page * page_size_i

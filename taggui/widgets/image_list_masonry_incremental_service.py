@@ -9,6 +9,8 @@ Full recalc only happens on: drag jump, resize, enrichment, or config change.
 
 import math
 
+from utils.diagnostic_logging import diagnostic_print
+
 
 class MasonryIncrementalService:
     """Manages per-page masonry cache for incremental scroll updates."""
@@ -24,7 +26,10 @@ class MasonryIncrementalService:
     def invalidate(self, reason="unknown"):
         """Clear all cached pages (on jump, resize, enrichment)."""
         if self._page_cache:
-            print(f"[MASONRY-INCR] Cache invalidated ({len(self._page_cache)} pages): {reason}")
+            diagnostic_print(
+                f"[MASONRY-INCR] Cache invalidated ({len(self._page_cache)} pages): {reason}",
+                detail="verbose",
+            )
         self._page_cache.clear()
         self._prefix_height = 0
         self._cache_config = None
@@ -263,4 +268,7 @@ class MasonryIncrementalService:
                 del self._page_cache[p]
                 purged.append(p)
         if purged:
-            print(f"[MASONRY-INCR] Purged {len(purged)} far pages: {purged[0]}-{purged[-1]}")
+            diagnostic_print(
+                f"[MASONRY-INCR] Purged {len(purged)} far pages: {purged[0]}-{purged[-1]}",
+                detail="verbose",
+            )

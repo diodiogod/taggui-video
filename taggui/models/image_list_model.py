@@ -27,6 +27,7 @@ import threading
 from utils.image import Image, ImageMarking, Marking
 from utils.image_index_db import ImageIndexDB
 from utils.jxlutil import get_jxl_size
+from utils.diagnostic_logging import diagnostic_print, should_emit_trace_log
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.thumbnail_cache import get_thumbnail_cache
 from utils.utils import get_confirmation_dialog_reply, pluralize
@@ -1185,20 +1186,8 @@ class ImageListModel(QAbstractListModel):
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
         """Timestamped, optionally throttled flow logging for pagination/masonry diagnostics."""
-        # TRACE_RESTORE: temporary minimal diagnostics filter for strict drag debugging.
-        # Set `minimal_trace_logs` to False in settings to restore full flow logs.
-        try:
-            minimal_trace = bool(settings.value("minimal_trace_logs", True, type=bool))
-        except Exception:
-            minimal_trace = True
-        if minimal_trace:
-            keep = False
-            if component == "ASPECT_RATIOS" and message.startswith("Iterating loaded pages"):
-                keep = True
-            elif component == "PAGINATION" and message.startswith("Triggered loads"):
-                keep = True
-            if not keep:
-                return
+        if not should_emit_trace_log(component, message, level=level):
+            return
 
         now = time.time()
         if throttle_key and every_s is not None:
@@ -3812,13 +3801,14 @@ class ImageListModel(QAbstractListModel):
                  # pointless and can break restore scroll position at startup.
                  scope_label = describe_scope(_window_page_set)
                  if self._enrichment_log_batches > 0 or self._enrichment_log_total > 0:
-                     print(
+                     diagnostic_print(
                          f"[ENRICH] {scope_label} complete after "
                          f"{self._enrichment_log_batches} batch(es), "
-                         f"{self._enrichment_log_total} item(s) total [ALL DONE]"
+                         f"{self._enrichment_log_total} item(s) total [ALL DONE]",
+                         detail="verbose",
                      )
                  else:
-                     print(f"[ENRICH] {scope_label} already up to date [ALL DONE]")
+                     diagnostic_print(f"[ENRICH] {scope_label} already up to date [ALL DONE]", detail="verbose")
                  return
 
              scope_label = describe_scope(_window_page_set)
@@ -3833,7 +3823,7 @@ class ImageListModel(QAbstractListModel):
                  if hasattr(self, '_enrichment_cancelled') and self._enrichment_cancelled.is_set():
                      db_bg.commit()
                      self._enrichment_running = False
-                     print("[ENRICH] Cancelled")
+                     diagnostic_print("[ENRICH] Cancelled", detail="verbose")
                      return
 
                  # Yield disk time every 10 files to avoid blocking thumbnail I/O
@@ -3939,15 +3929,17 @@ class ImageListModel(QAbstractListModel):
              self._enrichment_log_total += enriched_count
              cumulative_total = self._enrichment_log_total
              if self._enrichment_exhausted:
-                 print(
+                 diagnostic_print(
                      f"[ENRICH] {scope_label}: batch {batch_number} finished "
                      f"({enriched_count} item(s)); cumulative {cumulative_total} "
-                     f"across {self._enrichment_log_batches} batch(es) [ALL DONE]"
+                     f"across {self._enrichment_log_batches} batch(es) [ALL DONE]",
+                     detail="verbose",
                  )
              else:
-                 print(
+                 diagnostic_print(
                      f"[ENRICH] {scope_label}: batch {batch_number} finished "
-                     f"({enriched_count} item(s)); cumulative {cumulative_total}, continuing"
+                     f"({enriched_count} item(s)); cumulative {cumulative_total}, continuing",
+                     detail="verbose",
                  )
 
              # Signal completion from background thread
@@ -4737,7 +4729,10 @@ class ImageListModel(QAbstractListModel):
                 db_bg.commit()
                 db_bg.close()
 
-                print(f"[ENRICH] BG enrichment done: {enriched_count} updated, {self._enrichment_queue.qsize()} queued")
+                diagnostic_print(
+                    f"[ENRICH] BG enrichment done: {enriched_count} updated, {self._enrichment_queue.qsize()} queued",
+                    detail="verbose",
+                )
 
                 # Timer will continue processing queue until empty, then stop itself
 

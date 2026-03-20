@@ -27,6 +27,7 @@ from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.icons import taggui_icon
 from utils.big_widgets import BigPushButton
+from utils.diagnostic_logging import diagnostic_print
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
@@ -4520,7 +4521,22 @@ class MainWindow(QMainWindow):
                     if img:
                         self._save_folder_last_selected_path(img.path)
                         settings.setValue('last_selected_path', str(img.path))
-                        print(f"[SAVE] Selected path: {img.path.name}")
+                        debug_page = getattr(view, '_current_page', None)
+                        try:
+                            debug_page = int(debug_page) + 1
+                        except Exception:
+                            debug_page = "?"
+                        try:
+                            debug_index = self.image_list_model.get_global_index_for_row(source_index.row())
+                            if not (isinstance(debug_index, int) and debug_index >= 0):
+                                debug_index = int(source_index.row())
+                        except Exception:
+                            debug_index = int(source_index.row())
+                        diagnostic_print(
+                            f"[SAVE] Selected path: {img.path.name} "
+                            f"| page={debug_page} | index={debug_index}",
+                            detail="essential",
+                        )
                         self._update_main_window_title(img.path.name)
                     else:
                         self._update_main_window_title()
@@ -4616,12 +4632,19 @@ class MainWindow(QMainWindow):
             if loading_pages and int(mapped) != int(selected_global):
                 return True
             return False
-        if not (release_active or loading_pages):
-            return False
 
         mapped = self._proxy_index_to_global_rank(proxy_image_index)
         if mapped < 0:
             return True
+
+        # In masonry mode, an active drag-jump lock means "selection identity
+        # is frozen until an explicit user action releases it". Keep ignoring
+        # remapped current indexes even after the short release-anchor window ends.
+        if now < lock_until and int(mapped) != int(selected_global):
+            return True
+
+        if not (release_active or loading_pages):
+            return False
 
         # During drag-release stabilization, only accept current changes that still
         # point to the stable selected global.

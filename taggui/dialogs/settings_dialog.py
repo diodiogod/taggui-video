@@ -563,7 +563,23 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(floating_detail_zoom_spin_box, 2, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=3)
+        grid_layout.addWidget(QLabel('Diagnostic log mode'), 3, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        diagnostic_log_mode_combo = SettingsComboBox(
+            key='diagnostic_log_mode',
+            default='essential')
+        diagnostic_log_mode_combo.addItems(['off', 'essential', 'verbose'])
+        diagnostic_log_mode_combo.setToolTip(
+            'Controls runtime diagnostic logging.\n\n'
+            'off: suppress debug/runtime diagnostics.\n'
+            'essential: keep important navigation/debug lines such as page jumps and selection saves.\n'
+            'verbose: emit the full masonry/pagination diagnostic stream.\n\n'
+            'Applied live (no restart).'
+        )
+        grid_layout.addWidget(diagnostic_log_mode_combo, 3, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=4)
 
         layout.addLayout(grid_layout)
         layout.addStretch()

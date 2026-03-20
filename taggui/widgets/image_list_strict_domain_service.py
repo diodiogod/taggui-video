@@ -118,6 +118,7 @@ class StrictScrollDomainService:
             ):
                 return max(1, int(self._view.verticalScrollBar().maximum()))
 
+            tiny_dataset = self._is_tiny_paginated_dataset(source_model)
             total_items = int(getattr(source_model, "_total_count", 0) or 0)
             if total_items <= 0:
                 return max(1, int(self._view.verticalScrollBar().maximum()))
@@ -133,9 +134,17 @@ class StrictScrollDomainService:
             est_total_h = int(rows * max(10.0, avg_h))
             viewport_height = max(1, int(self._view.viewport().height()))
             domain = est_total_h - viewport_height
-            if self._is_tiny_paginated_dataset(source_model):
-                return max(1, domain)
-            return max(10000, domain)
+            if tiny_dataset:
+                domain = max(1, domain)
+            else:
+                domain = max(10000, domain, int(self.get_strict_min_domain(source_model)))
+
+            domain = max(
+                int(domain),
+                int(getattr(self._view, "_strict_scroll_max_floor", 0) or 0),
+                int(getattr(self._view, "_strict_drag_frozen_max", 0) or 0),
+            )
+            return max(1, int(domain))
         except Exception:
             return max(10000, int(self._view.verticalScrollBar().maximum()))
 

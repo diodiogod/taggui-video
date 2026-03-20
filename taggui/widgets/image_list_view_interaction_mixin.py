@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from utils.diagnostic_logging import diagnostic_print
 
 class ImageListViewInteractionMixin:
     def _drag_to_external_only_mode(self) -> bool:
@@ -1443,6 +1444,7 @@ class ImageListViewInteractionMixin:
         total_pages = max(1, (total_items + max(1, page_size) - 1) // max(1, page_size))
         target_page = max(0, min(total_pages - 1, int(page_1_based) - 1))
         target_global = max(0, min(total_items - 1, target_page * max(1, page_size)))
+        diagnostic_print(f"[jump page requested] page {target_page + 1} via=input", detail="essential")
         return self.go_to_global_index(target_global)
 
     def go_to_global_index(self, target_global: int) -> bool:
@@ -1467,9 +1469,30 @@ class ImageListViewInteractionMixin:
             return False
         target_global = max(0, min(total_items - 1, target_global))
 
+        import time as _t
+        strict_paginated_masonry = bool(
+            self.use_masonry
+            and hasattr(source_model, "_paginated_mode")
+            and source_model._paginated_mode
+            and hasattr(self, "_use_local_anchor_masonry")
+            and self._use_local_anchor_masonry(source_model)
+        )
+
         # New explicit jump overrides drag/release edge and lock state.
-        self._selected_global_lock_until = 0.0
-        self._selected_global_lock_value = None
+        if strict_paginated_masonry:
+            self._selected_global_lock_value = int(target_global)
+            self._selected_global_lock_until = _t.time() + 30.0
+            self._suppress_masonry_auto_scroll_until = _t.time() + 8.0
+            self._strict_jump_target_global = int(target_global)
+            # Far buffered jumps can take several seconds to materialize their
+            # target window. Keep explicit jump ownership alive long enough so
+            # strict mode cannot fall back to stale old-window pages mid-jump.
+            self._strict_jump_until = _t.time() + 30.0
+        else:
+            self._selected_global_lock_until = 0.0
+            self._selected_global_lock_value = None
+            self._strict_jump_target_global = None
+            self._strict_jump_until = 0.0
         self._drag_release_anchor_active = False
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
@@ -1481,16 +1504,25 @@ class ImageListViewInteractionMixin:
 
         page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
         target_page = target_global // max(1, page_size)
+        if strict_paginated_masonry:
+            self._release_page_lock_page = int(target_page)
+            self._release_page_lock_until = _t.time() + 30.0
+            self._idle_anchor_target_global = None
+            self._idle_anchor_until = 0.0
+            self._resize_anchor_page = None
+            self._resize_anchor_target_global = None
+            self._resize_anchor_until = 0.0
 
         # Load target page eagerly when possible.
-        try:
-            pages = getattr(source_model, "_pages", {})
-            if isinstance(pages, dict) and target_page not in pages and hasattr(source_model, "_load_page_sync"):
-                source_model._load_page_sync(target_page)
-                if hasattr(source_model, "_emit_pages_updated"):
-                    source_model._emit_pages_updated()
-        except Exception:
-            pass
+        if not strict_paginated_masonry:
+            try:
+                pages = getattr(source_model, "_pages", {})
+                if isinstance(pages, dict) and target_page not in pages and hasattr(source_model, "_load_page_sync"):
+                    source_model._load_page_sync(target_page)
+                    if hasattr(source_model, "_emit_pages_updated"):
+                        source_model._emit_pages_updated()
+            except Exception:
+                pass
 
         # Request window around target for buffered pagination.
         try:
@@ -1505,8 +1537,75 @@ class ImageListViewInteractionMixin:
         self._current_page = max(0, int(target_page))
         self._restore_target_page = int(target_page)
         self._restore_target_global_index = int(target_global)
-        import time as _t
         self._restore_anchor_until = _t.time() + 4.0
+        self._selected_global_index = int(target_global)
+
+        if strict_paginated_masonry:
+            try:
+                jump_domain = int(self._get_strict_scroll_domain_max(source_model, include_drag_baseline=True))
+            except Exception:
+                jump_domain = int(self._strict_canonical_domain_max(source_model))
+            self._strict_scroll_max_floor = max(
+                int(getattr(self, '_strict_scroll_max_floor', 0) or 0),
+                int(jump_domain),
+            )
+            self._strict_drag_frozen_max = max(
+                int(getattr(self, '_strict_drag_frozen_max', 0) or 0),
+                int(jump_domain),
+            )
+            self._strict_drag_frozen_until = _t.time() + 8.0
+            try:
+                buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
+            except Exception:
+                buffer_pages = 3
+            buffer_pages = max(1, min(buffer_pages, 6))
+            start_page = max(0, int(target_page) - buffer_pages)
+            end_page = min(max(0, (total_items - 1) // max(1, page_size)), int(target_page) + buffer_pages)
+
+            loaded_sync = False
+            try:
+                if hasattr(source_model, "set_page_protection_window"):
+                    source_model.set_page_protection_window(start_page, end_page)
+                pages = getattr(source_model, "_pages", {})
+                page_loaded = False
+                if isinstance(pages, dict):
+                    try:
+                        page_loaded = bool(pages.get(int(target_page)))
+                    except Exception:
+                        page_loaded = False
+                if (not page_loaded) and hasattr(source_model, "_load_page_sync"):
+                    source_model._load_page_sync(int(target_page))
+                    loaded_sync = True
+                if loaded_sync and hasattr(source_model, "_emit_pages_updated"):
+                    source_model._emit_pages_updated()
+            except Exception:
+                pass
+
+            try:
+                sb = self.verticalScrollBar()
+                keep_max = max(int(jump_domain), int(self._strict_canonical_domain_max(source_model)))
+                target_scroll = self._get_strict_canonical_scroll_for_global(
+                    int(target_global),
+                    source_model=source_model,
+                    domain_max=keep_max,
+                )
+                if target_scroll is None:
+                    last_page = max(0, (total_items - 1) // max(1, page_size))
+                    page_frac = max(0.0, min(1.0, int(target_page) / max(1, last_page)))
+                    target_scroll = int(round(page_frac * keep_max))
+                target_scroll = max(0, min(int(target_scroll), keep_max))
+                prev_block = sb.blockSignals(True)
+                try:
+                    sb.setRange(0, keep_max)
+                    sb.setValue(target_scroll)
+                finally:
+                    sb.blockSignals(prev_block)
+                self._last_stable_scroll_value = int(target_scroll)
+            except Exception:
+                pass
+
+            self._last_masonry_window_signature = None
+            self._calculate_masonry_layout()
 
         loaded_row = -1
         if hasattr(source_model, "get_loaded_row_for_global_index"):
@@ -1514,9 +1613,7 @@ class ImageListViewInteractionMixin:
         else:
             loaded_row = target_global
         if loaded_row < 0:
-            self._last_masonry_window_signature = None
-            self._calculate_masonry_layout()
-            return False
+            return bool(strict_paginated_masonry)
 
         src_idx = source_model.index(loaded_row, 0)
         proxy_model = self.model()
@@ -1526,16 +1623,13 @@ class ImageListViewInteractionMixin:
             else src_idx
         )
         if not proxy_idx.isValid():
-            self._last_masonry_window_signature = None
-            self._calculate_masonry_layout()
-            return False
+            return bool(strict_paginated_masonry)
 
         sel_model = self.selectionModel()
         if sel_model is not None:
             sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
         else:
             self.setCurrentIndex(proxy_idx)
-        self._selected_global_index = int(target_global)
         self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
         self.viewport().update()
         return True

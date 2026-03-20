@@ -2,6 +2,7 @@ from widgets.image_list_shared import *  # noqa: F401,F403
 import math
 from PySide6.QtCore import Property
 from PySide6.QtWidgets import QMainWindow
+from utils.diagnostic_logging import diagnostic_print
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -797,7 +798,10 @@ class ImageListViewGeometryMixin:
                             self._pagination_loaded_items.discard(i)
 
         if evicted_count > 0:
-            print(f"[EVICT] Evicted {evicted_count} distant thumbnails (keeping indices {keep_range_start}-{keep_range_end})")
+            diagnostic_print(
+                f"[EVICT] Evicted {evicted_count} distant thumbnails (keeping indices {keep_range_start}-{keep_range_end})",
+                detail="verbose",
+            )
 
 
     def _show_thumbnail_progress(self, total_items):
@@ -1794,13 +1798,17 @@ class ImageListViewGeometryMixin:
                                 restored_val = 0
                             else:
                                 _lock_idx = int(_rl_page) * _ps
-                                _lock_it = None
-                                for _it in self._masonry_items:
-                                    if _it.get('index', -1) >= _lock_idx:
-                                        _lock_it = _it
-                                        break
-                                if _lock_it is not None:
-                                    restored_val = max(0, min(int(_lock_it['y']), keep_max))
+                                _canonical_target = (
+                                    self._get_strict_canonical_scroll_for_global(
+                                        _lock_idx,
+                                        source_model=source_model,
+                                        domain_max=keep_max,
+                                    )
+                                    if hasattr(self, '_get_strict_canonical_scroll_for_global')
+                                    else None
+                                )
+                                if _canonical_target is not None:
+                                    restored_val = max(0, min(int(_canonical_target), keep_max))
                                 else:
                                     _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
                                     restored_val = max(0, min(int(round(_pf * keep_max)), keep_max))
@@ -2110,6 +2118,68 @@ class ImageListViewGeometryMixin:
             self._ensure_virtual_list_visible_range_loaded()
             return
 
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        global_idx = safe_index.row()
+        if source_model and hasattr(source_model, 'get_global_index_for_row'):
+            global_idx = source_model.get_global_index_for_row(safe_index.row())
+        elif source_model and getattr(source_model, '_paginated_mode', False):
+            global_idx = self._map_row_to_global_index_safely(safe_index.row())
+
+        strict_jump_target = getattr(self, "_strict_jump_target_global", None)
+        strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+        if (
+            isinstance(strict_jump_target, int)
+            and strict_jump_target >= 0
+            and time.time() < strict_jump_until
+            and int(global_idx) == int(strict_jump_target)
+            and source_model is not None
+            and getattr(source_model, "_paginated_mode", False)
+            and hint in (
+                QAbstractItemView.ScrollHint.EnsureVisible,
+                QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+            and hasattr(self, "_use_local_anchor_masonry")
+            and self._use_local_anchor_masonry(source_model)
+            and hasattr(self, "_get_strict_canonical_scroll_for_global")
+        ):
+            target_scroll = self._get_strict_canonical_scroll_for_global(
+                global_idx,
+                source_model=source_model,
+                domain_max=self.verticalScrollBar().maximum(),
+            )
+            if target_scroll is not None:
+                sb = self.verticalScrollBar()
+                target_scroll = max(0, min(int(target_scroll), int(sb.maximum())))
+                self._last_stable_scroll_value = target_scroll
+                sb.setValue(target_scroll)
+                return
+
+        suppress_auto_scroll_until = float(getattr(self, "_suppress_masonry_auto_scroll_until", 0.0) or 0.0)
+        if (
+            time.time() < suppress_auto_scroll_until
+            and not getattr(self, "_scrollbar_dragging", False)
+            and not getattr(self, "_drag_preview_mode", False)
+            and hint in (
+                QAbstractItemView.ScrollHint.EnsureVisible,
+                QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+        ):
+            allowed_globals = {
+                int(candidate)
+                for candidate in (
+                    getattr(self, "_restore_target_global_index", None),
+                    getattr(self, "_selected_global_lock_value", None),
+                    getattr(self, "_selected_global_index", None),
+                )
+                if isinstance(candidate, int) and candidate >= 0
+            }
+            if allowed_globals and int(global_idx) not in allowed_globals:
+                return
+
         if not (self.use_masonry and self._masonry_items):
             try:
                 model = self.model()
@@ -2126,16 +2196,21 @@ class ImageListViewGeometryMixin:
             return
 
         # Map proxy row → global index → masonry rect.
-        global_idx = safe_index.row()
-        source_model = (
-            self.model().sourceModel()
-            if hasattr(self.model(), 'sourceModel')
-            else self.model()
+        lock_until = float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0)
+        locked_global = (
+            getattr(self, "_selected_global_lock_value", None)
+            if time.time() < lock_until else None
         )
-        if source_model and hasattr(source_model, 'get_global_index_for_row'):
-            global_idx = source_model.get_global_index_for_row(safe_index.row())
-        elif source_model and getattr(source_model, '_paginated_mode', False):
-            global_idx = self._map_row_to_global_index_safely(safe_index.row())
+        if (
+            isinstance(locked_global, int)
+            and locked_global >= 0
+            and int(global_idx) == int(locked_global)
+            and not getattr(self, "_scrollbar_dragging", False)
+            and not getattr(self, "_drag_preview_mode", False)
+        ):
+            # During a masonry drag-jump, keep the old selected item from
+            # auto-scrolling the viewport back to its previous page.
+            return
 
         rect = self._get_masonry_item_rect(global_idx)
         if not rect.isValid():

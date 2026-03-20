@@ -171,6 +171,9 @@ class ImageListView(
         self._last_masonry_window_signature = None
         self._drag_preview_mode = False
         self._suppress_anchor_until = 0.0
+        self._suppress_masonry_auto_scroll_until = 0.0
+        self._strict_jump_target_global = None
+        self._strict_jump_until = 0.0
         self._pending_edge_snap = None
         self._pending_edge_snap_until = 0.0
         self._stick_to_edge = None

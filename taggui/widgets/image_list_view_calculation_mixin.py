@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+import time
 from widgets.image_list_masonry_context import MasonryContext
 from widgets.image_list_masonry_submission_service import MasonrySubmissionService
 from widgets.image_list_masonry_window_planner_service import MasonryWindowPlannerService
@@ -104,14 +105,45 @@ class ImageListViewCalculationMixin:
             if not target_ready:
                 self._strict_waiting_target_page = int(ctx.current_page)
                 self._strict_waiting_window_pages = (int(ctx.window_start_page), int(ctx.window_end_page))
+                drag_jump_lock_live = (
+                    float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0) > time.time()
+                    and getattr(self, "_selected_global_lock_value", None) is not None
+                )
+                explicit_jump_live = (
+                    isinstance(getattr(self, "_strict_jump_target_global", None), int)
+                    and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+                )
+                if drag_jump_lock_live:
+                    self._release_page_lock_page = int(ctx.current_page)
+                    self._release_page_lock_until = max(
+                        float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
+                        time.time() + 8.0,
+                    )
+                if explicit_jump_live and hasattr(source_model, "_load_page_sync"):
+                    try:
+                        source_model._load_page_sync(int(ctx.current_page))
+                        target_ready = len(source_model._pages.get(int(ctx.current_page), [])) > 0
+                        if target_ready and hasattr(source_model, "_emit_pages_updated"):
+                            source_model._emit_pages_updated()
+                    except Exception:
+                        target_ready = False
                 resize_anchor_live = (
                     getattr(self, '_resize_anchor_page', None) is not None
                     and time.time() <= float(getattr(self, '_resize_anchor_until', 0.0) or 0.0)
                 )
+                if target_ready:
+                    self._strict_wait_count = 0
+                    self._strict_waiting_target_page = None
+                    self._strict_waiting_window_pages = None
+                    loaded_pages_now = set(source_model._pages.keys())
+                else:
+                    loaded_pages_now = set(source_model._pages.keys())
                 wait_count = getattr(self, "_strict_wait_count", 0) + 1
                 self._strict_wait_count = wait_count
                 snapped_to_loaded_page = False
-                if wait_count > 20 and not resize_anchor_live:
+                if target_ready:
+                    pass
+                elif wait_count > 20 and not resize_anchor_live:
                     loaded_list = sorted(loaded_pages_now) if loaded_pages_now else []
                     sb = self.verticalScrollBar()
                     sb_val = int(sb.value())
@@ -151,7 +183,9 @@ class ImageListViewCalculationMixin:
                     else:
                         # Keep retrying the target edge page instead of teleporting.
                         self._strict_wait_count = min(wait_count, 80)
-                if not snapped_to_loaded_page:
+                if target_ready:
+                    pass
+                elif not snapped_to_loaded_page:
                     if wait_count > 40:
                         # Keep waiting while resize anchor is active; avoid snapping
                         # to a different loaded page and losing viewport context.
@@ -266,6 +300,17 @@ class ImageListViewCalculationMixin:
                 cached_pages = set()
             current_page_cached = int(ctx.current_page) in cached_pages
             if (not current_page_cached):
+                explicit_jump_live = (
+                    isinstance(getattr(self, "_strict_jump_target_global", None), int)
+                    and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+                )
+                release_lock_live = (
+                    getattr(self, "_release_page_lock_page", None) is not None
+                    and time.time() < float(getattr(self, "_release_page_lock_until", 0.0) or 0.0)
+                )
+                restore_anchor_live = (
+                    time.time() <= float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+                )
                 unenriched_count = 0
                 try:
                     if hasattr(self, '_window_unenriched_count'):
@@ -282,7 +327,18 @@ class ImageListViewCalculationMixin:
                     unenriched_count = 0
                 if unenriched_count >= 5:
                     has_existing_layout = bool(getattr(self, "_masonry_items", None))
-                    if not has_existing_layout:
+                    jump_materialization_live = bool(
+                        explicit_jump_live or release_lock_live or restore_anchor_live
+                    )
+                    if jump_materialization_live:
+                        # Explicit page jumps should render the target window
+                        # immediately, even with placeholder dimensions. Holding
+                        # for enrichment leaves the viewport blank on far jumps
+                        # and the owner lock expires before the target page can
+                        # take over.
+                        self._strict_enrich_wait_signature = None
+                        self._strict_enrich_wait_count = 0
+                    elif not has_existing_layout:
                         self._strict_enrich_wait_signature = None
                         self._strict_enrich_wait_count = 0
                     elif self._hold_strict_layout_for_window_enrichment(

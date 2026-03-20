@@ -2,6 +2,7 @@ import time
 
 from PySide6.QtCore import QItemSelectionModel, QTimer
 from PySide6.QtWidgets import QAbstractItemView
+from utils.diagnostic_logging import diagnostic_print
 
 
 class MasonryCompletionService:
@@ -379,19 +380,19 @@ class MasonryCompletionService:
                                 else:
                                     target_val = max(0, min(int(old_val), stable_max))
                             else:
-                                # Prefer actual masonry y-coordinate of the locked page's
-                                # first item so the viewport aligns with real content
-                                # (formula-based fraction drifts when real heights != avg_h).
                                 _lock_start_idx = release_page_i * page_size
-                                _lock_item = None
-                                for _it in v._masonry_items:
-                                    if _it.get('index', -1) >= _lock_start_idx:
-                                        _lock_item = _it
-                                        break
-                                if _lock_item is not None:
-                                    target_val = max(0, min(int(_lock_item['y']), stable_max))
+                                _canonical_target = (
+                                    v._get_strict_canonical_scroll_for_global(
+                                        _lock_start_idx,
+                                        source_model=source_model,
+                                        domain_max=stable_max,
+                                    )
+                                    if hasattr(v, '_get_strict_canonical_scroll_for_global')
+                                    else None
+                                )
+                                if _canonical_target is not None:
+                                    target_val = max(0, min(int(_canonical_target), stable_max))
                                 else:
-                                    # Fallback: item-based fraction.
                                     page_frac = max(0.0, min(1.0, (_lock_start_idx) / max(1, total_items)))
                                     target_val = int(round(page_frac * stable_max))
                             sb.setValue(max(0, min(target_val, stable_max)))
@@ -470,7 +471,10 @@ class MasonryCompletionService:
                     min_y = v._masonry_items[0]['y']
                     if (not release_anchor_active) and scroll_val + viewport_height < min_y:
                         # Viewport is stuck ABOVE the current loaded block. Snap down to start.
-                        print(f"[RESCUE] Viewport {scroll_val} above block {min_y}. Snapping down.")
+                        diagnostic_print(
+                            f"[RESCUE] Viewport {scroll_val} above block {min_y}. Snapping down.",
+                            detail="verbose",
+                        )
                         from PySide6.QtCore import QTimer
                         QTimer.singleShot(0, lambda: v.verticalScrollBar().setValue(min_y))
         
@@ -560,6 +564,14 @@ class MasonryCompletionService:
                             if not source_model_local:
                                 return
 
+                            strict_restore_target_y = None
+                            if strict_mode and restore_anchor_live and hasattr(v, '_get_strict_canonical_scroll_for_global'):
+                                strict_restore_target_y = v._get_strict_canonical_scroll_for_global(
+                                    target_global,
+                                    source_model=source_model_local,
+                                    domain_max=sb_local.maximum(),
+                                )
+
                             # IMPORTANT: avoid selection rebinding during resize/zoom anchoring.
                             # It can remap through transient buffered rows and cause jumpy
                             # "wrong image selected" behavior. Keep rebind only for restore.
@@ -583,6 +595,17 @@ class MasonryCompletionService:
                                                 )
                                             else:
                                                 v.setCurrentIndex(proxy_idx)
+
+                            if strict_restore_target_y is not None:
+                                target_y = max(0, min(int(strict_restore_target_y), int(sb_local.maximum())))
+                                prev_block = sb_local.blockSignals(True)
+                                try:
+                                    if sb_local.value() != target_y:
+                                        sb_local.setValue(target_y)
+                                finally:
+                                    sb_local.blockSignals(prev_block)
+                                v._last_stable_scroll_value = target_y
+                                return
 
                             # Anchor viewport to actual masonry item position.
                             target_item = None

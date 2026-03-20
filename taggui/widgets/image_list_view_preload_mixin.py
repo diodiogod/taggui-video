@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from utils.diagnostic_logging import diagnostic_print
 
 class ImageListViewPreloadMixin:
     def _on_thumbnail_updates_ready(self):
@@ -271,7 +272,14 @@ class ImageListViewPreloadMixin:
         old_pos = max(0, int(sb.sliderPosition()))
         strict_mode = self._use_local_anchor_masonry(source_model)
         if strict_mode:
-            baseline_max = self._strict_canonical_domain_max(source_model)
+            baseline_max = self._get_strict_scroll_domain_max(
+                source_model,
+                include_drag_baseline=True,
+            )
+            self._strict_scroll_max_floor = max(
+                int(getattr(self, '_strict_scroll_max_floor', 0) or 0),
+                int(baseline_max),
+            )
         else:
             baseline_max = max(old_max, int(getattr(self, '_strict_scroll_max_floor', 0) or 0),
                                int(sb.value()), old_pos)
@@ -313,6 +321,12 @@ class ImageListViewPreloadMixin:
         self._drag_release_anchor_active = False
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
+        self._restore_target_page = None
+        self._restore_target_global_index = None
+        self._restore_anchor_until = 0.0
+        self._idle_anchor_target_global = None
+        self._idle_anchor_until = 0.0
+        self._recenter_after_layout = False
         self._stick_to_edge = None
         self._pending_edge_snap = None
         self._pending_edge_snap_until = 0.0
@@ -337,6 +351,7 @@ class ImageListViewPreloadMixin:
         import time
         self._scrollbar_dragging = False
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
+        strict_release_target_global = None
 
         # In plain List/Icon mode (non-masonry), keep native Qt scrollbar behavior.
         if not self.use_masonry:
@@ -359,9 +374,16 @@ class ImageListViewPreloadMixin:
         release_fraction = 0.0
         max_v = sb.maximum()
         if strategy == "windowed_strict":
-            baseline_max = self._strict_canonical_domain_max(source_model)
+            baseline_max = self._get_strict_scroll_domain_max(
+                source_model,
+                include_drag_baseline=True,
+            )
             # Keep virtual domain frozen through immediate post-release relayout bursts.
             self._strict_drag_frozen_until = time.time() + 2.0
+            self._strict_drag_frozen_max = max(
+                int(getattr(self, '_strict_drag_frozen_max', 0) or 0),
+                int(baseline_max),
+            )
         else:
             baseline_max = max(1, int(getattr(self, "_drag_scroll_max_baseline", 0) or 0))
         slider_pos = int(sb.sliderPosition())
@@ -442,6 +464,22 @@ class ImageListViewPreloadMixin:
                 self._drag_release_anchor_until = time.time() + (8.0 if self._use_local_anchor_masonry(source_model) else 8.0)
                 if hasattr(source_model, 'PAGE_SIZE') and source_model.PAGE_SIZE > 0:
                     self._current_page = self._drag_release_anchor_idx // source_model.PAGE_SIZE
+                    if strategy == "windowed_strict":
+                        strict_release_target_global = int(self._drag_release_anchor_idx)
+                        self._selected_global_index = int(strict_release_target_global)
+                        self._selected_global_lock_value = int(strict_release_target_global)
+                        self._selected_global_lock_until = max(
+                            float(getattr(self, '_selected_global_lock_until', 0.0) or 0.0),
+                            time.time() + 12.0,
+                        )
+                        self._suppress_masonry_auto_scroll_until = max(
+                            float(getattr(self, '_suppress_masonry_auto_scroll_until', 0.0) or 0.0),
+                            time.time() + 8.0,
+                        )
+                    diagnostic_print(
+                        f"[jump page requested] page {int(self._current_page) + 1} via=drag_release",
+                        detail="essential",
+                    )
                     # Lock owner briefly so async range updates cannot steal page ownership.
                     if precise_small_drag and not (bottom_intent or top_intent):
                         self._release_page_lock_page = None
@@ -469,7 +507,14 @@ class ImageListViewPreloadMixin:
                     except Exception:
                         pass
                     # Keep scrollbar value aligned to the strict virtual domain for this page.
-                    if strategy == "windowed_strict":
+                    will_use_explicit_strict_jump = bool(
+                        strategy == "windowed_strict"
+                        and strict_release_target_global is not None
+                        and source_model
+                        and getattr(source_model, "_paginated_mode", False)
+                        and hasattr(self, "go_to_global_index")
+                    )
+                    if strategy == "windowed_strict" and (not will_use_explicit_strict_jump):
                         # Item-based fraction to match masonry spacer positions.
                         page_fraction = max(0.0, min(1.0, (self._current_page * source_model.PAGE_SIZE) / max(1, total_items)))
                         if bottom_intent:
@@ -534,12 +579,32 @@ class ImageListViewPreloadMixin:
         if source_model:
             source_model._pause_thumbnail_loading = False
 
-        if self._drag_preview_mode:
+        had_drag_preview = bool(self._drag_preview_mode)
+        if had_drag_preview:
             self._drag_preview_mode = False
             self.setUniformItemSizes(False)
             self.setGridSize(QSize(-1, -1))
             # Prevent immediate anchor snap-back during the first relayout after drag release.
             self._suppress_anchor_until = time.time() + 0.8
+        if (
+            strict_release_target_global is not None
+            and strategy == "windowed_strict"
+            and source_model
+            and getattr(source_model, "_paginated_mode", False)
+            and hasattr(self, "go_to_global_index")
+        ):
+            # Use the same item-based jump path as typed page navigation.
+            # The release-lock path alone can leave the viewport in a spacer void
+            # until async loads settle, especially on far-page jumps.
+            self._last_masonry_window_signature = None
+            self._last_masonry_signal = "drag_release"
+            if self.go_to_global_index(int(strict_release_target_global)):
+                self.viewport().update()
+                self._idle_preload_timer.stop()
+                self._idle_preload_timer.start(100)
+                return
+
+        if had_drag_preview:
             # Re-anchor masonry at release position.
             self._last_masonry_window_signature = None
             self._last_masonry_signal = "drag_release"
