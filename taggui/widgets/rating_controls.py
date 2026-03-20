@@ -41,6 +41,7 @@ class StarRatingWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rating = 0.0
+        self._mixed_state = False
         self._hover_rating = None
         self._pressed = False
         self._press_pos = None
@@ -68,12 +69,23 @@ class StarRatingWidget(QWidget):
     def set_rating(self, value: float):
         clamped = max(0.0, min(float(self._star_count), float(value or 0.0)))
         if abs(clamped - self._rating) <= 1e-6:
-            return
+            if not self._mixed_state:
+                return
         self._rating = clamped
         self.update()
 
     def rating(self) -> float:
         return float(self._rating)
+
+    def set_mixed_state(self, mixed: bool):
+        mixed = bool(mixed)
+        if mixed == self._mixed_state:
+            return
+        self._mixed_state = mixed
+        self.update()
+
+    def mixed_state(self) -> bool:
+        return bool(self._mixed_state)
 
     def _star_rects(self) -> list[QRectF]:
         content_rect = QRectF(self.rect()).adjusted(
@@ -186,9 +198,18 @@ class StarRatingWidget(QWidget):
         inactive_fill.setAlpha(90)
         outline = QColor(196, 145, 16)
         outline.setAlpha(220)
+        mixed_accent = QColor(246, 153, 63)
         disabled_outline = palette.color(self.foregroundRole())
         disabled_outline.setAlpha(120)
-        display_rating = self._effective_display_rating()
+        display_rating = 0.0 if self._mixed_state else self._effective_display_rating()
+
+        if self._mixed_state:
+            panel_rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+            panel_fill = QColor(mixed_accent)
+            panel_fill.setAlpha(28)
+            painter.setPen(QPen(mixed_accent, 1.2))
+            painter.setBrush(panel_fill)
+            painter.drawRoundedRect(panel_rect, 7, 7)
 
         for index, rect in enumerate(self._star_rects()):
             transform = QTransform()
@@ -211,6 +232,18 @@ class StarRatingWidget(QWidget):
             painter.setPen(pen)
             painter.drawPath(star_path)
 
+        if self._mixed_state:
+            badge_radius = 5.0
+            badge_center = QPointF(float(self.width()) - 10.0, 10.0)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(mixed_accent)
+            painter.drawEllipse(badge_center, badge_radius, badge_radius)
+            painter.setPen(QPen(QColor(40, 28, 12), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(
+                QPointF(badge_center.x() - 2.2, badge_center.y()),
+                QPointF(badge_center.x() + 2.2, badge_center.y()),
+            )
+
 
 class ReactionToggleButton(QAbstractButton):
     """Painted toggle button for simple binary media reactions."""
@@ -221,6 +254,7 @@ class ReactionToggleButton(QAbstractButton):
         super().__init__(parent)
         self._kind = str(kind or '').strip().lower()
         self._filter_click_active = False
+        self._mixed_state = False
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -235,6 +269,16 @@ class ReactionToggleButton(QAbstractButton):
             self.setToolTip('Love this item (L)\nCtrl+click filters loved items')
         else:
             self.setToolTip('Bomb this item (B)\nCtrl+click filters bombed items')
+
+    def set_mixed_state(self, mixed: bool):
+        mixed = bool(mixed)
+        if mixed == self._mixed_state:
+            return
+        self._mixed_state = mixed
+        self.update()
+
+    def mixed_state(self) -> bool:
+        return bool(self._mixed_state)
 
     def _icon_path(self, rect: QRectF) -> QPainterPath:
         if self._kind == 'love':
@@ -340,7 +384,13 @@ class ReactionToggleButton(QAbstractButton):
             checked_background = QColor(36, 36, 40)
             checked_border = QColor(10, 10, 12)
             checked_icon = QColor(255, 181, 97)
-        if self.isChecked():
+        mixed_accent = QColor(246, 153, 63)
+        if self._mixed_state:
+            background = QColor(mixed_accent)
+            background.setAlpha(34)
+            border = QColor(mixed_accent)
+            icon_color = QColor(214, 108, 26)
+        elif self.isChecked():
             background = checked_background
             border = checked_border
             icon_color = checked_icon
@@ -355,3 +405,14 @@ class ReactionToggleButton(QAbstractButton):
         painter.setPen(QPen(icon_color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.setBrush(icon_color)
         painter.drawPath(self._icon_path(icon_rect))
+
+        if self._mixed_state:
+            badge_center = QPointF(base_rect.right() - 4.5, base_rect.top() + 4.5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(mixed_accent)
+            painter.drawEllipse(badge_center, 3.5, 3.5)
+            painter.setPen(QPen(QColor(40, 28, 12), 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(
+                QPointF(badge_center.x() - 1.4, badge_center.y()),
+                QPointF(badge_center.x() + 1.4, badge_center.y()),
+            )

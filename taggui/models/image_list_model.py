@@ -5044,6 +5044,31 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    def add_images_to_undo_stack(
+        self,
+        images: list[Image],
+        action_name: str,
+        should_ask_for_confirmation: bool,
+    ):
+        """Add a lightweight undo snapshot for one or more images."""
+        valid_images = [image for image in images if image is not None]
+        if not valid_images:
+            self.add_to_undo_stack(action_name, should_ask_for_confirmation)
+            return
+
+        self.undo_stack.append(HistoryItem(
+            action_name,
+            [],
+            should_ask_for_confirmation,
+            image_snapshots=[{
+                'image': image,
+                'path': self._history_image_key(image),
+                'state': self._capture_history_image_state(image),
+            } for image in valid_images],
+        ))
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+
     def _resolve_history_snapshot_image(self, snapshot: dict[str, Any]) -> tuple[Image | None, int | None]:
         target_image = snapshot.get('image')
         target_path = str(snapshot.get('path') or '')

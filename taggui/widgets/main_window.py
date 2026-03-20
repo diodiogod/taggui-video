@@ -1216,21 +1216,20 @@ class MainWindow(QMainWindow):
         """Toggle one reaction flag for the active media."""
         if self._focus_widget_accepts_text():
             return False
-        if self._current_viewer_image() is None:
+        targets = self._rating_reaction_target_images()
+        if not targets:
             return False
 
         reaction_name = str(reaction or '').strip().lower()
-        love = bool(self.love_button.isChecked()) if self.love_button is not None else False
-        bomb = bool(self.bomb_button.isChecked()) if self.bomb_button is not None else False
-
         if reaction_name == 'love':
-            love = not love
+            next_love = not all(bool(getattr(image, 'love', False)) for image in targets)
+            self.set_reactions(next_love, None, True, changed_kind='love')
         elif reaction_name == 'bomb':
-            bomb = not bomb
+            next_bomb = not all(bool(getattr(image, 'bomb', False)) for image in targets)
+            self.set_reactions(None, next_bomb, True, changed_kind='bomb')
         else:
             return False
 
-        self.set_reactions(love, bomb, True, changed_kind=reaction_name)
         return True
 
     def set_floating_hold_mode(self, enabled: bool):
@@ -2070,13 +2069,13 @@ class MainWindow(QMainWindow):
             target = self.image_viewer
         self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
-            self._sync_rating_controls_from_viewer(target)
+            self._sync_rating_controls_from_context()
             if self._exclusive_video_controls_visibility:
                 self._sync_active_viewer_controls_visibility(target)
             return
         self._active_viewer = target
 
-        self._sync_rating_controls_from_viewer(target)
+        self._sync_rating_controls_from_context()
 
         live_windows = []
         for window in list(getattr(self, '_floating_viewers', [])):
@@ -2158,24 +2157,137 @@ class MainWindow(QMainWindow):
             return None
         return None
 
-    def _sync_rating_controls_from_viewer(self, viewer: ImageViewer | None = None):
-        image = self._current_viewer_image(viewer)
-        if image is None:
-            self.set_rating(0.0, False)
-            self.set_reactions(False, False, False)
+    def _selected_list_images(self) -> list[Image]:
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is None or not hasattr(list_view, 'get_selected_images'):
+            return []
+        try:
+            selected_images = list_view.get_selected_images()
+        except Exception:
+            return []
+
+        unique_images: list[Image] = []
+        seen_ids: set[int] = set()
+        for image in selected_images:
+            if image is None:
+                continue
+            image_id = id(image)
+            if image_id in seen_ids:
+                continue
+            seen_ids.add(image_id)
+            unique_images.append(image)
+        return unique_images
+
+    def _rating_reaction_target_images(self) -> list[Image]:
+        selected_images = self._selected_list_images()
+        if selected_images:
+            return selected_images
+        image = self._current_viewer_image()
+        return [image] if image is not None else []
+
+    def _set_rating_controls_value(self, rating: float, *, mixed: bool = False):
+        self.rating = float(rating or 0.0)
+        stars = self.rating * 5.0
+        if self.rating_widget is not None:
+            self.rating_widget.set_mixed_state(bool(mixed))
+            self.rating_widget.set_rating(stars)
+        overlay = getattr(self, '_reaction_controls_overlay', None)
+        overlay_rating_widget = getattr(overlay, 'rating_widget', None)
+        if overlay_rating_widget is not None:
+            overlay_rating_widget.set_mixed_state(bool(mixed))
+            overlay_rating_widget.set_rating(stars)
+
+    def _set_reaction_controls_value(
+        self,
+        love: bool,
+        bomb: bool,
+        *,
+        love_mixed: bool = False,
+        bomb_mixed: bool = False,
+    ):
+        def _update_button(button, checked: bool, mixed: bool):
+            if button is None:
+                return
+            blocker = button.blockSignals(True)
+            button.setChecked(bool(checked) if not mixed else False)
+            button.blockSignals(blocker)
+            button.set_mixed_state(bool(mixed))
+
+        _update_button(self.love_button, bool(love), bool(love_mixed))
+        _update_button(self.bomb_button, bool(bomb), bool(bomb_mixed))
+
+        overlay = getattr(self, '_reaction_controls_overlay', None)
+        _update_button(getattr(overlay, 'love_button', None), bool(love), bool(love_mixed))
+        _update_button(getattr(overlay, 'bomb_button', None), bool(bomb), bool(bomb_mixed))
+
+    def _emit_image_rows_changed(self, images: list[Image]):
+        source_model = self.image_list_model
+        if source_model is None:
             return
-        self.set_rating(float(getattr(image, 'rating', 0.0) or 0.0), False)
-        self.set_reactions(
+
+        changed_rows: list[int] = []
+        for image in images:
+            if image is None:
+                continue
+            try:
+                changed_rows.append(source_model.images.index(image))
+            except ValueError:
+                continue
+            except Exception:
+                continue
+
+        if not changed_rows:
+            return
+
+        changed_rows = sorted(set(changed_rows))
+        source_model.dataChanged.emit(
+            source_model.index(changed_rows[0]),
+            source_model.index(changed_rows[-1]),
+        )
+
+    def _sync_rating_controls_from_context(self, *_args):
+        selected_images = self._selected_list_images()
+        if len(selected_images) > 1:
+            rating_values = {
+                round(float(getattr(image, 'rating', 0.0) or 0.0), 6)
+                for image in selected_images
+            }
+            love_values = {bool(getattr(image, 'love', False)) for image in selected_images}
+            bomb_values = {bool(getattr(image, 'bomb', False)) for image in selected_images}
+            rating_mixed = len(rating_values) > 1
+            love_mixed = len(love_values) > 1
+            bomb_mixed = len(bomb_values) > 1
+            rating_value = next(iter(rating_values)) if not rating_mixed and rating_values else 0.0
+            love_value = next(iter(love_values)) if not love_mixed and love_values else False
+            bomb_value = next(iter(bomb_values)) if not bomb_mixed and bomb_values else False
+            self._set_rating_controls_value(float(rating_value or 0.0), mixed=rating_mixed)
+            self._set_reaction_controls_value(
+                bool(love_value),
+                bool(bomb_value),
+                love_mixed=love_mixed,
+                bomb_mixed=bomb_mixed,
+            )
+            return
+
+        image = selected_images[0] if selected_images else self._current_viewer_image()
+        if image is None:
+            self._set_rating_controls_value(0.0, mixed=False)
+            self._set_reaction_controls_value(False, False)
+            return
+        self._set_rating_controls_value(float(getattr(image, 'rating', 0.0) or 0.0), mixed=False)
+        self._set_reaction_controls_value(
             bool(getattr(image, 'love', False)),
             bool(getattr(image, 'bomb', False)),
-            False,
         )
+
+    def _sync_rating_controls_from_viewer(self, viewer: ImageViewer | None = None):
+        self._sync_rating_controls_from_context()
 
     def _connect_floating_viewer(self, viewer: ImageViewer):
         """Bind floating viewer signals to existing main-window slots."""
         viewer.activated.connect(lambda: self.set_active_viewer(viewer))
-        viewer.rating_changed.connect(self.set_rating)
-        viewer.reaction_flags_changed.connect(self.set_reactions)
+        viewer.rating_changed.connect(self._sync_rating_controls_from_context)
+        viewer.reaction_flags_changed.connect(self._sync_rating_controls_from_context)
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
         viewer.directory_reload_requested.connect(self.reload_directory)
         viewer.video_player.playback_started.connect(self._freeze_list_view)
@@ -4546,7 +4658,7 @@ class MainWindow(QMainWindow):
 
     @Slot(float)
     def set_rating(self, rating: float, interactive: bool = False,
-                   event: QMouseEvent|None = None):
+                   event: QMouseEvent|None = None, *, mixed: bool = False):
         """Set the rating from 0.0 to 1.0."""
         if event is not None and (event.modifiers() & Qt.ControlModifier) == Qt.ControlModifier:
             # don't set the image but instead the filter
@@ -4560,32 +4672,54 @@ class MainWindow(QMainWindow):
             self.image_list.filter_line_edit.setText(stars)
             return
 
-        self.rating = rating
-        if self.rating_widget is not None:
-            self.rating_widget.set_rating(float(rating or 0.0) * 5.0)
-        overlay = getattr(self, '_reaction_controls_overlay', None)
-        overlay_rating_widget = getattr(overlay, 'rating_widget', None)
-        if overlay_rating_widget is not None:
-            overlay_rating_widget.set_rating(float(rating or 0.0) * 5.0)
-        if interactive:
-            if self._current_viewer_image() is None:
-                return
+        rating = max(0.0, min(1.0, float(rating or 0.0)))
+        if not interactive:
+            self._set_rating_controls_value(rating, mixed=mixed)
+            return
+
+        targets = self._rating_reaction_target_images()
+        if not targets:
+            return
+
+        changed_images = [
+            image for image in targets
+            if abs(float(getattr(image, 'rating', 0.0) or 0.0) - rating) > 1e-6
+        ]
+        if not changed_images:
+            self._sync_rating_controls_from_context()
+            return
+
+        if len(changed_images) == 1:
             self.image_list_model.add_image_to_undo_stack(
-                self._current_viewer_image(),
+                changed_images[0],
                 action_name='Change rating',
                 should_ask_for_confirmation=False,
             )
-            active_viewer = self.get_active_viewer()
-            active_viewer.rating_change(rating)
-            self._show_reaction_feedback(
-                'stars',
-                stars=float(rating or 0.0) * 5.0,
+        else:
+            self.image_list_model.add_images_to_undo_stack(
+                changed_images,
+                action_name='Change rating',
+                should_ask_for_confirmation=False,
             )
-            # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
-            # Re-apply filter only when the active filter actually depends on rating.
-            if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
-                self._arm_masonry_refresh_anchor()
-                self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+
+        for image in changed_images:
+            image.rating = rating
+            QTimer.singleShot(
+                0,
+                lambda img=image, model=self.image_list_model: model.write_meta_to_disk(img),
+            )
+
+        self._emit_image_rows_changed(changed_images)
+        self._show_reaction_feedback(
+            'stars',
+            stars=float(rating or 0.0) * 5.0,
+        )
+        # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
+        # Re-apply filter only when the active filter actually depends on rating.
+        if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
+            self._arm_masonry_refresh_anchor()
+            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._sync_rating_controls_from_context()
 
     @Slot(str)
     def apply_reaction_filter(self, reaction: str):
@@ -4597,52 +4731,75 @@ class MainWindow(QMainWindow):
 
     def set_reactions(
         self,
-        love: bool,
-        bomb: bool,
+        love: bool | None,
+        bomb: bool | None,
         interactive: bool = False,
         *,
         changed_kind: str | None = None,
+        love_mixed: bool = False,
+        bomb_mixed: bool = False,
     ):
-        if self.love_button is not None:
-            blocker = self.love_button.blockSignals(True)
-            self.love_button.setChecked(bool(love))
-            self.love_button.blockSignals(blocker)
-        if self.bomb_button is not None:
-            blocker = self.bomb_button.blockSignals(True)
-            self.bomb_button.setChecked(bool(bomb))
-            self.bomb_button.blockSignals(blocker)
-        overlay = getattr(self, '_reaction_controls_overlay', None)
-        overlay_love_button = getattr(overlay, 'love_button', None)
-        overlay_bomb_button = getattr(overlay, 'bomb_button', None)
-        if overlay_love_button is not None:
-            blocker = overlay_love_button.blockSignals(True)
-            overlay_love_button.setChecked(bool(love))
-            overlay_love_button.blockSignals(blocker)
-        if overlay_bomb_button is not None:
-            blocker = overlay_bomb_button.blockSignals(True)
-            overlay_bomb_button.setChecked(bool(bomb))
-            overlay_bomb_button.blockSignals(blocker)
+        if not interactive:
+            self._set_reaction_controls_value(
+                bool(love),
+                bool(bomb),
+                love_mixed=love_mixed,
+                bomb_mixed=bomb_mixed,
+            )
+            return
 
-        if interactive:
-            if self._current_viewer_image() is None:
-                return
+        targets = self._rating_reaction_target_images()
+        if not targets:
+            return
+
+        changed_images = []
+        for image in targets:
+            current_love = bool(getattr(image, 'love', False))
+            current_bomb = bool(getattr(image, 'bomb', False))
+            next_love = current_love if love is None else bool(love)
+            next_bomb = current_bomb if bomb is None else bool(bomb)
+            if current_love != next_love or current_bomb != next_bomb:
+                changed_images.append(image)
+
+        if not changed_images:
+            self._sync_rating_controls_from_context()
+            return
+
+        if len(changed_images) == 1:
             self.image_list_model.add_image_to_undo_stack(
-                self._current_viewer_image(),
+                changed_images[0],
                 action_name='Change reactions',
                 should_ask_for_confirmation=False,
             )
-            active_viewer = self.get_active_viewer()
-            active_viewer.reaction_flags_change(love=love, bomb=bomb)
-            feedback_kind = str(changed_kind or '').strip().lower()
-            if feedback_kind == 'love':
-                feedback_enabled = bool(love)
-            else:
-                feedback_kind = 'bomb'
-                feedback_enabled = bool(bomb)
-            self._show_reaction_feedback(feedback_kind, enabled=feedback_enabled)
-            if self._filter_uses_reactions(self.proxy_image_list_model.filter):
-                self._arm_masonry_refresh_anchor()
-                self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        else:
+            self.image_list_model.add_images_to_undo_stack(
+                changed_images,
+                action_name='Change reactions',
+                should_ask_for_confirmation=False,
+            )
+
+        for image in changed_images:
+            if love is not None:
+                image.love = bool(love)
+            if bomb is not None:
+                image.bomb = bool(bomb)
+            QTimer.singleShot(
+                0,
+                lambda img=image, model=self.image_list_model: model.save_reactions_to_db(img),
+            )
+
+        self._emit_image_rows_changed(changed_images)
+        feedback_kind = str(changed_kind or '').strip().lower()
+        if feedback_kind == 'love':
+            feedback_enabled = bool(love)
+        else:
+            feedback_kind = 'bomb'
+            feedback_enabled = bool(bomb)
+        self._show_reaction_feedback(feedback_kind, enabled=feedback_enabled)
+        if self._filter_uses_reactions(self.proxy_image_list_model.filter):
+            self._arm_masonry_refresh_anchor()
+            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._sync_rating_controls_from_context()
 
     def _arm_masonry_refresh_anchor(self):
         """Keep selected masonry item stable across filter-triggered relayout."""

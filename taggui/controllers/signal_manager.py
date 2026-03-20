@@ -131,8 +131,8 @@ class SignalManager:
         toolbar_manager.add_show_marking_latent_action.toggled.connect(image_viewer.show_marking_latent)
 
         # Rating stars
-        image_viewer.rating_changed.connect(self.main_window.set_rating)
-        image_viewer.reaction_flags_changed.connect(self.main_window.set_reactions)
+        image_viewer.rating_changed.connect(self.main_window._sync_rating_controls_from_context)
+        image_viewer.reaction_flags_changed.connect(self.main_window._sync_rating_controls_from_context)
         image_viewer.zoom_follow_mode_changed.connect(
             lambda mode: self.main_window.sync_zoom_follow_mode_button(image_viewer)
         )
@@ -148,9 +148,9 @@ class SignalManager:
                 self.main_window.apply_reaction_filter
             )
             love_button.toggled.connect(
-                lambda checked, other=bomb_button: self.main_window.set_reactions(
+                lambda checked: self.main_window.set_reactions(
                     bool(checked),
-                    bool(other.isChecked()) if other is not None else False,
+                    None,
                     True,
                     changed_kind='love',
                 )
@@ -160,8 +160,8 @@ class SignalManager:
                 self.main_window.apply_reaction_filter
             )
             bomb_button.toggled.connect(
-                lambda checked, other=love_button: self.main_window.set_reactions(
-                    bool(other.isChecked()) if other is not None else False,
+                lambda checked: self.main_window.set_reactions(
+                    None,
                     bool(checked),
                     True,
                     changed_kind='bomb',
@@ -221,6 +221,12 @@ class SignalManager:
                 return
             image_tags_editor.load_image_tags(current)
         image_list_selection_model.currentChanged.connect(safe_load_tags)
+        image_list_selection_model.selectionChanged.connect(
+            lambda *_: self.main_window._sync_rating_controls_from_context()
+        )
+        image_list_selection_model.currentChanged.connect(
+            self.main_window._sync_rating_controls_from_context
+        )
         image_list_model.modelReset.connect(self._update_tag_counts)
         image_list_model.modelReset.connect(self._update_delete_button_visibility)
         image_list_model.enrichment_complete.connect(self._update_tag_counts)
