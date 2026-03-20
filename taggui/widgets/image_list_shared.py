@@ -62,6 +62,30 @@ FILTER_TEMPLATE_SPECS = [
 ]
 
 
+class HoverSelectableListWidget(QListWidget):
+    """QListWidget that keeps its current item aligned with hover movement."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.itemEntered.connect(self._set_hover_current_item)
+
+    def mouseMoveEvent(self, event):
+        try:
+            hover_pos = event.position().toPoint()
+        except Exception:
+            hover_pos = event.pos()
+        hovered_item = self.itemAt(hover_pos)
+        if hovered_item is not None:
+            self.setCurrentItem(hovered_item)
+        super().mouseMoveEvent(event)
+
+    def _set_hover_current_item(self, item):
+        if item is not None:
+            self.setCurrentItem(item)
+
+
 class FilterSuggestionPopup(QFrame):
     template_selected = Signal(str, bool)
     history_selected = Signal(str)
@@ -89,6 +113,10 @@ class FilterSuggestionPopup(QFrame):
                 margin: 2px 0px;
                 border-radius: 6px;
             }
+            QListWidget::item:hover {
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
             QListWidget::item:selected {
                 background: palette(highlight);
                 color: palette(highlighted-text);
@@ -104,7 +132,7 @@ class FilterSuggestionPopup(QFrame):
         filters_label.setStyleSheet('font-weight: 600; padding: 2px 4px;')
         layout.addWidget(filters_label)
 
-        self.list_widget = QListWidget(self)
+        self.list_widget = HoverSelectableListWidget(self)
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list_widget.setUniformItemSizes(False)
         self.list_widget.itemClicked.connect(self._choose_item)
@@ -133,7 +161,7 @@ class FilterSuggestionPopup(QFrame):
         history_header.addWidget(self.clear_history_button)
         layout.addWidget(self.history_header_widget)
 
-        self.history_list_widget = QListWidget(self)
+        self.history_list_widget = HoverSelectableListWidget(self)
         self.history_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.history_list_widget.setUniformItemSizes(True)
         self.history_list_widget.itemClicked.connect(self._choose_history_item)
