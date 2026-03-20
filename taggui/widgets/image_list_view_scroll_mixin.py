@@ -478,6 +478,19 @@ class ImageListViewScrollMixin:
             current_page = max(0, min(last_page, int(self._release_page_lock_page)))
         elif anchor_active:
             current_page = max(0, min(last_page, int(self._drag_release_anchor_idx // source_model.PAGE_SIZE)))
+        elif strict_mode and (not dragging_mode):
+            transient_owner_page = None
+            resolve_owner_page = getattr(self, '_get_transient_owner_anchor_page', None)
+            if callable(resolve_owner_page):
+                try:
+                    transient_owner_page = resolve_owner_page(
+                        source_model=source_model,
+                        last_page=last_page,
+                    )
+                except Exception:
+                    transient_owner_page = None
+            if isinstance(transient_owner_page, int):
+                current_page = max(0, min(last_page, int(transient_owner_page)))
         elif edge_snap_active and self._pending_edge_snap == "top":
             current_page = 0
             if scroll_offset > 0:

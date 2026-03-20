@@ -45,6 +45,7 @@ class FakeView:
         self._current_page = 0
         self._masonry_sticky_until = 0.0
         self._masonry_sticky_page = 0
+        self._transient_owner_page = None
 
     def verticalScrollBar(self):
         return self._scrollbar
@@ -59,6 +60,10 @@ class FakeView:
     def _get_masonry_visible_items(self, viewport_rect):
         del viewport_rect
         return []
+
+    def _get_transient_owner_anchor_page(self, source_model=None, *, last_page=None):
+        del source_model, last_page
+        return self._transient_owner_page
 
 
 def test_resolve_current_page_uses_drag_target_in_strict_mode():
@@ -78,6 +83,24 @@ def test_resolve_current_page_uses_drag_target_in_strict_mode():
 
     assert page == 3
     assert view._current_page == 3
+
+
+def test_resolve_current_page_prefers_transient_owner_anchor_in_strict_mode():
+    view = FakeView()
+    view._scrollbar = FakeScrollBar(value=6200, maximum=10000, slider_position=6200)
+    view._transient_owner_page = 4
+    service = MasonryWindowPlannerService(view)
+
+    page = service.resolve_current_page(
+        source_model=object(),
+        page_size=1000,
+        total_items=9000,
+        strict_mode=True,
+        local_anchor_mode=False,
+    )
+
+    assert page == 4
+    assert view._current_page == 4
 
 
 def test_get_window_buffer_clamps_settings_value(monkeypatch):

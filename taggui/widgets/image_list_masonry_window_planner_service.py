@@ -60,6 +60,19 @@ class MasonryWindowPlannerService:
             source_idx = 0
         elif anchor_active:
             source_idx = int(self._view._drag_release_anchor_idx)
+        elif strict_mode and (not dragging_mode):
+            transient_owner_page = None
+            resolve_owner_page = getattr(self._view, "_get_transient_owner_anchor_page", None)
+            if callable(resolve_owner_page):
+                try:
+                    transient_owner_page = resolve_owner_page(
+                        source_model=source_model,
+                        last_page=max(0, (total_items - 1) // page_size) if total_items > 0 else 0,
+                    )
+                except Exception:
+                    transient_owner_page = None
+            if isinstance(transient_owner_page, int):
+                source_idx = max(0, min(total_items - 1, int(transient_owner_page) * page_size))
         elif strict_mode:
             if dragging_mode and self._view._drag_target_page is not None:
                 strict_page = max(

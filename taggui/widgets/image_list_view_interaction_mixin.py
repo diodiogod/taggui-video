@@ -557,6 +557,11 @@ class ImageListViewInteractionMixin:
                 # overwrite the user's deliberate click.
                 import time as _time_mod
                 self._user_click_selection_frozen_until = _time_mod.time() + 2.0
+                if hasattr(self, '_activate_selected_idle_anchor'):
+                    try:
+                        self._activate_selected_idle_anchor(source_model=source_model, hold_s=2.5)
+                    except Exception:
+                        pass
 
                 # Accept the event to prevent further processing
                 event.accept()

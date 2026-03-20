@@ -201,6 +201,55 @@ class ImageListViewStrategyMixin:
             return int(selected_global)
         return None
 
+    def _get_transient_owner_anchor_global(self, source_model=None) -> int | None:
+        """Return the short-lived anchor item that should own strict page selection."""
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if (
+            getattr(self, "_mouse_scrolling", False)
+            or getattr(self, "_scrollbar_dragging", False)
+            or getattr(self, "_drag_preview_mode", False)
+        ):
+            return None
+
+        now = time.time()
+        idle_until = float(getattr(self, "_idle_anchor_until", 0.0) or 0.0)
+        if now <= idle_until:
+            target_global = getattr(self, "_idle_anchor_target_global", None)
+            if isinstance(target_global, int) and target_global >= 0:
+                return int(target_global)
+
+        click_freeze_until = float(getattr(self, "_user_click_selection_frozen_until", 0.0) or 0.0)
+        if now < click_freeze_until:
+            target_global = self._get_current_or_selected_global_index(source_model=source_model)
+            if isinstance(target_global, int) and target_global >= 0:
+                return int(target_global)
+
+        return None
+
+    def _get_transient_owner_anchor_page(self, source_model=None, *, last_page: int | None = None) -> int | None:
+        """Resolve a temporary strict owner page from the local clicked/idle anchor item."""
+        if source_model is None:
+            source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model is None:
+            return None
+
+        target_global = self._get_transient_owner_anchor_global(source_model=source_model)
+        if not (isinstance(target_global, int) and target_global >= 0):
+            return None
+
+        try:
+            page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        except Exception:
+            page_size = 1000
+        if page_size <= 0:
+            return None
+
+        target_page = max(0, int(target_global // page_size))
+        if isinstance(last_page, int):
+            target_page = max(0, min(int(last_page), target_page))
+        return target_page
+
     def _get_viewport_center_anchor_global(self) -> int | None:
         """Return the masonry item nearest the viewport center, if any."""
         try:
@@ -1031,6 +1080,21 @@ class ImageListViewStrategyMixin:
         exhausted = getattr(source_model, '_enrichment_exhausted', True)
 
         cur_page = int(getattr(self, '_current_page', 0) or 0)
+        try:
+            last_page = max(
+                0,
+                (
+                    int(getattr(source_model, '_total_count', 0) or 0) - 1
+                ) // max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)),
+            )
+        except Exception:
+            last_page = 0
+        transient_owner_page = self._get_transient_owner_anchor_page(
+            source_model=source_model,
+            last_page=last_page,
+        )
+        if isinstance(transient_owner_page, int):
+            cur_page = int(transient_owner_page)
         window_buffer = 3
         ws = max(0, cur_page - window_buffer)
         we = cur_page + window_buffer
@@ -1113,6 +1177,18 @@ class ImageListViewStrategyMixin:
             sb = self.verticalScrollBar()
             old_scroll = int(sb.value())
             anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+            anchor_offset = None
+            if isinstance(anchor_global, int) and anchor_global >= 0:
+                old_anchor_item = self._get_masonry_item_for_global_index(anchor_global)
+                if old_anchor_item is not None:
+                    anchor_offset = int(old_anchor_item.get('y', 0)) - int(old_scroll)
+            reflow_guide_snapshot = None
+            capture_reflow_guide = getattr(self, "_capture_selected_reflow_guide_snapshot", None)
+            if callable(capture_reflow_guide):
+                try:
+                    reflow_guide_snapshot = capture_reflow_guide(source_model=source_model)
+                except Exception:
+                    reflow_guide_snapshot = None
 
             # Reload window pages to pick up enriched dimensions
             for p in range(ws, we + 1):
@@ -1210,10 +1286,10 @@ class ImageListViewStrategyMixin:
             restore_target = self._get_restore_anchor_scroll_value(source_model, sb.maximum())
             if restore_target is not None:
                 target_scroll = int(restore_target)
-            elif anchor_global is not None:
+            elif isinstance(anchor_global, int) and anchor_offset is not None:
                 for _it in result:
                     if int(_it.get('index', -1)) == int(anchor_global):
-                        target_scroll = int(_it.get('y', 0)) + int(_it.get('height', 0)) // 2 - (self.viewport().height() // 2)
+                        target_scroll = int(_it.get('y', 0)) - int(anchor_offset)
                         break
 
             # Apply range/value atomically in strict mode to prevent transient writer races.
@@ -1231,6 +1307,13 @@ class ImageListViewStrategyMixin:
                 sb.blockSignals(prev_block)
 
             self.viewport().update()
+            if reflow_guide_snapshot is not None:
+                show_reflow_guide = getattr(self, "_show_selected_reflow_guide_from_snapshot", None)
+                if callable(show_reflow_guide):
+                    try:
+                        show_reflow_guide(reflow_guide_snapshot)
+                    except Exception:
+                        pass
             print(f"[ENRICH] Masonry refreshed ({len(new_items)} items)")
 
             # Start pre-enrichment for fringe pages (±15 ahead) with 'preload' scope
