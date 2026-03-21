@@ -387,6 +387,23 @@ class ImageList(QDockWidget):
             except (OSError, AttributeError):
                 return default
 
+        def reaction_sort_bucket(img):
+            rating_value = float(getattr(img, 'rating', 0.0) or 0.0)
+            has_rating = rating_value > 0.0
+            has_love = bool(getattr(img, 'love', False))
+            has_bomb = bool(getattr(img, 'bomb', False))
+            if has_love and not has_bomb and has_rating:
+                return 0
+            if has_love and not has_bomb:
+                return 1
+            if has_love and has_bomb and has_rating:
+                return 2
+            if has_love and has_bomb:
+                return 3
+            if not has_love and not has_bomb:
+                return 4
+            return 5
+
         # Sort the images list
         try:
             selected_image = None
@@ -478,10 +495,7 @@ class ImageList(QDockWidget):
                     elif sort_by == 'Love / Rate / Bomb':
                         source_model.images.sort(
                             key=lambda img: (
-                                0 if img.love and not img.bomb else
-                                1 if img.love and img.bomb else
-                                2 if not img.love and not img.bomb else
-                                3,
+                                reaction_sort_bucket(img),
                                 -float(img.rating or 0.0),
                                 natural_sort_key(img.path),
                             )

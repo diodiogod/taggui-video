@@ -1229,10 +1229,12 @@ class ImageIndexDB:
     def _reaction_sort_bucket_expr() -> str:
         return (
             "CASE "
-            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) = 0 THEN 0 "
-            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) != 0 THEN 1 "
-            "WHEN COALESCE(love, 0) = 0 AND COALESCE(bomb, 0) = 0 THEN 2 "
-            "ELSE 3 END"
+            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) = 0 AND COALESCE(rating, 0) > 0 THEN 0 "
+            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) = 0 THEN 1 "
+            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) != 0 AND COALESCE(rating, 0) > 0 THEN 2 "
+            "WHEN COALESCE(love, 0) != 0 AND COALESCE(bomb, 0) != 0 THEN 3 "
+            "WHEN COALESCE(love, 0) = 0 AND COALESCE(bomb, 0) = 0 THEN 4 "
+            "ELSE 5 END"
         )
 
     def _resolve_sort_order(self, sort_field: str, sort_dir: str = 'DESC', **kwargs) -> tuple[str, str, Optional[str], str]:
