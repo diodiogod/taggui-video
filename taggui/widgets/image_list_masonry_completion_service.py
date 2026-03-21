@@ -590,9 +590,11 @@ class MasonryCompletionService:
                             )
                             prefer_exact_item_anchor = explicit_jump_kind in {
                                 "index_input",
+                                "page_input",
                                 "sort_restore",
                                 "startup_restore",
                             } or stabilize_reason in {
+                                "page_input",
                                 "sort_restore",
                                 "startup_restore",
                             }

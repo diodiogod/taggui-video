@@ -250,26 +250,15 @@ class ImageListViewInteractionMixin:
 
         try:
             sb = self.verticalScrollBar()
-            viewport_h = max(1, int(self.viewport().height()))
             item_top = int(target_item.get("y", 0))
             item_center_y = item_top + int(target_item.get("height", 0)) // 2
-            if reason == "page_input":
-                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
-                target_page = max(0, int(target_global) // max(1, page_size))
-                page_start = int(target_page) * max(1, page_size)
-                page_end = page_start + max(1, page_size)
-                page_top = item_top
-                try:
-                    for it in (self._masonry_items or []):
-                        idx = int(it.get("index", -1))
-                        if page_start <= idx < page_end:
-                            page_top = min(page_top, int(it.get("y", 0)))
-                except Exception:
-                    page_top = item_top
-                top_margin = max(12, min(48, viewport_h // 12))
-                target_scroll = max(0, min(page_top - top_margin, int(sb.maximum())))
-            else:
-                target_scroll = max(0, min(item_center_y - viewport_h // 2, int(sb.maximum())))
+            target_scroll = max(
+                0,
+                min(
+                    item_center_y - (max(1, int(self.viewport().height())) // 2),
+                    int(sb.maximum()),
+                ),
+            )
             prev_block = sb.blockSignals(True)
             try:
                 sb.setValue(target_scroll)
