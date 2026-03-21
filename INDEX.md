@@ -39,7 +39,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 
 ### Models (`taggui/models/`)
 
-- `image_list_model.py`: Core paginated image model, page loading, sorting, and DB-backed data access.
+- `image_list_model.py`: Core paginated image model, page loading, sorting, DB-backed data access, and targeted generated-media insert/remove paths.
 - `proxy_image_list_model.py`: Filter/sort proxy and view-facing transformations.
 - `paginated_image_model.py`: Pagination-focused model helpers.
 - `image_tag_list_model.py`: Tag list model for selected image context.
@@ -61,7 +61,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_list_view_interaction_mixin.py`: Mouse/keyboard interaction and navigation behavior.
 - `image_list_view_scroll_mixin.py`: Scroll callbacks and page-load triggering.
 - `image_list_view_paint_selection_mixin.py`: Paint path and selection/tag clipboard operations.
-- `image_list_view_file_ops_mixin.py`: File operations, context actions, page indicator, and cache flush.
+- `image_list_view_file_ops_mixin.py`: File operations, context actions, fast duplicate/delete flows, page indicator, and cache flush.
 - `image_list_strict_domain_service.py`: Strict virtual scroll domain math extracted as a dedicated service.
 - `image_list_masonry_lifecycle_service.py`: Masonry recalculation gating and async completion lifecycle service.
 - `image_list_masonry_submission_service.py`: Masonry worker submission and executor-rotation service.
@@ -100,7 +100,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `menu_manager.py`: Main menu wiring.
 - `toolbar_manager.py`: Toolbar wiring.
 - `signal_manager.py`: Signal/slot wiring.
-- `video_editing_controller.py`: Video editing workflow control.
+- `video_editing_controller.py`: Video editing workflow control, screenshot export, and copy-output media registration.
 
 ### Utilities (`taggui/utils/`)
 
