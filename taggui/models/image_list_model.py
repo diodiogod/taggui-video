@@ -6611,6 +6611,123 @@ class ImageListModel(QAbstractListModel):
             )
         return len(inserted_paths)
 
+    def remove_generated_media_batch(self, image_paths: list[Path]) -> int:
+        """Remove multiple known media files from the model and DB without reloading the folder."""
+        resolved_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        for raw_path in image_paths or []:
+            try:
+                image_path = Path(raw_path).resolve()
+            except Exception:
+                continue
+            if image_path in seen_paths:
+                continue
+            seen_paths.add(image_path)
+            resolved_paths.append(image_path)
+
+        if not resolved_paths:
+            return 0
+
+        if not self._paginated_mode:
+            target_paths = set(resolved_paths)
+            kept_images = []
+            removed_count = 0
+            for image in self.images:
+                try:
+                    image_path = Path(getattr(image, 'path', '')).resolve()
+                except Exception:
+                    image_path = None
+                if image_path in target_paths:
+                    removed_count += 1
+                    continue
+                kept_images.append(image)
+
+            if removed_count <= 0:
+                return 0
+
+            self.beginResetModel()
+            try:
+                self.images = kept_images
+            finally:
+                self.endResetModel()
+
+            if self._db and self._directory_path:
+                rel_paths: list[str] = []
+                for image_path in resolved_paths:
+                    try:
+                        rel_paths.append(_to_native_relative_path(
+                            str(image_path.relative_to(self._directory_path))
+                        ))
+                    except Exception:
+                        continue
+                if rel_paths:
+                    try:
+                        self._db.remove_images_by_paths(rel_paths)
+                    except Exception:
+                        pass
+            return removed_count
+
+        if not self._db or not self._directory_path:
+            return 0
+
+        rel_paths: list[str] = []
+        for image_path in resolved_paths:
+            try:
+                rel_paths.append(_to_native_relative_path(
+                    str(image_path.relative_to(self._directory_path))
+                ))
+            except ValueError:
+                continue
+
+        rel_paths = sorted(set(rel_paths))
+        if not rel_paths:
+            return 0
+
+        removed_count = int(self._db.remove_images_by_paths(rel_paths) or 0)
+        if removed_count <= 0:
+            return 0
+
+        loaded_pages = sorted(int(page_num) for page_num in self._pages.keys())
+        new_total = int(self._db.count(
+            filter_sql=self._filter_sql,
+            bindings=self._filter_bindings,
+        ) or 0)
+        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        pages_to_reload = [
+            int(page_num) for page_num in loaded_pages
+            if 0 <= int(page_num) < total_pages
+        ]
+        if not pages_to_reload and new_total > 0:
+            pages_to_reload = [0]
+
+        preloaded_pages: dict[int, list[Image]] = {}
+        for page_num in sorted(set(pages_to_reload)):
+            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
+            preloaded_pages[int(page_num)] = page_images
+
+        self.beginResetModel()
+        try:
+            with self._page_load_lock:
+                self._pages.clear()
+                self._loading_pages.clear()
+                self._page_load_order.clear()
+            self.images = []
+            self._total_count = int(new_total)
+        finally:
+            self.endResetModel()
+
+        for page_num in sorted(preloaded_pages.keys()):
+            self._store_page(int(page_num), preloaded_pages[int(page_num)])
+
+        self.total_count_changed.emit(self._total_count)
+        self._emit_paginated_layout_refresh()
+        if preloaded_pages:
+            self._start_paginated_enrichment(
+                window_pages=sorted(preloaded_pages.keys()),
+                scope='window',
+            )
+        return removed_count
+
     def _trigger_metadata_backfill_later(self, directory_path):
         """Run metadata backfill in a background thread to avoid blocking UI."""
         import threading

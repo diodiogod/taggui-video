@@ -284,6 +284,7 @@ class ImageListViewFileOpsMixin:
         from PySide6.QtCore import QThread
         import time
 
+        deleted_paths = []
         for image in selected_images:
             success = False
 
@@ -327,24 +328,33 @@ class ImageListViewFileOpsMixin:
                     caption_file.remove()  # Silent operation for captions
 
             self._cleanup_generated_derivative_siblings(image.path)
+            deleted_paths.append(image.path)
+        if not deleted_paths:
+            return
 
-        # Remove deleted images from DB index so they don't reappear on reload
+        removed_count = 0
         try:
             _src_model = self.proxy_image_list_model.sourceModel()
-            if hasattr(_src_model, '_db') and _src_model._db:
-                from utils.settings import settings as _settings
-                directory_path = Path(_settings.value('directory_path', type=str))
-                rel_paths = []
-                for image in selected_images:
-                    try:
-                        rel_paths.append(str(image.path.relative_to(directory_path)))
-                    except ValueError:
-                        rel_paths.append(image.path.name)
-                _src_model._db.remove_images_by_paths(rel_paths)
+            removed_count = int(_src_model.remove_generated_media_batch(deleted_paths) or 0)
         except Exception as e:
-            print(f"[DELETE] Warning: failed to clean DB index: {e}")
+            print(f"[DELETE] Warning: failed to clean model/DB index: {e}")
+            self.directory_reload_requested.emit()
+            return
 
-        self.directory_reload_requested.emit()
+        if removed_count <= 0:
+            self.directory_reload_requested.emit()
+            return
+
+        if selected_indices:
+            target_row = min(next_index, max(0, self.proxy_image_list_model.rowCount() - 1))
+            if self.proxy_image_list_model.rowCount() > 0:
+                proxy_index = self.proxy_image_list_model.index(target_row, 0)
+                if proxy_index.isValid():
+                    self.setCurrentIndex(proxy_index)
+                    try:
+                        self.scrollTo(proxy_index)
+                    except Exception:
+                        pass
 
 
     @Slot()

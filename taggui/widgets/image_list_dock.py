@@ -690,6 +690,7 @@ class ImageList(QDockWidget):
         # Delete files with retries
         import gc
         max_retries = 3
+        deleted_paths = []
         for image in marked_images:
             success = False
             for attempt in range(max_retries):
@@ -723,23 +724,41 @@ class ImageList(QDockWidget):
                 caption_file = QFile(caption_file_path)
                 if not caption_file.moveToTrash():
                     caption_file.remove()
+            deleted_paths.append(image.path)
 
-        # Remove deleted images from DB index so they don't reappear on reload
-        # (load_directory uses DB cache for datasets with 1000+ images).
+        if not deleted_paths:
+            return
+
+        removed_count = 0
         try:
-            if hasattr(source_model, '_db') and source_model._db:
-                from utils.settings import settings as _settings
-                directory_path = Path(_settings.value('directory_path', type=str))
-                rel_paths = []
-                for image in marked_images:
-                    try:
-                        rel_paths.append(str(image.path.relative_to(directory_path)))
-                    except ValueError:
-                        rel_paths.append(image.path.name)
-                source_model._db.remove_images_by_paths(rel_paths)
+            removed_count = int(source_model.remove_generated_media_batch(deleted_paths) or 0)
         except Exception as e:
-            print(f"[DELETE] Warning: failed to clean DB index: {e}")
+            print(f"[DELETE] Warning: failed to clean model/DB index: {e}")
+            self.directory_reload_requested.emit()
+            return
 
-        self.directory_reload_requested.emit()
+        if removed_count <= 0:
+            self.directory_reload_requested.emit()
+            return
+
+        # Clear deletion marks from any remaining items and refresh the overlay state.
+        for image in marked_images:
+            try:
+                image.marked_for_deletion = False
+            except Exception:
+                pass
+        self.deletion_marking_changed.emit()
+        self.list_view.viewport().update()
+
+        if marked_indices:
+            target_row = min(next_index, max(0, self.proxy_image_list_model.rowCount() - 1))
+            if self.proxy_image_list_model.rowCount() > 0:
+                proxy_index = self.proxy_image_list_model.index(target_row, 0)
+                if proxy_index.isValid():
+                    self.list_view.setCurrentIndex(proxy_index)
+                    try:
+                        self.list_view.scrollTo(proxy_index)
+                    except Exception:
+                        pass
 
 __all__ = ["ImageList"]
