@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.27] - 2026-03-20
+
+### Added
+
+- Screenshot current video frames now appear almost instantly
+- Duplicates sort more like newly created files in recent-first views
+
+### Changed
+
+- Duplicate media now shows up much faster in the current folder
+
+### Removed
+
+- Speed up duplicate, screenshot, and delete workflows
+- Delete selected and Delete Marked now remove items without a full folder refresh
 ## [1.0.26] - 2026-03-20
 
 ### Added
