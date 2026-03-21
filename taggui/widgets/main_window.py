@@ -4640,6 +4640,36 @@ class MainWindow(QMainWindow):
             self.image_list.list_view.setCurrentIndex(
                 self.proxy_image_list_model.index(0, 0))
 
+    def _debug_image_enrichment_status(self, image: Image | None) -> tuple[str, str]:
+        """Return a compact enrichment status label for selection diagnostics."""
+        if image is None:
+            return ("unknown", "unknown")
+
+        dims = getattr(image, "dimensions", None)
+        if not dims or len(dims) != 2:
+            return ("no", "missing")
+
+        try:
+            width = dims[0]
+            height = dims[1]
+        except Exception:
+            return ("no", "invalid")
+
+        if width is None or height is None:
+            return ("no", "missing")
+
+        try:
+            width_i = int(width)
+            height_i = int(height)
+        except Exception:
+            return ("no", "invalid")
+
+        if width_i <= 0 or height_i <= 0:
+            return ("no", f"{width_i}x{height_i}")
+        if (width_i, height_i) == (512, 512):
+            return ("no", "512x512")
+        return ("yes", f"{width_i}x{height_i}")
+
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
         """Save the index and path of the currently selected image."""
@@ -4683,9 +4713,11 @@ class MainWindow(QMainWindow):
                                 debug_index = int(source_index.row())
                         except Exception:
                             debug_index = int(source_index.row())
+                        enriched_state, dims_state = self._debug_image_enrichment_status(img)
                         diagnostic_print(
                             f"{diagnostic_time_prefix()} [SAVE] Selected path: {img.path.name} "
-                            f"| page={debug_page} | index={debug_index}",
+                            f"| page={debug_page} | index={debug_index} "
+                            f"| enriched={enriched_state} | dims={dims_state}",
                             detail="essential",
                         )
                         self._update_main_window_title(img.path.name)
@@ -4797,6 +4829,7 @@ class MainWindow(QMainWindow):
 
         release_active = now < float(getattr(view, '_drag_release_anchor_until', 0.0) or 0.0)
         loading_pages = bool(getattr(source_model, '_loading_pages', set()))
+        enrichment_running = bool(getattr(source_model, '_enrichment_running', False))
         if virtual_list_active:
             mapped = self._proxy_index_to_global_rank(proxy_image_index)
             if mapped < 0:
@@ -4821,6 +4854,15 @@ class MainWindow(QMainWindow):
         # is frozen until an explicit user action releases it". Keep ignoring
         # remapped current indexes even after the short release-anchor window ends.
         if now < lock_until and int(mapped) != int(selected_global):
+            return True
+
+        if enrichment_running and int(mapped) != int(selected_global):
+            schedule_rebind = getattr(view, '_schedule_rebind_current_index_to_selected_global', None)
+            if callable(schedule_rebind):
+                try:
+                    schedule_rebind()
+                except Exception:
+                    pass
             return True
 
         if not (release_active or loading_pages):
@@ -4905,8 +4947,10 @@ class MainWindow(QMainWindow):
                 should_ask_for_confirmation=False,
             )
 
+        reaction_updated_at = time.time()
         for image in changed_images:
             image.rating = rating
+            image.reaction_updated_at = reaction_updated_at
             QTimer.singleShot(
                 0,
                 lambda img=image, model=self.image_list_model: model.write_meta_to_disk(img),
@@ -4987,11 +5031,13 @@ class MainWindow(QMainWindow):
                 should_ask_for_confirmation=False,
             )
 
+        reaction_updated_at = time.time()
         for image in changed_images:
             if love is not None:
                 image.love = bool(love)
             if bomb is not None:
                 image.bomb = bool(bomb)
+            image.reaction_updated_at = reaction_updated_at
             QTimer.singleShot(
                 0,
                 lambda img=image, model=self.image_list_model: model.save_reactions_to_db(img),

@@ -1417,6 +1417,18 @@ class ImageListViewInteractionMixin:
         total_items = int(getattr(source_model, '_total_count', 0) or 0)
         page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
         target_page = (target_global // max(1, page_size)) if total_items > 0 else 0
+        self._current_page = max(0, int(target_page))
+        self._restore_target_page = int(target_page)
+        try:
+            enrich_buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
+        except Exception:
+            enrich_buffer_pages = 3
+        enrich_buffer_pages = max(1, min(enrich_buffer_pages, 6))
+        enrich_start_page = max(0, int(target_page) - enrich_buffer_pages)
+        enrich_end_page = min(
+            max(0, (total_items - 1) // max(1, page_size)),
+            int(target_page) + enrich_buffer_pages,
+        ) if total_items > 0 else 0
 
         # Load target page immediately when selection is outside loaded window.
         try:
@@ -1426,6 +1438,11 @@ class ImageListViewInteractionMixin:
                     source_model._load_page_sync(target_page)
                     if hasattr(source_model, '_emit_pages_updated'):
                         source_model._emit_pages_updated()
+                    if hasattr(source_model, '_start_paginated_enrichment'):
+                        source_model._start_paginated_enrichment(
+                            window_pages=range(enrich_start_page, enrich_end_page + 1),
+                            scope='window',
+                        )
         except Exception:
             pass
 
@@ -1438,8 +1455,6 @@ class ImageListViewInteractionMixin:
             try:
                 if hasattr(source_model, 'ensure_pages_for_range'):
                     source_model.ensure_pages_for_range(target_global, target_global + 1)
-                self._current_page = max(0, int(target_page))
-                self._restore_target_page = int(target_page)
                 self._restore_target_global_index = int(target_global)
                 import time as _t
                 self._restore_anchor_until = _t.time() + 4.0
@@ -2020,6 +2035,11 @@ class ImageListViewInteractionMixin:
                     loaded_sync = True
                 if loaded_sync and hasattr(source_model, "_emit_pages_updated"):
                     source_model._emit_pages_updated()
+                if hasattr(source_model, "_start_paginated_enrichment"):
+                    source_model._start_paginated_enrichment(
+                        window_pages=range(start_page, end_page + 1),
+                        scope='window',
+                    )
             except Exception:
                 pass
 

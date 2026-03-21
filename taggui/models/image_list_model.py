@@ -27,7 +27,7 @@ import threading
 from utils.image import Image, ImageMarking, Marking
 from utils.image_index_db import ImageIndexDB
 from utils.jxlutil import get_jxl_size
-from utils.diagnostic_logging import diagnostic_print, should_emit_trace_log
+from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.thumbnail_cache import get_thumbnail_cache
 from utils.utils import get_confirmation_dialog_reply, pluralize
@@ -1083,6 +1083,11 @@ class ImageListModel(QAbstractListModel):
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
         # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
         self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        self._enrichment_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="page_enrich",
+            initializer=self._set_low_priority_thread,
+        )
         self._refresh_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="folder_refresh",
@@ -1661,6 +1666,7 @@ class ImageListModel(QAbstractListModel):
                 rating=row.get('rating', 0.0),
                 love=bool(row.get('love', 0)),
                 bomb=bool(row.get('bomb', 0)),
+                reaction_updated_at=row.get('reaction_updated_at'),
             )
 
             # Populate metadata
@@ -3211,6 +3217,7 @@ class ImageListModel(QAbstractListModel):
         for executor_name in (
             '_page_executor',
             '_load_executor',
+            '_enrichment_executor',
             '_refresh_executor',
             '_save_executor',
             '_scan_process_executor',
@@ -3684,19 +3691,36 @@ class ImageListModel(QAbstractListModel):
                    on completion), 'preload' for ahead-of-scroll enrichment
                    (no masonry refresh, no retrigger).
         """
-        # Cancel any running enrichment so it doesn't waste time on stale pages
-        if hasattr(self, '_enrichment_cancelled'):
+        # Snapshot the window pages for the worker closure
+        _window_page_set = set(window_pages) if window_pages is not None else None
+        requested_target_pages = (
+            frozenset(_window_page_set) if _window_page_set else None
+        )
+        current_target_pages = getattr(self, '_enrichment_target_pages', None)
+        current_scope = getattr(self, '_enrichment_scope', 'window')
+
+        # Re-requesting the same running window/preload target only burns work
+        # and makes deep-page masonry repair feel random because batches keep
+        # restarting before they finish.
+        if (
+            getattr(self, '_enrichment_running', False)
+            and current_scope == scope
+            and current_target_pages == requested_target_pages
+        ):
+            return
+
+        # Cancel only when retargeting a different enrichment job.
+        if getattr(self, '_enrichment_running', False) and hasattr(self, '_enrichment_cancelled'):
             self._enrichment_cancelled.set()
             # Non-blocking: worker checks cancel flag every 10 files (~20ms),
             # so it will notice quickly without blocking the UI thread here.
             self._enrichment_cancelled = threading.Event()
-
-        # Snapshot the window pages for the worker closure
-        _window_page_set = set(window_pages) if window_pages is not None else None
+        elif not hasattr(self, '_enrichment_cancelled') or self._enrichment_cancelled.is_set():
+            self._enrichment_cancelled = threading.Event()
 
         self._enrichment_running = True
         self._enrichment_scope = scope
-        self._enrichment_target_pages = frozenset(_window_page_set) if _window_page_set else None
+        self._enrichment_target_pages = requested_target_pages
         enrichment_signature = (
             scope,
             tuple(sorted(_window_page_set)) if _window_page_set else (),
@@ -3731,10 +3755,12 @@ class ImageListModel(QAbstractListModel):
                      return f"{phase} on page {start_page}"
                  return f"{phase} on pages {start_page}-{end_page} ({page_count} pages)"
 
+             scoped_page_repair = _window_page_set is not None
+
              # Collect unenriched images — scoped to window pages if provided.
              prioritized_rel_paths = []
              seen = set()
-             if _window_page_set is not None:
+             if scoped_page_repair:
                  # Window-scoped: use DB to find unenriched files (avoids stale in-memory data).
                  # Query DB for placeholder files in the page range, ordered center-out.
                  pages_sorted = sorted(_window_page_set)
@@ -3788,9 +3814,15 @@ class ImageListModel(QAbstractListModel):
                          placeholders.append(rel_path)
                          seen.add(rel_path)
 
-             # Keep small for fast first-cycle masonry fix (~3-4s).
-             max_enrich_per_cycle = 1500
+             # Keep scoped window repair batches small so the viewport gets a
+             # visible masonry correction quickly instead of waiting for one
+             # huge batch to finish. Preload/legacy work can stay larger.
+             if scope == 'window' and scoped_page_repair:
+                 max_enrich_per_cycle = 250
+             else:
+                 max_enrich_per_cycle = 1500
              placeholders = placeholders[:max_enrich_per_cycle]
+             placeholder_count = len(placeholders)
 
              if not placeholders:
                  self._enrichment_exhausted = True
@@ -3809,9 +3841,17 @@ class ImageListModel(QAbstractListModel):
                      )
                  else:
                      diagnostic_print(f"[ENRICH] {scope_label} already up to date [ALL DONE]", detail="verbose")
+                 diagnostic_print(
+                     f"{diagnostic_time_prefix()} [ENRICH] {scope_label}: 0 placeholder(s), nothing to repair",
+                     detail="essential",
+                 )
                  return
 
              scope_label = describe_scope(_window_page_set)
+             diagnostic_print(
+                 f"{diagnostic_time_prefix()} [ENRICH] Starting {scope_label}: {len(placeholders)} placeholder(s)",
+                 detail="essential",
+             )
              self._enrichment_log_batches += 1
              batch_number = self._enrichment_log_batches
 
@@ -3824,6 +3864,10 @@ class ImageListModel(QAbstractListModel):
                      db_bg.commit()
                      self._enrichment_running = False
                      diagnostic_print("[ENRICH] Cancelled", detail="verbose")
+                     diagnostic_print(
+                         f"{diagnostic_time_prefix()} [ENRICH] Cancelled {scope_label}",
+                         detail="essential",
+                     )
                      return
 
                  # Yield disk time every 10 files to avoid blocking thumbnail I/O
@@ -3838,17 +3882,20 @@ class ImageListModel(QAbstractListModel):
                       video_metadata = None
                       tags = []
                       
-                      # Extract tags
-                      txt_path = full_path.with_suffix('.txt')
+                      # Scoped paginated repair exists to fix masonry dimensions
+                      # for the active pages. Tag sidecar indexing is much more
+                      # expensive and is handled elsewhere, so skip it here.
                       txt_sidecar_mtime = None
-                      if txt_path.exists():
-                          try:
-                              txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                              caption = txt_path.read_text(encoding='utf-8', errors='replace')
-                              if caption:
-                                  tags = [t.strip() for t in caption.split(self.tag_separator) if t.strip()]
-                          except Exception:
-                              pass
+                      if not scoped_page_repair:
+                          txt_path = full_path.with_suffix('.txt')
+                          if txt_path.exists():
+                              try:
+                                  txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+                                  caption = txt_path.read_text(encoding='utf-8', errors='replace')
+                                  if caption:
+                                      tags = [t.strip() for t in caption.split(self.tag_separator) if t.strip()]
+                              except Exception:
+                                  pass
                       
                       # Extract dimensions
                       if is_video:
@@ -3904,15 +3951,16 @@ class ImageListModel(QAbstractListModel):
                            # Save dimensions
                            db_bg.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime, video_metadata)
                            
-                           # Save tags (requires image_id from newly inserted/updated record)
-                           image_id = db_bg.get_image_id(rel_path)
-                           if image_id:
-                               if tags:
-                                   db_bg.set_tags_for_image(image_id, tags)
-                               else:
-                                   # Mark as scanned with special tag to prevent reprocessing
-                                   db_bg.add_tag_to_image(image_id, '__no_tags__')
-                               db_bg.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                           if not scoped_page_repair:
+                               # Legacy/full enrichment also backfills tag sidecars.
+                               image_id = db_bg.get_image_id(rel_path)
+                               if image_id:
+                                   if tags:
+                                       db_bg.set_tags_for_image(image_id, tags)
+                                   else:
+                                       # Mark as scanned with special tag to prevent reprocessing
+                                       db_bg.add_tag_to_image(image_id, '__no_tags__')
+                                   db_bg.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
                                    
                            enriched_count += 1
 
@@ -3923,7 +3971,10 @@ class ImageListModel(QAbstractListModel):
                       pass
 
              db_bg.commit()
-             self._enrichment_exhausted = (enriched_count < max_enrich_per_cycle)
+             self._enrichment_exhausted = (
+                 placeholder_count < max_enrich_per_cycle
+                 or enriched_count == 0
+             )
              self._enrichment_actual_count = enriched_count
              self._enrichment_running = False
              self._enrichment_log_total += enriched_count
@@ -3941,11 +3992,17 @@ class ImageListModel(QAbstractListModel):
                      f"({enriched_count} item(s)); cumulative {cumulative_total}, continuing",
                      detail="verbose",
                  )
+             diagnostic_print(
+                 f"{diagnostic_time_prefix()} [ENRICH] {scope_label}: batch {batch_number} "
+                 f"enriched {enriched_count}, cumulative {cumulative_total}, "
+                 f"{'done' if self._enrichment_exhausted else 'continuing'}",
+                 detail="essential",
+             )
 
              # Signal completion from background thread
              self.enrichment_complete.emit()
 
-        self._load_executor.submit(enrich_worker)
+        self._enrichment_executor.submit(enrich_worker)
 
     def _should_use_cached_paginated_bootstrap(self, cached_count: int) -> bool:
         """Use cached-image bootstrap only when the folder will enter paginated mode."""
@@ -4578,6 +4635,7 @@ class ImageListModel(QAbstractListModel):
                 rating=float((cached or {}).get('rating', 0.0) or 0.0),
                 love=bool((cached or {}).get('love', False)),
                 bomb=bool((cached or {}).get('bomb', False)),
+                reaction_updated_at=(cached or {}).get('reaction_updated_at'),
             )
             # Store DB cached info (including thumbnail_cached flag) for fast cache checks
             image._db_cached_info = cached if cached else {}
@@ -4864,6 +4922,11 @@ class ImageListModel(QAbstractListModel):
         # CRITICAL: Emit pages_updated BEFORE layoutChanged so proxy invalidates first
         # Otherwise proxy.rowCount() returns 0 during masonry calculation
         self._emit_paginated_layout_refresh()
+        if self._pages:
+            self._start_paginated_enrichment(
+                window_pages=sorted(self._pages.keys()),
+                scope='window',
+            )
         QTimer.singleShot(
             250,
             lambda path=Path(directory_path): self._schedule_paginated_maintenance(path),
@@ -4988,6 +5051,7 @@ class ImageListModel(QAbstractListModel):
                  'rating': image.rating,
                  'love': bool(getattr(image, 'love', False)),
                  'bomb': bool(getattr(image, 'bomb', False)),
+                 'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
                  'crop': QRect(image.crop) if image.crop is not None else None,
                  'markings': image.markings.copy(),
                  'loop_start_frame': image.loop_start_frame,
@@ -5003,6 +5067,7 @@ class ImageListModel(QAbstractListModel):
             'rating': image.rating,
             'love': bool(getattr(image, 'love', False)),
             'bomb': bool(getattr(image, 'bomb', False)),
+            'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
             'crop': QRect(image.crop) if image.crop is not None else None,
             'markings': image.markings.copy(),
             'loop_start_frame': image.loop_start_frame,
@@ -5094,6 +5159,7 @@ class ImageListModel(QAbstractListModel):
         image.rating = state['rating']
         image.love = bool(state.get('love', False))
         image.bomb = bool(state.get('bomb', False))
+        image.reaction_updated_at = state.get('reaction_updated_at')
         image.crop = state['crop']
         image.markings = state['markings']
         image.loop_start_frame = state.get('loop_start_frame')
@@ -5210,7 +5276,8 @@ class ImageListModel(QAbstractListModel):
                      height=height,
                      is_video=is_video,
                      mtime=stat.st_mtime,
-                     rating=image.rating
+                     rating=image.rating,
+                     reaction_updated_at=getattr(image, 'reaction_updated_at', None),
                  )
                  # Retry get ID
                  image_id = self._db.get_image_id(rel_path)
@@ -5233,7 +5300,11 @@ class ImageListModel(QAbstractListModel):
                  self._db.add_tag_to_image(image_id, '__no_tags__')
             self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
             # Keep DB rating in sync with sidecar/in-memory rating.
-            self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
+            self._db.set_rating(
+                image_id,
+                float(getattr(image, 'rating', 0.0) or 0.0),
+                reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+            )
 
     def _save_markings_to_db(self, image: Image):
         """Persist searchable markings to database in paginated mode."""
@@ -5262,6 +5333,7 @@ class ImageListModel(QAbstractListModel):
                     is_video=is_video,
                     mtime=stat.st_mtime,
                     rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                    reaction_updated_at=getattr(image, 'reaction_updated_at', None),
                 )
                 image_id = self._db.get_image_id(rel_path)
             except Exception:
@@ -5310,7 +5382,11 @@ class ImageListModel(QAbstractListModel):
                 image_id = None
 
         if image_id:
-            self._db.set_rating(image_id, float(getattr(image, 'rating', 0.0) or 0.0))
+            self._db.set_rating(
+                image_id,
+                float(getattr(image, 'rating', 0.0) or 0.0),
+                reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+            )
 
     def save_reactions_to_db(self, image: Image):
         """Persist DB-only love/bomb flags for one image."""
@@ -5338,6 +5414,7 @@ class ImageListModel(QAbstractListModel):
                     is_video=is_video,
                     mtime=stat.st_mtime,
                     rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                    reaction_updated_at=getattr(image, 'reaction_updated_at', None),
                 )
                 image_id = self._db.get_image_id(rel_path)
             except Exception:
@@ -5348,6 +5425,7 @@ class ImageListModel(QAbstractListModel):
                 image_id,
                 bool(getattr(image, 'love', False)),
                 bool(getattr(image, 'bomb', False)),
+                reaction_updated_at=getattr(image, 'reaction_updated_at', None),
             )
 
     def write_meta_to_disk(self, image: Image):
@@ -5450,6 +5528,7 @@ class ImageListModel(QAbstractListModel):
                  'rating': image.rating,
                  'love': bool(getattr(image, 'love', False)),
                  'bomb': bool(getattr(image, 'bomb', False)),
+                 'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
                  'crop': QRect(image.crop) if image.crop is not None else None,
                  'markings': image.markings.copy(),
                  'loop_start_frame': image.loop_start_frame,
@@ -5464,6 +5543,7 @@ class ImageListModel(QAbstractListModel):
                 image.rating == history_image_tags['rating'] and
                 bool(getattr(image, 'love', False)) == bool(history_image_tags.get('love', False)) and
                 bool(getattr(image, 'bomb', False)) == bool(history_image_tags.get('bomb', False)) and
+                getattr(image, 'reaction_updated_at', None) == history_image_tags.get('reaction_updated_at') and
                 image.crop == history_image_tags['crop'] and
                 image.markings == history_image_tags['markings'] and
                 image.loop_start_frame == history_image_tags.get('loop_start_frame') and
@@ -5474,6 +5554,7 @@ class ImageListModel(QAbstractListModel):
             image.rating = history_image_tags['rating']
             image.love = bool(history_image_tags.get('love', False))
             image.bomb = bool(history_image_tags.get('bomb', False))
+            image.reaction_updated_at = history_image_tags.get('reaction_updated_at')
             image.crop = history_image_tags['crop']
             image.markings = history_image_tags['markings']
             image.loop_start_frame = history_image_tags.get('loop_start_frame')
@@ -6448,6 +6529,7 @@ class ImageListModel(QAbstractListModel):
             rating=float(cached_info.get('rating', 0.0) or 0.0),
             love=bool(cached_info.get('love', False)),
             bomb=bool(cached_info.get('bomb', False)),
+            reaction_updated_at=cached_info.get('reaction_updated_at'),
         )
 
         json_file_path = image_path.with_suffix('.json')

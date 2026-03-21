@@ -330,6 +330,7 @@ class PaginatedImageModel(QAbstractListModel):
                 rating=row.get('rating', 0.0),
                 love=bool(row.get('love', 0)),
                 bomb=bool(row.get('bomb', 0)),
+                reaction_updated_at=row.get('reaction_updated_at'),
             )
 
             if row['is_video']:

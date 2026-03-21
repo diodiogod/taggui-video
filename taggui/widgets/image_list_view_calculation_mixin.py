@@ -163,7 +163,11 @@ class ImageListViewCalculationMixin:
                         getattr(self, '_release_page_lock_page', None) is not None
                         and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
                     )
-                    restore_lock_live = getattr(self, '_restore_target_page', None) is not None
+                    resolve_restore_page = getattr(self, '_get_live_restore_target_page', None)
+                    restore_lock_live = bool(
+                        callable(resolve_restore_page)
+                        and resolve_restore_page(last_page=last_page) is not None
+                    )
                     # Avoid snap-back teleports while user is intentionally at edges
                     # or when restore/release lock is steering ownership.
                     if loaded_list and not (at_top_edge or at_bottom_edge or release_lock_live or restore_lock_live):

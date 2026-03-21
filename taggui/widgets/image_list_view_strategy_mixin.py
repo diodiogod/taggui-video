@@ -4,6 +4,100 @@ from widgets.image_list_masonry_incremental_service import MasonryIncrementalSer
 from utils.diagnostic_logging import diagnostic_print, should_emit_trace_log
 
 class ImageListViewStrategyMixin:
+    def _get_live_restore_target_page(self, *, last_page: int | None = None) -> int | None:
+        """Return the active restore-owned page while its hold window is still live."""
+        restore_page = getattr(self, "_restore_target_page", None)
+        if restore_page is None:
+            return None
+
+        try:
+            restore_until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+        except Exception:
+            restore_until = 0.0
+
+        if time.time() > restore_until:
+            self._restore_target_page = None
+            self._restore_target_global_index = None
+            self._restore_anchor_until = 0.0
+            return None
+
+        try:
+            restore_page = int(restore_page)
+        except Exception:
+            return None
+
+        if isinstance(last_page, int):
+            restore_page = max(0, min(int(last_page), restore_page))
+        return restore_page
+
+    def _get_preferred_enrichment_window_pages(
+        self,
+        source_model,
+        *,
+        window_buffer: int = 3,
+    ) -> tuple[int, int] | None:
+        """Prefer the visible masonry window when choosing paginated repair pages."""
+        if not source_model or not getattr(source_model, "_paginated_mode", False):
+            return None
+
+        try:
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+            page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        except Exception:
+            total_items = 0
+            page_size = 1000
+        if total_items <= 0 or page_size <= 0:
+            return None
+
+        last_page = max(0, (total_items - 1) // page_size)
+        window_buffer = max(1, int(window_buffer))
+
+        visible_pages = set()
+        try:
+            if self.use_masonry and self._masonry_items:
+                scroll_offset = int(self.verticalScrollBar().value())
+                viewport_rect = QRect(
+                    0,
+                    scroll_offset,
+                    self.viewport().width(),
+                    max(1, self.viewport().height()),
+                )
+                for item in self._get_masonry_visible_items(viewport_rect):
+                    idx = int(item.get("index", -1))
+                    if idx >= 0:
+                        visible_pages.add(max(0, min(last_page, idx // page_size)))
+        except Exception:
+            visible_pages = set()
+
+        if visible_pages:
+            base_start = min(visible_pages)
+            base_end = max(visible_pages)
+            return (
+                max(0, base_start - window_buffer),
+                min(last_page, base_end + window_buffer),
+            )
+
+        target_global = self._get_current_or_selected_global_index(source_model=source_model)
+        if isinstance(target_global, int) and target_global >= 0:
+            target_page = max(0, min(last_page, int(target_global // page_size)))
+            return (
+                max(0, target_page - window_buffer),
+                min(last_page, target_page + window_buffer),
+            )
+
+        restore_page = self._get_live_restore_target_page(last_page=last_page)
+        if isinstance(restore_page, int):
+            return (
+                max(0, restore_page - window_buffer),
+                min(last_page, restore_page + window_buffer),
+            )
+
+        cur_page = max(0, min(last_page, int(getattr(self, "_current_page", 0) or 0)))
+        return (
+            max(0, cur_page - window_buffer),
+            min(last_page, cur_page + window_buffer),
+        )
+
     def _image_dimensions_need_enrichment(self, image) -> bool:
         """Return True when an image still has placeholder or missing dimensions."""
         if not image:
@@ -716,6 +810,14 @@ class ImageListViewStrategyMixin:
             self.viewport().update()
             return True
 
+        current_global = None
+        resolve_current_global = getattr(self, "_current_global_from_current_index", None)
+        if callable(resolve_current_global):
+            try:
+                current_global = resolve_current_global(source_model)
+            except Exception:
+                current_global = None
+
         explicit_jump_rebind_live = False
         if self.use_masonry:
             now = time.time()
@@ -743,10 +845,24 @@ class ImageListViewStrategyMixin:
                 )
             )
 
-        if explicit_jump_rebind_live:
+        enrichment_rebind_live = bool(
+            self.use_masonry
+            and getattr(source_model, "_paginated_mode", False)
+            and isinstance(current_global, int)
+            and int(current_global) != int(target_global)
+            and not getattr(self, "_scrollbar_dragging", False)
+            and not getattr(self, "_mouse_scrolling", False)
+            and not getattr(self, "_drag_preview_mode", False)
+            and (
+                bool(getattr(source_model, "_enrichment_running", False))
+                or getattr(self, "_last_masonry_signal", None) in {"pages_updated", "enrichment_complete", "scroll_idle"}
+            )
+        )
+
+        if explicit_jump_rebind_live or enrichment_rebind_live:
             # Exact index jumps need the volatile Qt row handle rebound after
             # buffered pages are inserted ahead of the target page. Keep this
-            # narrow to explicit jump/restore states instead of all masonry churn.
+            # narrow to explicit jump/restore or active enrichment remap churn.
             sel_model = self.selectionModel()
             if sel_model is not None:
                 prev_block = sel_model.blockSignals(True)
@@ -869,10 +985,16 @@ class ImageListViewStrategyMixin:
             if self.model() and hasattr(self.model(), "sourceModel")
             else self.model()
         )
-        if not (
+        virtual_list_active = bool(
             hasattr(self, "_virtual_list_is_active")
             and self._virtual_list_is_active(source_model)
-        ):
+        )
+        paginated_masonry_active = bool(
+            self.use_masonry
+            and source_model is not None
+            and getattr(source_model, "_paginated_mode", False)
+        )
+        if not (virtual_list_active or paginated_masonry_active):
             return
         if bool(getattr(self, "_rebind_selected_global_pending", False)):
             return
@@ -998,7 +1120,7 @@ class ImageListViewStrategyMixin:
                 return max(0, min(target, domain_max))
 
         # Fallback until target item is materialized: keep target page ownership.
-        restore_page = getattr(self, "_restore_target_page", None)
+        restore_page = self._get_live_restore_target_page()
         if restore_page is None or not source_model:
             return None
         try:
@@ -1268,6 +1390,7 @@ class ImageListViewStrategyMixin:
 
         scope = getattr(source_model, '_enrichment_scope', 'window')
         exhausted = getattr(source_model, '_enrichment_exhausted', True)
+        target_pages = sorted(getattr(source_model, '_enrichment_target_pages', ()) or ())
 
         cur_page = int(getattr(self, '_current_page', 0) or 0)
         try:
@@ -1305,9 +1428,11 @@ class ImageListViewStrategyMixin:
         self._last_enrich_trigger_time = time.time()
 
         if not exhausted:
-            # More window work — silently re-trigger without any UI change
+            # Continue the exact target that started this repair batch.
+            next_target = target_pages if target_pages else range(ws, we + 1)
             source_model._start_paginated_enrichment(
-                window_pages=range(ws, we + 1), scope='window',
+                window_pages=next_target,
+                scope='window',
             )
             return
 
@@ -1322,7 +1447,6 @@ class ImageListViewStrategyMixin:
         self._enrich_first_refresh_done = True
 
         incremental = self._get_masonry_incremental_service()
-        target_pages = sorted(getattr(source_model, '_enrichment_target_pages', ()) or ())
         if incremental.is_active and target_pages:
             anchor_global = None
             anchor_old_y = None
@@ -1380,8 +1504,11 @@ class ImageListViewStrategyMixin:
                 except Exception:
                     reflow_guide_snapshot = None
 
-            # Reload window pages to pick up enriched dimensions
-            for p in range(ws, we + 1):
+            # Reload the exact enriched target pages when known. Falling back
+            # to the derived visible window is less stable on deep jumps
+            # because `_current_page` can drift before repair finishes.
+            pages_to_refresh = target_pages if target_pages else list(range(ws, we + 1))
+            for p in pages_to_refresh:
                 if p in source_model._pages:
                     source_model._load_page_sync(p)
 
@@ -1836,11 +1963,13 @@ class ImageListViewStrategyMixin:
         if not hasattr(source_model, '_pages') or not source_model._pages:
             return
 
-        # Only check pages in the current masonry window (not all loaded pages)
-        cur_page = int(getattr(self, '_current_page', 0) or 0)
-        window_buffer = 3
-        window_start = max(0, cur_page - window_buffer)
-        window_end = cur_page + window_buffer
+        preferred_window = self._get_preferred_enrichment_window_pages(
+            source_model,
+            window_buffer=3,
+        )
+        if preferred_window is None:
+            return
+        window_start, window_end = preferred_window
 
         # Compare current window to what enrichment is targeting (if anything).
         now = time.time()

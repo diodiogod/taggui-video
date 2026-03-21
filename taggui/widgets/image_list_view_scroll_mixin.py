@@ -48,6 +48,17 @@ class ImageListViewScrollMixin:
         ):
             try:
                 self._check_and_enrich_loaded_pages()
+                if hasattr(source_model, '_start_paginated_enrichment'):
+                    preferred_window = None
+                    resolve_window = getattr(self, '_get_preferred_enrichment_window_pages', None)
+                    if callable(resolve_window):
+                        preferred_window = resolve_window(source_model, window_buffer=3)
+                    if preferred_window is not None:
+                        window_start, window_end = preferred_window
+                        source_model._start_paginated_enrichment(
+                            window_pages=range(window_start, window_end + 1),
+                            scope='window',
+                        )
             except Exception:
                 pass
 
@@ -412,9 +423,11 @@ class ImageListViewScrollMixin:
             self._release_page_lock_until = 0.0
         current_page = None
         # Restore override from main_window scroll restore
-        restore_page = getattr(self, '_restore_target_page', None)
-        if restore_page is not None and not dragging_mode:
-            current_page = max(0, min(last_page, int(restore_page)))
+        resolve_restore_page = getattr(self, '_get_live_restore_target_page', None)
+        if callable(resolve_restore_page) and not dragging_mode:
+            restore_page = resolve_restore_page(last_page=last_page)
+            if restore_page is not None:
+                current_page = int(restore_page)
         # Resize/zoom anchor override keeps ownership stable while viewport
         # geometry and strict domains are being recalculated.
         resize_page = getattr(self, '_resize_anchor_page', None)

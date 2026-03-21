@@ -791,6 +791,11 @@ class ImageListView(
                 if exact_jump_active and int(global_idx) != int(exact_jump_target):
                     return
                 prev_global = getattr(self, '_selected_global_index', None)
+                enrichment_running = bool(
+                    source_model is not None
+                    and getattr(source_model, '_paginated_mode', False)
+                    and getattr(source_model, '_enrichment_running', False)
+                )
                 if (
                     virtual_list_active
                     and isinstance(prev_global, int)
@@ -809,6 +814,18 @@ class ImageListView(
                             )
                         ):
                             return
+                if (
+                    self.use_masonry
+                    and isinstance(prev_global, int)
+                    and prev_global >= 0
+                    and int(global_idx) != int(prev_global)
+                    and enrichment_running
+                ):
+                    try:
+                        self._schedule_rebind_current_index_to_selected_global()
+                    except Exception:
+                        pass
+                    return
                 # Buffered remap guard: while pages are still loading, ignore
                 # suspicious large jumps that are not explicit user intent.
                 if self.use_masonry and loading_pages_nonempty and source_model and hasattr(source_model, 'PAGE_SIZE'):

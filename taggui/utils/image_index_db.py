@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 9  # v9 adds DB-only love/bomb reaction flags
+DB_VERSION = 10  # v10 adds reaction_updated_at for curator-priority sorting
 
 
 class ImageIndexDB:
@@ -216,6 +216,7 @@ class ImageIndexDB:
                         rating REAL DEFAULT 0.0,
                         love INTEGER DEFAULT 0,
                         bomb INTEGER DEFAULT 0,
+                        reaction_updated_at REAL,
                         indexed_at REAL,
                         thumbnail_cached INTEGER DEFAULT 0,
                         file_size INTEGER,
@@ -244,6 +245,25 @@ class ImageIndexDB:
                 ''')
                 self._create_image_markings_schema(cursor)
 
+                # Old folder DBs may already exist without newer columns.
+                # Ensure schema columns exist before creating indexes that
+                # reference them, otherwise CREATE INDEX can fail early and
+                # abort initialization before the migration/self-heal path.
+                cursor.execute("PRAGMA table_info(images)")
+                columns = [info[1] for info in cursor.fetchall()]
+                for column_name, ddl in (
+                    ('file_size', 'ALTER TABLE images ADD COLUMN file_size INTEGER'),
+                    ('file_type', 'ALTER TABLE images ADD COLUMN file_type TEXT'),
+                    ('ctime', 'ALTER TABLE images ADD COLUMN ctime REAL'),
+                    ('txt_sidecar_mtime', 'ALTER TABLE images ADD COLUMN txt_sidecar_mtime REAL'),
+                    ('love', 'ALTER TABLE images ADD COLUMN love INTEGER DEFAULT 0'),
+                    ('bomb', 'ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0'),
+                    ('reaction_updated_at', 'ALTER TABLE images ADD COLUMN reaction_updated_at REAL'),
+                ):
+                    if column_name not in columns:
+                        cursor.execute(ddl)
+                        columns.append(column_name)
+
                 # Create indexes for fast queries
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
@@ -252,6 +272,7 @@ class ImageIndexDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
@@ -267,7 +288,7 @@ class ImageIndexDB:
                     self.conn.commit()
                 elif int(row['value']) != DB_VERSION:
                     old_version = int(row['value'])
-                    if old_version in (6, 7, 8) and DB_VERSION == 9:
+                    if old_version in (6, 7, 8, 9) and DB_VERSION == 10:
                         print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating incrementally...')
                         if old_version <= 6:
                             self._create_image_markings_schema(cursor)
@@ -279,8 +300,11 @@ class ImageIndexDB:
                             cursor.execute('ALTER TABLE images ADD COLUMN love INTEGER DEFAULT 0')
                         if 'bomb' not in columns:
                             cursor.execute('ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0')
+                        if 'reaction_updated_at' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN reaction_updated_at REAL')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
                         cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
                                      (str(DB_VERSION), 'version'))
                         self.conn.commit()
@@ -308,6 +332,7 @@ class ImageIndexDB:
                                 rating REAL DEFAULT 0.0,
                                 love INTEGER DEFAULT 0,
                                 bomb INTEGER DEFAULT 0,
+                                reaction_updated_at REAL,
                                 indexed_at REAL,
                                 thumbnail_cached INTEGER DEFAULT 0,
                                 file_size INTEGER,
@@ -332,6 +357,7 @@ class ImageIndexDB:
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
@@ -367,6 +393,10 @@ class ImageIndexDB:
                         print("Migrating DB: Adding bomb column...")
                         cursor.execute('ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0')
                         self.conn.commit()
+                    if 'reaction_updated_at' not in columns:
+                        print("Migrating DB: Adding reaction_updated_at column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN reaction_updated_at REAL')
+                        self.conn.commit()
                         
                     # Ensure indexes exist
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
@@ -375,6 +405,7 @@ class ImageIndexDB:
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_ctime ON images(ctime)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size)')
@@ -385,15 +416,31 @@ class ImageIndexDB:
 
         except sqlite3.Error as e:
             print(f'Failed to initialize database: {e}')
-            # If DB is corrupted, delete and retry
             if self.conn:
-                try: self.conn.close() 
-                except: pass
-            try:
-                self.delete_database_bundle(self._directory_path, include_legacy=False)
-                self._init_db()  # Retry
-            except Exception:
-                pass
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+
+            error_text = str(e).lower()
+            corruption_markers = (
+                'database disk image is malformed',
+                'file is not a database',
+                'unsupported file format',
+                'not a database',
+            )
+            should_recreate = any(marker in error_text for marker in corruption_markers)
+
+            # Schema mistakes must never silently wipe DB-only curator data.
+            # Only recreate when SQLite is explicitly reporting corruption.
+            if should_recreate:
+                print('[DB] Initialization failed due to corruption; recreating DB bundle.')
+                try:
+                    self.delete_database_bundle(self._directory_path, include_legacy=False)
+                    self._init_db()  # Retry once after cleanup
+                except Exception:
+                    pass
 
     def _prepare_db_location(self):
         """Ensure the DB folder exists and migrate a legacy root-level DB if needed."""
@@ -443,7 +490,7 @@ class ImageIndexDB:
             cursor.execute('''
                 SELECT width, height, is_video, video_fps, video_duration,
                        video_frame_count, mtime, thumbnail_cached, rating,
-                       love, bomb
+                       love, bomb, reaction_updated_at
                 FROM images
                 WHERE file_name = ?
             ''', (file_name,))
@@ -463,6 +510,10 @@ class ImageIndexDB:
                 'rating': float(row['rating'] or 0.0),
                 'love': bool(row['love']),
                 'bomb': bool(row['bomb']),
+                'reaction_updated_at': (
+                    float(row['reaction_updated_at'])
+                    if row['reaction_updated_at'] is not None else None
+                ),
             }
 
             if row['is_video']:
@@ -481,7 +532,7 @@ class ImageIndexDB:
     def save_info(self, file_name: str, width: int, height: int,
                   is_video: bool, mtime: float, video_metadata: Optional[dict] = None,
                   rating: float = 0.0, file_size: int = None, file_type: str = None,
-                  ctime: float = None):
+                  ctime: float = None, reaction_updated_at: float | None = None):
         """
         Save image info to cache.
 
@@ -513,9 +564,10 @@ class ImageIndexDB:
         aspect_ratio = width / height if height > 0 else 1.0
         indexed_at = time.time()
         
-        # Use mtime as fallback for ctime if not provided
-        if ctime is None:
-            ctime = mtime
+        # For inserts we still want a usable ctime fallback, but updates must
+        # not rewrite an existing stable ctime just because the caller omitted
+        # it. Enrichment relies on this to avoid mutating ctime-based sort order.
+        insert_ctime = mtime if ctime is None else ctime
 
         # Retry with exponential backoff for locked database
         max_retries = 3
@@ -526,9 +578,9 @@ class ImageIndexDB:
                 cursor.execute('''
                     INSERT INTO images
                     (file_name, width, height, aspect_ratio, is_video, video_fps,
-                     video_duration, video_frame_count, mtime, rating, indexed_at,
+                     video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
                      file_size, file_type, ctime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_name) DO UPDATE SET
                         width = excluded.width,
                         height = excluded.height,
@@ -538,15 +590,23 @@ class ImageIndexDB:
                         video_duration = excluded.video_duration,
                         video_frame_count = excluded.video_frame_count,
                         mtime = excluded.mtime,
-                        rating = excluded.rating,
+                        rating = CASE
+                            WHEN ABS(COALESCE(excluded.rating, 0.0)) > 0.000001
+                                THEN excluded.rating
+                            ELSE images.rating
+                        END,
+                        reaction_updated_at = COALESCE(images.reaction_updated_at, excluded.reaction_updated_at),
                         indexed_at = excluded.indexed_at,
-                        file_size = excluded.file_size,
-                        file_type = excluded.file_type,
-                        ctime = excluded.ctime
+                        file_size = COALESCE(excluded.file_size, images.file_size),
+                        file_type = COALESCE(NULLIF(excluded.file_type, ''), images.file_type),
+                        ctime = CASE
+                            WHEN images.ctime IS NOT NULL THEN images.ctime
+                            ELSE excluded.ctime
+                        END
                         -- thumbnail_cached intentionally NOT updated (preserve existing value)
                 ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
-                      video_duration, video_frame_count, mtime, rating, indexed_at,
-                      file_size, file_type, ctime))
+                      video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
+                      file_size, file_type, insert_ctime))
                 return  # Success
 
             except sqlite3.OperationalError as e:
@@ -1237,6 +1297,17 @@ class ImageIndexDB:
             "ELSE 5 END"
         )
 
+    @classmethod
+    def _reaction_sort_time_expr(cls) -> str:
+        active_curated = (
+            "(COALESCE(rating, 0) > 0 OR COALESCE(love, 0) != 0 OR COALESCE(bomb, 0) != 0)"
+        )
+        return (
+            "COALESCE("
+            f"CASE WHEN {active_curated} THEN reaction_updated_at END, "
+            "ctime, mtime)"
+        )
+
     def _resolve_sort_order(self, sort_field: str, sort_dir: str = 'DESC', **kwargs) -> tuple[str, str, Optional[str], str]:
         """Normalize sort parameters and return the SQL ORDER BY clause."""
         valid_sort_fields = {
@@ -1254,7 +1325,7 @@ class ImageIndexDB:
         if sort_field == 'love_rate_bomb':
             order_clause = (
                 f"{self._reaction_sort_bucket_expr()} ASC, "
-                "COALESCE(rating, 0) DESC, file_name ASC, id ASC"
+                f"COALESCE(rating, 0) DESC, {self._reaction_sort_time_expr()} DESC, file_name ASC, id ASC"
             )
             return sort_field, normalized_dir, None, order_clause
 
@@ -1300,14 +1371,14 @@ class ImageIndexDB:
                     if filter_sql:
                         q = (
                             f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
                             f"FROM images WHERE file_name = ? AND ({filter_sql}) LIMIT 1"
                         )
                         cursor.execute(q, (candidate,) + safe_bindings)
                     else:
                         q = (
                             f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
                             "FROM images WHERE file_name = ? LIMIT 1"
                         )
                         cursor.execute(q, (candidate,))
@@ -1328,14 +1399,14 @@ class ImageIndexDB:
                     if filter_sql:
                         q = (
                             f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
                             f"FROM images WHERE lower(file_name) = lower(?) AND ({filter_sql}) LIMIT 1"
                         )
                         cursor.execute(q, (rel_path,) + safe_bindings)
                     else:
                         q = (
                             f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            "COALESCE(rating, 0) AS rating_value, file_name "
+                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
                             "FROM images WHERE lower(file_name) = lower(?) LIMIT 1"
                         )
                         cursor.execute(q, (rel_path,))
@@ -1360,18 +1431,21 @@ class ImageIndexDB:
             if sort_field == 'love_rate_bomb':
                 target_bucket = int(target_row[1])
                 target_rating = float(target_row[2] or 0.0)
-                target_file_name = str(target_row[3])
+                target_sort_time = float(target_row[3] or 0.0)
+                target_file_name = str(target_row[4])
                 before_clause = (
                     f"(({self._reaction_sort_bucket_expr()} < ?)"
                     f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) > ?)"
-                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND file_name < ?)"
-                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND file_name = ? AND id < ?))"
+                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND {self._reaction_sort_time_expr()} > ?)"
+                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND {self._reaction_sort_time_expr()} = ? AND file_name < ?)"
+                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND {self._reaction_sort_time_expr()} = ? AND file_name = ? AND id < ?))"
                 )
                 rank_bindings = (
                     target_bucket,
                     target_bucket, target_rating,
-                    target_bucket, target_rating, target_file_name,
-                    target_bucket, target_rating, target_file_name, target_id,
+                    target_bucket, target_rating, target_sort_time,
+                    target_bucket, target_rating, target_sort_time, target_file_name,
+                    target_bucket, target_rating, target_sort_time, target_file_name, target_id,
                 )
             else:
                 target_val = target_row[1]
@@ -1432,7 +1506,7 @@ class ImageIndexDB:
                 query = f'''
                     SELECT id, file_name, width, height, aspect_ratio, is_video,
                            video_fps, video_duration, video_frame_count, mtime, rating,
-                           love, bomb,
+                           love, bomb, reaction_updated_at,
                            file_size, file_type, ctime
                     FROM images
                 '''
@@ -1503,7 +1577,7 @@ class ImageIndexDB:
             cursor.execute('''
                 SELECT id, file_name, width, height, aspect_ratio, is_video,
                        video_fps, video_duration, video_frame_count, mtime, rating,
-                       love, bomb,
+                       love, bomb, reaction_updated_at,
                        file_size, file_type, ctime
                 FROM images WHERE id = ?
             ''', (image_id,))
@@ -2043,7 +2117,7 @@ class ImageIndexDB:
 
     # ========== Rating Management ==========
 
-    def set_rating(self, image_id: int, rating: float):
+    def set_rating(self, image_id: int, rating: float, reaction_updated_at: float | None = None):
         """Set rating for an image."""
         if not self.enabled or not self.conn:
             return
@@ -2051,12 +2125,17 @@ class ImageIndexDB:
         with self._db_lock:
             try:
                 cursor = self.conn.cursor()
-                cursor.execute('UPDATE images SET rating = ? WHERE id = ?', (rating, image_id))
+                if reaction_updated_at is None:
+                    reaction_updated_at = time.time()
+                cursor.execute(
+                    'UPDATE images SET rating = ?, reaction_updated_at = ? WHERE id = ?',
+                    (rating, float(reaction_updated_at), image_id),
+                )
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f'Database rating write error: {e}')
 
-    def set_reactions(self, image_id: int, love: bool, bomb: bool):
+    def set_reactions(self, image_id: int, love: bool, bomb: bool, reaction_updated_at: float | None = None):
         """Set DB-only love/bomb reaction flags for one image."""
         if not self.enabled or not self.conn:
             return
@@ -2064,9 +2143,11 @@ class ImageIndexDB:
         with self._db_lock:
             try:
                 cursor = self.conn.cursor()
+                if reaction_updated_at is None:
+                    reaction_updated_at = time.time()
                 cursor.execute(
-                    'UPDATE images SET love = ?, bomb = ? WHERE id = ?',
-                    (int(bool(love)), int(bool(bomb)), image_id),
+                    'UPDATE images SET love = ?, bomb = ?, reaction_updated_at = ? WHERE id = ?',
+                    (int(bool(love)), int(bool(bomb)), float(reaction_updated_at), image_id),
                 )
                 self.conn.commit()
             except sqlite3.Error as e:

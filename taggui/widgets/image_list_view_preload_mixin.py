@@ -504,6 +504,11 @@ class ImageListViewPreloadMixin:
                             start_row = start_page * page_size
                             end_row = min(total_items_i - 1, ((end_page + 1) * page_size) - 1)
                             source_model.ensure_pages_for_range(start_row, end_row)
+                            if hasattr(source_model, '_start_paginated_enrichment'):
+                                source_model._start_paginated_enrichment(
+                                    window_pages=range(start_page, end_page + 1),
+                                    scope='window',
+                                )
                     except Exception:
                         pass
                     # Keep scrollbar value aligned to the strict virtual domain for this page.

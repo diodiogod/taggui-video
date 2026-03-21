@@ -418,6 +418,21 @@ class ImageList(QDockWidget):
                 return 4
             return 5
 
+        def reaction_sort_time_value(img):
+            rating_value = float(getattr(img, 'rating', 0.0) or 0.0)
+            active_curated = (
+                rating_value > 0.0
+                or bool(getattr(img, 'love', False))
+                or bool(getattr(img, 'bomb', False))
+            )
+            if active_curated:
+                return float(
+                    getattr(img, 'reaction_updated_at', None)
+                    or getattr(img, 'ctime', None)
+                    or safe_stat(img, 'st_ctime')
+                )
+            return float(getattr(img, 'ctime', None) or safe_stat(img, 'st_ctime'))
+
         # Sort the images list
         try:
             selected_image = None
@@ -486,7 +501,10 @@ class ImageList(QDockWidget):
                 
                 # Restart background enrichment (essential for updating placeholders)
                 if hasattr(source_model, '_start_paginated_enrichment'):
-                    source_model._start_paginated_enrichment()
+                    source_model._start_paginated_enrichment(
+                        window_pages=sorted(source_model._pages.keys()),
+                        scope='window',
+                    )
 
             else:
                 # NORMAL MODE: Sort in-memory list
@@ -511,6 +529,7 @@ class ImageList(QDockWidget):
                             key=lambda img: (
                                 reaction_sort_bucket(img),
                                 -float(img.rating or 0.0),
+                                -reaction_sort_time_value(img),
                                 natural_sort_key(img.path),
                             )
                         )

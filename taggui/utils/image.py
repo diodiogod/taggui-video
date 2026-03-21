@@ -33,6 +33,7 @@ class Image:
     rating: float = 0.0
     love: bool = False
     bomb: bool = False
+    reaction_updated_at: float | None = None
     thumbnail: QIcon | None = None
     thumbnail_qimage: QImage | None = None  # Store QImage, convert to QPixmap/QIcon lazily
     is_video: bool = False

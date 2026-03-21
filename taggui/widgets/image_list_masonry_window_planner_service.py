@@ -39,9 +39,13 @@ class MasonryWindowPlannerService:
 
         # Restore override: main_window scroll restore sets this to bypass
         # scrollbar-to-page derivation (which drifts through competing writers).
-        restore_page = getattr(self._view, '_restore_target_page', None)
-        if restore_page is not None and not dragging_mode:
-            return max(0, min(max(0, (total_items - 1) // page_size) if total_items > 0 else 0, int(restore_page)))
+        resolve_restore_page = getattr(self._view, "_get_live_restore_target_page", None)
+        if callable(resolve_restore_page) and not dragging_mode:
+            restore_page = resolve_restore_page(
+                last_page=max(0, (total_items - 1) // page_size) if total_items > 0 else 0,
+            )
+            if restore_page is not None:
+                return int(restore_page)
 
         # Resize/zoom anchor override: keep strict ownership stable while the
         # viewport geometry changes and scrollbar domains are re-derived.
