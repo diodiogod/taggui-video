@@ -115,6 +115,18 @@ class ImageListView(
         self._rapid_input_detected = False
         self._last_masonry_signal = "unknown"  # Track which signal triggered masonry
         self._user_click_selection_frozen_until = 0.0  # Post-click selection freeze
+        self._selection_log_source = "program"
+        self._selection_log_source_until = 0.0
+        self._pending_click_commit_index = QPersistentModelIndex()
+        self._pending_targeted_relocation_target_global = None
+        self._pending_targeted_relocation_target_page = None
+        self._pending_targeted_relocation_reason = None
+        self._pending_targeted_relocation_until = 0.0
+        self._post_jump_stabilize_until = 0.0
+        self._post_jump_stabilize_target_global = None
+        self._post_jump_stabilize_page = None
+        self._post_jump_stabilize_reason = None
+        self._post_jump_stabilize_scroll_value = None
 
         # Idle preloading timer for smooth scrolling
         self._idle_preload_timer = QTimer(self)
@@ -207,6 +219,10 @@ class ImageListView(
         self._last_reflow_guide_target_global = None
         self._last_reflow_guide_end_rect = QRect()
         self._last_reflow_guide_time = 0.0
+        self._one_shot_jump_target_global = None
+        self._one_shot_jump_reason = None
+        self._one_shot_jump_token = 0
+        self._one_shot_jump_attempts = 0
         self._resize_anchor_page = None
         self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
@@ -605,11 +621,30 @@ class ImageListView(
 
     @Slot()
     def _on_model_about_to_reset(self):
+        import time as _t
+
         try:
             self._get_masonry_incremental_service().invalidate("model_reset")
         except Exception:
             pass
         self._model_resetting = True
+        pending_until = float(getattr(self, "_pending_targeted_relocation_until", 0.0) or 0.0)
+        pending_restore_live = _t.time() <= pending_until
+        pending_target_global = (
+            getattr(self, "_pending_targeted_relocation_target_global", None)
+            if pending_restore_live else
+            None
+        )
+        pending_target_page = (
+            getattr(self, "_pending_targeted_relocation_target_page", None)
+            if pending_restore_live else
+            None
+        )
+        pending_reason = (
+            getattr(self, "_pending_targeted_relocation_reason", None)
+            if pending_restore_live else
+            None
+        )
         # Reset strict/domain anchors so folder switches don't inherit stale
         # virtual heights or edge snaps from the previous dataset.
         self._pending_edge_snap = None
@@ -630,9 +665,23 @@ class ImageListView(
         self._strict_enrich_wait_signature = None
         self._strict_enrich_wait_count = 0
         self._strict_drag_live_fraction = 0.0
-        self._restore_target_page = None
-        self._restore_target_global_index = None
-        self._restore_anchor_until = 0.0
+        if pending_restore_live and isinstance(pending_target_global, int) and pending_target_global >= 0:
+            self._restore_target_page = int(pending_target_page) if isinstance(pending_target_page, int) else None
+            self._restore_target_global_index = int(pending_target_global)
+            self._restore_anchor_until = max(
+                float(getattr(self, "_restore_anchor_until", 0.0) or 0.0),
+                pending_until,
+            )
+            self._selected_global_index = int(pending_target_global)
+            self._selected_global_lock_value = int(pending_target_global)
+            self._selected_global_lock_until = max(
+                float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0),
+                pending_until,
+            )
+        else:
+            self._restore_target_page = None
+            self._restore_target_global_index = None
+            self._restore_anchor_until = 0.0
         self._pending_explicit_jump_kind = None
         self._last_explicit_jump_kind = None
         self._last_explicit_jump_target_global = None
@@ -646,23 +695,30 @@ class ImageListView(
         self._last_reflow_guide_target_global = None
         self._last_reflow_guide_end_rect = QRect()
         self._last_reflow_guide_time = 0.0
-        self._selected_global_lock_until = 0.0
-        self._selected_global_lock_value = None
         mw = self.window()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
             and hasattr(mw, "_restore_target_global_rank")
         ):
-            mw._restore_in_progress = False
-            mw._restore_target_global_rank = -1
+            if pending_restore_live and isinstance(pending_target_global, int) and pending_target_global >= 0:
+                mw._restore_in_progress = True
+                mw._restore_target_global_rank = int(pending_target_global)
+            else:
+                mw._restore_in_progress = False
+                mw._restore_target_global_rank = -1
         self._resize_anchor_page = None
         self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
         self._idle_anchor_target_global = None
         self._idle_anchor_until = 0.0
-        self._current_page = 0
-        self._last_stable_scroll_value = 0
+        if pending_restore_live and isinstance(pending_target_page, int) and pending_target_page >= 0:
+            self._current_page = int(pending_target_page)
+        else:
+            self._current_page = 0
+            self._selected_global_lock_until = 0.0
+            self._selected_global_lock_value = None
+            self._last_stable_scroll_value = 0
         self._masonry_items = []
         self._masonry_index_map = None
         self._painted_hit_regions = {}
@@ -670,13 +726,14 @@ class ImageListView(
         self._painted_hit_regions_scroll_offset = 0
         self._masonry_total_height = 0
         self._last_masonry_window_signature = None
-        sb = self.verticalScrollBar()
-        prev_block = sb.blockSignals(True)
-        try:
-            sb.setRange(0, 0)
-            sb.setValue(0)
-        finally:
-            sb.blockSignals(prev_block)
+        if not pending_restore_live:
+            sb = self.verticalScrollBar()
+            prev_block = sb.blockSignals(True)
+            try:
+                sb.setRange(0, 0)
+                sb.setValue(0)
+            finally:
+                sb.blockSignals(prev_block)
         self._clear_selection_cache()
 
     @Slot()

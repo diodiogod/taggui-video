@@ -18,6 +18,18 @@ class ImageListViewScrollMixin:
                 every_s=0.3,
             )
 
+        stabilize_state = None
+        consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+        if callable(consume_stabilization):
+            try:
+                stabilize_state = consume_stabilization(
+                    source_model=source_model,
+                    scroll_value=int(self.verticalScrollBar().value()),
+                    refresh_scroll=True,
+                )
+            except Exception:
+                stabilize_state = None
+
         # DON'T flush cache saves immediately - still might be scrolling
         # Just mark that scroll detection stopped (200ms is too short for flush)
 
@@ -45,6 +57,7 @@ class ImageListViewScrollMixin:
             and hasattr(source_model, '_paginated_mode')
             and source_model._paginated_mode
             and hasattr(self, '_check_and_enrich_loaded_pages')
+            and stabilize_state is None
         ):
             try:
                 self._check_and_enrich_loaded_pages()
@@ -65,13 +78,17 @@ class ImageListViewScrollMixin:
         # Also schedule a low-priority masonry settle pass when scrolling goes
         # idle. This makes already-arrived dimension updates reorganize the
         # visible window without requiring an extra nudge-scroll from the user.
-        if self.use_masonry and hasattr(self, '_recalculate_masonry_if_needed'):
+        if self.use_masonry and hasattr(self, '_recalculate_masonry_if_needed') and stabilize_state is None:
             try:
                 if (
                     source_model
                     and hasattr(self, '_activate_selected_idle_anchor')
                 ):
-                    self._activate_selected_idle_anchor(source_model=source_model, hold_s=1.5)
+                    self._activate_selected_idle_anchor(
+                        source_model=source_model,
+                        hold_s=1.5,
+                        prefer_viewport_center=True,
+                    )
                 self._recalculate_masonry_if_needed("scroll_idle")
             except Exception:
                 pass
@@ -605,6 +622,19 @@ class ImageListViewScrollMixin:
                 self._stick_to_edge = "bottom"
             elif current_page <= 0 and near_top_now:
                 self._stick_to_edge = "top"
+        if strict_mode and (not dragging_mode):
+            consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+            if callable(consume_stabilization):
+                try:
+                    stabilize_state = consume_stabilization(
+                        source_model=source_model,
+                        candidate_page=int(current_page) if current_page is not None else None,
+                        scroll_value=int(scroll_offset),
+                    )
+                except Exception:
+                    stabilize_state = None
+                if stabilize_state is not None:
+                    current_page = max(0, min(last_page, int(stabilize_state["target_page"])))
         if prev_stick != getattr(self, '_stick_to_edge', None):
             self._log_flow(
                 "STRICT",

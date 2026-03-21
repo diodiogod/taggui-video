@@ -814,6 +814,148 @@ class ImageListModel(QAbstractListModel):
             print(f"[RESTORE] get_global_rank_for_path error: {e}")
             return -1
 
+    def resolve_restore_target(self, path: Path) -> dict[str, int] | None:
+        """Resolve a stable global restore target without forcing page materialization."""
+        try:
+            target_global = int(self.get_global_rank_for_path(path))
+        except Exception:
+            return None
+        if target_global < 0:
+            return None
+
+        try:
+            page_size = int(getattr(self, 'PAGE_SIZE', 1000) or 1000)
+        except Exception:
+            page_size = 1000
+
+        total_items = int(getattr(self, '_total_count', 0) or 0)
+        if total_items <= 0 and not self._paginated_mode:
+            total_items = len(self.images)
+        if total_items <= 0:
+            total_items = max(1, target_global + 1)
+
+        target_page = max(0, int(target_global) // max(1, page_size))
+        return {
+            'target_global': int(target_global),
+            'target_page': int(target_page),
+            'page_size': int(page_size),
+            'total_items': int(total_items),
+        }
+
+    def _get_target_window_pages(
+        self,
+        target_global: int,
+        *,
+        include_buffer: bool = True,
+        prefer_forward: bool = False,
+    ) -> tuple[int, int, int, int]:
+        """Return target/visible page window for a global index."""
+        total_items = int(getattr(self, '_total_count', 0) or 0)
+        page_size = int(getattr(self, 'PAGE_SIZE', 1000) or 1000)
+        last_page = max(0, (max(0, total_items) - 1) // max(1, page_size)) if total_items > 0 else 0
+        target_page = max(0, min(last_page, int(target_global) // max(1, page_size)))
+
+        if include_buffer:
+            try:
+                buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
+            except Exception:
+                buffer_pages = 3
+            buffer_pages = max(1, min(buffer_pages, 6))
+        else:
+            buffer_pages = 0
+
+        if prefer_forward:
+            start_page = int(target_page)
+            end_page = min(last_page, target_page + buffer_pages)
+        else:
+            start_page = max(0, target_page - buffer_pages)
+            end_page = min(last_page, target_page + buffer_pages)
+        return int(target_page), int(start_page), int(end_page), int(last_page)
+
+    def prepare_target_window(
+        self,
+        target_global: int,
+        *,
+        sync_target_page: bool = True,
+        include_buffer: bool = True,
+        prefer_forward: bool = False,
+        emit_update: bool = True,
+        request_async_window: bool = True,
+        restart_enrichment: bool = True,
+    ) -> dict[str, int]:
+        """Materialize the target page first, then request the surrounding window."""
+        state = {
+            'target_global': -1,
+            'target_page': -1,
+            'start_page': -1,
+            'end_page': -1,
+            'page_size': int(getattr(self, 'PAGE_SIZE', 1000) or 1000),
+            'total_items': int(getattr(self, '_total_count', 0) or 0),
+            'loaded_sync': 0,
+            'loaded_row': -1,
+        }
+        if not self._paginated_mode:
+            return state
+
+        total_items = int(getattr(self, '_total_count', 0) or 0)
+        if total_items <= 0:
+            return state
+
+        try:
+            target_global = max(0, min(total_items - 1, int(target_global)))
+        except Exception:
+            return state
+
+        page_size = int(getattr(self, 'PAGE_SIZE', 1000) or 1000)
+        target_page, start_page, end_page, _last_page = self._get_target_window_pages(
+            int(target_global),
+            include_buffer=include_buffer,
+            prefer_forward=prefer_forward,
+        )
+
+        state.update({
+            'target_global': int(target_global),
+            'target_page': int(target_page),
+            'start_page': int(start_page),
+            'end_page': int(end_page),
+            'page_size': int(page_size),
+            'total_items': int(total_items),
+        })
+
+        self.set_page_protection_window(start_page, end_page)
+
+        if sync_target_page:
+            with self._page_load_lock:
+                page_loaded = int(target_page) in self._pages
+            if not page_loaded:
+                self._load_page_sync(int(target_page))
+                state['loaded_sync'] = 1
+                self._bootstrap_complete = bool(getattr(self, '_pages', {}))
+                if emit_update:
+                    self._emit_pages_updated()
+
+        if request_async_window:
+            for page_num in range(int(start_page), int(end_page) + 1):
+                if int(page_num) == int(target_page) and state['loaded_sync']:
+                    continue
+                self._request_page_load(int(page_num))
+
+        if restart_enrichment and hasattr(self, '_start_paginated_enrichment'):
+            try:
+                self._start_paginated_enrichment(
+                    window_pages=range(int(start_page), int(end_page) + 1),
+                    scope='window',
+                )
+            except Exception:
+                pass
+
+        if hasattr(self, 'get_loaded_row_for_global_index'):
+            try:
+                state['loaded_row'] = int(self.get_loaded_row_for_global_index(int(target_global)))
+            except Exception:
+                state['loaded_row'] = -1
+        return state
+
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
