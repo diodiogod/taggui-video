@@ -113,7 +113,7 @@ class ImageListViewStrategyMixin:
         viewport_h = max(1, int(self.viewport().height()))
         release_scroll_delta = max(viewport_h * 3, 1800)
 
-        if isinstance(scroll_value, int) and isinstance(stable_scroll, int):
+        if refresh_scroll and isinstance(scroll_value, int) and isinstance(stable_scroll, int):
             if abs(int(scroll_value) - int(stable_scroll)) > release_scroll_delta:
                 self._release_post_jump_stabilization(
                     reason=f"scroll={int(scroll_value)} base={int(stable_scroll)}",
@@ -1555,20 +1555,9 @@ class ImageListViewStrategyMixin:
         if not source_model:
             return
 
-        stabilize_state = None
-        consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
-        if callable(consume_stabilization):
-            try:
-                stabilize_state = consume_stabilization(source_model=source_model)
-            except Exception:
-                stabilize_state = None
-
         scope = getattr(source_model, '_enrichment_scope', 'window')
         exhausted = getattr(source_model, '_enrichment_exhausted', True)
         target_pages = sorted(getattr(source_model, '_enrichment_target_pages', ()) or ())
-
-        if stabilize_state is not None and scope == 'window':
-            return
 
         cur_page = int(getattr(self, '_current_page', 0) or 0)
         try:
@@ -1882,22 +1871,10 @@ class ImageListViewStrategyMixin:
         strategy = self._get_masonry_strategy(source_model) if source_model else "full_compat"
         strict_mode = strategy == "windowed_strict"
 
-        stabilize_state = None
-        consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
-        if callable(consume_stabilization):
-            try:
-                stabilize_state = consume_stabilization(source_model=source_model)
-            except Exception:
-                stabilize_state = None
-
         if not is_paginated:
             # Non-paginated: always full recalc
             self._last_masonry_window_signature = None
             self._recalculate_masonry_if_needed("pages_updated")
-            self.viewport().update()
-            return
-
-        if strict_mode and stabilize_state is not None:
             self.viewport().update()
             return
 
@@ -2152,14 +2129,6 @@ class ImageListViewStrategyMixin:
             return
         if not hasattr(source_model, '_pages') or not source_model._pages:
             return
-        consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
-        if callable(consume_stabilization):
-            try:
-                if consume_stabilization(source_model=source_model) is not None:
-                    return
-            except Exception:
-                pass
-
         preferred_window = self._get_preferred_enrichment_window_pages(
             source_model,
             window_buffer=3,

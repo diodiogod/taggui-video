@@ -251,8 +251,25 @@ class ImageListViewInteractionMixin:
         try:
             sb = self.verticalScrollBar()
             viewport_h = max(1, int(self.viewport().height()))
-            item_center_y = int(target_item.get("y", 0)) + int(target_item.get("height", 0)) // 2
-            target_scroll = max(0, min(item_center_y - viewport_h // 2, int(sb.maximum())))
+            item_top = int(target_item.get("y", 0))
+            item_center_y = item_top + int(target_item.get("height", 0)) // 2
+            if reason == "page_input":
+                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                target_page = max(0, int(target_global) // max(1, page_size))
+                page_start = int(target_page) * max(1, page_size)
+                page_end = page_start + max(1, page_size)
+                page_top = item_top
+                try:
+                    for it in (self._masonry_items or []):
+                        idx = int(it.get("index", -1))
+                        if page_start <= idx < page_end:
+                            page_top = min(page_top, int(it.get("y", 0)))
+                except Exception:
+                    page_top = item_top
+                top_margin = max(12, min(48, viewport_h // 12))
+                target_scroll = max(0, min(page_top - top_margin, int(sb.maximum())))
+            else:
+                target_scroll = max(0, min(item_center_y - viewport_h // 2, int(sb.maximum())))
             prev_block = sb.blockSignals(True)
             try:
                 sb.setValue(target_scroll)
@@ -266,6 +283,34 @@ class ImageListViewInteractionMixin:
         if callable(try_show_reflow_guide):
             try:
                 try_show_reflow_guide(int(target_global))
+            except Exception:
+                pass
+
+        if reason == "startup_restore":
+            try:
+                loaded_row = -1
+                if hasattr(source_model, "get_loaded_row_for_global_index"):
+                    loaded_row = int(source_model.get_loaded_row_for_global_index(int(target_global)))
+                if loaded_row >= 0:
+                    src_idx = source_model.index(loaded_row, 0)
+                    proxy_model = self.model()
+                    proxy_idx = (
+                        proxy_model.mapFromSource(src_idx)
+                        if proxy_model and hasattr(proxy_model, "mapFromSource")
+                        else src_idx
+                    )
+                    if proxy_idx.isValid():
+                        sel_model = self.selectionModel()
+                        if sel_model is not None:
+                            sel_model.setCurrentIndex(
+                                proxy_idx,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
+                        else:
+                            self.setCurrentIndex(proxy_idx)
+                        host = self.window()
+                        if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
+                            host.commit_thumbnail_click_selection(proxy_idx)
             except Exception:
                 pass
 
@@ -2446,7 +2491,13 @@ class ImageListViewInteractionMixin:
         )
         prefer_forward_window = jump_kind in {"sort_restore", "startup_restore"}
 
-        if strict_paginated_masonry and jump_kind in {"sort_restore", "startup_restore", "page_drag"}:
+        if strict_paginated_masonry and jump_kind in {
+            "sort_restore",
+            "startup_restore",
+            "page_drag",
+            "index_input",
+            "page_input",
+        }:
             return self._start_one_shot_targeted_jump(
                 int(target_global),
                 reason=str(jump_kind),
