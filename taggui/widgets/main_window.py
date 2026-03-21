@@ -5040,7 +5040,7 @@ class MainWindow(QMainWindow):
             image.reaction_updated_at = reaction_updated_at
             QTimer.singleShot(
                 0,
-                lambda img=image, model=self.image_list_model: model.save_reactions_to_db(img),
+                lambda img=image, model=self.image_list_model: model.persist_reaction_state(img),
             )
 
         self._emit_image_rows_changed(changed_images)

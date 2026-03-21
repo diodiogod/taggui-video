@@ -255,6 +255,9 @@ class SignalManager:
                 print(f"[SIGNAL] ERROR in dataChanged->load_image: {e}")
 
         image_list_model.dataChanged.connect(refresh_viewer_on_data_change)
+        image_list_model.sidecar_reaction_migration_applied.connect(
+            lambda _count: self.main_window._refresh_reaction_sort_if_active()
+        )
         image_list_model.update_undo_and_redo_actions_requested.connect(
             menu_manager.update_undo_and_redo_actions)
         image_list_model.total_count_changed.connect(

@@ -3527,6 +3527,7 @@ class ImageViewer(QWidget):
             image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
             if image.rating != rating:
                 image.rating = rating
+                image.reaction_updated_at = time.time()
                 source_model = self.proxy_image_list_model.sourceModel()
                 QTimer.singleShot(0, lambda img=image, model=source_model: model.write_meta_to_disk(img))
 
@@ -3544,9 +3545,13 @@ class ImageViewer(QWidget):
                 changed = True
             if changed:
                 source_model = self.proxy_image_list_model.sourceModel()
+                image.reaction_updated_at = time.time()
                 saver = getattr(source_model, 'save_reactions_to_db', None)
+                persister = getattr(source_model, 'persist_reaction_state', None)
                 self.reaction_flags_changed.emit(bool(image.love), bool(image.bomb))
-                if callable(saver):
+                if callable(persister):
+                    QTimer.singleShot(0, lambda img=image, persist_fn=persister: persist_fn(img))
+                elif callable(saver):
                     QTimer.singleShot(0, lambda img=image, save_fn=saver: save_fn(img))
 
     @Slot()

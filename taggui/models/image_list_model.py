@@ -25,7 +25,11 @@ import threading
 
 
 from utils.image import Image, ImageMarking, Marking
-from utils.image_index_db import ImageIndexDB
+from utils.image_index_db import (
+    ImageIndexDB,
+    build_sidecar_reaction_recovery,
+    extract_sidecar_reaction_state,
+)
 from utils.jxlutil import get_jxl_size
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.settings import DEFAULT_SETTINGS, settings
@@ -706,9 +710,20 @@ class ImageListModel(QAbstractListModel):
             except Exception:
                 pass
 
-        rating = meta.get('rating')
-        if isinstance(rating, (int, float)):
-            image.rating = float(rating)
+        sidecar_reaction_state = extract_sidecar_reaction_state(meta)
+        if sidecar_reaction_state is not None:
+            rating = sidecar_reaction_state.get('rating')
+            love = sidecar_reaction_state.get('love')
+            bomb = sidecar_reaction_state.get('bomb')
+            reaction_updated_at = sidecar_reaction_state.get('reaction_updated_at')
+            if isinstance(rating, float):
+                image.rating = rating
+            if love is not None:
+                image.love = bool(love)
+            if bomb is not None:
+                image.bomb = bool(bomb)
+            if reaction_updated_at is not None:
+                image.reaction_updated_at = reaction_updated_at
 
         markings = meta.get('markings')
         if isinstance(markings, list):
@@ -947,6 +962,7 @@ class ImageListModel(QAbstractListModel):
     background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
     background_validation_applied = Signal(dict)  # applied background index refresh metadata
     new_media_refresh_finished = Signal(dict)  # Async additions-only refresh result
+    sidecar_reaction_migration_applied = Signal(int)  # imported curator-state count
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
     thumbnail_updates_ready = Signal()  # Batched visual refresh for paginated thumbnails
@@ -1643,6 +1659,7 @@ class ImageListModel(QAbstractListModel):
         )
         images = []
         missing_rel_paths: list[str] = []
+        sidecar_reaction_updates: list[tuple[float, bool, bool, float | None, int]] = []
         image_ids = [row['id'] for row in rows]
         tags_map = active_db.get_tags_for_images(image_ids)
 
@@ -1692,8 +1709,27 @@ class ImageListModel(QAbstractListModel):
                         pass
                     else:
                         self._apply_image_metadata_from_meta(image, meta)
+                        merged_state = build_sidecar_reaction_recovery(row, meta)
+                        if merged_state:
+                            sidecar_reaction_updates.append(
+                                (
+                                    float(merged_state.get('rating', 0.0) or 0.0),
+                                    bool(merged_state.get('love', False)),
+                                    bool(merged_state.get('bomb', False)),
+                                    merged_state.get('reaction_updated_at'),
+                                    int(img_id),
+                                )
+                            )
 
             images.append(image)
+
+        if sidecar_reaction_updates and hasattr(active_db, 'import_sidecar_reactions'):
+            try:
+                imported = int(active_db.import_sidecar_reactions(sidecar_reaction_updates) or 0)
+                if imported > 0:
+                    self.sidecar_reaction_migration_applied.emit(imported)
+            except Exception:
+                pass
 
         return images, missing_rel_paths
 
@@ -4808,6 +4844,22 @@ class ImageListModel(QAbstractListModel):
             try:
                 db_bg = ImageIndexDB(directory_path)
                 db_bg.run_maintenance(directory_path)
+                migrated_total = 0
+                deadline = time.monotonic() + 20.0
+                reaction_done = False
+                while time.monotonic() < deadline and not reaction_done:
+                    migrated, scanned, reaction_done = db_bg.migrate_reactions_from_sidecars(
+                        directory_path,
+                        batch_size=8000,
+                        max_seconds=1.5,
+                    )
+                    migrated_total += int(migrated or 0)
+                    if migrated > 0:
+                        print(f"[DB] Reaction migration: restored {migrated} curated item(s) from {scanned} candidate sidecar(s).")
+                    elif not reaction_done and scanned > 0:
+                        print(f"[DB] Reaction migration: scanned {scanned} candidate sidecar(s) (no new curator data yet).")
+                if migrated_total > 0:
+                    self.sidecar_reaction_migration_applied.emit(int(migrated_total))
                 db_bg.close()
             except Exception as e:
                 print(f"[DB] Background maintenance error: {e}")
@@ -5389,7 +5441,7 @@ class ImageListModel(QAbstractListModel):
             )
 
     def save_reactions_to_db(self, image: Image):
-        """Persist DB-only love/bomb flags for one image."""
+        """Persist love/bomb flags for one image to the DB cache."""
         if not self._db or not image or not getattr(image, "path", None):
             return
         if not self._directory_path:
@@ -5428,11 +5480,26 @@ class ImageListModel(QAbstractListModel):
                 reaction_updated_at=getattr(image, 'reaction_updated_at', None),
             )
 
+    def persist_reaction_state(self, image: Image):
+        """Persist reaction state to both DB and JSON sidecar."""
+        if image is None:
+            return
+        self.save_reactions_to_db(image)
+        self.write_meta_to_disk(image)
+
     def write_meta_to_disk(self, image: Image):
         # Keep DB rating synchronized even when only metadata changes.
         self._save_rating_to_db(image)
         does_exist = image.path.with_suffix('.json').exists()
-        meta: dict[str, any] = {'version': 1, 'rating': image.rating}
+        meta: dict[str, Any] = {
+            'version': 1,
+            'rating': float(getattr(image, 'rating', 0.0) or 0.0),
+            'love': bool(getattr(image, 'love', False)),
+            'bomb': bool(getattr(image, 'bomb', False)),
+        }
+        reaction_updated_at = getattr(image, 'reaction_updated_at', None)
+        if isinstance(reaction_updated_at, (int, float)):
+            meta['reaction_updated_at'] = float(reaction_updated_at)
         if image.crop is not None:
             meta['crop'] = image.crop.getRect()
         meta['markings'] = [{'label': marking.label,

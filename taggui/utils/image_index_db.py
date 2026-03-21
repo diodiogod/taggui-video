@@ -1,6 +1,7 @@
 """Database caching for image dimensions and metadata to speed up directory loading."""
 
 import json
+import math
 import sqlite3
 import shutil
 import time
@@ -13,6 +14,126 @@ from utils.settings import settings, DEFAULT_SETTINGS
 DB_VERSION = 10  # v10 adds reaction_updated_at for curator-priority sorting
 
 
+def _mapping_value(mapping: Any, key: str, default: Any = None) -> Any:
+    if isinstance(mapping, dict):
+        return mapping.get(key, default)
+    try:
+        return mapping[key]
+    except Exception:
+        return getattr(mapping, key, default)
+
+
+def normalize_sidecar_rating(raw_rating: Any) -> float | None:
+    if isinstance(raw_rating, bool) or not isinstance(raw_rating, (int, float)):
+        return None
+    rating_value = float(raw_rating)
+    if not math.isfinite(rating_value):
+        return None
+    if 1.0 < rating_value <= 5.0:
+        rating_value = rating_value / 5.0
+    return max(0.0, min(1.0, rating_value))
+
+
+def normalize_sidecar_bool(raw_value: Any) -> bool | None:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+        if raw_value in (0, 0.0, 1, 1.0):
+            return bool(raw_value)
+    return None
+
+
+def normalize_sidecar_timestamp(raw_value: Any) -> float | None:
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        return None
+    timestamp_value = float(raw_value)
+    if not math.isfinite(timestamp_value) or timestamp_value <= 0.0:
+        return None
+    return timestamp_value
+
+
+def extract_sidecar_reaction_state(meta: Any) -> dict[str, Any] | None:
+    if not isinstance(meta, dict) or meta.get('version') != 1:
+        return None
+
+    state: dict[str, Any] = {
+        'rating': None,
+        'love': None,
+        'bomb': None,
+        'reaction_updated_at': None,
+    }
+    if 'rating' in meta:
+        state['rating'] = normalize_sidecar_rating(meta.get('rating'))
+    if 'love' in meta:
+        state['love'] = normalize_sidecar_bool(meta.get('love'))
+    if 'bomb' in meta:
+        state['bomb'] = normalize_sidecar_bool(meta.get('bomb'))
+    if 'reaction_updated_at' in meta:
+        state['reaction_updated_at'] = normalize_sidecar_timestamp(
+            meta.get('reaction_updated_at')
+        )
+    return state
+
+
+def build_sidecar_reaction_recovery(db_state: Any, meta: Any) -> dict[str, Any] | None:
+    sidecar_state = extract_sidecar_reaction_state(meta)
+    if sidecar_state is None:
+        return None
+
+    try:
+        db_rating = float(_mapping_value(db_state, 'rating', 0.0) or 0.0)
+    except Exception:
+        db_rating = 0.0
+    db_rating = max(0.0, min(1.0, db_rating))
+    db_love = bool(_mapping_value(db_state, 'love', False))
+    db_bomb = bool(_mapping_value(db_state, 'bomb', False))
+    db_reaction_updated_at = normalize_sidecar_timestamp(
+        _mapping_value(db_state, 'reaction_updated_at')
+    )
+
+    sidecar_rating = sidecar_state.get('rating')
+    sidecar_love = sidecar_state.get('love')
+    sidecar_bomb = sidecar_state.get('bomb')
+    sidecar_reaction_updated_at = sidecar_state.get('reaction_updated_at')
+
+    sidecar_is_curated = (
+        float(sidecar_rating or 0.0) > 0.0
+        or sidecar_love is True
+        or sidecar_bomb is True
+    )
+    if not sidecar_is_curated:
+        return None
+
+    next_rating = db_rating
+    next_love = db_love
+    next_bomb = db_bomb
+    next_reaction_updated_at = db_reaction_updated_at
+    changed = False
+
+    if isinstance(sidecar_rating, float) and sidecar_rating > 0.0 and db_rating <= 0.0:
+        next_rating = sidecar_rating
+        changed = True
+    if sidecar_love is True and not db_love:
+        next_love = True
+        changed = True
+    if sidecar_bomb is True and not db_bomb:
+        next_bomb = True
+        changed = True
+    if sidecar_reaction_updated_at is not None and db_reaction_updated_at is None:
+        next_reaction_updated_at = sidecar_reaction_updated_at
+        changed = True
+
+    if not changed:
+        return None
+
+    return {
+        'rating': float(next_rating or 0.0),
+        'love': bool(next_love),
+        'bomb': bool(next_bomb),
+        'reaction_updated_at': next_reaction_updated_at,
+    }
+
+
 class ImageIndexDB:
     """SQLite database for caching image dimensions and metadata."""
 
@@ -23,6 +144,8 @@ class ImageIndexDB:
     INTERNAL_DIR_NAMES = {DB_DIR_NAME, '.taggui_profiles'}
     RATING_MIGRATION_DONE_KEY = 'rating_migration_v1_done'
     RATING_MIGRATION_LAST_ID_KEY = 'rating_migration_v1_last_id'
+    SIDECAR_REACTION_MIGRATION_DONE_KEY = 'sidecar_reaction_migration_v1_done'
+    SIDECAR_REACTION_MIGRATION_LAST_ID_KEY = 'sidecar_reaction_migration_v1_last_id'
     MARKING_MIGRATION_DONE_KEY = 'marking_migration_v1_done'
     MARKING_MIGRATION_LAST_ID_KEY = 'marking_migration_v1_last_id'
 
@@ -806,12 +929,12 @@ class ImageIndexDB:
             if rows:
                 print(f"[DB] Backfill complete.")
 
-            # 3. One-time/Incremental rating migration: JSON sidecars -> DB rating.
-            migrated, scanned, done = self.migrate_ratings_from_sidecars(directory_path)
+            # 3. One-time/Incremental curator migration: JSON sidecars -> DB rating/love/bomb.
+            migrated, scanned, done = self.migrate_reactions_from_sidecars(directory_path)
             if migrated > 0:
-                print(f"[DB] Rating migration: imported {migrated} rating(s) from {scanned} candidate sidecar(s).")
+                print(f"[DB] Reaction migration: restored {migrated} curated item(s) from {scanned} candidate sidecar(s).")
             elif not done and scanned > 0:
-                print(f"[DB] Rating migration: scanned {scanned} candidate sidecar(s) (no new ratings yet).")
+                print(f"[DB] Reaction migration: scanned {scanned} candidate sidecar(s) (no new curator data yet).")
 
             # 4. One-time/Incremental markings migration: JSON sidecars -> DB markings index.
             migrated_markings, scanned_marking_sidecars, marking_done = self.migrate_markings_from_sidecars(directory_path)
@@ -977,6 +1100,344 @@ class ImageIndexDB:
                         ON CONFLICT(key) DO UPDATE SET value = excluded.value
                         ''',
                         (self.RATING_MIGRATION_DONE_KEY, '1'),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                pass
+
+        return migrated_total, scanned_sidecars, done
+
+    def import_sidecar_ratings(self, updates: List[tuple[float, int]]) -> int:
+        """Apply sidecar-derived ratings to unrated DB rows in one batch."""
+        if not self.enabled or not self.conn or not updates:
+            return 0
+
+        normalized_updates: list[tuple[float, int]] = []
+        for rating, image_id in updates:
+            try:
+                rating_value = float(rating)
+                row_id = int(image_id)
+            except Exception:
+                continue
+            rating_value = max(0.0, min(1.0, rating_value))
+            if rating_value <= 0.0 or row_id <= 0:
+                continue
+            normalized_updates.append((rating_value, row_id))
+
+        if not normalized_updates:
+            return 0
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.executemany(
+                    '''
+                    UPDATE images
+                    SET rating = ?
+                    WHERE id = ? AND COALESCE(rating, 0.0) <= 0.0
+                    ''',
+                    normalized_updates,
+                )
+                changed = int(cursor.rowcount or 0)
+                self.conn.commit()
+                return changed
+        except sqlite3.Error as e:
+            print(f'Database rating import error: {e}')
+            return 0
+
+    def import_sidecar_reactions(
+        self,
+        updates: List[tuple[float, bool, bool, float | None, int]],
+    ) -> int:
+        """Apply sidecar-derived curator state to DB rows in one batch."""
+        if not self.enabled or not self.conn or not updates:
+            return 0
+
+        normalized_updates: list[tuple[float, int, int, float | None, int]] = []
+        for rating, love, bomb, reaction_updated_at, image_id in updates:
+            try:
+                rating_value = float(rating or 0.0)
+                row_id = int(image_id)
+            except Exception:
+                continue
+            rating_value = max(0.0, min(1.0, rating_value))
+            if row_id <= 0:
+                continue
+            normalized_updates.append(
+                (
+                    rating_value,
+                    int(bool(love)),
+                    int(bool(bomb)),
+                    normalize_sidecar_timestamp(reaction_updated_at),
+                    row_id,
+                )
+            )
+
+        if not normalized_updates:
+            return 0
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.executemany(
+                    '''
+                    UPDATE images
+                    SET
+                        rating = CASE
+                            WHEN COALESCE(rating, 0.0) <= 0.0 AND ? > 0.0 THEN ?
+                            ELSE rating
+                        END,
+                        love = CASE
+                            WHEN COALESCE(love, 0) = 0 AND ? != 0 THEN ?
+                            ELSE love
+                        END,
+                        bomb = CASE
+                            WHEN COALESCE(bomb, 0) = 0 AND ? != 0 THEN ?
+                            ELSE bomb
+                        END,
+                        reaction_updated_at = CASE
+                            WHEN reaction_updated_at IS NULL
+                                 AND ? IS NOT NULL
+                                 AND (
+                                     ? > 0.0
+                                     OR ? != 0
+                                     OR ? != 0
+                                     OR COALESCE(rating, 0.0) > 0.0
+                                     OR COALESCE(love, 0) != 0
+                                     OR COALESCE(bomb, 0) != 0
+                                 )
+                            THEN ?
+                            ELSE reaction_updated_at
+                        END
+                    WHERE id = ?
+                    ''',
+                    [
+                        (
+                            rating_value,
+                            rating_value,
+                            love_value,
+                            love_value,
+                            bomb_value,
+                            bomb_value,
+                            reaction_ts,
+                            rating_value,
+                            love_value,
+                            bomb_value,
+                            reaction_ts,
+                            row_id,
+                        )
+                        for rating_value, love_value, bomb_value, reaction_ts, row_id in normalized_updates
+                    ],
+                )
+                self.conn.commit()
+                return len(normalized_updates)
+        except sqlite3.Error as e:
+            print(f'Database reaction import error: {e}')
+            return 0
+
+    def migrate_reactions_from_sidecars(
+        self,
+        directory_path: Path,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 2.5,
+    ) -> tuple[int, int, bool]:
+        """
+        Incrementally restore curator state from JSON sidecars into the DB.
+
+        Returns:
+            (migrated_count, scanned_sidecars_count, done)
+        """
+        if not self.enabled or not self.conn:
+            return 0, 0, True
+
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 2.5
+
+        start_ts = time.monotonic()
+        migrated_total = 0
+        scanned_sidecars = 0
+        done = False
+        last_id = 0
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.SIDECAR_REACTION_MIGRATION_DONE_KEY,),
+                )
+                row = cursor.fetchone()
+                if row is not None and str(row[0]) == '1':
+                    return 0, 0, True
+
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.SIDECAR_REACTION_MIGRATION_LAST_ID_KEY,),
+                )
+                last_row = cursor.fetchone()
+                if last_row is not None:
+                    try:
+                        last_id = int(last_row[0])
+                    except Exception:
+                        last_id = 0
+        except sqlite3.Error:
+            return 0, 0, True
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT id, file_name, rating, love, bomb, reaction_updated_at
+                        FROM images
+                        WHERE id > ?
+                          AND (
+                              COALESCE(rating, 0) <= 0.0
+                              OR COALESCE(love, 0) = 0
+                              OR COALESCE(bomb, 0) = 0
+                              OR reaction_updated_at IS NULL
+                          )
+                        ORDER BY id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                done = True
+                break
+
+            updates: list[tuple[float, int, int, float | None, int]] = []
+            for row in rows:
+                try:
+                    row_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                except Exception:
+                    continue
+
+                if row_id > last_id:
+                    last_id = row_id
+
+                json_path = (directory_path / rel_path).with_suffix('.json')
+                if not json_path.exists():
+                    continue
+                try:
+                    if json_path.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+
+                scanned_sidecars += 1
+                try:
+                    with json_path.open(encoding='UTF-8') as fp:
+                        meta = json.load(fp)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+                merged_state = build_sidecar_reaction_recovery(row, meta)
+                if not merged_state:
+                    continue
+
+                updates.append(
+                    (
+                        float(merged_state.get('rating', 0.0) or 0.0),
+                        int(bool(merged_state.get('love', False))),
+                        int(bool(merged_state.get('bomb', False))),
+                        merged_state.get('reaction_updated_at'),
+                        row_id,
+                    )
+                )
+
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    if updates:
+                        cursor.executemany(
+                            '''
+                            UPDATE images
+                            SET
+                                rating = CASE
+                                    WHEN COALESCE(rating, 0.0) <= 0.0 AND ? > 0.0 THEN ?
+                                    ELSE rating
+                                END,
+                                love = CASE
+                                    WHEN COALESCE(love, 0) = 0 AND ? != 0 THEN ?
+                                    ELSE love
+                                END,
+                                bomb = CASE
+                                    WHEN COALESCE(bomb, 0) = 0 AND ? != 0 THEN ?
+                                    ELSE bomb
+                                END,
+                                reaction_updated_at = CASE
+                                    WHEN reaction_updated_at IS NULL
+                                         AND ? IS NOT NULL
+                                         AND (
+                                             ? > 0.0
+                                             OR ? != 0
+                                             OR ? != 0
+                                             OR COALESCE(rating, 0.0) > 0.0
+                                             OR COALESCE(love, 0) != 0
+                                             OR COALESCE(bomb, 0) != 0
+                                         )
+                                    THEN ?
+                                    ELSE reaction_updated_at
+                                END
+                            WHERE id = ?
+                            ''',
+                            [
+                                (
+                                    rating_value,
+                                    rating_value,
+                                    love_value,
+                                    love_value,
+                                    bomb_value,
+                                    bomb_value,
+                                    reaction_ts,
+                                    rating_value,
+                                    love_value,
+                                    bomb_value,
+                                    reaction_ts,
+                                    row_id,
+                                )
+                                for rating_value, love_value, bomb_value, reaction_ts, row_id in updates
+                            ],
+                        )
+                        migrated_total += len(updates)
+
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.SIDECAR_REACTION_MIGRATION_LAST_ID_KEY, str(int(last_id))),
+                    )
+
+                    self.conn.commit()
+            except sqlite3.Error:
+                break
+
+            if len(rows) < batch_size:
+                done = True
+                break
+
+        if done:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.SIDECAR_REACTION_MIGRATION_DONE_KEY, '1'),
                     )
                     self.conn.commit()
             except sqlite3.Error:
