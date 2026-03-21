@@ -2576,15 +2576,37 @@ class ImageViewer(QWidget):
         self._video_playback_feedback_timer.stop()
         self._video_playback_feedback_timer.start(max(200, int(duration_ms)))
 
+    def _resolve_video_playback_toggle_host(self):
+        """Find the owning window that exposes the shared play/pause toggle."""
+        candidates = []
+        try:
+            candidates.append(self.window())
+        except Exception:
+            pass
+        parent = self.parentWidget()
+        while parent is not None:
+            candidates.append(parent)
+            try:
+                parent = parent.parentWidget()
+            except Exception:
+                break
+        for candidate in candidates:
+            toggle_handler = getattr(candidate, "toggle_viewer_play_pause", None)
+            if callable(toggle_handler):
+                return candidate
+        return None
+
     def _toggle_video_play_pause_from_scrub_zone(self) -> bool:
         """Toggle playback from the contextual scrub zone without surfacing controls."""
         if not self._is_video_loaded:
             return False
-        toggle_handler = getattr(self.video_player, "toggle_play_pause", None)
+        host = self._resolve_video_playback_toggle_host()
+        toggle_handler = getattr(host, "toggle_viewer_play_pause", None) if host is not None else None
         if not callable(toggle_handler):
             return False
         try:
-            toggle_handler()
+            if not toggle_handler(self):
+                return False
         except Exception:
             return False
         is_playing = bool(getattr(self.video_player, "is_playing", False))
