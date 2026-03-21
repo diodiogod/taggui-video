@@ -3876,6 +3876,16 @@ class ImageListModel(QAbstractListModel):
         )
         current_target_pages = getattr(self, '_enrichment_target_pages', None)
         current_scope = getattr(self, '_enrichment_scope', 'window')
+        last_zero_target_pages = getattr(self, '_enrichment_zero_target_pages', None)
+        last_zero_scope = getattr(self, '_enrichment_zero_scope', None)
+
+        if (
+            scope == 'window'
+            and requested_target_pages
+            and last_zero_scope == 'window'
+            and last_zero_target_pages == requested_target_pages
+        ):
+            return
 
         # Re-requesting the same running window/preload target only burns work
         # and makes deep-page masonry repair feel random because batches keep
@@ -4003,6 +4013,8 @@ class ImageListModel(QAbstractListModel):
              placeholder_count = len(placeholders)
 
              if not placeholders:
+                 self._enrichment_zero_scope = scope
+                 self._enrichment_zero_target_pages = requested_target_pages
                  self._enrichment_exhausted = True
                  self._enrichment_actual_count = 0
                  self._enrichment_running = False
@@ -4149,6 +4161,12 @@ class ImageListModel(QAbstractListModel):
                       pass
 
              db_bg.commit()
+             if enriched_count > 0:
+                 self._enrichment_zero_scope = None
+                 self._enrichment_zero_target_pages = None
+             elif scope == 'window':
+                 self._enrichment_zero_scope = scope
+                 self._enrichment_zero_target_pages = requested_target_pages
              self._enrichment_exhausted = (
                  placeholder_count < max_enrich_per_cycle
                  or enriched_count == 0

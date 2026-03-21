@@ -297,11 +297,12 @@ class ImageListViewInteractionMixin:
 
         if hasattr(source_model, "prepare_target_window"):
             try:
+                prefer_forward = reason in {"sort_restore", "startup_restore"}
                 source_model.prepare_target_window(
                     int(target_global),
                     sync_target_page=False,
                     include_buffer=True,
-                    prefer_forward=True,
+                    prefer_forward=prefer_forward,
                     emit_update=False,
                     request_async_window=True,
                     restart_enrichment=False,
@@ -336,6 +337,7 @@ class ImageListViewInteractionMixin:
 
         page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
         target_page = max(0, int(target_global) // max(1, page_size))
+        prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
         self._mark_selection_log_source(str(reason), hold_s=20.0)
         self._selected_global_index = int(target_global)
         self._selected_global_lock_value = int(target_global)
@@ -359,7 +361,7 @@ class ImageListViewInteractionMixin:
                     int(target_global),
                     sync_target_page=True,
                     include_buffer=False,
-                    prefer_forward=True,
+                    prefer_forward=prefer_forward,
                     emit_update=False,
                     request_async_window=False,
                     restart_enrichment=False,
@@ -2357,7 +2359,7 @@ class ImageListViewInteractionMixin:
         )
         prefer_forward_window = jump_kind in {"sort_restore", "startup_restore"}
 
-        if strict_paginated_masonry and jump_kind in {"sort_restore", "startup_restore"}:
+        if strict_paginated_masonry and jump_kind in {"sort_restore", "startup_restore", "page_drag"}:
             return self._start_one_shot_targeted_jump(
                 int(target_global),
                 reason=str(jump_kind),
