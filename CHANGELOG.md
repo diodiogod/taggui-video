@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.28] - 2026-03-21
+
+### Added
+
+- Main viewer video controls now support always shown, auto-hide, or always hidden modes
+- Videos now support left/right seek zones with hover feedback and accumulated click-to-seek behavior
+
+### Changed
+
+- Improve video controls and masonry interaction polish
+- Masonry thumbnail zooming behaves more consistently and keeps the selected item centered better
 ## [1.0.27] - 2026-03-20
 
 ### Added
