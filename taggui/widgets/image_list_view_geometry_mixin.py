@@ -393,20 +393,67 @@ class ImageListViewGeometryMixin:
             "viewport_rect": QRect(item_rect),
         }
 
+    def _clear_pending_target_reflow_guide(self):
+        self._pending_target_reflow_guide_snapshot = None
+
+    def _queue_target_reflow_guide(self, target_global: int, source_model=None, duration_ms: int | None = None):
+        """Queue the selected-item reflow guide so it can play once the target settles."""
+        try:
+            target_global = int(target_global)
+        except Exception:
+            self._pending_target_reflow_guide_snapshot = None
+            return
+        if target_global < 0:
+            self._pending_target_reflow_guide_snapshot = None
+            return
+
+        snapshot = self._capture_selected_reflow_guide_snapshot(source_model=source_model)
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        snapshot["global_index"] = int(target_global)
+        viewport_rect = snapshot.get("viewport_rect")
+        snapshot["viewport_rect"] = QRect(viewport_rect) if isinstance(viewport_rect, QRect) else QRect()
+        if isinstance(duration_ms, int) and duration_ms > 0:
+            snapshot["duration_ms"] = int(duration_ms)
+        self._pending_target_reflow_guide_snapshot = snapshot
+
+    def _try_show_pending_target_reflow_guide(self, target_global: int | None = None) -> bool:
+        snapshot = getattr(self, "_pending_target_reflow_guide_snapshot", None)
+        if not isinstance(snapshot, dict):
+            return False
+        queued_target = snapshot.get("global_index")
+        if target_global is not None:
+            try:
+                target_global = int(target_global)
+            except Exception:
+                return False
+            if not (isinstance(queued_target, int) and int(queued_target) == int(target_global)):
+                return False
+        show_reflow_guide = getattr(self, "_show_selected_reflow_guide_from_snapshot", None)
+        if not callable(show_reflow_guide):
+            return False
+        try:
+            show_reflow_guide(snapshot)
+            return True
+        finally:
+            self._pending_target_reflow_guide_snapshot = None
+
     def _show_selected_reflow_guide_from_snapshot(self, snapshot):
         """Animate a guide from the previous selected-item position to the new one."""
         if not isinstance(snapshot, dict):
             return
         target_global = snapshot.get("global_index")
         start_rect = snapshot.get("viewport_rect")
+        duration_ms = snapshot.get("duration_ms")
         if not (isinstance(target_global, int) and target_global >= 0):
-            return
-        if not isinstance(start_rect, QRect) or not start_rect.isValid():
             return
 
         end_rect = self._selected_masonry_viewport_rect(int(target_global))
         if not end_rect.isValid():
             return
+
+        if not isinstance(start_rect, QRect) or not start_rect.isValid():
+            start_rect = QRect(end_rect)
 
         viewport_rect = self.viewport().rect()
         if not end_rect.adjusted(-24, -24, 24, 24).intersects(viewport_rect):
@@ -437,7 +484,9 @@ class ImageListViewGeometryMixin:
         from PySide6.QtCore import QEasingCurve, QPropertyAnimation
 
         animation = QPropertyAnimation(overlay, b"progress", self)
-        animation.setDuration(560)
+        if not (isinstance(duration_ms, int) and duration_ms > 0):
+            duration_ms = 560
+        animation.setDuration(int(duration_ms))
         animation.setStartValue(0.0)
         animation.setEndValue(1.0)
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -1788,7 +1837,19 @@ class ImageListViewGeometryMixin:
                         _ti = int(getattr(source_model, '_total_count', 0) or 0)
                         _last_page = max(0, (_ti - 1) // max(1, _ps)) if _ti > 0 else 0
                         if _rl_live and keep_max > 0:
-                            if getattr(self, '_stick_to_edge', None) == "bottom" or int(_rl_page) >= _last_page:
+                            _exact_target = (
+                                self._get_active_exact_target_global(source_model=source_model)
+                                if hasattr(self, '_get_active_exact_target_global')
+                                else None
+                            )
+                            _exact_scroll = (
+                                self._get_restore_anchor_scroll_value(source_model, keep_max)
+                                if _exact_target is not None and hasattr(self, '_get_restore_anchor_scroll_value')
+                                else None
+                            )
+                            if _exact_scroll is not None:
+                                restored_val = max(0, min(int(_exact_scroll), keep_max))
+                            elif getattr(self, '_stick_to_edge', None) == "bottom" or int(_rl_page) >= _last_page:
                                 _tail_target = _strict_tail_scroll_target()
                                 if _tail_target is not None:
                                     restored_val = max(0, min(_tail_target, keep_max))
@@ -2131,11 +2192,25 @@ class ImageListViewGeometryMixin:
 
         strict_jump_target = getattr(self, "_strict_jump_target_global", None)
         strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+        exact_jump_active = False
+        try:
+            jump_kind = getattr(self, "_last_explicit_jump_kind", None)
+            jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
+            jump_target = getattr(self, "_last_explicit_jump_target_global", None)
+            exact_jump_active = (
+                jump_kind == "index_input"
+                and time.time() < jump_until
+                and isinstance(jump_target, int)
+                and int(jump_target) == int(global_idx)
+            )
+        except Exception:
+            exact_jump_active = False
         if (
             isinstance(strict_jump_target, int)
             and strict_jump_target >= 0
             and time.time() < strict_jump_until
             and int(global_idx) == int(strict_jump_target)
+            and not exact_jump_active
             and source_model is not None
             and getattr(source_model, "_paginated_mode", False)
             and hint in (

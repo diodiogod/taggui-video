@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from utils.settings import DEFAULT_SETTINGS, settings
 
 
@@ -81,3 +83,11 @@ def diagnostic_print(message: str, *, detail: str = "verbose") -> None:
     """Print a diagnostic line if the current mode allows it."""
     if should_emit_diagnostic_log(detail=detail):
         print(message)
+
+
+def diagnostic_time_prefix() -> str:
+    """Return a local wall-clock prefix with millisecond precision."""
+    try:
+        return f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}]"
+    except Exception:
+        return "[--:--:--.---]"

@@ -264,23 +264,36 @@ class ImageListViewPaintSelectionMixin:
                                 and time.time() < float(getattr(self, '_release_page_lock_until', 0.0) or 0.0)
                             )
                             if _rl_live and keep_max > 0:
-                                _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-                                _lock_idx = int(_rl_page) * _ps
-                                _canonical_target = (
-                                    self._get_strict_canonical_scroll_for_global(
-                                        _lock_idx,
-                                        source_model=source_model,
-                                        domain_max=keep_max,
-                                    )
-                                    if hasattr(self, '_get_strict_canonical_scroll_for_global')
+                                _exact_target = (
+                                    self._get_active_exact_target_global(source_model=source_model)
+                                    if hasattr(self, '_get_active_exact_target_global')
                                     else None
                                 )
-                                if _canonical_target is not None:
-                                    sb.setValue(max(0, min(int(_canonical_target), keep_max)))
+                                _exact_scroll = (
+                                    self._get_restore_anchor_scroll_value(source_model, keep_max)
+                                    if _exact_target is not None and hasattr(self, '_get_restore_anchor_scroll_value')
+                                    else None
+                                )
+                                if _exact_scroll is not None:
+                                    sb.setValue(max(0, min(int(_exact_scroll), keep_max)))
                                 else:
-                                    _ti = int(getattr(source_model, '_total_count', 0) or 0)
-                                    _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
-                                    sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
+                                    _ps = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+                                    _lock_idx = int(_rl_page) * _ps
+                                    _canonical_target = (
+                                        self._get_strict_canonical_scroll_for_global(
+                                            _lock_idx,
+                                            source_model=source_model,
+                                            domain_max=keep_max,
+                                        )
+                                        if hasattr(self, '_get_strict_canonical_scroll_for_global')
+                                        else None
+                                    )
+                                    if _canonical_target is not None:
+                                        sb.setValue(max(0, min(int(_canonical_target), keep_max)))
+                                    else:
+                                        _ti = int(getattr(source_model, '_total_count', 0) or 0)
+                                        _pf = max(0.0, min(1.0, _lock_idx / max(1, _ti)))
+                                        sb.setValue(max(0, min(int(round(_pf * keep_max)), keep_max)))
                             elif _old_max != keep_max and keep_max > 0:
                                 # Preserve absolute scroll value (clamped).
                                 sb.setValue(max(0, min(_old_val, keep_max)))
@@ -376,15 +389,33 @@ class ImageListViewPaintSelectionMixin:
                             if (
                                 isinstance(target_global, int)
                                 and target_global >= 0
-                                and hasattr(self, '_get_strict_canonical_scroll_for_global')
                             ):
                                 try:
                                     sb = self.verticalScrollBar()
-                                    snap_y = self._get_strict_canonical_scroll_for_global(
-                                        target_global,
-                                        source_model=source_model,
-                                        domain_max=int(sb.maximum()),
+                                    exact_target = (
+                                        self._get_active_exact_target_global(source_model=source_model)
+                                        if hasattr(self, '_get_active_exact_target_global')
+                                        else None
                                     )
+                                    if (
+                                        exact_target is not None
+                                        and int(exact_target) == int(target_global)
+                                        and hasattr(self, '_get_restore_anchor_scroll_value')
+                                    ):
+                                        snap_y = self._get_restore_anchor_scroll_value(
+                                            source_model,
+                                            int(sb.maximum()),
+                                        )
+                                    else:
+                                        snap_y = (
+                                            self._get_strict_canonical_scroll_for_global(
+                                                target_global,
+                                                source_model=source_model,
+                                                domain_max=int(sb.maximum()),
+                                            )
+                                            if hasattr(self, '_get_strict_canonical_scroll_for_global')
+                                            else None
+                                        )
                                     if snap_y is not None:
                                         snap_y = max(0, min(int(snap_y), int(sb.maximum())))
                                         if int(sb.value()) != snap_y:

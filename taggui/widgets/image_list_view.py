@@ -194,6 +194,16 @@ class ImageListView(
         self._restore_target_page = None  # Set by main_window scroll restore
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
+        self._pending_explicit_jump_kind = None
+        self._last_explicit_jump_kind = None
+        self._last_explicit_jump_target_global = None
+        self._last_explicit_jump_until = 0.0
+        self._exact_jump_settle_target_global = None
+        self._exact_jump_settle_until = 0.0
+        self._exact_jump_settle_stable_hits = 0
+        self._exact_jump_settle_token = 0
+        self._exact_jump_settle_connected = False
+        self._pending_target_reflow_guide_snapshot = None
         self._resize_anchor_page = None
         self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
@@ -559,8 +569,26 @@ class ImageListView(
         self._restore_target_page = None
         self._restore_target_global_index = None
         self._restore_anchor_until = 0.0
+        self._pending_explicit_jump_kind = None
+        self._last_explicit_jump_kind = None
+        self._last_explicit_jump_target_global = None
+        self._last_explicit_jump_until = 0.0
+        self._exact_jump_settle_target_global = None
+        self._exact_jump_settle_until = 0.0
+        self._exact_jump_settle_stable_hits = 0
+        self._exact_jump_settle_token = 0
+        self._exact_jump_settle_connected = False
+        self._pending_target_reflow_guide_snapshot = None
         self._selected_global_lock_until = 0.0
         self._selected_global_lock_value = None
+        mw = self.window()
+        if (
+            mw is not None
+            and hasattr(mw, "_restore_in_progress")
+            and hasattr(mw, "_restore_target_global_rank")
+        ):
+            mw._restore_in_progress = False
+            mw._restore_target_global_rank = -1
         self._resize_anchor_page = None
         self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
@@ -619,6 +647,33 @@ class ImageListView(
                 if proxy_model and hasattr(proxy_model, "sourceModel")
                 else proxy_model
             )
+            restore_until = float(getattr(self, '_restore_anchor_until', 0.0) or 0.0)
+            restore_target = getattr(self, '_restore_target_global_index', None)
+            if (
+                self.use_masonry
+                and _t.time() < restore_until
+                and isinstance(restore_target, int)
+                and restore_target >= 0
+            ):
+                self._selected_global_index = int(restore_target)
+                return
+            exact_jump_active = False
+            exact_jump_target = None
+            try:
+                jump_kind = getattr(self, '_last_explicit_jump_kind', None)
+                jump_until = float(getattr(self, '_last_explicit_jump_until', 0.0) or 0.0)
+                jump_target = getattr(self, '_last_explicit_jump_target_global', None)
+                if (
+                    jump_kind == "index_input"
+                    and _t.time() < jump_until
+                    and isinstance(jump_target, int)
+                    and jump_target >= 0
+                ):
+                    exact_jump_active = True
+                    exact_jump_target = int(jump_target)
+            except Exception:
+                exact_jump_active = False
+                exact_jump_target = None
             virtual_list_active = bool(
                 hasattr(self, "_virtual_list_is_active")
                 and self._virtual_list_is_active(source_model)
@@ -672,6 +727,8 @@ class ImageListView(
             else:
                 global_idx = src_idx.row()
             if isinstance(global_idx, int) and global_idx >= 0:
+                if exact_jump_active and int(global_idx) != int(exact_jump_target):
+                    return
                 prev_global = getattr(self, '_selected_global_index', None)
                 if (
                     virtual_list_active

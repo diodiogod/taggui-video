@@ -145,6 +145,42 @@ class ImageListViewStrategyMixin:
             return None
         return None
 
+    def _get_active_exact_target_global(self, source_model=None) -> int | None:
+        """Return the exact-image target while an exact jump/restore still owns the viewport."""
+        now = time.time()
+
+        try:
+            settle_until = float(getattr(self, "_exact_jump_settle_until", 0.0) or 0.0)
+            settle_target = getattr(self, "_exact_jump_settle_target_global", None)
+            if now <= settle_until and isinstance(settle_target, int) and settle_target >= 0:
+                return int(settle_target)
+        except Exception:
+            pass
+
+        try:
+            jump_kind = getattr(self, "_last_explicit_jump_kind", None)
+            jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
+            jump_target = getattr(self, "_last_explicit_jump_target_global", None)
+            if (
+                jump_kind == "index_input"
+                and now <= jump_until
+                and isinstance(jump_target, int)
+                and jump_target >= 0
+            ):
+                return int(jump_target)
+        except Exception:
+            pass
+
+        try:
+            mw = self.window()
+            restore_target = int(getattr(mw, "_restore_target_global_rank", -1) or -1) if mw is not None else -1
+            if mw is not None and getattr(mw, "_restore_in_progress", False) and restore_target >= 0:
+                return int(restore_target)
+        except Exception:
+            pass
+
+        return None
+
     def _get_masonry_item_for_global_index(self, global_index: int):
         """Return the masonry item for a stable global index, if loaded."""
         if not (isinstance(global_index, int) and global_index >= 0):
@@ -680,8 +716,59 @@ class ImageListViewStrategyMixin:
             self.viewport().update()
             return True
 
+        explicit_jump_rebind_live = False
+        if self.use_masonry:
+            now = time.time()
+            lock_until = float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0)
+            strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+            restore_until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+            locked_global = getattr(self, "_selected_global_lock_value", None)
+            jump_global = getattr(self, "_strict_jump_target_global", None)
+            restore_global = getattr(self, "_restore_target_global_index", None)
+            explicit_jump_rebind_live = bool(
+                (
+                    now < lock_until
+                    and isinstance(locked_global, int)
+                    and int(locked_global) == int(target_global)
+                )
+                or (
+                    now < strict_jump_until
+                    and isinstance(jump_global, int)
+                    and int(jump_global) == int(target_global)
+                )
+                or (
+                    now < restore_until
+                    and isinstance(restore_global, int)
+                    and int(restore_global) == int(target_global)
+                )
+            )
+
+        if explicit_jump_rebind_live:
+            # Exact index jumps need the volatile Qt row handle rebound after
+            # buffered pages are inserted ahead of the target page. Keep this
+            # narrow to explicit jump/restore states instead of all masonry churn.
+            sel_model = self.selectionModel()
+            if sel_model is not None:
+                prev_block = sel_model.blockSignals(True)
+                try:
+                    sel_model.setCurrentIndex(
+                        proxy_idx,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    )
+                finally:
+                    sel_model.blockSignals(prev_block)
+            else:
+                self.setCurrentIndex(proxy_idx)
+            self._selected_rows_cache = {int(target_row)}
+            self._selected_global_rows_cache = {int(target_global)}
+            self._current_proxy_row_cache = int(target_row)
+            self._current_global_row_cache = int(target_global)
+            self.viewport().update()
+            return True
+
         # Rebind mutation was a startup crash source on some Windows/PySide builds.
-        # Keep global target tracking, but avoid forcing current-index mutation here.
+        # Keep global target tracking, but avoid forcing current-index mutation for
+        # normal masonry churn outside explicit jump/restore states.
         return False
 
     def _enforce_locked_selected_global(self, source_model=None) -> bool:
@@ -860,6 +947,37 @@ class ImageListViewStrategyMixin:
             domain_max = self.verticalScrollBar().maximum()
         domain_max = max(0, int(domain_max))
 
+        prefer_exact_item_anchor = False
+        try:
+            now = time.time()
+            jump_kind = getattr(self, "_last_explicit_jump_kind", None)
+            jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
+            jump_target = getattr(self, "_last_explicit_jump_target_global", None)
+            if (
+                jump_kind == "index_input"
+                and now <= jump_until
+                and isinstance(jump_target, int)
+                and int(jump_target) == int(target_global)
+            ):
+                prefer_exact_item_anchor = True
+            settle_until = float(getattr(self, "_exact_jump_settle_until", 0.0) or 0.0)
+            settle_target = getattr(self, "_exact_jump_settle_target_global", None)
+            if (
+                now <= settle_until
+                and isinstance(settle_target, int)
+                and int(settle_target) == int(target_global)
+            ):
+                prefer_exact_item_anchor = True
+        except Exception:
+            prefer_exact_item_anchor = False
+
+        if prefer_exact_item_anchor:
+            for item in (self._masonry_items or []):
+                if int(item.get("index", -1)) == int(target_global):
+                    item_center_y = int(item.get("y", 0)) + int(item.get("height", 0)) // 2
+                    target = item_center_y - (self.viewport().height() // 2)
+                    return max(0, min(target, domain_max))
+
         strict_mode = (
             bool(getattr(self, "use_masonry", False))
             and source_model is not None
@@ -920,6 +1038,16 @@ class ImageListViewStrategyMixin:
                 self._restore_target_page = None
                 self._restore_target_global_index = None
                 self._restore_anchor_until = 0.0
+            if hasattr(self, '_cancel_exact_jump_settle'):
+                try:
+                    self._cancel_exact_jump_settle()
+                except Exception:
+                    pass
+            if hasattr(self, '_clear_pending_target_reflow_guide'):
+                try:
+                    self._clear_pending_target_reflow_guide()
+                except Exception:
+                    pass
             self._suppress_masonry_auto_scroll_until = 0.0
             self._strict_jump_target_global = None
             self._strict_jump_until = 0.0

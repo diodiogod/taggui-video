@@ -1,5 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
-from utils.diagnostic_logging import diagnostic_print
+from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 
 class ImageListViewPreloadMixin:
     def _on_thumbnail_updates_ready(self):
@@ -477,7 +477,7 @@ class ImageListViewPreloadMixin:
                             time.time() + 8.0,
                         )
                     diagnostic_print(
-                        f"[jump page requested] page {int(self._current_page) + 1} via=drag_release",
+                        f"{diagnostic_time_prefix()} [jump page requested] page {int(self._current_page) + 1} via=drag_release",
                         detail="essential",
                     )
                     # Lock owner briefly so async range updates cannot steal page ownership.
@@ -596,6 +596,7 @@ class ImageListViewPreloadMixin:
             # Use the same item-based jump path as typed page navigation.
             # The release-lock path alone can leave the viewport in a spacer void
             # until async loads settle, especially on far-page jumps.
+            self._pending_explicit_jump_kind = "page_drag"
             self._last_masonry_window_signature = None
             self._last_masonry_signal = "drag_release"
             if self.go_to_global_index(int(strict_release_target_global)):

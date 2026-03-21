@@ -27,7 +27,7 @@ from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.icons import taggui_icon
 from utils.big_widgets import BigPushButton
-from utils.diagnostic_logging import diagnostic_print
+from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
@@ -3865,9 +3865,15 @@ class MainWindow(QMainWindow):
         )
         if is_paginated_strict and _restore_global_rank >= 0:
             page_size = getattr(source_model, 'PAGE_SIZE', 1000)
+            queue_reflow_guide = getattr(view, '_queue_target_reflow_guide', None)
+            if callable(queue_reflow_guide):
+                try:
+                    queue_reflow_guide(int(_restore_global_rank), source_model=source_model, duration_ms=3200)
+                except Exception:
+                    pass
             view._restore_target_page = _restore_global_rank // page_size
             view._restore_target_global_index = _restore_global_rank
-            view._restore_anchor_until = time.time() + 12.0
+            view._restore_anchor_until = time.time() + 30.0
             self._restore_in_progress = True
             self._restore_target_global_rank = int(_restore_global_rank)
         else:
@@ -4007,6 +4013,13 @@ class MainWindow(QMainWindow):
                                         rebound_proxy_index = _fresh_view_index(rebound_proxy_index)
                                 if rebound_proxy_index.isValid():
                                     _set_current_and_select(rebound_proxy_index)
+                                if hasattr(view, '_start_exact_jump_settle'):
+                                    try:
+                                        view._start_exact_jump_settle(int(target_idx))
+                                    except Exception:
+                                        self._restore_in_progress = False
+                                        self._restore_target_global_rank = -1
+                                else:
                                     self._restore_in_progress = False
                                     self._restore_target_global_rank = -1
                                 print(f"[RESTORE] Centered on global index "
@@ -4036,19 +4049,32 @@ class MainWindow(QMainWindow):
                                 fallback_index,
                                 QAbstractItemView.ScrollHint.PositionAtCenter,
                             )
-                        self._restore_in_progress = False
-                        self._restore_target_global_rank = -1
+                        if hasattr(view, '_start_exact_jump_settle'):
+                            try:
+                                view._start_exact_jump_settle(int(target_idx))
+                            except Exception:
+                                self._restore_in_progress = False
+                                self._restore_target_global_rank = -1
+                        else:
+                            self._restore_in_progress = False
+                            self._restore_target_global_rank = -1
 
                     view.layout_ready.connect(do_final_scroll)
                     # Keep restore override alive through startup page-load/recalc bursts.
                     # It is also cleared immediately on user-driven scrolling.
                     def _clear_restore():
+                        if hasattr(view, '_cancel_exact_jump_settle'):
+                            try:
+                                view._cancel_exact_jump_settle()
+                                return
+                            except Exception:
+                                pass
                         view._restore_target_page = None
                         view._restore_target_global_index = None
                         view._restore_anchor_until = 0.0
                         self._restore_in_progress = False
                         self._restore_target_global_rank = -1
-                    QTimer.singleShot(12000, _clear_restore)
+                    QTimer.singleShot(30000, _clear_restore)
                     QTimer.singleShot(2000, do_final_scroll)
                     return
 
@@ -4533,7 +4559,7 @@ class MainWindow(QMainWindow):
                         except Exception:
                             debug_index = int(source_index.row())
                         diagnostic_print(
-                            f"[SAVE] Selected path: {img.path.name} "
+                            f"{diagnostic_time_prefix()} [SAVE] Selected path: {img.path.name} "
                             f"| page={debug_page} | index={debug_index}",
                             detail="essential",
                         )
@@ -4609,13 +4635,36 @@ class MainWindow(QMainWindow):
 
         now = time.time()
         lock_until = float(getattr(view, '_selected_global_lock_until', 0.0) or 0.0)
+        restore_until = float(getattr(view, '_restore_anchor_until', 0.0) or 0.0)
+        restore_global = (
+            getattr(view, '_restore_target_global_index', None)
+            if now < restore_until else
+            None
+        )
         selected_global = (
             getattr(view, '_selected_global_lock_value', None)
             if now < lock_until else
             getattr(view, '_selected_global_index', None)
         )
         if not (isinstance(selected_global, int) and selected_global >= 0):
-            return False
+            selected_global = restore_global
+        exact_jump_target = None
+        try:
+            jump_kind = getattr(view, '_last_explicit_jump_kind', None)
+            jump_until = float(getattr(view, '_last_explicit_jump_until', 0.0) or 0.0)
+            jump_target = getattr(view, '_last_explicit_jump_target_global', None)
+            if (
+                jump_kind == "index_input"
+                and now < jump_until
+                and isinstance(jump_target, int)
+                and jump_target >= 0
+            ):
+                exact_jump_target = int(jump_target)
+        except Exception:
+            exact_jump_target = None
+        if not (isinstance(selected_global, int) and selected_global >= 0):
+            if exact_jump_target is None:
+                return False
 
         # Live drag/preview: never treat current-index remaps as user selection changes.
         if getattr(view, '_scrollbar_dragging', False) or getattr(view, '_drag_preview_mode', False):
@@ -4635,6 +4684,12 @@ class MainWindow(QMainWindow):
 
         mapped = self._proxy_index_to_global_rank(proxy_image_index)
         if mapped < 0:
+            return True
+
+        if isinstance(restore_global, int) and restore_global >= 0 and int(mapped) != int(restore_global):
+            return True
+
+        if exact_jump_target is not None and int(mapped) != int(exact_jump_target):
             return True
 
         # In masonry mode, an active drag-jump lock means "selection identity

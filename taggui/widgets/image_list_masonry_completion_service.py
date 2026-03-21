@@ -373,7 +373,19 @@ class MasonryCompletionService:
                             # Bottom-intent drag release: keep true tail reachable.
                             # Locking to first item of last page creates a fake end
                             # above the real last item and causes pull-back behavior.
-                            if release_page_i >= last_page:
+                            exact_target = (
+                                v._get_active_exact_target_global(source_model=source_model)
+                                if hasattr(v, '_get_active_exact_target_global')
+                                else None
+                            )
+                            exact_scroll = (
+                                v._get_restore_anchor_scroll_value(source_model, stable_max)
+                                if exact_target is not None and hasattr(v, '_get_restore_anchor_scroll_value')
+                                else None
+                            )
+                            if exact_scroll is not None:
+                                target_val = max(0, min(int(exact_scroll), stable_max))
+                            elif release_page_i >= last_page:
                                 _tail_target = _strict_tail_scroll_target()
                                 if _tail_target is not None:
                                     target_val = int(_tail_target)
@@ -499,11 +511,17 @@ class MasonryCompletionService:
                     # selection-model signals during the apply phase.  This
                     # prevents updateGeometries / Qt layout churn from firing
                     # spurious currentChanged that overwrite the clicked image.
+                    _now = time.time()
                     _click_freeze = (
-                        time.time()
+                        _now
                         < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0)
                     )
-                    _sel_model = v.selectionModel() if _click_freeze else None
+                    _selection_guard_live = bool(
+                        _click_freeze
+                        or _now < float(getattr(v, '_selected_global_lock_until', 0.0) or 0.0)
+                        or _now < float(getattr(v, '_restore_anchor_until', 0.0) or 0.0)
+                    )
+                    _sel_model = v.selectionModel() if _selection_guard_live else None
                     if _sel_model:
                         _sel_model.blockSignals(True)
                     try:
@@ -545,10 +563,27 @@ class MasonryCompletionService:
                             if resize_anchor_live and (at_top_edge or at_bottom_edge):
                                 return
 
-                            if idle_anchor_live:
+                            explicit_jump_kind = None
+                            explicit_jump_until = float(getattr(v, '_last_explicit_jump_until', 0.0) or 0.0)
+                            explicit_jump_target = getattr(v, '_last_explicit_jump_target_global', None)
+                            if (
+                                now <= explicit_jump_until
+                                and isinstance(explicit_jump_target, int)
+                                and explicit_jump_target >= 0
+                            ):
+                                jump_kind_candidate = getattr(v, '_last_explicit_jump_kind', None)
+                                if isinstance(jump_kind_candidate, str) and jump_kind_candidate:
+                                    explicit_jump_kind = jump_kind_candidate
+                            prefer_exact_item_anchor = explicit_jump_kind == "index_input"
+
+                            if prefer_exact_item_anchor:
+                                target_global = int(explicit_jump_target)
+                            elif idle_anchor_live:
                                 target_global = getattr(v, '_idle_anchor_target_global', None)
                             elif resize_anchor_live:
                                 target_global = getattr(v, '_resize_anchor_target_global', None)
+                            elif restore_anchor_live:
+                                target_global = getattr(v, '_restore_target_global_index', None)
                             else:
                                 target_global = getattr(v, '_selected_global_index', None)
                             if not (isinstance(target_global, int) and target_global >= 0):
@@ -596,16 +631,22 @@ class MasonryCompletionService:
                                             else:
                                                 v.setCurrentIndex(proxy_idx)
 
-                            if strict_restore_target_y is not None:
+                            if strict_restore_target_y is not None and not prefer_exact_item_anchor:
                                 target_y = max(0, min(int(strict_restore_target_y), int(sb_local.maximum())))
                                 prev_block = sb_local.blockSignals(True)
+                            try:
+                                if sb_local.value() != target_y:
+                                    sb_local.setValue(target_y)
+                            finally:
+                                sb_local.blockSignals(prev_block)
+                            v._last_stable_scroll_value = target_y
+                            try_show_reflow_guide = getattr(v, "_try_show_pending_target_reflow_guide", None)
+                            if callable(try_show_reflow_guide):
                                 try:
-                                    if sb_local.value() != target_y:
-                                        sb_local.setValue(target_y)
-                                finally:
-                                    sb_local.blockSignals(prev_block)
-                                v._last_stable_scroll_value = target_y
-                                return
+                                    try_show_reflow_guide(int(target_global))
+                                except Exception:
+                                    pass
+                            return
 
                             # Anchor viewport to actual masonry item position.
                             target_item = None
@@ -614,6 +655,15 @@ class MasonryCompletionService:
                                     target_item = it
                                     break
                             if target_item is None:
+                                if strict_restore_target_y is not None:
+                                    target_y = max(0, min(int(strict_restore_target_y), int(sb_local.maximum())))
+                                    prev_block = sb_local.blockSignals(True)
+                                    try:
+                                        if sb_local.value() != target_y:
+                                            sb_local.setValue(target_y)
+                                    finally:
+                                        sb_local.blockSignals(prev_block)
+                                    v._last_stable_scroll_value = target_y
                                 return
 
                             cur_scroll = sb_local.value()
@@ -621,10 +671,15 @@ class MasonryCompletionService:
                             item_top = int(target_item.get('y', 0))
                             item_bot = item_top + int(target_item.get('height', 0))
 
-                            # Only scroll if target item is NOT already visible.
-                            # Unconditional centering caused viewport jumps when
-                            # the user was viewing items away from the selection.
-                            if item_top >= cur_scroll and item_bot <= (cur_scroll + vh):
+                            # Exact index jumps should end with the target image
+                            # centered, not merely selected somewhere off-screen
+                            # or near a viewport edge. Keep the old "ensure
+                            # visible only" behavior for non-index restore flows.
+                            if (
+                                not prefer_exact_item_anchor
+                                and item_top >= cur_scroll
+                                and item_bot <= (cur_scroll + vh)
+                            ):
                                 return  # Already visible — don't move viewport
 
                             target_y = item_top + (item_bot - item_top) // 2 - (vh // 2)
@@ -636,6 +691,12 @@ class MasonryCompletionService:
                             finally:
                                 sb_local.blockSignals(prev_block)
                             v._last_stable_scroll_value = target_y
+                            try_show_reflow_guide = getattr(v, "_try_show_pending_target_reflow_guide", None)
+                            if callable(try_show_reflow_guide):
+                                try:
+                                    try_show_reflow_guide(int(target_global))
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
 
