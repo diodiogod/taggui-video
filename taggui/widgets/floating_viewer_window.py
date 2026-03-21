@@ -1532,11 +1532,11 @@ class FloatingViewerWindow(QWidget):
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._emit_activated()
                 if event.button() == Qt.MouseButton.LeftButton:
-                    seek_accumulate_handler = getattr(self.viewer, "handle_video_seek_zone_click_accumulate", None)
-                    if callable(seek_accumulate_handler):
+                    zone_press_handler = getattr(self.viewer, "handle_video_surface_zone_press", None)
+                    if callable(zone_press_handler):
                         try:
                             view_anchor = self._event_viewport_pos(watched, event)
-                            if bool(seek_accumulate_handler(view_anchor)):
+                            if bool(zone_press_handler(view_anchor)):
                                 self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
                                 return True
                         except Exception:
@@ -1553,6 +1553,14 @@ class FloatingViewerWindow(QWidget):
                     self._begin_window_drag(event, None)
                     return True
             elif event.type() == QEvent.Type.MouseMove:
+                zone_move_handler = getattr(self.viewer, "handle_video_surface_zone_move", None)
+                if callable(zone_move_handler):
+                    try:
+                        if bool(zone_move_handler(self._event_viewport_pos(watched, event))):
+                            self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                            return True
+                    except Exception:
+                        pass
                 if self._resize_active:
                     self._apply_corner_resize(self._event_global_pos(event))
                     return True
@@ -1587,6 +1595,14 @@ class FloatingViewerWindow(QWidget):
                     pass
                 self._update_overlay_hover_from_global_pos(event_global)
             elif event.type() == QEvent.Type.MouseButtonRelease:
+                zone_release_handler = getattr(self.viewer, "handle_video_surface_zone_release", None)
+                if callable(zone_release_handler):
+                    try:
+                        if bool(zone_release_handler(self._event_viewport_pos(watched, event))):
+                            self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                            return True
+                    except Exception:
+                        pass
                 if self._resize_active and event.button() == Qt.MouseButton.LeftButton:
                     self._end_window_resize(event)
                     try:

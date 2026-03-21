@@ -186,6 +186,93 @@ class _VideoSeekZoneOverlay(QWidget):
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, text)
 
 
+class _VideoScrubZoneOverlay(QWidget):
+    """Transparent overlay for bottom scrub/hold-speed zone."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._active = False
+        self._progress = None
+        self._speed_hold = False
+        self._speed_value = None
+        self._scrub_seconds = None
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.hide()
+
+    def set_state(self, *, active: bool, progress=None, speed_hold: bool = False, scrub_seconds=None, speed_value=None):
+        self._active = bool(active)
+        self._progress = progress
+        self._speed_hold = bool(speed_hold)
+        self._speed_value = None if speed_value is None else max(0.0, float(speed_value))
+        self._scrub_seconds = None if scrub_seconds is None else max(0.0, float(scrub_seconds))
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        bar_y = rect.height() - 14.0
+        bar_rect = QRectF(12.0, bar_y, max(24.0, rect.width() - 24.0), 4.0)
+        speed_hold_active = bool(self._speed_hold)
+        groove_glow = QColor(102, 255, 170, 165 if self._active else 105) if speed_hold_active else QColor(255, 255, 255, 135 if self._active else 80)
+        groove_base = QColor(198, 255, 220, 242 if self._active else 190) if speed_hold_active else QColor(255, 255, 255, 230 if self._active else 165)
+        marker_glow = QColor(102, 255, 170, 150 if self._active else 110) if speed_hold_active else QColor(255, 255, 255, 120 if self._active else 85)
+        marker_base = QColor(235, 255, 242, 250) if speed_hold_active else QColor(255, 255, 255, 245)
+
+        shadow_pen = QPen(QColor(0, 0, 0, 110), 6.0)
+        shadow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        glow_pen = QPen(groove_glow, 3.6)
+        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        base_pen = QPen(groove_base, 1.6)
+        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+
+        for pen in (shadow_pen, glow_pen, base_pen):
+            painter.setPen(pen)
+            painter.drawLine(bar_rect.topLeft(), bar_rect.topRight())
+
+        progress = self._progress
+        if isinstance(progress, (int, float)):
+            progress = max(0.0, min(1.0, float(progress)))
+            marker_x = bar_rect.left() + (bar_rect.width() * progress)
+            top_y = bar_rect.top() - 8.0
+            bottom_y = bar_rect.bottom() + 2.0
+            marker_shadow_pen = QPen(QColor(0, 0, 0, 130), 5.0)
+            marker_shadow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            marker_glow_pen = QPen(marker_glow, 3.2)
+            marker_glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            marker_pen = QPen(marker_base, 1.8)
+            marker_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            for pen in (marker_shadow_pen, marker_glow_pen, marker_pen):
+                painter.setPen(pen)
+                painter.drawLine(QPointF(marker_x, top_y), QPointF(marker_x, bottom_y))
+
+        if self._speed_hold:
+            label_rect = QRect(0, 0, rect.width(), max(24, rect.height() - 18))
+            font = QFont(painter.font())
+            font.setPixelSize(18)
+            font.setBold(True)
+            painter.setFont(font)
+            speed_text = f"{float(self._speed_value or 2.0):.2f}x"
+            painter.setPen(QPen(QColor(0, 0, 0, 145), 3.0))
+            painter.drawText(label_rect.translated(0, 1), Qt.AlignmentFlag.AlignCenter, speed_text)
+            painter.setPen(QColor(186, 255, 214, 245))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, speed_text)
+        elif self._scrub_seconds is not None:
+            label_rect = QRect(0, 0, rect.width(), max(24, rect.height() - 18))
+            font = QFont(painter.font())
+            font.setPixelSize(16)
+            font.setBold(True)
+            painter.setFont(font)
+            label = f"{self._scrub_seconds:.1f}s"
+            painter.setPen(QPen(QColor(0, 0, 0, 140), 3.0))
+            painter.drawText(label_rect.translated(0, 1), Qt.AlignmentFlag.AlignCenter, label)
+            painter.setPen(QColor(255, 255, 255, 232))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
+
+
 class ImageViewer(QWidget):
     """Main widget coordinating image/video display, marking, and zoom functionality."""
 
@@ -289,11 +376,13 @@ class ImageViewer(QWidget):
         self.video_controls.setVisible(False)
         self._video_seek_back_overlay = _VideoSeekZoneOverlay("backward", self.view.viewport())
         self._video_seek_forward_overlay = _VideoSeekZoneOverlay("forward", self.view.viewport())
-        # Spawned viewers always use auto-hide to keep multi-view playback responsive.
-        if self.is_spawned_viewer:
-            self.video_controls_visibility_mode = VIDEO_CONTROLS_VISIBILITY_AUTO
-        else:
-            self.video_controls_visibility_mode = load_video_controls_visibility_mode()
+        self._video_scrub_overlay = _VideoScrubZoneOverlay(self.view.viewport())
+        initial_controls_mode = normalize_video_controls_visibility_mode(
+            load_video_controls_visibility_mode()
+        )
+        if self.is_spawned_viewer and initial_controls_mode == VIDEO_CONTROLS_VISIBILITY_ALWAYS:
+            initial_controls_mode = VIDEO_CONTROLS_VISIBILITY_AUTO
+        self.video_controls_visibility_mode = initial_controls_mode
         self.video_controls_auto_hide = (
             self.video_controls_visibility_mode == VIDEO_CONTROLS_VISIBILITY_AUTO
         )
@@ -306,6 +395,18 @@ class ImageViewer(QWidget):
         self._video_seek_burst_click_count = 0
         self._video_seek_pending_seconds = 0.0
         self._video_seek_feedback_token = 0
+        self._video_scrub_feedback_token = 0
+        self._video_seek_commit_delay_ms = 320
+        self._video_seek_hold_initial_delay_ms = 220
+        self._video_seek_hold_repeat_interval_ms = 160
+        self._video_temp_speed_hold_trigger_ms = 220
+        self._video_zone_press_kind = None
+        self._video_zone_press_start_viewport_pos = QPoint()
+        self._video_zone_last_viewport_pos = QPoint()
+        self._video_scrub_active = False
+        self._video_temp_speed_hold_active = False
+        self._video_temp_speed_hold_original_speed = 1.0
+        self._video_temp_speed_hold_current_speed = 2.0
         self._controls_visible = False
         self._controls_hover_inside = False
         self._main_controls_overlay = None
@@ -337,6 +438,12 @@ class ImageViewer(QWidget):
         self._video_seek_commit_timer = QTimer(self)
         self._video_seek_commit_timer.setSingleShot(True)
         self._video_seek_commit_timer.timeout.connect(self._commit_pending_video_seek)
+        self._video_seek_hold_timer = QTimer(self)
+        self._video_seek_hold_timer.setSingleShot(True)
+        self._video_seek_hold_timer.timeout.connect(self._on_video_seek_hold_timeout)
+        self._video_temp_speed_hold_timer = QTimer(self)
+        self._video_temp_speed_hold_timer.setSingleShot(True)
+        self._video_temp_speed_hold_timer.timeout.connect(self._activate_video_temp_speed_hold)
         self._main_controls_overlay_poll_timer = QTimer(self)
         self._main_controls_overlay_poll_timer.setInterval(50)
         self._main_controls_overlay_poll_timer.timeout.connect(self._poll_top_controls_overlay_hover)
@@ -393,6 +500,21 @@ class ImageViewer(QWidget):
             try:
                 widget.installEventFilter(self)
                 widget.setMouseTracking(True)
+            except RuntimeError:
+                continue
+
+    def raise_viewport_overlays(self):
+        """Keep viewport-local HUD overlays above native video cover widgets."""
+        for overlay in (
+            getattr(self, "_video_seek_back_overlay", None),
+            getattr(self, "_video_seek_forward_overlay", None),
+            getattr(self, "_video_scrub_overlay", None),
+            getattr(self, "_reaction_feedback_overlay", None),
+        ):
+            if overlay is None:
+                continue
+            try:
+                overlay.raise_()
             except RuntimeError:
                 continue
 
@@ -1926,6 +2048,12 @@ class ImageViewer(QWidget):
         )
         self._video_seek_back_overlay.raise_()
         self._video_seek_forward_overlay.raise_()
+        scrub_w = max(140, min(300, int(viewport.width() * 0.34)))
+        scrub_h = 40
+        scrub_x = max(0, (viewport.width() - scrub_w) // 2)
+        scrub_y = max(0, viewport.height() - scrub_h - max(14, int(viewport.height() * 0.03)))
+        self._video_scrub_overlay.setGeometry(scrub_x, scrub_y, scrub_w, scrub_h)
+        self._video_scrub_overlay.raise_()
 
     def _set_video_seek_overlay_active(self, direction: str | None):
         mapping = {
@@ -1938,66 +2066,206 @@ class ImageViewer(QWidget):
     def _hide_video_seek_overlays(self):
         self._video_seek_back_overlay.hide()
         self._video_seek_forward_overlay.hide()
+        self._video_scrub_overlay.hide()
         self._set_video_seek_overlay_active(None)
         self._video_seek_back_overlay.clear_feedback()
         self._video_seek_forward_overlay.clear_feedback()
+        self._video_scrub_overlay.set_state(active=False, progress=None, speed_hold=False, scrub_seconds=None, speed_value=None)
 
-    def _video_seek_zone_at(self, viewer_pos: QPoint | None) -> str | None:
-        if not self._is_video_loaded or viewer_pos is None:
+    def _normalize_viewport_point(self, point: QPoint | None) -> QPoint | None:
+        if point is None:
             return None
         viewport = self.view.viewport()
-        candidate_points = []
         try:
-            candidate_points.append(QPoint(int(viewer_pos.x()), int(viewer_pos.y())))
+            direct = QPoint(int(point.x()), int(point.y()))
         except Exception:
             return None
+        viewport_rect = viewport.rect()
+        if viewport_rect.contains(direct):
+            return direct
         try:
-            mapped = self.mapTo(viewport, viewer_pos)
-            if mapped not in candidate_points:
-                candidate_points.append(mapped)
+            mapped = self.mapTo(viewport, direct)
         except Exception:
-            pass
-        for point in candidate_points:
-            if self._video_seek_back_overlay.geometry().contains(point):
-                return "backward"
-            if self._video_seek_forward_overlay.geometry().contains(point):
-                return "forward"
+            mapped = None
+        if mapped is not None and viewport_rect.contains(mapped):
+            return mapped
+        return mapped
+
+    def _video_scrub_zone_rect(self) -> QRect:
+        return QRect(self._video_scrub_overlay.geometry())
+
+    def _video_temp_speed_progress_from_speed(self, speed: float) -> float:
+        speed = max(0.25, min(6.0, float(speed)))
+        if speed <= 2.0:
+            return max(0.0, min(0.5, 0.5 * ((speed - 0.25) / 1.75)))
+        return max(0.5, min(1.0, 0.5 + (0.5 * ((speed - 2.0) / 4.0))))
+
+    def _should_show_contextual_video_seek_ui(self) -> bool:
+        try:
+            controls_visible = bool(self._controls_visible and self.video_controls.isVisible())
+        except Exception:
+            controls_visible = bool(self._controls_visible)
+        return not controls_visible
+
+    def _video_scrub_progress_from_point(self, viewer_pos: QPoint | None):
+        viewport_pos = self._normalize_viewport_point(viewer_pos)
+        if viewport_pos is None:
+            return None
+        rect = self._video_scrub_zone_rect()
+        if rect.width() <= 1:
+            return None
+        return max(0.0, min(1.0, float(viewport_pos.x() - rect.left()) / float(rect.width())))
+
+    def _video_current_progress(self) -> float | None:
+        if not self._is_video_loaded:
+            return None
+        total_frames = int(self.video_player.get_total_frames() or 0)
+        if total_frames <= 1:
+            return None
+        current_frame = int(self.video_player.get_current_frame_number() or 0)
+        return max(0.0, min(1.0, float(current_frame) / float(total_frames - 1)))
+
+    def _video_seconds_from_progress(self, progress: float | None) -> float | None:
+        if progress is None or not self._is_video_loaded:
+            return None
+        fps = float(self.video_player.get_fps() or 0.0)
+        total_frames = int(self.video_player.get_total_frames() or 0)
+        if fps <= 0.0 or total_frames <= 0:
+            return None
+        return max(0.0, min(float(total_frames - 1) / fps, float(progress) * float(total_frames - 1) / fps))
+
+    def _video_seek_zone_at(self, viewer_pos: QPoint | None) -> str | None:
+        if (
+            not self._is_video_loaded
+            or viewer_pos is None
+            or not self._should_show_contextual_video_seek_ui()
+        ):
+            return None
+        point = self._normalize_viewport_point(viewer_pos)
+        if point is None:
+            return None
+        back_rect = self._video_seek_back_overlay.geometry().adjusted(-10, -8, 10, 8)
+        forward_rect = self._video_seek_forward_overlay.geometry().adjusted(-10, -8, 10, 8)
+        if back_rect.contains(point):
+            return "backward"
+        if forward_rect.contains(point):
+            return "forward"
+        return None
+
+    def _show_video_scrub_feedback(self, progress: float | None, *, scrub_seconds: float | None = None, duration_ms: int = 320):
+        if not self._is_video_loaded or progress is None:
+            return
+        self._video_scrub_overlay.set_state(
+            active=True,
+            progress=progress,
+            speed_hold=self._video_temp_speed_hold_active,
+            scrub_seconds=scrub_seconds,
+        )
+        self._video_scrub_overlay.show()
+        self._video_scrub_overlay.raise_()
+        self._video_scrub_feedback_token += 1
+        token = int(self._video_scrub_feedback_token)
+
+        def _clear_scrub_feedback():
+            if token != int(self._video_scrub_feedback_token):
+                return
+            if self._video_zone_press_kind == "scrub" or self._video_scrub_active:
+                return
+            try:
+                cursor_viewer_pos = self.view.viewport().mapFromGlobal(QCursor.pos())
+            except Exception:
+                cursor_viewer_pos = None
+            self._update_video_seek_overlays(cursor_viewer_pos)
+
+        QTimer.singleShot(max(80, int(duration_ms)), _clear_scrub_feedback)
+
+    def _video_surface_zone_at(self, viewer_pos: QPoint | None) -> str | None:
+        if not self._should_show_contextual_video_seek_ui():
+            return None
+        seek_zone = self._video_seek_zone_at(viewer_pos)
+        if seek_zone:
+            return seek_zone
+        point = self._normalize_viewport_point(viewer_pos)
+        if point is None:
+            return None
+        if self._video_scrub_zone_rect().contains(point):
+            return "scrub"
         return None
 
     def _update_video_seek_overlays(self, viewer_pos: QPoint | None = None):
         if not self._is_video_loaded or self._compare_mode_active:
             self._hide_video_seek_overlays()
             return
-        self._position_video_seek_overlays()
-        in_viewer = False
-        if viewer_pos is not None:
-            try:
-                in_viewer = self.rect().contains(viewer_pos)
-            except Exception:
-                in_viewer = False
-        if not in_viewer:
-            try:
-                in_viewer = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
-            except Exception:
-                in_viewer = False
-        if not in_viewer:
+        if not self._should_show_contextual_video_seek_ui():
             self._hide_video_seek_overlays()
             return
-        active_direction = self._video_seek_zone_at(viewer_pos)
+        self._position_video_seek_overlays()
+        viewport = self.view.viewport()
+        viewport_rect = viewport.rect()
+        viewport_pos = self._normalize_viewport_point(viewer_pos)
+        if viewport_pos is None:
+            try:
+                viewport_pos = viewport.mapFromGlobal(QCursor.pos())
+            except Exception:
+                viewport_pos = None
+        if viewport_pos is None or not viewport_rect.contains(viewport_pos):
+            self._hide_video_seek_overlays()
+            return
+
+        active_direction = self._video_seek_zone_at(viewport_pos)
         if active_direction == "backward":
             self._set_video_seek_overlay_active("backward")
             self._video_seek_back_overlay.show()
             self._video_seek_forward_overlay.hide()
             self._video_seek_forward_overlay.clear_feedback()
+            self._video_scrub_overlay.hide()
         elif active_direction == "forward":
             self._set_video_seek_overlay_active("forward")
             self._video_seek_forward_overlay.show()
             self._video_seek_back_overlay.hide()
             self._video_seek_back_overlay.clear_feedback()
+            self._video_scrub_overlay.hide()
+        elif self._video_scrub_active or self._video_surface_zone_at(viewport_pos) == "scrub":
+            if self._video_temp_speed_hold_active:
+                progress = self._video_temp_speed_progress_from_speed(self._video_temp_speed_hold_current_speed)
+            else:
+                progress = (
+                    self._video_scrub_progress_from_point(viewport_pos)
+                    if (self._video_scrub_active or self._video_surface_zone_at(viewport_pos) == "scrub")
+                    else None
+                )
+            if progress is None:
+                progress = self._video_current_progress()
+            self._video_seek_back_overlay.hide()
+            self._video_seek_forward_overlay.hide()
+            self._video_scrub_overlay.set_state(
+                active=True,
+                progress=progress,
+                speed_hold=self._video_temp_speed_hold_active,
+                scrub_seconds=self._video_seconds_from_progress(progress) if self._video_scrub_active else None,
+                speed_value=self._video_temp_speed_hold_current_speed if self._video_temp_speed_hold_active else None,
+            )
+            self._video_scrub_overlay.show()
         else:
             self._hide_video_seek_overlays()
 
-    def _skip_video_seconds(self, seconds: float):
+    def _set_video_controls_skip_feedback(self, direction: str, seconds: int):
+        setter = getattr(self.video_controls, "set_skip_button_feedback", None)
+        if callable(setter):
+            try:
+                setter(direction, seconds)
+            except Exception:
+                pass
+
+    def _clear_video_controls_skip_feedback(self, direction: str | None = None):
+        clearer = getattr(self.video_controls, "clear_skip_button_feedback", None)
+        if callable(clearer):
+            try:
+                clearer(direction)
+            except Exception:
+                pass
+
+    def _skip_video_seconds(self, seconds: float, *, show_scrub_feedback: bool = False):
         if not self._is_video_loaded:
             return False
         fps = float(self.video_player.get_fps() or 0.0)
@@ -2016,23 +2284,36 @@ class ImageViewer(QWidget):
             return False
         self.video_player.seek_to_frame(new_frame)
         self._set_video_seek_overlay_active(active_direction)
+        target_progress = None
+        target_seconds = None
+        if total_frames > 1 and fps > 0.0:
+            target_progress = max(0.0, min(1.0, float(new_frame) / float(total_frames - 1)))
+            target_seconds = max(0.0, float(new_frame) / fps)
 
         seconds_feedback = int(round(abs(float(seconds))))
-        active_overlay = (
-            self._video_seek_back_overlay
-            if active_direction == "backward"
-            else self._video_seek_forward_overlay
-        )
-        inactive_overlay = (
-            self._video_seek_forward_overlay
-            if active_direction == "backward"
-            else self._video_seek_back_overlay
-        )
-        active_overlay.set_feedback(seconds_feedback, pulse_strength=1.0)
-        active_overlay.show()
-        active_overlay.raise_()
-        inactive_overlay.hide()
-        inactive_overlay.clear_feedback()
+        use_controls_feedback = not self._should_show_contextual_video_seek_ui()
+        if use_controls_feedback:
+            self._set_video_controls_skip_feedback(active_direction, seconds_feedback)
+            self._hide_video_seek_overlays()
+        else:
+            active_overlay = (
+                self._video_seek_back_overlay
+                if active_direction == "backward"
+                else self._video_seek_forward_overlay
+            )
+            inactive_overlay = (
+                self._video_seek_forward_overlay
+                if active_direction == "backward"
+                else self._video_seek_back_overlay
+            )
+            active_overlay.set_feedback(seconds_feedback, pulse_strength=1.0)
+            active_overlay.show()
+            active_overlay.raise_()
+            inactive_overlay.hide()
+            inactive_overlay.clear_feedback()
+            self._clear_video_controls_skip_feedback()
+        if show_scrub_feedback:
+            self._show_video_scrub_feedback(target_progress, scrub_seconds=target_seconds, duration_ms=360)
 
         self._video_seek_feedback_token += 1
         token = int(self._video_seek_feedback_token)
@@ -2040,10 +2321,12 @@ class ImageViewer(QWidget):
         def _clear_seek_feedback():
             if token != int(self._video_seek_feedback_token):
                 return
-            active_overlay.clear_feedback()
+            self._video_seek_back_overlay.clear_feedback()
+            self._video_seek_forward_overlay.clear_feedback()
+            self._clear_video_controls_skip_feedback()
             self._set_video_seek_overlay_active(None)
             try:
-                cursor_viewer_pos = self.mapFromGlobal(QCursor.pos())
+                cursor_viewer_pos = self.view.viewport().mapFromGlobal(QCursor.pos())
             except Exception:
                 cursor_viewer_pos = None
             self._update_video_seek_overlays(cursor_viewer_pos)
@@ -2079,36 +2362,257 @@ class ImageViewer(QWidget):
             return
         self._skip_video_seconds(pending_seconds)
 
-    def _handle_video_seek_zone_double_click(self, view_anchor_pos=None) -> bool:
-        direction = self._video_seek_zone_at(view_anchor_pos)
-        if not direction:
+    def _accumulate_video_seek_direction(self, direction: str) -> bool:
+        direction = "backward" if str(direction).lower().startswith("back") else "forward"
+        skip_seconds = self._next_video_seek_skip_seconds(direction)
+        self._video_seek_pending_seconds = float(skip_seconds)
+        seconds_feedback = int(round(abs(self._video_seek_pending_seconds)))
+        if self._should_show_contextual_video_seek_ui():
+            if direction == "backward":
+                active_overlay = self._video_seek_back_overlay
+                inactive_overlay = self._video_seek_forward_overlay
+            else:
+                active_overlay = self._video_seek_forward_overlay
+                inactive_overlay = self._video_seek_back_overlay
+            self._set_video_seek_overlay_active(direction)
+            active_overlay.set_feedback(seconds_feedback, pulse_strength=1.0)
+            active_overlay.show()
+            active_overlay.raise_()
+            inactive_overlay.hide()
+            inactive_overlay.clear_feedback()
+            self._clear_video_controls_skip_feedback()
+        else:
+            self._set_video_controls_skip_feedback(direction, seconds_feedback)
+            self._hide_video_seek_overlays()
+        self._video_seek_feedback_token += 1
+        self._video_seek_commit_timer.stop()
+        self._video_seek_commit_timer.start(self._video_seek_commit_delay_ms)
+        return True
+
+    def _on_video_seek_hold_timeout(self):
+        if self._video_zone_press_kind not in {"backward", "forward"}:
+            return
+        self._accumulate_video_seek_direction(self._video_zone_press_kind)
+        self._video_seek_hold_timer.start(self._video_seek_hold_repeat_interval_ms)
+
+    def _activate_video_temp_speed_hold(self):
+        if self._video_zone_press_kind != "scrub" or self._video_scrub_active or self._video_temp_speed_hold_active:
+            return
+        try:
+            self._video_temp_speed_hold_original_speed = float(self.video_controls.get_speed_value())
+        except Exception:
+            self._video_temp_speed_hold_original_speed = 1.0
+        self._video_temp_speed_hold_active = True
+        self._video_temp_speed_hold_current_speed = 2.0
+        try:
+            self.video_controls.set_speed_value(self._video_temp_speed_hold_current_speed, emit_signal=True)
+            visual_setter = getattr(self.video_controls, "set_temp_speed_visual_state", None)
+            if callable(visual_setter):
+                visual_setter(True, self._video_temp_speed_hold_current_speed)
+        except Exception:
+            self._video_temp_speed_hold_active = False
+            return
+        progress = self._video_temp_speed_progress_from_speed(self._video_temp_speed_hold_current_speed)
+        self._video_scrub_overlay.set_state(
+            active=True,
+            progress=progress,
+            speed_hold=True,
+            scrub_seconds=None,
+            speed_value=self._video_temp_speed_hold_current_speed,
+        )
+        self._video_scrub_overlay.show()
+        self._video_scrub_overlay.raise_()
+
+    def _update_video_temp_speed_hold_speed(self, viewport_pos: QPoint | None) -> bool:
+        if not self._video_temp_speed_hold_active or viewport_pos is None:
             return False
-        return self.handle_video_seek_zone_click_accumulate(view_anchor_pos)
+        scrub_rect = self._video_scrub_zone_rect()
+        range_px = max(56.0, float(scrub_rect.width()) * 0.5)
+        delta_x = float(viewport_pos.x() - self._video_zone_press_start_viewport_pos.x())
+        if delta_x <= 0.0:
+            target_speed = 2.0 + ((delta_x / range_px) * 1.75)
+        else:
+            target_speed = 2.0 + ((delta_x / range_px) * 4.0)
+        target_speed = max(0.25, min(6.0, float(target_speed)))
+        self._video_temp_speed_hold_current_speed = target_speed
+        try:
+            self.video_controls.set_speed_value(target_speed, emit_signal=True)
+            visual_setter = getattr(self.video_controls, "set_temp_speed_visual_state", None)
+            if callable(visual_setter):
+                visual_setter(True, target_speed)
+        except Exception:
+            return False
+        self._video_scrub_overlay.set_state(
+            active=True,
+            progress=self._video_temp_speed_progress_from_speed(target_speed),
+            speed_hold=True,
+            scrub_seconds=None,
+            speed_value=target_speed,
+        )
+        self._video_scrub_overlay.show()
+        self._video_scrub_overlay.raise_()
+        return True
+
+    def _restore_video_temp_speed_hold(self):
+        if not self._video_temp_speed_hold_active:
+            return
+        self._video_temp_speed_hold_active = False
+        try:
+            self.video_controls.set_speed_value(self._video_temp_speed_hold_original_speed, emit_signal=True)
+            visual_setter = getattr(self.video_controls, "set_temp_speed_visual_state", None)
+            if callable(visual_setter):
+                visual_setter(False, self._video_temp_speed_hold_original_speed)
+        except Exception:
+            pass
+        self._video_temp_speed_hold_current_speed = 2.0
+
+    def _seek_video_to_scrub_progress(self, progress: float) -> bool:
+        if not self._is_video_loaded:
+            return False
+        total_frames = int(self.video_player.get_total_frames() or 0)
+        if total_frames <= 0:
+            return False
+        progress = max(0.0, min(1.0, float(progress)))
+        target_frame = int(round(progress * max(0, total_frames - 1)))
+        self.video_player.seek_to_frame(target_frame)
+        self._video_scrub_overlay.set_state(
+            active=True,
+            progress=progress,
+            speed_hold=False,
+            scrub_seconds=self._video_seconds_from_progress(progress),
+        )
+        self._video_scrub_overlay.show()
+        self._video_scrub_overlay.raise_()
+        return True
+
+    def _handle_video_seek_zone_double_click(self, view_anchor_pos=None) -> bool:
+        zone = self._video_surface_zone_at(view_anchor_pos)
+        if zone == "scrub":
+            return True
+        if zone in {"backward", "forward"}:
+            return self.handle_video_seek_zone_click_accumulate(view_anchor_pos)
+        return False
 
     def handle_video_seek_zone_click_accumulate(self, view_anchor_pos=None) -> bool:
         """Start or extend the seek burst with a single click in the seek zone."""
         direction = self._video_seek_zone_at(view_anchor_pos)
         if not direction:
             return False
-        if direction == "backward":
-            skip_seconds = self._next_video_seek_skip_seconds("backward")
-            active_overlay = self._video_seek_back_overlay
-            inactive_overlay = self._video_seek_forward_overlay
-        else:
-            skip_seconds = self._next_video_seek_skip_seconds("forward")
-            active_overlay = self._video_seek_forward_overlay
-            inactive_overlay = self._video_seek_back_overlay
-        self._video_seek_pending_seconds = float(skip_seconds)
-        self._set_video_seek_overlay_active(direction)
-        active_overlay.set_feedback(int(round(abs(skip_seconds))), pulse_strength=1.0)
-        active_overlay.show()
-        active_overlay.raise_()
-        inactive_overlay.hide()
-        inactive_overlay.clear_feedback()
-        self._video_seek_feedback_token += 1
-        self._video_seek_commit_timer.stop()
-        self._video_seek_commit_timer.start(420)
+        return self._accumulate_video_seek_direction(direction)
+
+    def handle_video_surface_zone_press(self, view_anchor_pos=None) -> bool:
+        zone = self._video_surface_zone_at(view_anchor_pos)
+        if zone is None:
+            return False
+        self._video_zone_press_kind = zone
+        viewport_pos = self._normalize_viewport_point(view_anchor_pos)
+        self._video_zone_press_start_viewport_pos = viewport_pos or QPoint()
+        self._video_zone_last_viewport_pos = viewport_pos or QPoint()
+        if zone in {"backward", "forward"}:
+            handled = self.handle_video_seek_zone_click_accumulate(view_anchor_pos)
+            self._video_seek_hold_timer.stop()
+            self._video_seek_hold_timer.start(self._video_seek_hold_initial_delay_ms)
+            return handled
+        self._video_scrub_active = False
+        self._video_temp_speed_hold_timer.stop()
+        self._video_temp_speed_hold_timer.start(self._video_temp_speed_hold_trigger_ms)
+        self._video_scrub_overlay.set_state(
+            active=True,
+            progress=self._video_scrub_progress_from_point(view_anchor_pos),
+            speed_hold=False,
+            scrub_seconds=None,
+            speed_value=None,
+        )
+        self._video_scrub_overlay.show()
+        self._video_scrub_overlay.raise_()
         return True
+
+    def handle_video_surface_zone_move(self, view_anchor_pos=None) -> bool:
+        if self._video_zone_press_kind is None:
+            return False
+        viewport_pos = self._normalize_viewport_point(view_anchor_pos)
+        if viewport_pos is not None:
+            self._video_zone_last_viewport_pos = viewport_pos
+        if self._video_zone_press_kind in {"backward", "forward"}:
+            current_zone = self._video_seek_zone_at(view_anchor_pos)
+            if current_zone != self._video_zone_press_kind:
+                self._video_seek_hold_timer.stop()
+            elif not self._video_seek_hold_timer.isActive():
+                self._video_seek_hold_timer.start(self._video_seek_hold_repeat_interval_ms)
+            return True
+        if viewport_pos is None:
+            return True
+        if self._video_temp_speed_hold_active:
+            return self._update_video_temp_speed_hold_speed(viewport_pos)
+        if not self._video_scrub_active:
+            moved = abs(int(viewport_pos.x()) - int(self._video_zone_press_start_viewport_pos.x())) >= 8
+            if moved:
+                self._video_temp_speed_hold_timer.stop()
+                self._restore_video_temp_speed_hold()
+                self._video_scrub_active = True
+        if self._video_scrub_active:
+            progress = self._video_scrub_progress_from_point(viewport_pos)
+            if progress is not None:
+                self._seek_video_to_scrub_progress(progress)
+        else:
+            self._video_scrub_overlay.set_state(
+                active=True,
+                progress=self._video_scrub_progress_from_point(viewport_pos),
+                speed_hold=self._video_temp_speed_hold_active,
+                scrub_seconds=None,
+                speed_value=self._video_temp_speed_hold_current_speed if self._video_temp_speed_hold_active else None,
+            )
+            self._video_scrub_overlay.show()
+        return True
+
+    def handle_video_surface_zone_release(self, view_anchor_pos=None) -> bool:
+        if self._video_zone_press_kind is None:
+            return False
+        zone_kind = self._video_zone_press_kind
+        viewport_pos = self._normalize_viewport_point(view_anchor_pos)
+        should_seek_on_release = (
+            zone_kind == "scrub"
+            and (not self._video_scrub_active)
+            and (not self._video_temp_speed_hold_active)
+        )
+        self._video_seek_hold_timer.stop()
+        self._video_temp_speed_hold_timer.stop()
+        if should_seek_on_release and viewport_pos is not None:
+            progress = self._video_scrub_progress_from_point(viewport_pos)
+            if progress is not None:
+                self._seek_video_to_scrub_progress(progress)
+        self._restore_video_temp_speed_hold()
+        self._video_zone_press_kind = None
+        self._video_scrub_active = False
+        self._video_zone_last_viewport_pos = QPoint()
+        try:
+            cursor_viewer_pos = self.view.viewport().mapFromGlobal(QCursor.pos())
+        except Exception:
+            cursor_viewer_pos = view_anchor_pos
+        self._update_video_seek_overlays(cursor_viewer_pos)
+        return True
+
+    def handle_video_controls_skip_button_step(self, direction: str) -> bool:
+        if not self._is_video_loaded:
+            return False
+        normalized = "backward" if str(direction).lower().startswith("back") else "forward"
+        return self._accumulate_video_seek_direction(normalized)
+
+    def handle_video_controls_skip_button_release(self, direction: str) -> bool:
+        normalized = "backward" if str(direction).lower().startswith("back") else "forward"
+        if self._video_zone_press_kind != normalized:
+            return False
+        self._video_seek_hold_timer.stop()
+        self._video_zone_press_kind = None
+        return True
+
+    def handle_video_controls_skip_button_direct(self, direction: str) -> bool:
+        if not self._is_video_loaded:
+            return False
+        direction = "backward" if str(direction).lower().startswith("back") else "forward"
+        if self._video_seek_commit_timer.isActive() or self._video_seek_hold_timer.isActive():
+            return True
+        return self._skip_video_seconds(-1.0 if direction == "backward" else 1.0)
 
     def resizeEvent(self, event):
         """Reposition controls when viewer is resized."""
@@ -2140,7 +2644,7 @@ class ImageViewer(QWidget):
             self.set_compare_split_from_viewer_pos(event.pos())
         if self._is_video_loaded:
             self._process_controls_hover(event.pos())
-            self._update_video_seek_overlays(event.pos())
+            self._update_video_seek_overlays(self.view.viewport().mapFrom(self, event.pos()))
         self._process_top_controls_overlay_hover(event.pos())
         super().mouseMoveEvent(event)
 
@@ -2383,6 +2887,34 @@ class ImageViewer(QWidget):
             return
         self._process_top_controls_overlay_hover(viewer_pos)
 
+    def _event_pos_to_viewport(self, watched, event):
+        """Map an event local position from watched object to viewport coordinates."""
+        if not hasattr(event, 'position'):
+            return None
+        try:
+            local_pos = event.position().toPoint()
+        except Exception:
+            try:
+                local_pos = event.pos()
+            except Exception:
+                return None
+        viewport = self.view.viewport()
+        try:
+            if watched is viewport:
+                return local_pos
+            if watched is self:
+                return viewport.mapFrom(self, local_pos)
+            if watched is self.view:
+                return viewport.mapFrom(self.view, local_pos)
+            if watched is self.video_controls:
+                return viewport.mapFrom(self.video_controls, local_pos)
+            if isinstance(watched, QWidget):
+                global_pos = watched.mapToGlobal(local_pos)
+                return viewport.mapFromGlobal(global_pos)
+        except Exception:
+            return None
+        return None
+
     def _event_pos_to_viewer(self, watched, event):
         """Map an event local position from watched object to viewer coordinates."""
         if not hasattr(event, 'position'):
@@ -2492,11 +3024,12 @@ class ImageViewer(QWidget):
                 return True
         if event_type == QEvent.Type.MouseMove:
             viewer_pos = self._event_pos_to_viewer(watched, event)
+            viewport_pos = self._event_pos_to_viewport(watched, event)
             if viewer_pos is not None and self._compare_mode_active:
                 self.set_compare_split_from_viewer_pos(viewer_pos)
             if viewer_pos is not None and self._is_video_loaded:
                 self._process_controls_hover(viewer_pos)
-                self._update_video_seek_overlays(viewer_pos)
+                self._update_video_seek_overlays(viewport_pos)
         if event_type in (
             QEvent.Type.MouseButtonPress,
             QEvent.Type.FocusIn,
@@ -2507,13 +3040,15 @@ class ImageViewer(QWidget):
             if self._compare_mode_active:
                 self._sync_compare_split_to_global_cursor()
             self._controls_hover_inside = False
-            self._hide_video_seek_overlays()
+            if self._video_zone_press_kind is None:
+                self._hide_video_seek_overlays()
         return super().eventFilter(watched, event)
 
     def leaveEvent(self, event):
         if self._compare_mode_active:
             self._sync_compare_split_to_global_cursor()
-        self._hide_video_seek_overlays()
+        if self._video_zone_press_kind is None:
+            self._hide_video_seek_overlays()
         super().leaveEvent(event)
 
     def _show_controls_temporarily(self):
@@ -2527,6 +3062,7 @@ class ImageViewer(QWidget):
         if not self._controls_visible:
             self.video_controls.setVisible(True)
             self._controls_visible = True
+            self._hide_video_seek_overlays()
             self._position_video_controls()
             if self._pending_controls_stabilize:
                 self.video_controls._stabilize_after_geometry_change()
@@ -2559,6 +3095,7 @@ class ImageViewer(QWidget):
         self._controls_hide_timer.stop()
         self.video_controls.setVisible(True)
         self._controls_visible = True
+        self._hide_video_seek_overlays()
         self._position_video_controls()
         if self._pending_controls_stabilize:
             self.video_controls._stabilize_after_geometry_change()
@@ -2573,11 +3110,9 @@ class ImageViewer(QWidget):
     @Slot(str)
     def set_video_controls_visibility_mode(self, mode: str, *, show_auto_temporarily: bool = True):
         """Apply main-viewer video-controls visibility mode."""
-        effective_mode = (
-            VIDEO_CONTROLS_VISIBILITY_AUTO
-            if self.is_spawned_viewer
-            else normalize_video_controls_visibility_mode(mode)
-        )
+        effective_mode = normalize_video_controls_visibility_mode(mode)
+        if self.is_spawned_viewer and effective_mode == VIDEO_CONTROLS_VISIBILITY_ALWAYS:
+            effective_mode = VIDEO_CONTROLS_VISIBILITY_AUTO
         self.video_controls_visibility_mode = effective_mode
         self.video_controls_auto_hide = effective_mode == VIDEO_CONTROLS_VISIBILITY_AUTO
         self.video_controls_never_show = effective_mode == VIDEO_CONTROLS_VISIBILITY_OFF
@@ -2910,11 +3445,10 @@ class ImageViewer(QWidget):
     @Slot()
     def setting_change(self, key, value):
         if key in ['video_controls_visibility_mode', 'video_always_show_controls']:
-            if not self.is_spawned_viewer:
-                self.set_video_controls_visibility_mode(
-                    load_video_controls_visibility_mode(),
-                    show_auto_temporarily=False,
-                )
+            self.set_video_controls_visibility_mode(
+                load_video_controls_visibility_mode(),
+                show_auto_temporarily=False,
+            )
             return
         if key in ['export_resolution', 'export_bucket_res_size',
                    'export_latent_size', 'export_upscaling',
@@ -3159,6 +3693,16 @@ class ImageViewer(QWidget):
                 anchor_view_pos = viewport_rect.center()
 
         anchor_view_pos = self._clamp_viewport_point_to_rect(anchor_view_pos, viewport_rect)
+        if self._is_video_loaded and self._video_seek_zone_at(anchor_view_pos):
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.angleDelta().x()
+            if delta != 0:
+                step_count = max(1, int(round(abs(delta) / 120.0)))
+                seek_seconds = float(step_count if delta > 0 else -step_count)
+                if self._skip_video_seconds(seek_seconds, show_scrub_feedback=True):
+                    event.accept()
+                    return
         focus_scene_pos = self._clamp_scene_point_to_rect(
             self.view.mapToScene(anchor_view_pos),
             scene_rect,

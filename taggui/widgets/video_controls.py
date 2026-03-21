@@ -285,6 +285,32 @@ class LoopSlider(QSlider):
         super().mouseReleaseEvent(event)
 
 
+class _BurstSkipButton(QPushButton):
+    """Skip button that exposes burst-step and release interactions."""
+
+    burst_step_requested = Signal(str)
+    burst_released = Signal(str)
+
+    def __init__(self, direction: str, label: str, parent=None):
+        super().__init__(label, parent)
+        self._direction = "backward" if str(direction).lower().startswith("back") else "forward"
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.burst_step_requested.emit(self._direction)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.burst_step_requested.emit(self._direction)
+        super().mouseDoubleClickEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.burst_released.emit(self._direction)
+        super().mouseReleaseEvent(event)
+
+
 class SpeedSlider(QSlider):
     """Custom speed slider with colored zones and visual dividers."""
 
@@ -336,6 +362,8 @@ class VideoControlsWidget(QWidget):
     marker_preview_requested = Signal(int)  # Preview frame during marker drag (doesn't move seekbar)
     skip_backward_requested = Signal()  # Skip 1 second backward
     skip_forward_requested = Signal()  # Skip 1 second forward
+    skip_burst_step_requested = Signal(str)  # backward/forward burst step
+    skip_burst_released = Signal(str)  # backward/forward burst release
     screenshot_requested = Signal()
     loop_start_set = Signal()
     loop_end_set = Signal()
@@ -378,6 +406,8 @@ class VideoControlsWidget(QWidget):
         self._overlay_reposition_pending = False
         self._overlay_reposition_in_progress = False
         self._overlay_reposition_retry_count = 0
+        self._temp_speed_visual_active = False
+        self._temp_speed_visual_value = None
 
         # Double-click fit/restore state
         self._fit_mode_active = False
@@ -391,6 +421,12 @@ class VideoControlsWidget(QWidget):
         self._last_mute_visual_state = None
         self._timeline_scrubbing = False
         self._exact_frame_resolver = None
+        self._skip_feedback_style = (
+            "QPushButton { background-color: rgba(76, 175, 80, 0.30); "
+            "border: 1px solid rgba(255, 255, 255, 0.45); color: white; font-weight: bold; }"
+            "QPushButton:hover { background-color: rgba(76, 175, 80, 0.38); }"
+        )
+        self._skip_button_base_styles = {}
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -468,12 +504,22 @@ class VideoControlsWidget(QWidget):
         self.skip_back_btn = QPushButton('<<')
         self.skip_back_btn.setToolTip('Skip 1 Second Backward')
         self.skip_back_btn.setMaximumWidth(40)
-        self.skip_back_btn.clicked.connect(self.skip_backward_requested.emit)
+        self.skip_back_btn.setAutoRepeat(True)
+        self.skip_back_btn.setAutoRepeatDelay(220)
+        self.skip_back_btn.setAutoRepeatInterval(160)
+        self.skip_back_btn.clicked.connect(
+            lambda: self.skip_burst_step_requested.emit('backward')
+        )
 
         self.skip_forward_btn = QPushButton('>>')
         self.skip_forward_btn.setToolTip('Skip 1 Second Forward')
         self.skip_forward_btn.setMaximumWidth(40)
-        self.skip_forward_btn.clicked.connect(self.skip_forward_requested.emit)
+        self.skip_forward_btn.setAutoRepeat(True)
+        self.skip_forward_btn.setAutoRepeatDelay(220)
+        self.skip_forward_btn.setAutoRepeatInterval(160)
+        self.skip_forward_btn.clicked.connect(
+            lambda: self.skip_burst_step_requested.emit('forward')
+        )
 
         # Frame number input
         self.frame_label = QLabel('Frame:')
@@ -585,6 +631,8 @@ class VideoControlsWidget(QWidget):
 
         # Speed label for theme cycling (clicking "Speed:" text)
         self.speed_label.mousePressEvent = self._cycle_speed_theme
+        self._default_speed_label_style = self.speed_label.styleSheet()
+        self._default_speed_value_label_style = self.speed_value_label.styleSheet()
 
         # Independent component slots (ground-up layout model)
         self._component_slots = {}
@@ -618,6 +666,12 @@ class VideoControlsWidget(QWidget):
             'speed_value_label': self._create_component_slot('speed_value_label', self.speed_value_label, 'controls_row'),
         }
         self._rebuild_top_controls_content()
+        self._default_skip_back_label = self.skip_back_btn.text()
+        self._default_skip_forward_label = self.skip_forward_btn.text()
+        self._skip_button_base_styles = {
+            'backward': self.skip_back_btn.styleSheet(),
+            'forward': self.skip_forward_btn.styleSheet(),
+        }
 
         # Alignment spacers around controls content
         self.controls_layout.addStretch(1)
@@ -818,16 +872,55 @@ class VideoControlsWidget(QWidget):
         """Apply current skin background to the dedicated visual surface widget."""
         if not hasattr(self, 'background_surface'):
             return
-        qcolor = QColor(str(getattr(self, '_skin_bg_color', '#242424')))
-        opacity = max(0.0, min(1.0, float(getattr(self, '_skin_bg_opacity', 0.95))))
-        qcolor.setAlphaF(opacity)
+        if bool(getattr(self, '_temp_speed_visual_active', False)):
+            qcolor = QColor(28, 96, 46)
+            qcolor.setAlphaF(0.96)
+            border = "1px solid rgba(160, 255, 196, 0.80)"
+        else:
+            qcolor = QColor(str(getattr(self, '_skin_bg_color', '#242424')))
+            opacity = max(0.0, min(1.0, float(getattr(self, '_skin_bg_opacity', 0.95))))
+            qcolor.setAlphaF(opacity)
+            border = str(getattr(self, '_skin_bg_border', 'none'))
         rgba = f"rgba({qcolor.red()}, {qcolor.green()}, {qcolor.blue()}, {qcolor.alpha()})"
-        border = str(getattr(self, '_skin_bg_border', 'none'))
         radius = int(getattr(self, '_skin_bg_radius', 0))
         self.background_surface.setStyleSheet(
             f"QWidget {{ background-color: {rgba}; border: {border}; border-radius: {radius}px; }}"
         )
         self._update_background_surface_geometry()
+
+    def set_temp_speed_visual_state(self, active: bool, speed: float | None = None):
+        self._temp_speed_visual_active = bool(active)
+        self._temp_speed_visual_value = None if speed is None else float(speed)
+        self._refresh_background_surface()
+        if self._temp_speed_visual_active:
+            self.speed_label.setStyleSheet("QLabel { color: #BFFFD0; font-weight: bold; }")
+            self.speed_value_label.setStyleSheet("QLabel { color: #E4FFEC; font-weight: bold; }")
+            self.speed_slider.setStyleSheet("""
+                QSlider::groove:horizontal {
+                    height: 8px;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0.0 #1F6A36,
+                        stop:0.35 #2B9B4E,
+                        stop:0.7 #43C96B,
+                        stop:1.0 #8AFFAF);
+                    border-radius: 4px;
+                }
+                QSlider::handle:horizontal {
+                    background: #F6FFF8;
+                    border: 2px solid #134B25;
+                    width: 16px;
+                    margin: -4px 0;
+                    border-radius: 8px;
+                }
+                QSlider::handle:horizontal:hover {
+                    background: #FFFFFF;
+                    border: 2px solid #0D341A;
+                }
+            """)
+        else:
+            self.speed_label.setStyleSheet(self._default_speed_label_style)
+            self.speed_value_label.setStyleSheet(self._default_speed_value_label_style)
+            self._apply_speed_theme()
 
     def _update_background_surface_geometry(self):
         """Keep background rectangle inset from floating area."""
@@ -2269,6 +2362,27 @@ class VideoControlsWidget(QWidget):
     def get_speed_value(self) -> float:
         """Return current playback speed value from controls."""
         return float(self._extended_speed)
+
+    def set_skip_button_feedback(self, direction: str, seconds: int):
+        seconds_value = max(1, int(seconds))
+        if str(direction).lower().startswith('back'):
+            self.skip_back_btn.setText(f'{seconds_value}s')
+            self.skip_forward_btn.setText(self._default_skip_forward_label)
+            self.skip_back_btn.setStyleSheet(self._skip_feedback_style)
+            self.skip_forward_btn.setStyleSheet(self._skip_button_base_styles.get('forward', ''))
+        else:
+            self.skip_forward_btn.setText(f'{seconds_value}s')
+            self.skip_back_btn.setText(self._default_skip_back_label)
+            self.skip_forward_btn.setStyleSheet(self._skip_feedback_style)
+            self.skip_back_btn.setStyleSheet(self._skip_button_base_styles.get('backward', ''))
+
+    def clear_skip_button_feedback(self, direction: str | None = None):
+        if direction is None or str(direction).lower().startswith('back'):
+            self.skip_back_btn.setText(self._default_skip_back_label)
+            self.skip_back_btn.setStyleSheet(self._skip_button_base_styles.get('backward', ''))
+        if direction is None or str(direction).lower().startswith('for'):
+            self.skip_forward_btn.setText(self._default_skip_forward_label)
+            self.skip_forward_btn.setStyleSheet(self._skip_button_base_styles.get('forward', ''))
 
     def set_speed_value(self, speed: float, emit_signal: bool = True):
         """Set playback speed value and keep slider/labels synchronized."""

@@ -2355,11 +2355,11 @@ class MainWindow(QMainWindow):
         video_controls.timeline_slider.scrub_started.connect(video_player.begin_timeline_scrub)
         video_controls.timeline_slider.sliderReleased.connect(video_player.end_timeline_scrub)
         video_controls.marker_preview_requested.connect(video_player.seek_to_frame)
-        video_controls.skip_backward_requested.connect(
-            lambda: self._skip_viewer_video(viewer, backward=True)
+        video_controls.skip_back_btn.clicked.connect(
+            lambda checked=False, current_viewer=viewer: current_viewer.handle_video_controls_skip_button_step('backward')
         )
-        video_controls.skip_forward_requested.connect(
-            lambda: self._skip_viewer_video(viewer, backward=False)
+        video_controls.skip_forward_btn.clicked.connect(
+            lambda checked=False, current_viewer=viewer: current_viewer.handle_video_controls_skip_button_step('forward')
         )
         video_player.frame_changed.connect(
             lambda frame, time_ms: self._queue_video_controls_update(viewer, frame, time_ms)

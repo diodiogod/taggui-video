@@ -168,10 +168,10 @@ class ImageGraphicsView(QGraphicsView):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton and not self.insertion_mode:
-            seek_accumulate_handler = getattr(self.image_viewer, "handle_video_seek_zone_click_accumulate", None)
-            if callable(seek_accumulate_handler):
+            zone_press_handler = getattr(self.image_viewer, "handle_video_surface_zone_press", None)
+            if callable(zone_press_handler):
                 try:
-                    if bool(seek_accumulate_handler(event.pos())):
+                    if bool(zone_press_handler(event.pos())):
                         event.accept()
                         return
                 except Exception:
@@ -227,6 +227,14 @@ class ImageGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        zone_move_handler = getattr(self.image_viewer, "handle_video_surface_zone_move", None)
+        if callable(zone_move_handler):
+            try:
+                if bool(zone_move_handler(event.pos())):
+                    event.accept()
+                    return
+            except Exception:
+                pass
         if self._manual_pan_active:
             current_global = event.globalPosition().toPoint()
             if self._manual_pan_last_global_pos is not None:
@@ -294,6 +302,14 @@ class ImageGraphicsView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        zone_release_handler = getattr(self.image_viewer, "handle_video_surface_zone_release", None)
+        if callable(zone_release_handler):
+            try:
+                if bool(zone_release_handler(event.pos())):
+                    event.accept()
+                    return
+            except Exception:
+                pass
         if self._manual_pan_active and event.button() in (
             Qt.MouseButton.LeftButton,
             Qt.MouseButton.MiddleButton,

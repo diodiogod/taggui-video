@@ -794,6 +794,9 @@ class VideoPlayerWidget(QWidget):
             if widget_rect.width() > 1 and widget_rect.height() > 1:
                 label.setGeometry(widget_rect)
                 label.raise_()
+                viewer_owner = getattr(view, 'image_viewer', None)
+                if viewer_owner is not None and hasattr(viewer_owner, 'raise_viewport_overlays'):
+                    viewer_owner.raise_viewport_overlays()
             else:
                 label.hide()
         except RuntimeError:
@@ -851,6 +854,9 @@ class VideoPlayerWidget(QWidget):
                 label.setGeometry(view.viewport().rect())
             label.show()
             label.raise_()
+            viewer_owner = getattr(view, 'image_viewer', None)
+            if viewer_owner is not None and hasattr(viewer_owner, 'raise_viewport_overlays'):
+                viewer_owner.raise_viewport_overlays()
         except RuntimeError:
             self._opencv_cover_label = None
 
