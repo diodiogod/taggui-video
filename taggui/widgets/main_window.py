@@ -5261,17 +5261,18 @@ class MainWindow(QMainWindow):
         list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
         if list_view is None:
             return
-        min_size = int(getattr(list_view, 'min_thumbnail_size', 64) or 64)
-        max_size = int(getattr(list_view, 'max_thumbnail_size', 512) or 512)
-        size = max(min_size, min(max_size, int(target_size)))
+        size, display_size = list_view._resolve_requested_thumbnail_size(
+            target_size,
+            zoom_direction=0,
+        )
         if hasattr(list_view, "_target_thumbnail_size"):
             list_view._target_thumbnail_size = int(size)
-        if int(getattr(list_view, 'current_thumbnail_size', size)) == size:
+        if int(getattr(list_view, 'current_thumbnail_size', display_size)) == display_size:
             if hasattr(self.image_list, 'update_thumbnail_size_controls'):
                 self.image_list.update_thumbnail_size_controls()
             return
-        list_view.current_thumbnail_size = size
-        list_view.setIconSize(QSize(size, size * 3))
+        list_view.current_thumbnail_size = int(display_size)
+        list_view.setIconSize(QSize(display_size, display_size * 3))
         list_view._update_view_mode()
         if bool(getattr(list_view, 'use_masonry', False)) and hasattr(list_view, '_resize_timer'):
             # Explicit button/dialog size changes should relayout immediately,
@@ -5279,6 +5280,7 @@ class MainWindow(QMainWindow):
             list_view._last_masonry_done_time = 0
             list_view._zoom_resize_wait_for_ctrl_release = False
             list_view._zoom_resize_snap_defer_until = 0.0
+            list_view._last_ctrl_wheel_zoom_direction = 0
             list_view._last_masonry_signal = "thumbnail_size_button"
             if hasattr(list_view, '_on_resize_finished'):
                 list_view._on_resize_finished()
@@ -5288,9 +5290,17 @@ class MainWindow(QMainWindow):
         else:
             list_view.viewport().update()
         if persist:
-            settings.setValue('image_list_thumbnail_size', size)
+            settings.setValue('image_list_thumbnail_size', display_size)
         if hasattr(self.image_list, 'update_thumbnail_size_controls'):
             self.image_list.update_thumbnail_size_controls()
+
+    def _step_image_list_thumbnail_size(self, zoom_direction: int, *, persist: bool = False):
+        """Apply one thumbnail zoom step using the same logic as Ctrl+wheel."""
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is None:
+            return
+        target_size, _display_size = list_view._step_thumbnail_size_request(zoom_direction)
+        self._set_image_list_thumbnail_size(target_size, persist=persist)
 
     def _compute_full_masonry_initial_size(self) -> int:
         """Pick a medium-density masonry size that also minimizes right-side slack."""

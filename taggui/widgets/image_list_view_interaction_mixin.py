@@ -2089,41 +2089,17 @@ class ImageListViewInteractionMixin:
             delta = event.angleDelta().y()
             self._last_ctrl_wheel_zoom_direction = 1 if delta > 0 else -1 if delta < 0 else 0
 
-            # Adjust thumbnail size
-            zoom_step = 20  # Pixels per scroll step
-            base_zoom_size = int(
-                getattr(self, "_target_thumbnail_size", self.current_thumbnail_size)
-                if (
-                    self.use_masonry
-                    and hasattr(self, "_is_full_width_masonry_mode")
-                    and self._is_full_width_masonry_mode()
-                )
-                else self.current_thumbnail_size
-            )
-            if delta > 0:
-                # Scroll up = zoom in (larger thumbnails)
-                new_size = min(base_zoom_size + zoom_step, self.max_thumbnail_size)
-            else:
-                # Scroll down = zoom out (smaller thumbnails)
-                new_size = max(base_zoom_size - zoom_step, self.min_thumbnail_size)
-
             full_width_masonry = bool(
                 self.use_masonry
                 and hasattr(self, "_is_full_width_masonry_mode")
                 and self._is_full_width_masonry_mode()
             )
-            if full_width_masonry:
-                self._target_thumbnail_size = int(new_size)
-            else:
-                self._target_thumbnail_size = int(new_size)
+            target_size, new_size = self._step_thumbnail_size_request(
+                self._last_ctrl_wheel_zoom_direction,
+            )
+            self._target_thumbnail_size = int(target_size)
 
             if new_size != self.current_thumbnail_size or full_width_masonry:
-                if full_width_masonry and hasattr(self, "_resolve_full_width_masonry_thumbnail_size"):
-                    new_size = self._resolve_full_width_masonry_thumbnail_size(
-                        self._target_thumbnail_size,
-                        self._last_ctrl_wheel_zoom_direction,
-                    )
-
                 self.current_thumbnail_size = new_size
                 self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
 
@@ -2169,9 +2145,9 @@ class ImageListViewInteractionMixin:
 
                 # Save to settings
                 settings.setValue('image_list_thumbnail_size', self.current_thumbnail_size)
-                parent_widget = self.parent()
-                if parent_widget is not None and hasattr(parent_widget, 'update_thumbnail_size_controls'):
-                    parent_widget.update_thumbnail_size_controls()
+                refresh_thumbnail_controls = getattr(self, "_refresh_thumbnail_size_controls", None)
+                if callable(refresh_thumbnail_controls):
+                    refresh_thumbnail_controls()
 
             event.accept()
             return

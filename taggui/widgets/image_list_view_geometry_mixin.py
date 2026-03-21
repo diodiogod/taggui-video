@@ -382,11 +382,8 @@ class ImageListViewGeometryMixin:
         if not (isinstance(target_global, int) and target_global >= 0):
             return None
 
-        viewport_rect = self.viewport().rect()
         item_rect = self._selected_masonry_viewport_rect(int(target_global))
         if not item_rect.isValid():
-            return None
-        if not item_rect.adjusted(-36, -36, 36, 36).intersects(viewport_rect):
             return None
         return {
             "global_index": int(target_global),
@@ -455,10 +452,6 @@ class ImageListViewGeometryMixin:
         if not isinstance(start_rect, QRect) or not start_rect.isValid():
             start_rect = QRect(end_rect)
 
-        viewport_rect = self.viewport().rect()
-        if not end_rect.adjusted(-24, -24, 24, 24).intersects(viewport_rect):
-            return
-
         start_center = start_rect.center()
         end_center = end_rect.center()
         overlay = getattr(self, "_masonry_reflow_guide_overlay", None)
@@ -501,6 +494,19 @@ class ImageListViewGeometryMixin:
         self._masonry_reflow_guide_animation = animation
         animation.start()
 
+    def _refresh_thumbnail_size_controls(self):
+        """Refresh footer thumbnail-size controls when the dock is reachable."""
+        dock = self.parentWidget()
+        while dock is not None and not hasattr(dock, "update_thumbnail_size_controls"):
+            dock = dock.parentWidget()
+        if dock is None:
+            host = self.window()
+            candidate = getattr(host, "image_list", None)
+            if hasattr(candidate, "update_thumbnail_size_controls"):
+                dock = candidate
+        if dock is not None and hasattr(dock, "update_thumbnail_size_controls"):
+            dock.update_thumbnail_size_controls()
+
     def _is_full_width_masonry_mode(self) -> bool:
         """Whether masonry currently owns the full workspace width."""
         if not self.use_masonry:
@@ -511,7 +517,7 @@ class ImageListViewGeometryMixin:
         return not bool(getattr(host, "_main_viewer_visible", True))
 
     def _resolve_full_width_masonry_thumbnail_size(self, target_size: int, zoom_direction: int = 0) -> int:
-        """Resolve a target thumbnail size to the closest full-width exact-fit size."""
+        """Resolve a target thumbnail size to the closest exact-fit masonry size."""
         metrics = self._get_masonry_column_metrics() if hasattr(self, "_get_masonry_column_metrics") else None
         if not metrics:
             return int(target_size)
@@ -544,9 +550,50 @@ class ImageListViewGeometryMixin:
         size = usable // cols
         return max(min_size, min(max_size, int(size)))
 
+    def _resolve_requested_thumbnail_size(
+        self,
+        target_size: int,
+        *,
+        zoom_direction: int = 0,
+    ) -> tuple[int, int]:
+        """Return the logical target size and the actual display size to apply."""
+        min_size = int(getattr(self, "min_thumbnail_size", 16) or 16)
+        max_size = int(getattr(self, "max_thumbnail_size", 512) or 512)
+        resolved_target = max(min_size, min(max_size, int(target_size or min_size)))
+
+        masonry_mode = bool(self.use_masonry)
+        if masonry_mode and hasattr(self, "_resolve_full_width_masonry_thumbnail_size"):
+            display_size = self._resolve_full_width_masonry_thumbnail_size(
+                resolved_target,
+                zoom_direction,
+            )
+        else:
+            display_size = resolved_target
+        return int(resolved_target), int(display_size)
+
+    def _step_thumbnail_size_request(
+        self,
+        zoom_direction: int,
+        *,
+        step_px: int = 20,
+    ) -> tuple[int, int]:
+        """Advance thumbnail size by one zoom step using the active zoom model."""
+        zoom_direction = 1 if int(zoom_direction or 0) > 0 else -1
+        masonry_mode = bool(self.use_masonry)
+        base_size = int(
+            getattr(self, "_target_thumbnail_size", self.current_thumbnail_size)
+            if masonry_mode
+            else self.current_thumbnail_size
+        )
+        target_size = base_size + (int(step_px) * zoom_direction)
+        return self._resolve_requested_thumbnail_size(
+            target_size,
+            zoom_direction=zoom_direction,
+        )
+
     def _quantize_full_width_masonry_thumbnail_size(self) -> bool:
-        """Snap thumbnail size to the best-fit full-width masonry size."""
-        if not self._is_full_width_masonry_mode():
+        """Snap thumbnail size to the best-fit masonry size."""
+        if not self.use_masonry:
             return False
 
         target_size = int(getattr(self, "_target_thumbnail_size", getattr(self, "current_thumbnail_size", 0)) or 0)
@@ -559,9 +606,7 @@ class ImageListViewGeometryMixin:
         self._target_thumbnail_size = int(target_size)
         self.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size * 3))
         self._update_view_mode()
-        parent_widget = self.parent()
-        if parent_widget is not None and hasattr(parent_widget, 'update_thumbnail_size_controls'):
-            parent_widget.update_thumbnail_size_controls()
+        self._refresh_thumbnail_size_controls()
         return True
 
     def _on_zoom_resize_idle_finished(self):

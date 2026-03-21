@@ -119,10 +119,10 @@ class ImageList(QDockWidget):
         )
 
         self.decrease_thumbnail_size_button.clicked.connect(
-            lambda: self._adjust_thumbnail_size(-20)
+            lambda: self._step_thumbnail_size(-1)
         )
         self.increase_thumbnail_size_button.clicked.connect(
-            lambda: self._adjust_thumbnail_size(20)
+            lambda: self._step_thumbnail_size(1)
         )
 
         status_layout = QHBoxLayout()
@@ -296,6 +296,15 @@ class ImageList(QDockWidget):
             list_view._update_view_mode()
             settings.setValue('image_list_thumbnail_size', size)
             self.update_thumbnail_size_controls()
+
+    def _step_thumbnail_size(self, zoom_direction: int):
+        """Advance thumbnail size by one zoom step, matching Ctrl+wheel behavior."""
+        main_window = self.window()
+        step_size = getattr(main_window, '_step_image_list_thumbnail_size', None)
+        if callable(step_size):
+            step_size(zoom_direction, persist=True)
+            return
+        self._adjust_thumbnail_size(20 if int(zoom_direction or 0) > 0 else -20)
 
     # DISABLED: Cache warming causes UI blocking
     # def _update_cache_status(self, progress: int, total: int):
