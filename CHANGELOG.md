@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.30] - 2026-03-21
+
+### Added
+
+- Love, bomb, and star state now survive DB rebuilds through sidecar metadata
+- Love / Rate / Bomb sorting is more reliable after folder reloads and masonry repair
+- Keyboard and control-based media navigation stay in sync with reaction state
+- Scrub-zone play/pause uses the same persistent toggle as the main player controls
+
+### Changed
+
+- Improve curator resilience and navigation stability
 ## [1.0.29] - 2026-03-21
 
 ### Added
