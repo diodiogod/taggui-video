@@ -118,6 +118,7 @@ class ImageListView(
         self._selection_log_source = "program"
         self._selection_log_source_until = 0.0
         self._pending_click_commit_index = QPersistentModelIndex()
+        self._pending_click_commit_global = None
         self._pending_targeted_relocation_target_global = None
         self._pending_targeted_relocation_target_page = None
         self._pending_targeted_relocation_reason = None

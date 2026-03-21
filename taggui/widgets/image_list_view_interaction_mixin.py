@@ -957,18 +957,21 @@ class ImageListViewInteractionMixin:
                 self._spawn_drag_origin_global_pos = self._event_global_point(event)
                 self._suppress_selection_commit_until_release = True
                 self._pending_click_commit_index = QPersistentModelIndex()
+                self._pending_click_commit_global = None
             else:
                 self._spawn_drag_start_pos = None
                 self._spawn_drag_index = QPersistentModelIndex()
                 self._spawn_drag_origin_global_pos = QPoint()
                 self._suppress_selection_commit_until_release = False
                 self._pending_click_commit_index = QPersistentModelIndex()
+                self._pending_click_commit_global = None
         else:
             self._spawn_drag_start_pos = None
             self._spawn_drag_index = QPersistentModelIndex()
             self._spawn_drag_origin_global_pos = QPoint()
             self._suppress_selection_commit_until_release = False
             self._pending_click_commit_index = QPersistentModelIndex()
+            self._pending_click_commit_global = None
     
         # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
@@ -1002,6 +1005,7 @@ class ImageListViewInteractionMixin:
 
                     self._mark_selection_log_source("user_click", hold_s=2.5)
                     self._pending_click_commit_index = QPersistentModelIndex(index)
+                    self._pending_click_commit_global = int(clicked_global) if clicked_global >= 0 else None
                     self._user_click_selection_frozen_until = 0.0
                     clicked_global = -1
                     try:
@@ -1025,63 +1029,91 @@ class ImageListViewInteractionMixin:
                         active_exact_target = self._get_active_exact_target_global(source_model=source_model)
                     except Exception:
                         active_exact_target = None
-                    preserve_exact_target_hold = bool(
+                preserve_exact_target_hold = bool(
+                    not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                    and isinstance(active_exact_target, int)
+                    and active_exact_target >= 0
+                    and int(clicked_global) == int(active_exact_target)
+                )
+                stabilize_state = None
+                consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+                if callable(consume_stabilization):
+                    try:
+                        stabilize_state = consume_stabilization(source_model=source_model)
+                    except Exception:
+                        stabilize_state = None
+                if not preserve_exact_target_hold:
+                    self._selected_global_lock_until = 0.0
+                    self._selected_global_lock_value = None
+                    self._clear_explicit_jump_tracking()
+                    if (
                         not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
-                        and isinstance(active_exact_target, int)
-                        and active_exact_target >= 0
-                        and int(clicked_global) == int(active_exact_target)
-                    )
-                    if not preserve_exact_target_hold:
-                        self._selected_global_lock_until = 0.0
-                        self._selected_global_lock_value = None
-                        self._clear_explicit_jump_tracking()
-                    self._strict_jump_target_global = None
-                    self._strict_jump_until = 0.0
-
-                    sel_model = self.selectionModel()
-                    if sel_model is not None:
-                        # Prevent Qt's native auto-scroll-to-current in virtual-list mode.
-                        self._suppress_virtual_auto_scroll_once = True
-                        if modifiers & Qt.ControlModifier:
-                            was_selected = sel_model.isSelected(index)
-                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-                            sel_model.select(
-                                index,
-                                QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
-                            )
-                        elif modifiers & Qt.ShiftModifier:
-                            current = self.currentIndex()
-                            if current.isValid():
-                                start_row = min(current.row(), index.row())
-                                end_row = max(current.row(), index.row())
-                                selection = QItemSelection()
-                                for item_row in range(start_row, end_row + 1):
-                                    item_index = model.index(item_row, 0)
-                                    selection.select(item_index, item_index)
-                                sel_model.select(selection, QItemSelectionModel.Select)
-                                sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-                            else:
-                                sel_model.setCurrentIndex(
-                                    index,
-                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                        and isinstance(clicked_global, int)
+                        and clicked_global >= 0
+                        and isinstance(stabilize_state, dict)
+                    ):
+                        arm_stabilization = getattr(self, "_arm_post_jump_stabilization", None)
+                        if callable(arm_stabilization):
+                            try:
+                                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                            except Exception:
+                                page_size = 1000
+                            try:
+                                arm_stabilization(
+                                    int(clicked_global),
+                                    target_page=max(0, int(clicked_global) // max(1, page_size)),
+                                    reason=str(stabilize_state.get("reason", "browse_click") or "browse_click"),
+                                    hold_s=90.0,
                                 )
+                            except Exception:
+                                pass
+                self._strict_jump_target_global = None
+                self._strict_jump_until = 0.0
+
+                sel_model = self.selectionModel()
+                if sel_model is not None:
+                    # Prevent Qt's native auto-scroll-to-current in virtual-list mode.
+                    self._suppress_virtual_auto_scroll_once = True
+                    if modifiers & Qt.ControlModifier:
+                        was_selected = sel_model.isSelected(index)
+                        sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                        sel_model.select(
+                            index,
+                            QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
+                        )
+                    elif modifiers & Qt.ShiftModifier:
+                        current = self.currentIndex()
+                        if current.isValid():
+                            start_row = min(current.row(), index.row())
+                            end_row = max(current.row(), index.row())
+                            selection = QItemSelection()
+                            for item_row in range(start_row, end_row + 1):
+                                item_index = model.index(item_row, 0)
+                                selection.select(item_index, item_index)
+                            sel_model.select(selection, QItemSelectionModel.Select)
+                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
                         else:
                             sel_model.setCurrentIndex(
-                                    index,
-                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                                )
-                        # If Qt skipped scrollTo for this selection mutation, clear the guard.
-                        QTimer.singleShot(
-                            0,
-                            lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
-                        )
+                                index,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
                     else:
-                        self._suppress_virtual_auto_scroll_once = True
-                        self.setCurrentIndex(index)
-                        QTimer.singleShot(
-                            0,
-                            lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
-                        )
+                        sel_model.setCurrentIndex(
+                                index,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
+                    # If Qt skipped scrollTo for this selection mutation, clear the guard.
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                    )
+                else:
+                    self._suppress_virtual_auto_scroll_once = True
+                    self.setCurrentIndex(index)
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                    )
 
                     try:
                         current_global = self._current_global_from_current_index(source_model)
@@ -1257,15 +1289,44 @@ class ImageListViewInteractionMixin:
                     and active_exact_target >= 0
                     and int(clicked_global) == int(active_exact_target)
                 )
+                stabilize_state = None
+                consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+                if callable(consume_stabilization):
+                    try:
+                        stabilize_state = consume_stabilization(source_model=source_model)
+                    except Exception:
+                        stabilize_state = None
                 if not preserve_exact_target_hold:
                     # Explicit click means user is choosing a new selection identity.
                     self._selected_global_lock_until = 0.0
                     self._selected_global_lock_value = None
                     self._clear_explicit_jump_tracking()
+                    if (
+                        not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                        and isinstance(clicked_global, int)
+                        and clicked_global >= 0
+                        and isinstance(stabilize_state, dict)
+                    ):
+                        arm_stabilization = getattr(self, "_arm_post_jump_stabilization", None)
+                        if callable(arm_stabilization):
+                            try:
+                                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                            except Exception:
+                                page_size = 1000
+                            try:
+                                arm_stabilization(
+                                    int(clicked_global),
+                                    target_page=max(0, int(clicked_global) // max(1, page_size)),
+                                    reason=str(stabilize_state.get("reason", "browse_click") or "browse_click"),
+                                    hold_s=90.0,
+                                )
+                            except Exception:
+                                pass
                 self._strict_jump_target_global = None
                 self._strict_jump_until = 0.0
                 self._mark_selection_log_source("user_click", hold_s=2.5)
                 self._pending_click_commit_index = QPersistentModelIndex(index)
+                self._pending_click_commit_global = int(clicked_global) if clicked_global >= 0 else None
 
                 if modifiers & Qt.ControlModifier:
                     # Ctrl+Click: toggle selection WITHOUT clearing others
@@ -1578,14 +1639,39 @@ class ImageListViewInteractionMixin:
             host = self.window()
             if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
                 commit_index = QModelIndex()
+                pending_global = getattr(self, "_pending_click_commit_global", None)
+                if isinstance(pending_global, int) and pending_global >= 0:
+                    try:
+                        source_model = (
+                            self.model().sourceModel()
+                            if self.model() and hasattr(self.model(), "sourceModel")
+                            else self.model()
+                        )
+                        loaded_row = -1
+                        if source_model is not None and hasattr(source_model, "get_loaded_row_for_global_index"):
+                            loaded_row = int(source_model.get_loaded_row_for_global_index(int(pending_global)))
+                        if loaded_row >= 0 and source_model is not None:
+                            src_idx = source_model.index(loaded_row, 0)
+                            proxy_model = self.model()
+                            if proxy_model is not None and hasattr(proxy_model, "mapFromSource"):
+                                mapped_idx = proxy_model.mapFromSource(src_idx)
+                            else:
+                                mapped_idx = src_idx
+                            if mapped_idx.isValid():
+                                commit_index = mapped_idx
+                    except Exception:
+                        commit_index = QModelIndex()
                 pending_commit = QPersistentModelIndex(
                     getattr(self, "_pending_click_commit_index", QPersistentModelIndex())
                 )
-                if pending_commit.isValid():
+                if (not commit_index.isValid()) and pending_commit.isValid():
                     try:
                         live_model = self.model()
                         if live_model is not None:
-                            live_index = live_model.index(pending_commit.row(), pending_commit.column())
+                            if isinstance(pending_commit, QPersistentModelIndex) and pending_commit.isValid():
+                                live_index = QModelIndex(pending_commit)
+                            else:
+                                live_index = live_model.index(pending_commit.row(), pending_commit.column())
                             if live_index.isValid():
                                 commit_index = live_index
                     except Exception:
@@ -1595,6 +1681,7 @@ class ImageListViewInteractionMixin:
                 except Exception:
                     pass
         self._pending_click_commit_index = QPersistentModelIndex()
+        self._pending_click_commit_global = None
         self._suppress_selection_commit_until_release = False
 
     def leaveEvent(self, event):
