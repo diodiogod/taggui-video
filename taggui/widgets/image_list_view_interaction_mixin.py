@@ -1592,57 +1592,18 @@ class ImageListViewInteractionMixin:
     def _masonry_home_end(self, go_end: bool, source_model):
         """Navigate to first (Home) or last (End) item in paginated masonry.
 
-        Loads the target page synchronously, sets _current_page so the masonry
-        window is computed around the target.  The final scroll + select happens
-        in _on_masonry_calculation_complete via _pending_home_end_nav.
+        Route Home/End through the exact-target jump path. The older dedicated
+        masonry flow had separate page/window math and could drift to nearby
+        viewports; exact jumps are now the more stable path.
         """
         total_items = int(getattr(source_model, '_total_count', 0) or 0)
-        page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
         if total_items <= 0:
             return
 
-        if go_end:
-            target_global_idx = total_items - 1
-            target_page = target_global_idx // page_size
-        else:
-            target_global_idx = 0
-            target_page = 0
-
-        # Ensure the target page is loaded
-        if hasattr(source_model, '_load_page_sync'):
-            if target_page not in getattr(source_model, '_pages', {}):
-                source_model._load_page_sync(target_page)
-                source_model._emit_pages_updated()
-
-        # Set _current_page BEFORE masonry rebuild so the window is centered
-        # on the target page, not the old position.
-        self._current_page = target_page
-
-        # Set scroll position BEFORE masonry rebuild so the layout sees the
-        # correct scroll_val for source_idx determination.
-        sb = self.verticalScrollBar()
-        strategy = self._get_masonry_strategy(source_model)
-        sb.blockSignals(True)
-        if strategy == 'windowed_strict':
-            canonical_max = self._strict_canonical_domain_max(source_model)
-            sb.setMaximum(canonical_max)
-            sb.setValue(canonical_max if go_end else 0)
-        else:
-            sb.setValue(sb.maximum() if go_end else 0)
-        sb.blockSignals(False)
-
-        # Store pending nav — masonry calc is async, so the final scroll + select
-        # is deferred to _on_masonry_calculation_complete.
-        self._pending_home_end_nav = {
-            'go_end': go_end,
-            'target_global_idx': target_global_idx,
-        }
-
-        # Force masonry rebuild — will use _current_page + scroll position
-        self._last_masonry_window_signature = None
-        self._masonry_index_map = None
-        self._last_masonry_signal = "home_end_nav"
-        self._calculate_masonry_layout()
+        target_global_idx = (total_items - 1) if go_end else 0
+        self._pending_home_end_nav = None
+        self._pending_explicit_jump_kind = "index_input"
+        self.go_to_global_index(int(target_global_idx))
 
 
     def _finish_home_end_nav(self):
