@@ -367,34 +367,95 @@ class ImageListView(
         source_model.modelAboutToBeReset.connect(self._clear_selection_cache)
         source_model.modelReset.connect(self._clear_selection_cache)
 
-    def _reaction_feedback_anchor_rect(self) -> QRect:
-        index = self.currentIndex()
-        if not index.isValid():
-            return QRect()
-        rect = self.visualRect(index)
-        if not rect.isValid():
-            return QRect()
+    def _reaction_feedback_anchor_rect(self, target_global: int | None = None) -> QRect:
         viewport_rect = self.viewport().rect()
         if not viewport_rect.isValid():
             return QRect()
-        return rect.intersected(viewport_rect)
 
-    def _position_reaction_feedback_overlay(self):
+        def _clip(rect: QRect) -> QRect:
+            if not isinstance(rect, QRect) or not rect.isValid():
+                return QRect()
+            clipped = rect.intersected(viewport_rect)
+            return clipped if clipped.isValid() else QRect()
+
+        def _rect_for_global(global_index: int | None) -> QRect:
+            if not (isinstance(global_index, int) and global_index >= 0):
+                return QRect()
+            if self.use_masonry:
+                rect = self._selected_masonry_viewport_rect(int(global_index))
+                clipped = _clip(rect)
+                if clipped.isValid():
+                    return clipped
+                try:
+                    painted = getattr(self, "_painted_hit_regions", None) or {}
+                    snap_scroll = int(getattr(self, "_painted_hit_regions_scroll_offset", 0) or 0)
+                    painted_rect = painted.get(int(global_index))
+                    if isinstance(painted_rect, QRect) and painted_rect.isValid():
+                        return _clip(painted_rect.translated(0, -snap_scroll))
+                except Exception:
+                    pass
+                proxy_idx = self._proxy_index_from_global(int(global_index))
+                if proxy_idx.isValid():
+                    clipped = _clip(self.visualRect(proxy_idx))
+                    if clipped.isValid():
+                        return clipped
+                return QRect()
+
+            proxy_idx = self._proxy_index_from_global(int(global_index))
+            if proxy_idx.isValid():
+                clipped = _clip(self.visualRect(proxy_idx))
+                if clipped.isValid():
+                    return clipped
+            return QRect()
+
+        candidates: list[int] = []
+        if isinstance(target_global, int) and target_global >= 0:
+            candidates.append(int(target_global))
+
+        try:
+            exact_target = self._get_active_exact_target_global()
+        except Exception:
+            exact_target = None
+        if isinstance(exact_target, int) and exact_target >= 0 and exact_target not in candidates:
+            candidates.append(int(exact_target))
+
+        stable_selected = getattr(self, "_selected_global_index", None)
+        if isinstance(stable_selected, int) and stable_selected >= 0 and stable_selected not in candidates:
+            candidates.append(int(stable_selected))
+
+        for candidate in candidates:
+            rect = _rect_for_global(candidate)
+            if rect.isValid():
+                return rect
+
+        index = self.currentIndex()
+        if not index.isValid():
+            return QRect()
+        return _clip(self.visualRect(index))
+
+    def _position_reaction_feedback_overlay(self, target_global: int | None = None):
         overlay = getattr(self, "_reaction_feedback_overlay", None)
         if overlay is None or not overlay.isVisible():
             return False
-        anchor_rect = self._reaction_feedback_anchor_rect()
+        anchor_rect = self._reaction_feedback_anchor_rect(target_global=target_global)
         if not anchor_rect.isValid():
             return False
         changed = overlay.reposition(anchor_rect)
         overlay.raise_()
         return changed
 
-    def show_reaction_feedback(self, kind: str, *, enabled: bool | None = None, stars: float | None = None):
+    def show_reaction_feedback(
+        self,
+        kind: str,
+        *,
+        enabled: bool | None = None,
+        stars: float | None = None,
+        target_global: int | None = None,
+    ):
         overlay = getattr(self, "_reaction_feedback_overlay", None)
         if overlay is None:
             return
-        anchor_rect = self._reaction_feedback_anchor_rect()
+        anchor_rect = self._reaction_feedback_anchor_rect(target_global=target_global)
         if not anchor_rect.isValid():
             return
         overlay.show_feedback(kind, enabled=enabled, stars=stars, anchor_rect=anchor_rect)

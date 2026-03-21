@@ -192,8 +192,13 @@ class ReactionFeedbackOverlay(QWidget):
         width = int(round(base_w * scale))
         height = int(round(base_h * scale))
 
-        x_pos = int(round((parent_rect.width() - width) / 2.0))
-        y_pos = int(round((parent_rect.height() - height) / 2.0))
+        if self._anchor_rect.isValid():
+            anchor_center = self._anchor_rect.center()
+            x_pos = int(round(float(anchor_center.x()) - (width / 2.0)))
+            y_pos = int(round(float(anchor_center.y()) - (height / 2.0)))
+        else:
+            x_pos = int(round((parent_rect.width() - width) / 2.0))
+            y_pos = int(round((parent_rect.height() - height) / 2.0))
 
         x_pos = max(margin, min(x_pos, parent_rect.width() - width - margin))
         y_pos = max(margin, min(y_pos, parent_rect.height() - height - margin))

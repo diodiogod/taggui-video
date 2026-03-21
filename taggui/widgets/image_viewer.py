@@ -173,7 +173,7 @@ class ImageViewer(QWidget):
         self._main_controls_overlay_attached = False
         self._reaction_controls_overlay = None
         self._reaction_controls_overlay_attached = False
-        self._reaction_feedback_overlay = ReactionFeedbackOverlay(self)
+        self._reaction_feedback_overlay = ReactionFeedbackOverlay(self.view.viewport())
         self._top_controls_active_overlay = None
         self._main_controls_overlay_zone_height = 54
         self._is_video_loaded = False

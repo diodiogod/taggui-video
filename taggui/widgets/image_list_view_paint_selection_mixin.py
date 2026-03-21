@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
+
 class ImageListViewPaintSelectionMixin:
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""

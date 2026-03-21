@@ -1741,7 +1741,37 @@ class MainWindow(QMainWindow):
             return self.image_viewer
         return self.get_active_viewer()
 
-    def _show_reaction_feedback(self, kind: str, *, enabled: bool | None = None, stars: float | None = None):
+    def _image_to_global_rank(self, image: Image | None) -> int | None:
+        if image is None:
+            return None
+        source_model = getattr(self, "image_list_model", None)
+        if source_model is None:
+            return None
+        try:
+            return int(source_model.images.index(image))
+        except ValueError:
+            pass
+        except Exception:
+            return None
+        target_path = str(getattr(image, "path", "") or "")
+        if not target_path:
+            return None
+        try:
+            for idx, candidate in enumerate(getattr(source_model, "images", []) or []):
+                if str(getattr(candidate, "path", "") or "") == target_path:
+                    return int(idx)
+        except Exception:
+            return None
+        return None
+
+    def _show_reaction_feedback(
+        self,
+        kind: str,
+        *,
+        enabled: bool | None = None,
+        stars: float | None = None,
+        target_global: int | None = None,
+    ):
         """Route reaction feedback to the visible host."""
         if bool(getattr(self, '_main_viewer_visible', True)):
             target = self.get_active_viewer()
@@ -1750,7 +1780,16 @@ class MainWindow(QMainWindow):
                 return
         list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
         if list_view is not None and hasattr(list_view, 'show_reaction_feedback'):
-            list_view.show_reaction_feedback(kind, enabled=enabled, stars=stars)
+            try:
+                self._unfreeze_for_interaction(hold_ms=1500)
+            except Exception:
+                pass
+            list_view.show_reaction_feedback(
+                kind,
+                enabled=enabled,
+                stars=stars,
+                target_global=target_global,
+            )
 
     def _focus_widget_accepts_text(self) -> bool:
         """Return True when the current focus should keep raw key input."""
@@ -4788,9 +4827,11 @@ class MainWindow(QMainWindow):
             )
 
         self._emit_image_rows_changed(changed_images)
+        feedback_target_global = self._image_to_global_rank(changed_images[0]) if changed_images else None
         self._show_reaction_feedback(
             'stars',
             stars=float(rating or 0.0) * 5.0,
+            target_global=feedback_target_global,
         )
         # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
         # Re-apply filter only when the active filter actually depends on rating.
@@ -4873,7 +4914,12 @@ class MainWindow(QMainWindow):
         else:
             feedback_kind = 'bomb'
             feedback_enabled = bool(bomb)
-        self._show_reaction_feedback(feedback_kind, enabled=feedback_enabled)
+        feedback_target_global = self._image_to_global_rank(changed_images[0]) if changed_images else None
+        self._show_reaction_feedback(
+            feedback_kind,
+            enabled=feedback_enabled,
+            target_global=feedback_target_global,
+        )
         if self._filter_uses_reactions(self.proxy_image_list_model.filter):
             self._arm_masonry_refresh_anchor()
             self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
