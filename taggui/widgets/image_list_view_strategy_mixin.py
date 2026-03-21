@@ -1239,7 +1239,7 @@ class ImageListViewStrategyMixin:
             jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
             jump_target = getattr(self, "_last_explicit_jump_target_global", None)
             if (
-                jump_kind in {"index_input", "page_input"}
+                jump_kind == "index_input"
                 and now <= jump_until
                 and isinstance(jump_target, int)
                 and int(jump_target) == int(target_global)

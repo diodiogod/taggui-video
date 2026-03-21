@@ -250,15 +250,32 @@ class ImageListViewInteractionMixin:
 
         try:
             sb = self.verticalScrollBar()
+            viewport_h = max(1, int(self.viewport().height()))
             item_top = int(target_item.get("y", 0))
             item_center_y = item_top + int(target_item.get("height", 0)) // 2
-            target_scroll = max(
-                0,
-                min(
-                    item_center_y - (max(1, int(self.viewport().height())) // 2),
-                    int(sb.maximum()),
-                ),
-            )
+            if reason == "page_input":
+                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                target_page = max(0, int(target_global) // max(1, page_size))
+                page_start = int(target_page) * max(1, page_size)
+                page_end = page_start + max(1, page_size)
+                page_top = item_top
+                try:
+                    for it in (self._masonry_items or []):
+                        idx = int(it.get("index", -1))
+                        if page_start <= idx < page_end:
+                            page_top = min(page_top, int(it.get("y", 0)))
+                except Exception:
+                    page_top = item_top
+                top_margin = max(12, min(48, viewport_h // 12))
+                target_scroll = max(0, min(page_top - top_margin, int(sb.maximum())))
+            else:
+                target_scroll = max(
+                    0,
+                    min(
+                        item_center_y - (viewport_h // 2),
+                        int(sb.maximum()),
+                    ),
+                )
             prev_block = sb.blockSignals(True)
             try:
                 sb.setValue(target_scroll)
@@ -372,6 +389,7 @@ class ImageListViewInteractionMixin:
         page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
         target_page = max(0, int(target_global) // max(1, page_size))
         prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
+        publish_target_page_now = str(reason or "") in {"index_input", "page_drag"}
         self._mark_selection_log_source(str(reason), hold_s=20.0)
         self._selected_global_index = int(target_global)
         self._selected_global_lock_value = int(target_global)
@@ -396,7 +414,7 @@ class ImageListViewInteractionMixin:
                     sync_target_page=True,
                     include_buffer=False,
                     prefer_forward=prefer_forward,
-                    emit_update=False,
+                    emit_update=publish_target_page_now,
                     request_async_window=False,
                     restart_enrichment=False,
                 )
@@ -2432,7 +2450,7 @@ class ImageListViewInteractionMixin:
         total_pages = max(1, (total_items + max(1, page_size) - 1) // max(1, page_size))
         target_page = max(0, min(total_pages - 1, int(page_1_based) - 1))
         target_global = max(0, min(total_items - 1, target_page * max(1, page_size)))
-        self._pending_explicit_jump_kind = "page_input"
+        self._pending_explicit_jump_kind = "index_input"
         diagnostic_print(
             f"{diagnostic_time_prefix()} [jump page requested] page {target_page + 1} via=input",
             detail="essential",
@@ -2485,7 +2503,6 @@ class ImageListViewInteractionMixin:
             "startup_restore",
             "page_drag",
             "index_input",
-            "page_input",
         }:
             return self._start_one_shot_targeted_jump(
                 int(target_global),
