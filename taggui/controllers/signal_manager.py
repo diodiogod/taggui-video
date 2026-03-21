@@ -426,12 +426,20 @@ class SignalManager:
             video_editing_controller.extract_video_range)
         toolbar_manager.extract_range_rough_btn.clicked.connect(
             video_editing_controller.extract_video_range_rough)
+        toolbar_manager.screenshot_frame_btn.clicked.connect(
+            lambda: video_editing_controller.capture_current_video_frame()
+        )
         toolbar_manager.remove_range_action.triggered.connect(
             video_editing_controller.remove_video_range)
         toolbar_manager.remove_frame_action.triggered.connect(
             video_editing_controller.remove_video_frame)
         toolbar_manager.repeat_frame_action.triggered.connect(
             video_editing_controller.repeat_video_frame)
+        video_controls.screenshot_requested.connect(
+            lambda: video_editing_controller.capture_current_video_frame(
+                viewer=self.main_window.image_viewer
+            )
+        )
         toolbar_manager.fix_frame_count_btn.clicked.connect(
             video_editing_controller.fix_video_frame_count)
         toolbar_manager.fix_all_folder_btn.clicked.connect(

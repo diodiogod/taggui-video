@@ -353,6 +353,9 @@ class ImageViewer(QWidget):
     def _apply_static_image_quality_for_scale(self, scale: float | None = None, *, force_full: bool = False):
         if self._is_video_loaded or self.current_image_item is None:
             return
+        if _shiboken_is_valid is not None and not _shiboken_is_valid(self.current_image_item):
+            self.current_image_item = None
+            return
         if bool(getattr(self, "_fast_pan_visual_mode", False)):
             return
 
@@ -383,10 +386,14 @@ class ImageViewer(QWidget):
         ):
             return
 
-        self.current_image_item.setPixmap(pixmap)
-        self.current_image_item.setScale(float(divisor))
-        self.current_image_item.setCacheMode(QGraphicsItem.NoCache)
-        self.current_image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        try:
+            self.current_image_item.setPixmap(pixmap)
+            self.current_image_item.setScale(float(divisor))
+            self.current_image_item.setCacheMode(QGraphicsItem.NoCache)
+            self.current_image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        except RuntimeError:
+            self.current_image_item = None
+            return
         self._static_current_mip_divisor = divisor
         MarkingItem.image_size = QRect(QPoint(0, 0), source_size)
         self._set_scene_rect_for_item(self.current_image_item)

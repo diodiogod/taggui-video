@@ -764,7 +764,7 @@ class ImageListModel(QAbstractListModel):
         """Return the current paginated/global rank for a file path, or -1."""
         try:
             if not self._paginated_mode:
-                for i, img in enumerate(self._image_files):
+                for i, img in enumerate(self.images):
                     if img.path == path:
                         return i
                 return -1
@@ -802,9 +802,9 @@ class ImageListModel(QAbstractListModel):
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
-             # Normal Mode: _image_files is a list of Image objects
+             # Normal Mode
              if not self._paginated_mode:
-                 for i, img in enumerate(self._image_files):
+                 for i, img in enumerate(self.images):
                      if img.path == path:
                          return i
              else:
@@ -908,8 +908,8 @@ class ImageListModel(QAbstractListModel):
         try:
              # Normal Mode
              if not self._paginated_mode:
-                 if 0 <= row < len(self._image_files):
-                     return self._image_files[row]
+                 if 0 <= row < len(self.images):
+                     return self.images[row]
                  return None
              
              # Paginated Mode
@@ -6474,6 +6474,142 @@ class ImageListModel(QAbstractListModel):
         self.beginInsertRows(QModelIndex(), insert_pos, insert_pos)
         self.images.insert(insert_pos, image)
         self.endInsertRows()
+
+    def add_generated_media(self, image_path: Path) -> bool:
+        """Register a known app-created media file without scanning the folder."""
+        return self.add_generated_media_batch([image_path]) > 0
+
+    def add_generated_media_batch(self, image_paths: list[Path]) -> int:
+        """Register multiple known app-created media files without scanning the folder."""
+        resolved_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        for raw_path in image_paths or []:
+            try:
+                image_path = Path(raw_path).resolve()
+            except Exception:
+                continue
+            if not image_path.exists() or image_path in seen_paths:
+                continue
+            seen_paths.add(image_path)
+            resolved_paths.append(image_path)
+
+        if not resolved_paths:
+            return 0
+
+        if not self._paginated_mode:
+            existing_paths: set[Path] = set()
+            for img in self.images:
+                try:
+                    existing_paths.add(Path(getattr(img, 'path', resolved_paths[0])).resolve())
+                except Exception:
+                    continue
+
+            inserted_paths: list[Path] = []
+            for image_path in resolved_paths:
+                if image_path in existing_paths:
+                    continue
+                self.add_image(image_path)
+                existing_paths.add(image_path)
+                inserted_paths.append(image_path)
+
+            if inserted_paths and self._db and self._directory_path:
+                rel_paths: list[str] = []
+                for image_path in inserted_paths:
+                    try:
+                        rel_path = _to_native_relative_path(
+                            str(image_path.relative_to(self._directory_path))
+                        )
+                    except Exception:
+                        continue
+                    if self._db.get_image_id(rel_path) is not None:
+                        continue
+                    rel_paths.append(rel_path)
+                if rel_paths:
+                    self._db.bulk_insert_relative_paths(rel_paths, self._directory_path)
+                    self._index_tags_for_relative_paths(
+                        rel_paths,
+                        db=self._db,
+                        directory_path=self._directory_path,
+                    )
+                    self._db.commit()
+            return len(inserted_paths)
+
+        if not self._db or not self._directory_path:
+            return 0
+
+        rel_paths: list[str] = []
+        inserted_paths: list[Path] = []
+        for image_path in resolved_paths:
+            try:
+                rel_path = _to_native_relative_path(
+                    str(image_path.relative_to(self._directory_path))
+                )
+            except ValueError:
+                continue
+            if self._db.get_image_id(rel_path) is not None:
+                continue
+            rel_paths.append(rel_path)
+            inserted_paths.append(image_path)
+
+        if not rel_paths:
+            return 0
+
+        self._db.bulk_insert_relative_paths(rel_paths, self._directory_path)
+        self._index_tags_for_relative_paths(
+            rel_paths,
+            db=self._db,
+            directory_path=self._directory_path,
+        )
+        self._db.commit()
+
+        loaded_pages = sorted(int(page_num) for page_num in self._pages.keys())
+        new_total = int(self._db.count(
+            filter_sql=self._filter_sql,
+            bindings=self._filter_bindings,
+        ) or 0)
+        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        pages_to_reload = {
+            int(page_num) for page_num in loaded_pages
+            if 0 <= int(page_num) < total_pages
+        }
+
+        for image_path in inserted_paths:
+            inserted_rank = self.get_global_rank_for_path(image_path)
+            if inserted_rank >= 0:
+                inserted_page = int(inserted_rank) // self.PAGE_SIZE
+                if 0 <= inserted_page < total_pages:
+                    pages_to_reload.add(inserted_page)
+
+        if not pages_to_reload and new_total > 0:
+            pages_to_reload.add(0)
+
+        preloaded_pages: dict[int, list[Image]] = {}
+        for page_num in sorted(pages_to_reload):
+            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
+            preloaded_pages[int(page_num)] = page_images
+
+        self.beginResetModel()
+        try:
+            with self._page_load_lock:
+                self._pages.clear()
+                self._loading_pages.clear()
+                self._page_load_order.clear()
+            self.images = []
+            self._total_count = int(new_total)
+        finally:
+            self.endResetModel()
+
+        for page_num in sorted(preloaded_pages.keys()):
+            self._store_page(int(page_num), preloaded_pages[int(page_num)])
+
+        self.total_count_changed.emit(self._total_count)
+        self._emit_paginated_layout_refresh()
+        if preloaded_pages:
+            self._start_paginated_enrichment(
+                window_pages=sorted(preloaded_pages.keys()),
+                scope='window',
+            )
+        return len(inserted_paths)
 
     def _trigger_metadata_backfill_later(self, directory_path):
         """Run metadata backfill in a background thread to avoid blocking UI."""

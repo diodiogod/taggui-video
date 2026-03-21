@@ -1265,7 +1265,7 @@ class ImageIndexDB:
         elif sort_field == 'file_size':
             sort_expr = 'COALESCE(file_size, 0)'
 
-        return sort_field, normalized_dir, sort_expr, f'{sort_expr} {normalized_dir}, id ASC'
+        return sort_field, normalized_dir, sort_expr, f'{sort_expr} {normalized_dir}, id {normalized_dir}'
 
     def get_rank_of_image(self, rel_path: str, sort_field: str = 'file_name', sort_dir: str = 'ASC', 
                           filter_sql: str = '', bindings: tuple = (), **kwargs) -> int:

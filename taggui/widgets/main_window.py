@@ -2380,6 +2380,9 @@ class MainWindow(QMainWindow):
         )
         video_controls.speed_changed.connect(video_player.set_playback_speed)
         video_controls.mute_toggled.connect(video_player.set_muted)
+        video_controls.screenshot_requested.connect(
+            lambda: self.video_editing_controller.capture_current_video_frame(viewer=viewer)
+        )
         if hasattr(video_controls, 'set_exact_frame_resolver'):
             video_controls.set_exact_frame_resolver(video_player.resolve_exact_frame_for_marker)
         video_controls.fixed_marker_size = self.toolbar_manager.fixed_marker_size_spinbox.value()

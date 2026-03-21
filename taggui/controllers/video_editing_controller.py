@@ -1,6 +1,7 @@
 """Controller for video editing operations."""
 
 from pathlib import Path
+from PIL import Image as PILImage
 from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
 from PySide6.QtCore import Qt, QTimer
 from collections import deque
@@ -287,6 +288,84 @@ class VideoEditingController:
 
         QTimer.singleShot(0, lambda: _reload(0))
 
+    def _register_generated_media(self, media_path: Path, *, select: bool = False) -> bool:
+        """Insert a newly created media file into the active collection and DB."""
+        image_list_model = getattr(self.main_window, 'image_list_model', None)
+        if image_list_model is None:
+            return False
+
+        try:
+            resolved_path = Path(media_path).resolve()
+        except Exception:
+            resolved_path = Path(media_path)
+
+        added = bool(image_list_model.add_generated_media(resolved_path))
+        if select:
+            QTimer.singleShot(0, lambda p=resolved_path: self.main_window._select_media_by_path(p))
+        return added
+
+    def _build_screenshot_path(self, video_path: Path, frame_number: int) -> Path:
+        """Build a unique screenshot filename beside the source video."""
+        safe_frame = max(0, int(frame_number))
+        base_name = f"{video_path.stem}_frame_{safe_frame:06d}"
+        candidate = video_path.with_name(f"{base_name}.png")
+        suffix_counter = 2
+        while candidate.exists():
+            candidate = video_path.with_name(f"{base_name}_{suffix_counter}.png")
+            suffix_counter += 1
+        return candidate
+
+    def capture_current_video_frame(self, *, viewer=None):
+        """Save the currently shown video frame as an image in the same folder."""
+        target_viewer = viewer or self.main_window.get_active_viewer()
+        if target_viewer is None:
+            QMessageBox.warning(self.main_window, "No Viewer", "No viewer is active.")
+            return
+
+        video_player = getattr(target_viewer, 'video_player', None)
+        if video_player is None or not getattr(video_player, 'video_path', None):
+            QMessageBox.warning(self.main_window, "No Video", "No video is currently loaded.")
+            return
+
+        input_path = Path(video_player.video_path)
+        frame_number = int(video_player.resolve_exact_frame_for_marker(
+            video_player.get_current_frame_number()
+        ))
+        frame_rgb = video_player.get_frame_as_numpy(frame_number)
+        if frame_rgb is None:
+            QMessageBox.critical(
+                self.main_window,
+                "Screenshot Failed",
+                "Could not extract the current frame from the loaded video.",
+            )
+            return
+
+        output_path = self._build_screenshot_path(input_path, frame_number)
+
+        try:
+            PILImage.fromarray(frame_rgb).save(output_path, format='PNG')
+        except Exception as e:
+            QMessageBox.critical(
+                self.main_window,
+                "Screenshot Failed",
+                f"Could not save screenshot:\n{e}",
+            )
+            return
+
+        if not self._register_generated_media(output_path, select=True):
+            QMessageBox.warning(
+                self.main_window,
+                "Screenshot Saved",
+                f"Saved screenshot but could not register it in the collection:\n{output_path.name}",
+            )
+            return
+
+        QMessageBox.information(
+            self.main_window,
+            "Screenshot Saved",
+            f"Saved current frame {frame_number} as:\n{output_path.name}",
+        )
+
     def _build_extract_copy_path(self, input_path: Path, start_frame: int, end_frame: int) -> Path:
         """Build a unique output path for extract-as-copy operations."""
         directory = input_path.parent
@@ -427,7 +506,7 @@ class VideoEditingController:
                 self._copy_extract_sidecars(input_path, new_path)
                 self._refresh_edited_video_metadata(new_path)
                 QMessageBox.information(self.main_window, "Success", f"Created copy and extracted range:\n{new_path.name}")
-                self.main_window.reload_directory()
+                self._register_generated_media(new_path, select=False)
             else:
                 QMessageBox.critical(self.main_window, "Error", message)
         else:
@@ -631,7 +710,7 @@ class VideoEditingController:
                 if target_fps is not None:
                     operation_desc += f" @ {target_fps}fps"
                 QMessageBox.information(self.main_window, "Success", f"{operation_desc}:\n{new_path.name}")
-                self.main_window.reload_directory()
+                self._register_generated_media(new_path, select=False)
             else:
                 QMessageBox.critical(self.main_window, "Error", message)
         else:

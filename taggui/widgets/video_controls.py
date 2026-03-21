@@ -336,6 +336,7 @@ class VideoControlsWidget(QWidget):
     marker_preview_requested = Signal(int)  # Preview frame during marker drag (doesn't move seekbar)
     skip_backward_requested = Signal()  # Skip 1 second backward
     skip_forward_requested = Signal()  # Skip 1 second forward
+    screenshot_requested = Signal()
     loop_start_set = Signal()
     loop_end_set = Signal()
     loop_reset = Signal()
@@ -3287,6 +3288,12 @@ class VideoControlsWidget(QWidget):
                 background-color: #2196F3;
             }
         """)
+
+        if self._current_frame_count > 0:
+            screenshot_action = QAction("Screenshot Current Frame", self)
+            screenshot_action.triggered.connect(lambda _checked=False: self.screenshot_requested.emit())
+            menu.addAction(screenshot_action)
+            menu.addSeparator()
 
         # Add skin submenu
         skin_menu = menu.addMenu("🎨 Change Skin")

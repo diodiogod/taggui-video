@@ -3581,12 +3581,20 @@ class VideoPlayerWidget(QWidget):
         Returns:
             numpy.ndarray: RGB frame data, or None if extraction fails
         """
+        return self.get_frame_as_numpy()
+
+    def get_frame_as_numpy(self, frame_number: int | None = None):
+        """Extract a specific frame as RGB numpy array for processing."""
         if not self._ensure_cap_ready() or not self.cap:
             return None
 
         try:
-            # Seek to current frame
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+            target_frame = self.current_frame if frame_number is None else int(frame_number)
+            if self.total_frames > 0:
+                target_frame = max(0, min(target_frame, self.total_frames - 1))
+            else:
+                target_frame = max(0, target_frame)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
 
             # Read frame
             ret, frame = self.cap.read()
@@ -3597,7 +3605,8 @@ class VideoPlayerWidget(QWidget):
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             return frame_rgb
         except Exception as e:
-            print(f"Error extracting frame {self.current_frame}: {e}")
+            current_desc = frame_number if frame_number is not None else self.current_frame
+            print(f"Error extracting frame {current_desc}: {e}")
             return None
 
     def set_loop(self, enabled: bool, start_frame: int = None, end_frame: int = None):

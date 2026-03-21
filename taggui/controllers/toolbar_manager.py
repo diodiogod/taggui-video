@@ -59,6 +59,7 @@ class ToolbarManager:
         self.zoom_follow_mode_action = None
         self.fixed_marker_size_spinbox = None
         self.extract_range_action = None
+        self.screenshot_frame_btn = None
         self.extract_range_rough_btn = None
         self.remove_range_action = None
         self.remove_frame_action = None
@@ -481,6 +482,28 @@ class ToolbarManager:
 
     def _create_video_edit_controls(self, toolbar: QToolBar):
         """Create video edit action toolbar controls."""
+        self.screenshot_frame_btn = QPushButton('📸')
+        self.screenshot_frame_btn.setToolTip('Screenshot current frame to image')
+        self.screenshot_frame_btn.setMaximumWidth(32)
+        self.screenshot_frame_btn.setMaximumHeight(32)
+        self.screenshot_frame_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 18px;
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 60);
+                border: 1px solid rgba(0, 0, 0, 150);
+            }
+            QPushButton:pressed {
+                background-color: rgba(0, 0, 0, 90);
+            }
+        """)
+        toolbar.addWidget(self.screenshot_frame_btn)
+
         self.extract_range_rough_btn = QPushButton('🔑')
         self.extract_range_rough_btn.setToolTip(
             'Extract range* (ROUGH: fast keyframe cut, preserves quality, NOT frame-accurate)'

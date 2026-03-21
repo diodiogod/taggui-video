@@ -1,3 +1,5 @@
+import os
+
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewFileOpsMixin:
@@ -171,6 +173,7 @@ class ImageListViewFileOpsMixin:
         source_model = self.proxy_image_list_model.sourceModel()
 
         duplicated_count = 0
+        created_paths = []
         for image in selected_images:
             try:
                 # Generate unique name for duplicate
@@ -189,22 +192,24 @@ class ImageListViewFileOpsMixin:
                     new_path = directory / f"{new_stem}{suffix}"
 
                 # Copy the media file
-                shutil.copy2(original_path, new_path)
+                shutil.copyfile(original_path, new_path)
+                os.utime(new_path, None)
 
                 # Copy caption file if it exists
                 caption_file_path = original_path.with_suffix('.txt')
                 if caption_file_path.exists():
                     new_caption_path = new_path.with_suffix('.txt')
-                    shutil.copy2(caption_file_path, new_caption_path)
+                    shutil.copyfile(caption_file_path, new_caption_path)
+                    os.utime(new_caption_path, None)
 
                 # Copy JSON metadata file if it exists
                 json_file_path = original_path.with_suffix('.json')
                 if json_file_path.exists():
                     new_json_path = new_path.with_suffix('.json')
-                    shutil.copy2(json_file_path, new_json_path)
+                    shutil.copyfile(json_file_path, new_json_path)
+                    os.utime(new_json_path, None)
 
-                # Add the new image to the model
-                source_model.add_image(new_path)
+                created_paths.append(new_path)
 
                 duplicated_count += 1
 
@@ -213,8 +218,8 @@ class ImageListViewFileOpsMixin:
                                      f'Failed to duplicate {image.path}: {str(e)}')
 
         if duplicated_count > 0:
-            # Emit signal to reload directory (this will refresh the list)
-            self.directory_reload_requested.emit()
+            source_model.add_generated_media_batch(created_paths)
+            self.viewport().update()
 
 
     @Slot()
