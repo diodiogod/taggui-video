@@ -1,7 +1,8 @@
 import re
+import time
 from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
-from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPixmap, QTransform
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
@@ -65,6 +66,124 @@ STATIC_IMAGE_MIP_DIVISORS = (1, 2, 4, 8, 16, 32)
 STATIC_IMAGE_MIP_OVERSAMPLE = 1.35
 
 
+class _VideoSeekZoneOverlay(QWidget):
+    """Transparent overlay that paints a glowing double-chevron seek icon."""
+
+    def __init__(self, direction: str, parent=None):
+        super().__init__(parent)
+        self._direction = "backward" if str(direction).lower().startswith("back") else "forward"
+        self._active = False
+        self._feedback_seconds = 0
+        self._pulse_strength = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.hide()
+
+    def set_active(self, active: bool):
+        active = bool(active)
+        if self._active == active:
+            return
+        self._active = active
+        self.update()
+
+    def set_feedback(self, seconds: int, pulse_strength: float = 1.0):
+        self._feedback_seconds = max(0, int(seconds))
+        self._pulse_strength = max(0.0, float(pulse_strength))
+        self.update()
+
+    def clear_feedback(self):
+        if self._feedback_seconds == 0 and self._pulse_strength == 0.0:
+            return
+        self._feedback_seconds = 0
+        self._pulse_strength = 0.0
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect()
+        cx = float(rect.center().x())
+        feedback_visible = self._feedback_seconds > 0
+        cy = float(rect.center().y() - (8 if feedback_visible else 0))
+        pulse = max(self._pulse_strength, 0.0)
+        icon_w = max(24.0, min(46.0, rect.width() * (0.42 + (0.05 * pulse))))
+        icon_h = max(18.0, min(34.0, rect.height() * (0.42 + (0.05 * pulse))))
+        gap = max(5.0, icon_w * 0.16)
+        text_alpha = 0 if self._feedback_seconds <= 0 else int(round(235 * min(1.0, 0.45 + (0.55 * pulse))))
+
+        shadow_pen = QPen(QColor(0, 0, 0, 150 if self._active else 110), (6.5 if self._active else 5.0) + (1.3 * pulse))
+        shadow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        shadow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        glow_pen = QPen(QColor(255, 255, 255, 170 if self._active else 110), (6.0 if self._active else 4.6) + (1.2 * pulse))
+        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        base_pen = QPen(QColor(255, 255, 255, 250 if self._active else 225), (2.4 if self._active else 2.0) + (0.4 * pulse))
+        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        base_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        if self._direction == "backward":
+            tip_x = cx - (gap * 0.5)
+            points = (
+                (
+                    QPointF(tip_x + (icon_w * 0.5), cy - (icon_h * 0.5)),
+                    QPointF(tip_x, cy),
+                    QPointF(tip_x + (icon_w * 0.5), cy + (icon_h * 0.5)),
+                ),
+                (
+                    QPointF(tip_x + icon_w + gap, cy - (icon_h * 0.5)),
+                    QPointF(tip_x + (icon_w * 0.5) + gap, cy),
+                    QPointF(tip_x + icon_w + gap, cy + (icon_h * 0.5)),
+                ),
+            )
+        else:
+            tip_x = cx + (gap * 0.5)
+            points = (
+                (
+                    QPointF(tip_x - (icon_w * 0.5), cy - (icon_h * 0.5)),
+                    QPointF(tip_x, cy),
+                    QPointF(tip_x - (icon_w * 0.5), cy + (icon_h * 0.5)),
+                ),
+                (
+                    QPointF(tip_x - icon_w - gap, cy - (icon_h * 0.5)),
+                    QPointF(tip_x - (icon_w * 0.5) - gap, cy),
+                    QPointF(tip_x - icon_w - gap, cy + (icon_h * 0.5)),
+                ),
+            )
+
+        for pen in (shadow_pen, glow_pen, base_pen):
+            painter.setPen(pen)
+            for a, b, c in points:
+                if pen is shadow_pen:
+                    offset = QPointF(1.0, 2.0)
+                    painter.drawLine(a + offset, b + offset)
+                    painter.drawLine(b + offset, c + offset)
+                else:
+                    painter.drawLine(a, b)
+                    painter.drawLine(b, c)
+
+        if text_alpha > 0:
+            text = f"{self._feedback_seconds}s"
+            font = QFont(painter.font())
+            font.setPixelSize(max(15, min(22, rect.height() // 3)))
+            font.setBold(True)
+            painter.setFont(font)
+            text_rect = QRect(
+                int(rect.left()),
+                int(rect.bottom() - max(24, rect.height() // 3) - 2),
+                int(rect.width()),
+                int(max(24, rect.height() // 3)),
+            )
+            glow_color = QColor(255, 255, 255, max(0, text_alpha - 75))
+            shadow_color = QColor(0, 0, 0, max(0, text_alpha - 20))
+            painter.setPen(QPen(shadow_color, 3.2))
+            painter.drawText(text_rect.translated(0, 1), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, text)
+            painter.setPen(QPen(glow_color, 2.0))
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, text)
+            painter.setPen(QColor(255, 255, 255, text_alpha))
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, text)
 
 
 class ImageViewer(QWidget):
@@ -168,6 +287,8 @@ class ImageViewer(QWidget):
         self.video_controls = VideoControlsWidget(self)
         self.video_controls._is_spawned_owner = self.is_spawned_viewer
         self.video_controls.setVisible(False)
+        self._video_seek_back_overlay = _VideoSeekZoneOverlay("backward", self.view.viewport())
+        self._video_seek_forward_overlay = _VideoSeekZoneOverlay("forward", self.view.viewport())
         # Spawned viewers always use auto-hide to keep multi-view playback responsive.
         if self.is_spawned_viewer:
             self.video_controls_visibility_mode = VIDEO_CONTROLS_VISIBILITY_AUTO
@@ -179,6 +300,12 @@ class ImageViewer(QWidget):
         self.video_controls_never_show = (
             self.video_controls_visibility_mode == VIDEO_CONTROLS_VISIBILITY_OFF
         )
+        self._video_seek_skip_levels = (1, 2, 5, 10)
+        self._video_seek_last_direction = None
+        self._video_seek_last_trigger_at = 0.0
+        self._video_seek_burst_click_count = 0
+        self._video_seek_pending_seconds = 0.0
+        self._video_seek_feedback_token = 0
         self._controls_visible = False
         self._controls_hover_inside = False
         self._main_controls_overlay = None
@@ -207,6 +334,9 @@ class ImageViewer(QWidget):
         self._controls_hide_timer = QTimer(self)
         self._controls_hide_timer.setSingleShot(True)
         self._controls_hide_timer.timeout.connect(self._hide_controls)
+        self._video_seek_commit_timer = QTimer(self)
+        self._video_seek_commit_timer.setSingleShot(True)
+        self._video_seek_commit_timer.timeout.connect(self._commit_pending_video_seek)
         self._main_controls_overlay_poll_timer = QTimer(self)
         self._main_controls_overlay_poll_timer.setInterval(50)
         self._main_controls_overlay_poll_timer.timeout.connect(self._poll_top_controls_overlay_hover)
@@ -1495,6 +1625,8 @@ class ImageViewer(QWidget):
     def apply_floating_double_click_zoom(self, scene_anchor_pos=None, view_anchor_pos=None) -> bool:
         """Adaptive double-click zoom behavior for spawned floating viewers."""
         try:
+            if self._handle_video_seek_zone_double_click(view_anchor_pos):
+                return True
             follow_mode = self.get_zoom_follow_mode()
             if (not self.is_spawned_viewer
                     and follow_mode == ZOOM_FOLLOW_MODE_SCALE_LOCK):
@@ -1778,12 +1910,213 @@ class ImageViewer(QWidget):
         # Raise to ensure it's on top
         self.video_controls.raise_()
 
+    def _position_video_seek_overlays(self):
+        viewport = self.view.viewport()
+        overlay_w = max(72, min(116, int(viewport.width() * 0.16)))
+        overlay_h = 62
+        margin_x = max(12, int(viewport.width() * 0.025))
+        margin_bottom = max(12, int(viewport.height() * 0.04))
+        y = max(0, viewport.height() - overlay_h - margin_bottom)
+        self._video_seek_back_overlay.setGeometry(margin_x, y, overlay_w, overlay_h)
+        self._video_seek_forward_overlay.setGeometry(
+            max(0, viewport.width() - margin_x - overlay_w),
+            y,
+            overlay_w,
+            overlay_h,
+        )
+        self._video_seek_back_overlay.raise_()
+        self._video_seek_forward_overlay.raise_()
+
+    def _set_video_seek_overlay_active(self, direction: str | None):
+        mapping = {
+            "backward": self._video_seek_back_overlay,
+            "forward": self._video_seek_forward_overlay,
+        }
+        for name, overlay in mapping.items():
+            overlay.set_active(name == direction)
+
+    def _hide_video_seek_overlays(self):
+        self._video_seek_back_overlay.hide()
+        self._video_seek_forward_overlay.hide()
+        self._set_video_seek_overlay_active(None)
+        self._video_seek_back_overlay.clear_feedback()
+        self._video_seek_forward_overlay.clear_feedback()
+
+    def _video_seek_zone_at(self, viewer_pos: QPoint | None) -> str | None:
+        if not self._is_video_loaded or viewer_pos is None:
+            return None
+        viewport = self.view.viewport()
+        candidate_points = []
+        try:
+            candidate_points.append(QPoint(int(viewer_pos.x()), int(viewer_pos.y())))
+        except Exception:
+            return None
+        try:
+            mapped = self.mapTo(viewport, viewer_pos)
+            if mapped not in candidate_points:
+                candidate_points.append(mapped)
+        except Exception:
+            pass
+        for point in candidate_points:
+            if self._video_seek_back_overlay.geometry().contains(point):
+                return "backward"
+            if self._video_seek_forward_overlay.geometry().contains(point):
+                return "forward"
+        return None
+
+    def _update_video_seek_overlays(self, viewer_pos: QPoint | None = None):
+        if not self._is_video_loaded or self._compare_mode_active:
+            self._hide_video_seek_overlays()
+            return
+        self._position_video_seek_overlays()
+        in_viewer = False
+        if viewer_pos is not None:
+            try:
+                in_viewer = self.rect().contains(viewer_pos)
+            except Exception:
+                in_viewer = False
+        if not in_viewer:
+            try:
+                in_viewer = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+            except Exception:
+                in_viewer = False
+        if not in_viewer:
+            self._hide_video_seek_overlays()
+            return
+        active_direction = self._video_seek_zone_at(viewer_pos)
+        if active_direction == "backward":
+            self._set_video_seek_overlay_active("backward")
+            self._video_seek_back_overlay.show()
+            self._video_seek_forward_overlay.hide()
+            self._video_seek_forward_overlay.clear_feedback()
+        elif active_direction == "forward":
+            self._set_video_seek_overlay_active("forward")
+            self._video_seek_forward_overlay.show()
+            self._video_seek_back_overlay.hide()
+            self._video_seek_back_overlay.clear_feedback()
+        else:
+            self._hide_video_seek_overlays()
+
+    def _skip_video_seconds(self, seconds: float):
+        if not self._is_video_loaded:
+            return False
+        fps = float(self.video_player.get_fps() or 0.0)
+        total_frames = int(self.video_player.get_total_frames() or 0)
+        current_frame = int(self.video_player.get_current_frame_number() or 0)
+        if fps <= 0.0 or total_frames <= 0:
+            return False
+        frame_offset = max(1, int(round(abs(float(seconds)) * fps)))
+        if float(seconds) < 0.0:
+            new_frame = max(0, current_frame - frame_offset)
+            active_direction = "backward"
+        else:
+            new_frame = min(max(0, total_frames - 1), current_frame + frame_offset)
+            active_direction = "forward"
+        if new_frame == current_frame:
+            return False
+        self.video_player.seek_to_frame(new_frame)
+        self._set_video_seek_overlay_active(active_direction)
+
+        seconds_feedback = int(round(abs(float(seconds))))
+        active_overlay = (
+            self._video_seek_back_overlay
+            if active_direction == "backward"
+            else self._video_seek_forward_overlay
+        )
+        inactive_overlay = (
+            self._video_seek_forward_overlay
+            if active_direction == "backward"
+            else self._video_seek_back_overlay
+        )
+        active_overlay.set_feedback(seconds_feedback, pulse_strength=1.0)
+        active_overlay.show()
+        active_overlay.raise_()
+        inactive_overlay.hide()
+        inactive_overlay.clear_feedback()
+
+        self._video_seek_feedback_token += 1
+        token = int(self._video_seek_feedback_token)
+
+        def _clear_seek_feedback():
+            if token != int(self._video_seek_feedback_token):
+                return
+            active_overlay.clear_feedback()
+            self._set_video_seek_overlay_active(None)
+            try:
+                cursor_viewer_pos = self.mapFromGlobal(QCursor.pos())
+            except Exception:
+                cursor_viewer_pos = None
+            self._update_video_seek_overlays(cursor_viewer_pos)
+
+        QTimer.singleShot(360, _clear_seek_feedback)
+        return True
+
+    def _next_video_seek_skip_seconds(self, direction: str) -> float:
+        direction = "backward" if str(direction).lower().startswith("back") else "forward"
+        now = time.time()
+        accel_window_s = 0.9
+        if (
+            self._video_seek_last_direction == direction
+            and (now - float(self._video_seek_last_trigger_at)) <= accel_window_s
+        ):
+            self._video_seek_burst_click_count = max(1, int(self._video_seek_burst_click_count) + 1)
+        else:
+            self._video_seek_burst_click_count = 1
+        self._video_seek_last_direction = direction
+        self._video_seek_last_trigger_at = now
+        click_count = int(self._video_seek_burst_click_count)
+        if click_count <= len(self._video_seek_skip_levels):
+            seconds = float(self._video_seek_skip_levels[click_count - 1])
+        else:
+            seconds = float((click_count - (len(self._video_seek_skip_levels) - 1)) * 10)
+        return -seconds if direction == "backward" else seconds
+
+    def _commit_pending_video_seek(self):
+        pending_seconds = float(getattr(self, "_video_seek_pending_seconds", 0.0) or 0.0)
+        self._video_seek_pending_seconds = 0.0
+        self._video_seek_burst_click_count = 0
+        if abs(pending_seconds) <= 1e-6:
+            return
+        self._skip_video_seconds(pending_seconds)
+
+    def _handle_video_seek_zone_double_click(self, view_anchor_pos=None) -> bool:
+        direction = self._video_seek_zone_at(view_anchor_pos)
+        if not direction:
+            return False
+        return self.handle_video_seek_zone_click_accumulate(view_anchor_pos)
+
+    def handle_video_seek_zone_click_accumulate(self, view_anchor_pos=None) -> bool:
+        """Start or extend the seek burst with a single click in the seek zone."""
+        direction = self._video_seek_zone_at(view_anchor_pos)
+        if not direction:
+            return False
+        if direction == "backward":
+            skip_seconds = self._next_video_seek_skip_seconds("backward")
+            active_overlay = self._video_seek_back_overlay
+            inactive_overlay = self._video_seek_forward_overlay
+        else:
+            skip_seconds = self._next_video_seek_skip_seconds("forward")
+            active_overlay = self._video_seek_forward_overlay
+            inactive_overlay = self._video_seek_back_overlay
+        self._video_seek_pending_seconds = float(skip_seconds)
+        self._set_video_seek_overlay_active(direction)
+        active_overlay.set_feedback(int(round(abs(skip_seconds))), pulse_strength=1.0)
+        active_overlay.show()
+        active_overlay.raise_()
+        inactive_overlay.hide()
+        inactive_overlay.clear_feedback()
+        self._video_seek_feedback_token += 1
+        self._video_seek_commit_timer.stop()
+        self._video_seek_commit_timer.start(420)
+        return True
+
     def resizeEvent(self, event):
         """Reposition controls when viewer is resized."""
         super().resizeEvent(event)
         # Store visibility state
         was_visible = self.video_controls.isVisible()
         self._position_video_controls()
+        self._position_video_seek_overlays()
         self._position_main_controls_overlay()
         self._position_reaction_controls_overlay()
         self._position_reaction_feedback_overlay()
@@ -1807,6 +2140,7 @@ class ImageViewer(QWidget):
             self.set_compare_split_from_viewer_pos(event.pos())
         if self._is_video_loaded:
             self._process_controls_hover(event.pos())
+            self._update_video_seek_overlays(event.pos())
         self._process_top_controls_overlay_hover(event.pos())
         super().mouseMoveEvent(event)
 
@@ -2162,6 +2496,7 @@ class ImageViewer(QWidget):
                 self.set_compare_split_from_viewer_pos(viewer_pos)
             if viewer_pos is not None and self._is_video_loaded:
                 self._process_controls_hover(viewer_pos)
+                self._update_video_seek_overlays(viewer_pos)
         if event_type in (
             QEvent.Type.MouseButtonPress,
             QEvent.Type.FocusIn,
@@ -2172,11 +2507,13 @@ class ImageViewer(QWidget):
             if self._compare_mode_active:
                 self._sync_compare_split_to_global_cursor()
             self._controls_hover_inside = False
+            self._hide_video_seek_overlays()
         return super().eventFilter(watched, event)
 
     def leaveEvent(self, event):
         if self._compare_mode_active:
             self._sync_compare_split_to_global_cursor()
+        self._hide_video_seek_overlays()
         super().leaveEvent(event)
 
     def _show_controls_temporarily(self):
@@ -2407,6 +2744,7 @@ class ImageViewer(QWidget):
                         # Only show controls immediately in always-show mode.
                         if self.video_controls_visibility_mode == VIDEO_CONTROLS_VISIBILITY_ALWAYS:
                             self._show_controls_permanent()
+                        self._update_video_seek_overlays()
 
                         # Auto-play is deferred until after zoom/layout settles.
                         auto_play_after_layout = bool(self.video_controls.should_auto_play())
@@ -2431,6 +2769,7 @@ class ImageViewer(QWidget):
                 self._controls_hide_timer.stop()
                 self.video_controls.setVisible(False)
                 self._controls_visible = False
+                self._hide_video_seek_overlays()
 
                 # Suspend video playback quickly when switching to still image.
                 # This avoids expensive frame-reset work on backend transitions.

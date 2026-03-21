@@ -167,6 +167,15 @@ class ImageGraphicsView(QGraphicsView):
                                        self.last_pos.x(), view_rect.bottom())
 
     def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and not self.insertion_mode:
+            seek_accumulate_handler = getattr(self.image_viewer, "handle_video_seek_zone_click_accumulate", None)
+            if callable(seek_accumulate_handler):
+                try:
+                    if bool(seek_accumulate_handler(event.pos())):
+                        event.accept()
+                        return
+                except Exception:
+                    pass
         if self._should_start_manual_pan(event):
             self._manual_pan_active = True
             self._manual_pan_last_global_pos = event.globalPosition().toPoint()

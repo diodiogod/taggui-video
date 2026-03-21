@@ -1532,6 +1532,15 @@ class FloatingViewerWindow(QWidget):
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._emit_activated()
                 if event.button() == Qt.MouseButton.LeftButton:
+                    seek_accumulate_handler = getattr(self.viewer, "handle_video_seek_zone_click_accumulate", None)
+                    if callable(seek_accumulate_handler):
+                        try:
+                            view_anchor = self._event_viewport_pos(watched, event)
+                            if bool(seek_accumulate_handler(view_anchor)):
+                                self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
+                                return True
+                        except Exception:
+                            pass
                     local_pos = self.mapFromGlobal(self._event_global_pos(event))
                     zone_name = self._resize_zone_from_local_pos(local_pos)
                     if zone_name is not None:
