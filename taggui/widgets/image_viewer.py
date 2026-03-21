@@ -2485,9 +2485,30 @@ class ImageViewer(QWidget):
         self._video_scrub_overlay.raise_()
         return True
 
+    def _toggle_video_play_pause_from_scrub_zone(self) -> bool:
+        """Toggle playback from the contextual scrub zone without surfacing controls."""
+        if not self._is_video_loaded:
+            return False
+        toggle_handler = getattr(self.video_player, "toggle_play_pause", None)
+        if not callable(toggle_handler):
+            return False
+        try:
+            toggle_handler()
+        except Exception:
+            return False
+        current_progress = self._video_current_progress()
+        if current_progress is not None:
+            self._show_video_scrub_feedback(
+                current_progress,
+                scrub_seconds=self._video_seconds_from_progress(current_progress),
+                duration_ms=360,
+            )
+        return True
+
     def _handle_video_seek_zone_double_click(self, view_anchor_pos=None) -> bool:
         zone = self._video_surface_zone_at(view_anchor_pos)
         if zone == "scrub":
+            self._toggle_video_play_pause_from_scrub_zone()
             return True
         if zone in {"backward", "forward"}:
             return self.handle_video_seek_zone_click_accumulate(view_anchor_pos)
