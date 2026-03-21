@@ -23,6 +23,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/PLAN2_windowed_strict.md`: Windowed strict masonry implementation plan.
 - `docs/MASONRY_WINDOWED_STRICT_HANDOFF.md`: Current masonry strict-mode handoff and known hurdles.
 - `docs/MASONRY_CURRENT_PROBLEMS_MATRIX.md`: Repro matrix and current fail/pass status.
+- `docs/VIDEO_SURFACE_CONTROLS_GUIDE.md`: Contextual hover controls for video seek, scrub, and temporary speed actions.
 
 ## Archived Docs (`docs/archive/`)
 

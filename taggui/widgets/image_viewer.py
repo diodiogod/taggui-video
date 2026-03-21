@@ -2,7 +2,7 @@ import re
 import time
 from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
-from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap, QTransform
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
@@ -273,6 +273,70 @@ class _VideoScrubZoneOverlay(QWidget):
             painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
 
 
+class _VideoPlaybackFeedbackOverlay(QWidget):
+    """Compact transient play/pause feedback shown near the scrub zone."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._kind = "play"
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.hide()
+
+    def show_feedback(self, kind: str):
+        normalized = str(kind or "").strip().lower()
+        self._kind = "pause" if normalized == "pause" else "play"
+        self.update()
+        self.show()
+        self.raise_()
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(6, 6, -6, -6)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(12, 16, 22, 138))
+        painter.drawRoundedRect(rect, 16, 16)
+
+        center = rect.center()
+        icon_rect = QRectF(
+            center.x() - 14.0,
+            center.y() - 14.0,
+            28.0,
+            28.0,
+        )
+
+        if self._kind == "pause":
+            left_bar = QRectF(icon_rect.left() + 3.0, icon_rect.top() + 2.0, 7.0, icon_rect.height() - 4.0)
+            right_bar = QRectF(icon_rect.right() - 10.0, icon_rect.top() + 2.0, 7.0, icon_rect.height() - 4.0)
+            for bar_rect in (left_bar, right_bar):
+                painter.setBrush(QColor(0, 0, 0, 138))
+                painter.drawRoundedRect(bar_rect.translated(1.0, 2.0), 3.0, 3.0)
+                painter.setBrush(QColor(255, 255, 255, 172))
+                painter.drawRoundedRect(bar_rect.adjusted(-0.8, -0.8, 0.8, 0.8), 3.2, 3.2)
+                painter.setBrush(QColor(255, 255, 255, 245))
+                painter.drawRoundedRect(bar_rect, 2.8, 2.8)
+        else:
+            path = QPainterPath()
+            path.moveTo(icon_rect.left() + 4.0, icon_rect.top() + 2.0)
+            path.lineTo(icon_rect.right() - 3.0, center.y())
+            path.lineTo(icon_rect.left() + 4.0, icon_rect.bottom() - 2.0)
+            path.closeSubpath()
+            shadow_transform = QTransform()
+            shadow_transform.translate(1.0, 2.0)
+            painter.setBrush(QColor(0, 0, 0, 138))
+            painter.drawPath(shadow_transform.map(path))
+            glow_transform = QTransform()
+            glow_transform.translate(-0.2, -0.2)
+            painter.setBrush(QColor(255, 255, 255, 172))
+            painter.drawPath(glow_transform.map(path))
+            painter.setBrush(QColor(255, 255, 255, 245))
+            painter.drawPath(path)
+
+
 class ImageViewer(QWidget):
     """Main widget coordinating image/video display, marking, and zoom functionality."""
 
@@ -377,6 +441,7 @@ class ImageViewer(QWidget):
         self._video_seek_back_overlay = _VideoSeekZoneOverlay("backward", self.view.viewport())
         self._video_seek_forward_overlay = _VideoSeekZoneOverlay("forward", self.view.viewport())
         self._video_scrub_overlay = _VideoScrubZoneOverlay(self.view.viewport())
+        self._video_playback_feedback_overlay = _VideoPlaybackFeedbackOverlay(self.view.viewport())
         initial_controls_mode = normalize_video_controls_visibility_mode(
             load_video_controls_visibility_mode()
         )
@@ -444,6 +509,11 @@ class ImageViewer(QWidget):
         self._video_temp_speed_hold_timer = QTimer(self)
         self._video_temp_speed_hold_timer.setSingleShot(True)
         self._video_temp_speed_hold_timer.timeout.connect(self._activate_video_temp_speed_hold)
+        self._video_playback_feedback_timer = QTimer(self)
+        self._video_playback_feedback_timer.setSingleShot(True)
+        self._video_playback_feedback_timer.timeout.connect(
+            lambda: self._video_playback_feedback_overlay.hide()
+        )
         self._main_controls_overlay_poll_timer = QTimer(self)
         self._main_controls_overlay_poll_timer.setInterval(50)
         self._main_controls_overlay_poll_timer.timeout.connect(self._poll_top_controls_overlay_hover)
@@ -509,6 +579,7 @@ class ImageViewer(QWidget):
             getattr(self, "_video_seek_back_overlay", None),
             getattr(self, "_video_seek_forward_overlay", None),
             getattr(self, "_video_scrub_overlay", None),
+            getattr(self, "_video_playback_feedback_overlay", None),
             getattr(self, "_reaction_feedback_overlay", None),
         ):
             if overlay is None:
@@ -2054,6 +2125,17 @@ class ImageViewer(QWidget):
         scrub_y = max(0, viewport.height() - scrub_h - max(14, int(viewport.height() * 0.03)))
         self._video_scrub_overlay.setGeometry(scrub_x, scrub_y, scrub_w, scrub_h)
         self._video_scrub_overlay.raise_()
+        feedback_size = max(48, min(68, int(min(viewport.width(), viewport.height()) * 0.12)))
+        feedback_x = max(0, scrub_x + ((scrub_w - feedback_size) // 2))
+        feedback_y = max(0, scrub_y - feedback_size - 8)
+        self._video_playback_feedback_overlay.setGeometry(
+            feedback_x,
+            feedback_y,
+            feedback_size,
+            feedback_size,
+        )
+        if self._video_playback_feedback_overlay.isVisible():
+            self._video_playback_feedback_overlay.raise_()
 
     def _set_video_seek_overlay_active(self, direction: str | None):
         mapping = {
@@ -2485,6 +2567,15 @@ class ImageViewer(QWidget):
         self._video_scrub_overlay.raise_()
         return True
 
+    def _show_video_playback_feedback(self, kind: str, duration_ms: int = 1000):
+        overlay = getattr(self, "_video_playback_feedback_overlay", None)
+        if overlay is None:
+            return
+        self._position_video_seek_overlays()
+        overlay.show_feedback(kind)
+        self._video_playback_feedback_timer.stop()
+        self._video_playback_feedback_timer.start(max(200, int(duration_ms)))
+
     def _toggle_video_play_pause_from_scrub_zone(self) -> bool:
         """Toggle playback from the contextual scrub zone without surfacing controls."""
         if not self._is_video_loaded:
@@ -2496,13 +2587,8 @@ class ImageViewer(QWidget):
             toggle_handler()
         except Exception:
             return False
-        current_progress = self._video_current_progress()
-        if current_progress is not None:
-            self._show_video_scrub_feedback(
-                current_progress,
-                scrub_seconds=self._video_seconds_from_progress(current_progress),
-                duration_ms=360,
-            )
+        is_playing = bool(getattr(self.video_player, "is_playing", False))
+        self._show_video_playback_feedback("play" if is_playing else "pause", duration_ms=1000)
         return True
 
     def _handle_video_seek_zone_double_click(self, view_anchor_pos=None) -> bool:

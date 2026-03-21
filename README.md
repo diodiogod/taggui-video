@@ -33,6 +33,7 @@ Captioning and tagging remain core to the project, including workflows that supp
 
 - [Install and Launch](docs/GETTING_STARTED.md)
 - [Video Workflow](docs/VIDEO_WORKFLOW_GUIDE.md)
+- [Video Surface Controls](docs/VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Floating Viewers and Compare Mode](docs/FLOATING_VIEWERS_USER_GUIDE.md)
 - [Skins and Skin Designer](docs/SKIN_DESIGNER_GUIDE.md)
 

@@ -107,6 +107,17 @@ Hold mode freezes existing spawned viewers as dimmed, gray, click-through overla
 - Open compare mode: drag a thumbnail onto a target viewer, hold for about 1 second, then release
 - Expand or update an active compare view: drag another source onto the same compare target and hold again
 
+## Contextual Video Surface Controls
+
+- Hover lower left or lower right on a video with hidden controls: reveal contextual seek zones
+- Click, double-click, or hold on a side seek zone: accumulate a seek burst
+- Mouse wheel over a side seek zone: seek in the wheel direction
+- Hover lower center on a video with hidden controls: reveal contextual scrub bar
+- Click the contextual scrub bar: seek to that position
+- Drag the contextual scrub bar: scrub through the video
+- Hold the contextual scrub bar: temporary speed mode
+- Double-click the contextual scrub bar: play/pause
+
 ## Floating Viewer Context Menu
 
 - Sync videos: right-click a floating viewer and choose `Sync video`
@@ -119,6 +130,7 @@ Floating viewers do not have their own fullscreen mode.
 
 - Floating viewer double-click zoom is adaptive, not a fixed single-step zoom.
 - Detailed floating viewer behavior is documented in [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md).
+- Detailed contextual video hover controls are documented in [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md).
 
 ## Continue Reading
 

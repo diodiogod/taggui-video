@@ -16,6 +16,16 @@ The basic video workflow is simple:
 
 This makes TagGUI a practical video media viewer even before you use the editing tools.
 
+## Contextual Surface Controls
+
+When the normal video controls are hidden, the viewer can expose contextual seek and scrub controls directly on top of the video surface.
+
+- left and right hover zones support accumulated seek bursts
+- wheel input over those zones seeks and shows landing feedback
+- the bottom scrub zone supports click-to-seek, drag scrubbing, temporary speed hold, and play/pause toggle by double click
+
+Detailed behavior is documented in [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md).
+
 ## Core Video Workflows
 
 The main video tasks supported in TagGUI Video 1M are:
@@ -219,6 +229,7 @@ Other backend paths exist and may still be useful, but they do not behave identi
 ## Related Docs
 
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Video Backends](VIDEO_BACKENDS.md)
 - [Filtering Guide](FILTERING_GUIDE.md)

@@ -8,6 +8,7 @@ This is the main documentation map for TagGUI Video 1M.
 - [Getting Started](GETTING_STARTED.md)
 - [Feature Overview](FEATURE_OVERVIEW.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
+- [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
 - [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)
 

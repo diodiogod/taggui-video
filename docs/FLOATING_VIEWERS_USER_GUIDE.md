@@ -100,9 +100,11 @@ How to exit compare mode:
 - Speed is per viewer.
 - Loop markers are persisted with viewer scopes (`main`, `floating_*`) so different viewers can keep different marker ranges for the same media.
 - Fullscreen playback/review belongs to the main viewer; floating viewers are intended for side-by-side review, sync, and compare work.
+- When the normal video controls are hidden, spawned viewers use the same contextual surface seek and scrub controls as the main viewer.
 
 ## Related Docs
 
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
+- [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)
