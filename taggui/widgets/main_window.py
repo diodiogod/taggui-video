@@ -2158,6 +2158,13 @@ class MainWindow(QMainWindow):
                 if not getattr(viewer, '_is_video_loaded', False):
                     continue
                 if viewer is active_viewer:
+                    if getattr(viewer, 'video_controls_never_show', False):
+                        viewer._controls_hide_timer.stop()
+                        viewer.video_controls.setVisible(False)
+                        viewer._controls_visible = False
+                        if hasattr(viewer, '_controls_hover_inside'):
+                            viewer._controls_hover_inside = False
+                        continue
                     if viewer.video_controls_auto_hide:
                         pointer_in_zone = False
                         try:

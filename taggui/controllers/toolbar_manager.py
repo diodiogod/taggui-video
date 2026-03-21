@@ -13,7 +13,15 @@ from utils.icons import (
     show_labels_icon,
     show_marking_latent_icon,
 )
-from utils.settings import settings
+from utils.settings import (
+    settings,
+    load_video_controls_visibility_mode,
+    normalize_video_controls_visibility_mode,
+    persist_video_controls_visibility_mode,
+    VIDEO_CONTROLS_VISIBILITY_ALWAYS,
+    VIDEO_CONTROLS_VISIBILITY_AUTO,
+    VIDEO_CONTROLS_VISIBILITY_OFF,
+)
 from widgets.main_viewer_controls_widget import MainViewerControlsWidget
 from widgets.reaction_controls_widget import ReactionControlsWidget
 
@@ -38,6 +46,7 @@ class ToolbarManager:
         self.main_viewer_controls_host_toggle_action = None
         self.reaction_controls_host_toggle_action = None
         self.previous_media_action = None
+        self._action_buttons = {}
         self.next_media_action = None
         self.main_viewer_fullscreen_action = None
         self.zoom_fit_best_action = None
@@ -241,6 +250,21 @@ class ToolbarManager:
                 border-color: #4CAF50;
                 background-color: #2d5a2d;
             }
+            QToolButton[toolbarRole="viewer_action"][videoControlsVisibilityMode="always"] {
+                border-color: #67c587;
+                background-color: #294033;
+                color: #9ae6b4;
+            }
+            QToolButton[toolbarRole="viewer_action"][videoControlsVisibilityMode="auto"] {
+                border-color: #8d98a8;
+                background-color: #424a57;
+                color: #edf2f7;
+            }
+            QToolButton[toolbarRole="viewer_action"][videoControlsVisibilityMode="off"] {
+                border-color: #d98282;
+                background-color: #4d2424;
+                color: #fecaca;
+            }
             QToolButton[toolbarRole="host_toggle"] {
                 font-size: 11px;
                 font-weight: 700;
@@ -265,7 +289,61 @@ class ToolbarManager:
             }
         """)
         toolbar.addWidget(button)
+        self.register_action_button(action, button)
         return button
+
+    def register_action_button(self, action: QAction, button):
+        if action is None or button is None:
+            return
+        self._action_buttons.setdefault(action, []).append(button)
+        if action is self.always_show_controls_action:
+            self._apply_video_controls_visibility_mode_to_button(
+                button,
+                normalize_video_controls_visibility_mode(action.data()),
+            )
+
+    def _apply_video_controls_visibility_mode_to_button(self, button, mode: str):
+        mode = normalize_video_controls_visibility_mode(mode)
+        button.setProperty("videoControlsVisibilityMode", mode)
+        style = button.style()
+        if style is not None:
+            style.unpolish(button)
+            style.polish(button)
+        button.update()
+
+    def set_video_controls_visibility_action_mode(self, mode: str):
+        mode = normalize_video_controls_visibility_mode(mode)
+        action = self.always_show_controls_action
+        if action is None:
+            return
+        action.setData(mode)
+        action.setText('👁')
+        tooltip_map = {
+            VIDEO_CONTROLS_VISIBILITY_ALWAYS: 'Video controls: always shown',
+            VIDEO_CONTROLS_VISIBILITY_AUTO: 'Video controls: auto-hide',
+            VIDEO_CONTROLS_VISIBILITY_OFF: 'Video controls: always hidden',
+        }
+        action.setToolTip(tooltip_map.get(mode, tooltip_map[VIDEO_CONTROLS_VISIBILITY_AUTO]))
+        for button in self._action_buttons.get(action, []):
+            self._apply_video_controls_visibility_mode_to_button(button, mode)
+
+    def cycle_main_viewer_video_controls_visibility_mode(self, _checked: bool = False):
+        current_mode = normalize_video_controls_visibility_mode(
+            self.always_show_controls_action.data()
+            if self.always_show_controls_action is not None
+            else load_video_controls_visibility_mode()
+        )
+        next_mode_map = {
+            VIDEO_CONTROLS_VISIBILITY_ALWAYS: VIDEO_CONTROLS_VISIBILITY_AUTO,
+            VIDEO_CONTROLS_VISIBILITY_AUTO: VIDEO_CONTROLS_VISIBILITY_OFF,
+            VIDEO_CONTROLS_VISIBILITY_OFF: VIDEO_CONTROLS_VISIBILITY_ALWAYS,
+        }
+        next_mode = next_mode_map.get(current_mode, VIDEO_CONTROLS_VISIBILITY_AUTO)
+        persist_video_controls_visibility_mode(next_mode)
+        self.set_video_controls_visibility_action_mode(next_mode)
+        viewer = getattr(self.main_window, 'image_viewer', None)
+        if viewer is not None:
+            viewer.set_video_controls_visibility_mode(next_mode)
 
     def _create_viewer_controls(self, toolbar: QToolBar):
         """Create the combined main-viewer controls group."""
@@ -336,14 +414,9 @@ class ToolbarManager:
         self._add_toolbar_action_button(toolbar, self.zoom_out_action)
 
         self.always_show_controls_action = QAction('👁', self.main_window)
-        self.always_show_controls_action.setCheckable(True)
-        self.always_show_controls_action.setChecked(
-            settings.value('video_always_show_controls', False, type=bool)
-        )
-        self.always_show_controls_action.setToolTip(
-            'Always show video controls for the main viewer'
-        )
+        self.always_show_controls_action.setCheckable(False)
         self._add_toolbar_action_button(toolbar, self.always_show_controls_action)
+        self.set_video_controls_visibility_action_mode(load_video_controls_visibility_mode())
 
         self.zoom_follow_mode_action = QAction('⛶', self.main_window)
         self.zoom_follow_mode_action.setToolTip('Default: Per-image zoom behavior')

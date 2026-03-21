@@ -57,6 +57,7 @@ DEFAULT_SETTINGS = {
     'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving
     'video_ffmpeg_accel_mode': 'none',  # none, cuda
     'video_ffmpeg_cuda_device': 0,
+    'video_controls_visibility_mode': 'auto',  # always, auto, off (main viewer)
 }
 
 
@@ -73,6 +74,46 @@ class Settings(QSettings):
 
 # Common shared instance to ensure the Signal is also shared
 settings = Settings()
+
+VIDEO_CONTROLS_VISIBILITY_ALWAYS = 'always'
+VIDEO_CONTROLS_VISIBILITY_AUTO = 'auto'
+VIDEO_CONTROLS_VISIBILITY_OFF = 'off'
+VIDEO_CONTROLS_VISIBILITY_MODES = (
+    VIDEO_CONTROLS_VISIBILITY_ALWAYS,
+    VIDEO_CONTROLS_VISIBILITY_AUTO,
+    VIDEO_CONTROLS_VISIBILITY_OFF,
+)
+
+
+def normalize_video_controls_visibility_mode(value) -> str:
+    if isinstance(value, bool):
+        return (
+            VIDEO_CONTROLS_VISIBILITY_ALWAYS
+            if value
+            else VIDEO_CONTROLS_VISIBILITY_AUTO
+        )
+    text = str(value or '').strip().lower()
+    if text in VIDEO_CONTROLS_VISIBILITY_MODES:
+        return text
+    return VIDEO_CONTROLS_VISIBILITY_AUTO
+
+
+def load_video_controls_visibility_mode() -> str:
+    raw_mode = settings.value('video_controls_visibility_mode', defaultValue='', type=str)
+    mode = normalize_video_controls_visibility_mode(raw_mode)
+    if str(raw_mode or '').strip():
+        return mode
+    legacy_always_show = settings.value('video_always_show_controls', False, type=bool)
+    return normalize_video_controls_visibility_mode(bool(legacy_always_show))
+
+
+def persist_video_controls_visibility_mode(mode: str):
+    normalized = normalize_video_controls_visibility_mode(mode)
+    settings.setValue('video_controls_visibility_mode', normalized)
+    settings.setValue(
+        'video_always_show_controls',
+        normalized == VIDEO_CONTROLS_VISIBILITY_ALWAYS,
+    )
 
 
 def get_tag_separator() -> str:

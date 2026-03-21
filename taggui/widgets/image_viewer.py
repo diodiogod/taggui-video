@@ -6,7 +6,15 @@ from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRect
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
 from PIL import Image as pilimage
-from utils.settings import settings, DEFAULT_SETTINGS
+from utils.settings import (
+    settings,
+    DEFAULT_SETTINGS,
+    load_video_controls_visibility_mode,
+    normalize_video_controls_visibility_mode,
+    VIDEO_CONTROLS_VISIBILITY_ALWAYS,
+    VIDEO_CONTROLS_VISIBILITY_AUTO,
+    VIDEO_CONTROLS_VISIBILITY_OFF,
+)
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image, ImageMarking, Marking
 from utils.rect import RectPosition
@@ -162,11 +170,15 @@ class ImageViewer(QWidget):
         self.video_controls.setVisible(False)
         # Spawned viewers always use auto-hide to keep multi-view playback responsive.
         if self.is_spawned_viewer:
-            self.video_controls_auto_hide = True
+            self.video_controls_visibility_mode = VIDEO_CONTROLS_VISIBILITY_AUTO
         else:
-            # Main viewer follows user setting (inverted from always_show setting).
-            always_show = settings.value('video_always_show_controls', False, type=bool)
-            self.video_controls_auto_hide = not always_show
+            self.video_controls_visibility_mode = load_video_controls_visibility_mode()
+        self.video_controls_auto_hide = (
+            self.video_controls_visibility_mode == VIDEO_CONTROLS_VISIBILITY_AUTO
+        )
+        self.video_controls_never_show = (
+            self.video_controls_visibility_mode == VIDEO_CONTROLS_VISIBILITY_OFF
+        )
         self._controls_visible = False
         self._controls_hover_inside = False
         self._main_controls_overlay = None
@@ -2169,6 +2181,8 @@ class ImageViewer(QWidget):
 
     def _show_controls_temporarily(self):
         """Show controls and start hide timer."""
+        if self.video_controls_never_show:
+            return
         try:
             _ = self.video_controls.isVisible()
         except RuntimeError:
@@ -2203,6 +2217,8 @@ class ImageViewer(QWidget):
 
     def _show_controls_permanent(self):
         """Show controls permanently (not auto-hide)."""
+        if self.video_controls_never_show:
+            return
         self._controls_hide_timer.stop()
         self.video_controls.setVisible(True)
         self._controls_visible = True
@@ -2211,21 +2227,43 @@ class ImageViewer(QWidget):
             self.video_controls._stabilize_after_geometry_change()
             self._pending_controls_stabilize = False
 
+    def _hide_controls_immediately(self):
+        self._controls_hide_timer.stop()
+        self.video_controls.setVisible(False)
+        self._controls_visible = False
+        self._controls_hover_inside = False
+
+    @Slot(str)
+    def set_video_controls_visibility_mode(self, mode: str, *, show_auto_temporarily: bool = True):
+        """Apply main-viewer video-controls visibility mode."""
+        effective_mode = (
+            VIDEO_CONTROLS_VISIBILITY_AUTO
+            if self.is_spawned_viewer
+            else normalize_video_controls_visibility_mode(mode)
+        )
+        self.video_controls_visibility_mode = effective_mode
+        self.video_controls_auto_hide = effective_mode == VIDEO_CONTROLS_VISIBILITY_AUTO
+        self.video_controls_never_show = effective_mode == VIDEO_CONTROLS_VISIBILITY_OFF
+
+        if not self._is_video_loaded:
+            return
+        if self.video_controls_never_show:
+            self._hide_controls_immediately()
+            return
+        if effective_mode == VIDEO_CONTROLS_VISIBILITY_ALWAYS:
+            self._show_controls_permanent()
+            return
+        if show_auto_temporarily:
+            self._show_controls_temporarily()
+        else:
+            self._hide_controls_immediately()
+
     @Slot(bool)
     def set_always_show_controls(self, always_show: bool):
-        """Toggle always-show mode for video controls."""
-        if self.is_spawned_viewer:
-            # Spawned viewers intentionally remain auto-hide for performance.
-            self.video_controls_auto_hide = True
-            if self._is_video_loaded:
-                self._show_controls_temporarily()
-            return
-        self.video_controls_auto_hide = not always_show
-        if always_show and self._is_video_loaded:
-            self._show_controls_permanent()
-        elif self._is_video_loaded:
-            # Re-enable auto-hide, show temporarily
-            self._show_controls_temporarily()
+        """Backward-compatible bool setter for legacy callers/settings."""
+        self.set_video_controls_visibility_mode(
+            VIDEO_CONTROLS_VISIBILITY_ALWAYS if always_show else VIDEO_CONTROLS_VISIBILITY_AUTO
+        )
 
     def _show_error_placeholder(self, message: str):
         """Display an error message on the scene."""
@@ -2366,8 +2404,8 @@ class ImageViewer(QWidget):
                                 proxy_model=self.proxy_image_list_model
                             )
 
-                        # Only show controls if always-show is enabled
-                        if not self.video_controls_auto_hide:
+                        # Only show controls immediately in always-show mode.
+                        if self.video_controls_visibility_mode == VIDEO_CONTROLS_VISIBILITY_ALWAYS:
                             self._show_controls_permanent()
 
                         # Auto-play is deferred until after zoom/layout settles.
@@ -2532,6 +2570,13 @@ class ImageViewer(QWidget):
 
     @Slot()
     def setting_change(self, key, value):
+        if key in ['video_controls_visibility_mode', 'video_always_show_controls']:
+            if not self.is_spawned_viewer:
+                self.set_video_controls_visibility_mode(
+                    load_video_controls_visibility_mode(),
+                    show_auto_temporarily=False,
+                )
+            return
         if key in ['export_resolution', 'export_bucket_res_size',
                    'export_latent_size', 'export_upscaling',
                    'export_bucket_strategy']:

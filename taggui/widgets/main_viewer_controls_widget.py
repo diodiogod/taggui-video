@@ -65,6 +65,9 @@ class MainViewerControlsWidget(QFrame):
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             if action.icon().isNull():
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        register_button = getattr(self.toolbar_manager, "register_action_button", None)
+        if callable(register_button):
+            register_button(action, button)
         return button
 
     def set_overlay_mode(self, overlay_mode: bool):
@@ -96,6 +99,21 @@ class MainViewerControlsWidget(QFrame):
                 #mainViewerControlsWidget QToolButton[controlRole="viewer_action"]:checked {
                     background: rgba(46, 118, 74, 215);
                     border-color: rgba(163, 230, 186, 200);
+                }
+                #mainViewerControlsWidget QToolButton[controlRole="viewer_action"][videoControlsVisibilityMode="always"] {
+                    background: rgba(46, 118, 74, 215);
+                    border-color: rgba(163, 230, 186, 200);
+                    color: rgba(154, 230, 180, 235);
+                }
+                #mainViewerControlsWidget QToolButton[controlRole="viewer_action"][videoControlsVisibilityMode="auto"] {
+                    background: rgba(62, 70, 82, 195);
+                    border-color: rgba(184, 192, 206, 145);
+                    color: rgba(226, 232, 240, 220);
+                }
+                #mainViewerControlsWidget QToolButton[controlRole="viewer_action"][videoControlsVisibilityMode="off"] {
+                    background: rgba(116, 42, 42, 210);
+                    border-color: rgba(252, 165, 165, 190);
+                    color: rgba(254, 202, 202, 232);
                 }
                 #mainViewerControlsWidget QToolButton[controlRole="host_toggle"] {
                     background: transparent;

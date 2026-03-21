@@ -2,8 +2,6 @@
 
 from PySide6.QtCore import Qt, Slot, QModelIndex
 from widgets.image_viewer import ImageMarking
-from utils.settings import settings
-
 
 class SignalManager:
     """Manages signal connections for main window."""
@@ -413,13 +411,9 @@ class SignalManager:
         # Initialize video_controls.fixed_marker_size from saved settings
         video_controls.fixed_marker_size = toolbar_manager.fixed_marker_size_spinbox.value()
 
-
-        # Always show controls toggle
-        def on_always_show_toggled(checked):
-            self.main_window.image_viewer.set_always_show_controls(checked)
-            settings.setValue('video_always_show_controls', checked)
-
-        toolbar_manager.always_show_controls_action.toggled.connect(on_always_show_toggled)
+        toolbar_manager.always_show_controls_action.triggered.connect(
+            toolbar_manager.cycle_main_viewer_video_controls_visibility_mode
+        )
 
         # Connect video editing buttons
         toolbar_manager.extract_range_action.triggered.connect(
