@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.26] - 2026-03-20
+
+### Added
+
+- Page jumps, exact image jumps, and Home/End navigation are more stable in full masonry mode
+- Double-click now spawns a floating viewer by default, with a setting to switch back to the system default app
+- Auto-spawned viewers stay inside the current monitor on double-click, while drag-spawn still respects the release position
+- Reaction feedback now appears reliably on video thumbnails in full masonry when the main viewer is hidden
+- Batch rating and mixed reaction states are handled more cleanly
+
+### Changed
+
+- Improve masonry jumps, spawned viewers, and reaction feedback
+- Opening media in the system default app behaves better on Windows
 ## [1.0.25] - 2026-03-19
 
 ### Added
