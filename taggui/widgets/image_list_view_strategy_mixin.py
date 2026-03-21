@@ -1613,6 +1613,22 @@ class ImageListViewStrategyMixin:
         # ALL window images enriched — do a single masonry refresh
         self._enrich_first_refresh_done = True
 
+        post_jump_state = None
+        try:
+            post_jump_state = self._consume_post_jump_stabilization(source_model=source_model)
+        except Exception:
+            post_jump_state = None
+        post_jump_reason = (
+            str(post_jump_state.get("reason", "") or "")
+            if isinstance(post_jump_state, dict)
+            else ""
+        )
+        if post_jump_reason == "startup_restore":
+            self._last_masonry_window_signature = None
+            self._last_masonry_signal = "enrichment_complete"
+            self._recalculate_masonry_if_needed("enrichment_complete")
+            return
+
         incremental = self._get_masonry_incremental_service()
         if incremental.is_active and target_pages:
             anchor_global = None
