@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.29] - 2026-03-21
+
+### Added
+
+- Add contextual left and right seek zones with hover, click, hold, and wheel interactions
+- Add a bottom scrub overlay for direct seek, drag scrubbing, and temporary speed control
+- Keep contextual controls hidden while the normal video controls are visible
+
+### Changed
+
+- Improve video seeking and scrubbing interactions
+- Improve consistency between contextual seek actions and the video control bar
+
+### Fixed
+
+- Fix overlay visibility during reverse playback and improve spawned viewer control behavior
 ## [1.0.28] - 2026-03-21
 
 ### Added
