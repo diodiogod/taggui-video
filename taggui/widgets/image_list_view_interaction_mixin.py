@@ -29,7 +29,11 @@ class ImageListViewInteractionMixin:
         if not callable(spawn):
             return False
         try:
-            spawn(index, spawn_global_pos=self._event_global_point(event))
+            spawn(
+                index,
+                spawn_global_pos=self._event_global_point(event),
+                clamp_to_screen=True,
+            )
             return True
         except Exception:
             return False

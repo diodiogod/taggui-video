@@ -2793,6 +2793,35 @@ class MainWindow(QMainWindow):
         height = max(24, height)
         return (width, height)
 
+    def _clamp_spawn_top_left_to_screen(
+        self,
+        top_left: QPoint,
+        size: QSize,
+        *,
+        anchor_global_pos: QPoint | None = None,
+    ) -> QPoint:
+        """Clamp an auto-spawned floating viewer fully inside the target screen."""
+        try:
+            anchor = anchor_global_pos if isinstance(anchor_global_pos, QPoint) else top_left
+            screen = QApplication.screenAt(anchor)
+            if screen is None:
+                screen = self.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return QPoint(top_left)
+            available = screen.availableGeometry()
+            if not available.isValid():
+                return QPoint(top_left)
+
+            width = max(1, int(size.width()))
+            height = max(1, int(size.height()))
+            max_x = max(int(available.left()), int(available.right()) - width + 1)
+            max_y = max(int(available.top()), int(available.bottom()) - height + 1)
+            clamped_x = max(int(available.left()), min(int(top_left.x()), max_x))
+            clamped_y = max(int(available.top()), min(int(top_left.y()), max_y))
+            return QPoint(clamped_x, clamped_y)
+        except Exception:
+            return QPoint(top_left)
+
     def _viewer_global_rect(self, viewer: ImageViewer) -> QRect:
         try:
             top_left = viewer.mapToGlobal(QPoint(0, 0))
@@ -3520,6 +3549,7 @@ class MainWindow(QMainWindow):
         target_index=None,
         spawn_global_pos: QPoint | None = None,
         initial_size_fraction: float | None = None,
+        clamp_to_screen: bool = False,
     ):
         """Create a floating viewer for a specific index and optional global position."""
         if self._viewer_is_fullscreen(self.image_viewer):
@@ -3565,7 +3595,14 @@ class MainWindow(QMainWindow):
         window.resize(spawn_w, spawn_h)
 
         if spawn_global_pos is not None:
-            window.move(spawn_global_pos - QPoint(spawn_w // 2, spawn_h // 2))
+            target_top_left = spawn_global_pos - QPoint(spawn_w // 2, spawn_h // 2)
+            if bool(clamp_to_screen):
+                target_top_left = self._clamp_spawn_top_left_to_screen(
+                    target_top_left,
+                    QSize(spawn_w, spawn_h),
+                    anchor_global_pos=spawn_global_pos,
+                )
+            window.move(target_top_left)
         else:
             offset = 32 * ((self._floating_viewer_spawn_count - 1) % 8)
             top_left = self.mapToGlobal(self.rect().topLeft())
