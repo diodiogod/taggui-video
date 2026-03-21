@@ -129,8 +129,12 @@ class SignalManager:
         toolbar_manager.add_show_marking_latent_action.toggled.connect(image_viewer.show_marking_latent)
 
         # Rating stars
-        image_viewer.rating_changed.connect(self.main_window._sync_rating_controls_from_context)
-        image_viewer.reaction_flags_changed.connect(self.main_window._sync_rating_controls_from_context)
+        image_viewer.rating_changed.connect(
+            lambda *_args: self.main_window._sync_rating_controls_from_viewer(image_viewer)
+        )
+        image_viewer.reaction_flags_changed.connect(
+            lambda *_args: self.main_window._sync_rating_controls_from_viewer(image_viewer)
+        )
         image_viewer.zoom_follow_mode_changed.connect(
             lambda mode: self.main_window.sync_zoom_follow_mode_button(image_viewer)
         )

@@ -2109,13 +2109,13 @@ class MainWindow(QMainWindow):
             target = self.image_viewer
         self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
-            self._sync_rating_controls_from_context()
+            self._sync_rating_controls_from_viewer(target)
             if self._exclusive_video_controls_visibility:
                 self._sync_active_viewer_controls_visibility(target)
             return
         self._active_viewer = target
 
-        self._sync_rating_controls_from_context()
+        self._sync_rating_controls_from_viewer(target)
 
         live_windows = []
         for window in list(getattr(self, '_floating_viewers', [])):
@@ -2203,6 +2203,22 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
         return None
+
+    def _current_list_image(self):
+        """Return the image for the list view's current index, if any."""
+        selection_model = getattr(self, "image_list_selection_model", None)
+        if selection_model is None:
+            return None
+        try:
+            current_index = selection_model.currentIndex()
+        except Exception:
+            return None
+        if not current_index.isValid():
+            return None
+        try:
+            return current_index.data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            return None
 
     def _selected_list_images(self) -> list[Image]:
         list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
@@ -2294,6 +2310,7 @@ class MainWindow(QMainWindow):
 
     def _sync_rating_controls_from_context(self, *_args):
         selected_images = self._selected_list_images()
+        current_list_image = self._current_list_image()
         if len(selected_images) > 1:
             rating_values = {
                 round(float(getattr(image, 'rating', 0.0) or 0.0), 6)
@@ -2316,7 +2333,17 @@ class MainWindow(QMainWindow):
             )
             return
 
-        image = selected_images[0] if selected_images else self._current_viewer_image()
+        image = None
+        if selected_images:
+            image = selected_images[0]
+            if (
+                current_list_image is not None
+                and image is not None
+                and str(getattr(current_list_image, 'path', '') or '') != str(getattr(image, 'path', '') or '')
+            ):
+                image = current_list_image
+        else:
+            image = current_list_image or self._current_viewer_image()
         if image is None:
             self._set_rating_controls_value(0.0, mixed=False)
             self._set_reaction_controls_value(False, False)
@@ -2328,13 +2355,25 @@ class MainWindow(QMainWindow):
         )
 
     def _sync_rating_controls_from_viewer(self, viewer: ImageViewer | None = None):
-        self._sync_rating_controls_from_context()
+        image = self._current_viewer_image(viewer)
+        if image is None:
+            self._set_rating_controls_value(0.0, mixed=False)
+            self._set_reaction_controls_value(False, False)
+            return
+        self._set_rating_controls_value(
+            float(getattr(image, 'rating', 0.0) or 0.0),
+            mixed=False,
+        )
+        self._set_reaction_controls_value(
+            bool(getattr(image, 'love', False)),
+            bool(getattr(image, 'bomb', False)),
+        )
 
     def _connect_floating_viewer(self, viewer: ImageViewer):
         """Bind floating viewer signals to existing main-window slots."""
         viewer.activated.connect(lambda: self.set_active_viewer(viewer))
-        viewer.rating_changed.connect(self._sync_rating_controls_from_context)
-        viewer.reaction_flags_changed.connect(self._sync_rating_controls_from_context)
+        viewer.rating_changed.connect(lambda *_args, current_viewer=viewer: self._sync_rating_controls_from_viewer(current_viewer))
+        viewer.reaction_flags_changed.connect(lambda *_args, current_viewer=viewer: self._sync_rating_controls_from_viewer(current_viewer))
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
         viewer.directory_reload_requested.connect(self.reload_directory)
         viewer.video_player.playback_started.connect(self._freeze_list_view)
@@ -4885,6 +4924,10 @@ class MainWindow(QMainWindow):
         if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
             self._arm_masonry_refresh_anchor()
             self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._refresh_reaction_sort_if_active(
+            changed_images,
+            sync_rating=True,
+        )
         self._sync_rating_controls_from_context()
 
     @Slot(str)
@@ -4970,6 +5013,10 @@ class MainWindow(QMainWindow):
         if self._filter_uses_reactions(self.proxy_image_list_model.filter):
             self._arm_masonry_refresh_anchor()
             self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._refresh_reaction_sort_if_active(
+            changed_images,
+            sync_reactions=True,
+        )
         self._sync_rating_controls_from_context()
 
     def _arm_masonry_refresh_anchor(self):
@@ -5012,6 +5059,41 @@ class MainWindow(QMainWindow):
                 source_model.ensure_pages_for_range(int(target_global), int(target_global) + 1)
             except Exception:
                 pass
+
+    def _refresh_reaction_sort_if_active(
+        self,
+        changed_images: list[Image] | None = None,
+        *,
+        sync_rating: bool = False,
+        sync_reactions: bool = False,
+    ):
+        """Replay reaction sorting after edits when that sort mode is active."""
+        image_list = getattr(self, "image_list", None)
+        if image_list is None:
+            return
+        sort_combo = getattr(image_list, "sort_combo_box", None)
+        if sort_combo is None:
+            return
+        current_sort = str(sort_combo.currentText() or "")
+        if current_sort != 'Love / Rate / Bomb':
+            return
+        model = getattr(self, "image_list_model", None)
+        if bool(getattr(model, "_paginated_mode", False)) and changed_images:
+            for image in changed_images:
+                try:
+                    if sync_rating and hasattr(model, "_save_rating_to_db"):
+                        model._save_rating_to_db(image)
+                    if sync_reactions and hasattr(model, "save_reactions_to_db"):
+                        model.save_reactions_to_db(image)
+                except Exception:
+                    pass
+        def _replay_reaction_sort():
+            current_text = str(sort_combo.currentText() or "")
+            if current_text != 'Love / Rate / Bomb':
+                return
+            self._arm_masonry_refresh_anchor()
+            image_list._on_sort_changed(current_text, preserve_selection=True)
+        QTimer.singleShot(0, _replay_reaction_sort)
 
     def _filter_uses_star_rating(self, filter_node) -> bool:
         """Return True if a filter tree contains a `stars` predicate."""

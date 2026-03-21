@@ -1316,6 +1316,33 @@ class ImageListViewInteractionMixin:
                         self._selected_global_lock_value = None
                         self._clear_explicit_jump_tracking()
 
+        plain_arrow_actions = {
+            Qt.Key.Key_Left: QAbstractItemView.CursorAction.MoveLeft,
+            Qt.Key.Key_Right: QAbstractItemView.CursorAction.MoveRight,
+            Qt.Key.Key_Up: QAbstractItemView.CursorAction.MoveUp,
+            Qt.Key.Key_Down: QAbstractItemView.CursorAction.MoveDown,
+        }
+        if (
+            event.key() in plain_arrow_actions
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            try:
+                next_index = self.moveCursor(plain_arrow_actions[event.key()], event.modifiers())
+            except Exception:
+                next_index = QModelIndex()
+            if next_index.isValid():
+                sel_model = self.selectionModel()
+                if sel_model is not None:
+                    sel_model.setCurrentIndex(
+                        next_index,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    )
+                else:
+                    self.setCurrentIndex(next_index)
+                self.scrollTo(next_index, QAbstractItemView.ScrollHint.EnsureVisible)
+                event.accept()
+                return
+
         # Default behavior for other keys
         super().keyPressEvent(event)
 

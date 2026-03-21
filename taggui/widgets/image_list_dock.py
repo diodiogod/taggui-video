@@ -328,22 +328,36 @@ class ImageList(QDockWidget):
 
     @Slot()
     def go_to_previous_image(self):
-        if self.list_view.selectionModel().currentIndex().row() == 0:
+        selection_model = self.list_view.selectionModel()
+        if selection_model is None:
             return
-        self.list_view.clearSelection()
+        current_index = selection_model.currentIndex()
+        if not current_index.isValid() or current_index.row() == 0:
+            return
         previous_image_index = self.proxy_image_list_model.index(
-            self.list_view.selectionModel().currentIndex().row() - 1, 0)
-        self.list_view.setCurrentIndex(previous_image_index)
+            current_index.row() - 1, 0)
+        selection_model.setCurrentIndex(
+            previous_image_index,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
 
     @Slot()
     def go_to_next_image(self):
-        if (self.list_view.selectionModel().currentIndex().row()
-                == self.proxy_image_list_model.rowCount() - 1):
+        selection_model = self.list_view.selectionModel()
+        if selection_model is None:
             return
-        self.list_view.clearSelection()
+        current_index = selection_model.currentIndex()
+        if (
+            not current_index.isValid()
+            or current_index.row() == self.proxy_image_list_model.rowCount() - 1
+        ):
+            return
         next_image_index = self.proxy_image_list_model.index(
-            self.list_view.selectionModel().currentIndex().row() + 1, 0)
-        self.list_view.setCurrentIndex(next_image_index)
+            current_index.row() + 1, 0)
+        selection_model.setCurrentIndex(
+            next_image_index,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
 
     @Slot()
     def jump_to_first_untagged_image(self):
