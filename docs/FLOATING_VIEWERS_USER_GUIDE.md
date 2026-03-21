@@ -21,7 +21,10 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - Close all shortcut: `Ctrl+Shift+W`
 - Hold existing spawned viewers: `H`
 - Right-click in the main viewer area and spawn.
+- Double-click a thumbnail to spawn a floating viewer from that media.
+- `Ctrl` + double-click the thumbnail to open it in the system default app instead.
 - Drag a thumbnail from list/masonry and release on empty screen area to spawn at drop location.
+- Hold `Alt` while dragging from the list if you want to drag out the real file instead of spawning a viewer.
 
 Spawn actions are blocked while the main viewer is in fullscreen mode.
 

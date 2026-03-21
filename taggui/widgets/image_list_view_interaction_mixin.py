@@ -1,7 +1,46 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
+from utils.settings import DEFAULT_SETTINGS, settings
 
 class ImageListViewInteractionMixin:
+    def _get_image_list_double_click_action(self) -> str:
+        """Return normalized configured double-click action."""
+        try:
+            action = str(
+                settings.value(
+                    'image_list_double_click_action',
+                    defaultValue=DEFAULT_SETTINGS.get('image_list_double_click_action', 'spawn viewer'),
+                    type=str,
+                )
+                or ''
+            ).strip().lower()
+        except Exception:
+            action = ''
+        if action == 'system default app':
+            return 'system_default_app'
+        return 'spawn_viewer'
+
+    def _spawn_viewer_for_double_click(self, index: QModelIndex, event) -> bool:
+        """Open the clicked item in a spawned floating viewer."""
+        if not index.isValid():
+            return False
+        host = self.window()
+        spawn = getattr(host, 'spawn_floating_viewer_at', None)
+        if not callable(spawn):
+            return False
+        try:
+            spawn(index, spawn_global_pos=self._event_global_point(event))
+            return True
+        except Exception:
+            return False
+
+    def _open_double_click_in_system_app(self, image) -> bool:
+        """Open the clicked item with the OS default application."""
+        try:
+            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path))))
+        except Exception:
+            return False
+
     def _drag_to_external_only_mode(self) -> bool:
         """Alt+drag exports files to other apps instead of spawning a viewer."""
         try:
@@ -995,12 +1034,17 @@ class ImageListViewInteractionMixin:
 
     def mouseDoubleClickEvent(self, event):
         """Handle double-click events."""
-        # Only a left-button double-click should open media in the default app.
+        # Only a left-button double-click should trigger media actions.
         if event.button() != Qt.MouseButton.LeftButton:
             super().mouseDoubleClickEvent(event)
             return
 
-        index = self.indexAt(event.pos())
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        index = self._resolve_pressed_index(event.pos(), source_model)
         if index.isValid():
             # Get the image at this index
             image = index.data(Qt.ItemDataRole.UserRole)
@@ -1013,9 +1057,28 @@ class ImageListViewInteractionMixin:
                         show_in_explorer(image.path)
                         event.accept()
                         return
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path)))
-                event.accept()
-                return
+
+                action = self._get_image_list_double_click_action()
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    action = (
+                        'system_default_app'
+                        if action == 'spawn_viewer'
+                        else 'spawn_viewer'
+                    )
+
+                handled = False
+                if action == 'spawn_viewer':
+                    handled = self._spawn_viewer_for_double_click(index, event)
+                    if not handled:
+                        handled = self._open_double_click_in_system_app(image)
+                else:
+                    handled = self._open_double_click_in_system_app(image)
+                    if not handled:
+                        handled = self._spawn_viewer_for_double_click(index, event)
+
+                if handled:
+                    event.accept()
+                    return
 
         # Default behavior for other double-clicks
         super().mouseDoubleClickEvent(event)

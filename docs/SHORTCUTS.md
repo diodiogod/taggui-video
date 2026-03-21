@@ -25,7 +25,8 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 - Duplicate selected images: `Ctrl` + `D`
 - Open selected image in Windows Explorer: `Ctrl` + `E`
 - Open image context menu: right-click an image
-- Open selected image in its default app: double-click
+- Spawn a floating viewer from the clicked image: double-click
+- Open the clicked image in its system default app: `Ctrl` + double-click
 - Open selected image in Windows Explorer: `Alt` + double-click
 - Drag a real file to another app instead of spawning a floating viewer: hold `Alt` while dragging from the image list
 - Spawn a floating viewer by drag and release: drag a thumbnail from the list or masonry view and release it on empty screen space

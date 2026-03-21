@@ -579,7 +579,24 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(diagnostic_log_mode_combo, 3, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=4)
+        grid_layout.addWidget(QLabel('Image double-click action'), 4, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        image_list_double_click_combo = SettingsComboBox(
+            key='image_list_double_click_action',
+            default='spawn viewer')
+        image_list_double_click_combo.addItems(['spawn viewer', 'system default app'])
+        image_list_double_click_combo.setToolTip(
+            'Controls what double-clicking a thumbnail does.\n\n'
+            'spawn viewer: open the clicked media in a spawned floating viewer.\n'
+            'system default app: open the clicked media with the OS default application.\n\n'
+            'Ctrl+double-click always performs the alternate action.\n'
+            'Alt+double-click still opens Windows Explorer.\n'
+            'Applied live (no restart).'
+        )
+        grid_layout.addWidget(image_list_double_click_combo, 4, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=5)
 
         layout.addLayout(grid_layout)
         layout.addStretch()
