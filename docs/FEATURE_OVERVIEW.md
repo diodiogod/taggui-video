@@ -25,6 +25,7 @@ High-level capabilities of TagGUI Video 1M.
 - Half-star ratings plus local love/bomb reactions
 - Auto-captioning integrations
 - Crop/masking workflow
+- Video frame tools including screenshot, extract, remove, repeat, and repair actions
 - Dataset export pipeline
 
 ## Related Docs

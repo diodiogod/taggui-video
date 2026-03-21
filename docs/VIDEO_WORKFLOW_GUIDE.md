@@ -24,6 +24,7 @@ The main video tasks supported in TagGUI Video 1M are:
 - review videos in dedicated main-viewer fullscreen mode
 - navigate by timeline and frames
 - set loop ranges for review or extraction
+- save the current frame as an image
 - compare multiple videos visually
 - sync multiple spawned video viewers
 - extract precise clips or rough keyframe-based clips
@@ -81,6 +82,7 @@ TagGUI Video 1M includes real video editing operations, not just playback contro
 
 Supported editing actions include:
 
+- screenshot current frame
 - rough extract
 - precise extract
 - remove range
@@ -91,6 +93,17 @@ Supported editing actions include:
 - undo video edit
 - redo video edit
 
+These tools are available from the video edit toolbar, and screenshot is also available from the video controls right-click menu.
+
+### Screenshot Current Frame
+
+Screenshot current frame exports the currently shown frame as a still image.
+
+- saves beside the source video
+- uses PNG output
+- adds the new image directly into the current collection
+- useful for dataset prep, reference stills, and frame capture without opening an external editor
+
 ### Rough Extract
 
 Rough extract is the fast option.
@@ -98,6 +111,7 @@ Rough extract is the fast option.
 - no re-encode
 - preserves quality
 - cuts at nearby keyframes
+- supports extract-as-copy output
 - useful for rough trimming and fast dataset prep
 
 ### Precise Extract
@@ -108,8 +122,23 @@ Precise extract is the frame-accurate option.
 - uses the marked range exactly
 - supports optional reverse extraction
 - supports optional speed and FPS changes during extraction
+- supports extract-as-copy output
 
 This is the better path when exact frame count matters.
+
+### In-Place Edits and Backups
+
+Most frame-edit and repair tools work in place on the current video.
+
+- remove range
+- remove frame
+- repeat frame
+- speed change
+- FPS change
+- SAR fix
+- `N*4+1` frame-count fix
+
+When these tools edit the source video directly, TagGUI keeps `.backup` files for recovery instead of treating those backups as new media items.
 
 ## Dataset Preparation Workflows
 
