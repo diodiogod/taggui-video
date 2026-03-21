@@ -393,6 +393,60 @@ class ImageListViewGeometryMixin:
     def _clear_pending_target_reflow_guide(self):
         self._pending_target_reflow_guide_snapshot = None
 
+    def _maybe_show_followup_target_reflow_guide(
+        self,
+        target_global: int | None = None,
+        *,
+        min_move_px: int = 1,
+        cooldown_ms: int = 0,
+        duration_ms: int = 560,
+    ) -> bool:
+        """Replay the target guide when the same item keeps drifting across later settles."""
+        try:
+            if target_global is None:
+                target_global = getattr(self, "_selected_global_index", None)
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0:
+            return False
+
+        last_target = getattr(self, "_last_reflow_guide_target_global", None)
+        last_rect = getattr(self, "_last_reflow_guide_end_rect", QRect())
+        if not (
+            isinstance(last_target, int)
+            and int(last_target) == int(target_global)
+            and isinstance(last_rect, QRect)
+            and last_rect.isValid()
+        ):
+            return False
+
+        import time as _t
+
+        now = _t.time()
+        last_time = float(getattr(self, "_last_reflow_guide_time", 0.0) or 0.0)
+        if (now - last_time) < (max(0, int(cooldown_ms)) / 1000.0):
+            return False
+
+        end_rect = self._selected_masonry_viewport_rect(int(target_global))
+        if not end_rect.isValid():
+            return False
+
+        dx = int(end_rect.center().x()) - int(last_rect.center().x())
+        dy = int(end_rect.center().y()) - int(last_rect.center().y())
+        move_distance = (dx * dx) + (dy * dy)
+        if move_distance < (max(1, int(min_move_px)) ** 2):
+            return False
+
+        self._show_selected_reflow_guide_from_snapshot(
+            {
+                "global_index": int(target_global),
+                "viewport_rect": QRect(last_rect),
+                "duration_ms": int(duration_ms),
+            }
+        )
+        return True
+
     def _queue_target_reflow_guide(self, target_global: int, source_model=None, duration_ms: int | None = None):
         """Queue the selected-item reflow guide so it can play once the target settles."""
         try:
@@ -491,6 +545,10 @@ class ImageListViewGeometryMixin:
                 pass
 
         animation.finished.connect(_cleanup)
+        self._last_reflow_guide_target_global = int(target_global)
+        self._last_reflow_guide_end_rect = QRect(end_rect)
+        import time as _t
+        self._last_reflow_guide_time = _t.time()
         self._masonry_reflow_guide_animation = animation
         animation.start()
 

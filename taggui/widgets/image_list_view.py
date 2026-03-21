@@ -204,6 +204,9 @@ class ImageListView(
         self._exact_jump_settle_token = 0
         self._exact_jump_settle_connected = False
         self._pending_target_reflow_guide_snapshot = None
+        self._last_reflow_guide_target_global = None
+        self._last_reflow_guide_end_rect = QRect()
+        self._last_reflow_guide_time = 0.0
         self._resize_anchor_page = None
         self._resize_anchor_target_global = None
         self._resize_anchor_until = 0.0
@@ -640,6 +643,9 @@ class ImageListView(
         self._exact_jump_settle_token = 0
         self._exact_jump_settle_connected = False
         self._pending_target_reflow_guide_snapshot = None
+        self._last_reflow_guide_target_global = None
+        self._last_reflow_guide_end_rect = QRect()
+        self._last_reflow_guide_time = 0.0
         self._selected_global_lock_until = 0.0
         self._selected_global_lock_value = None
         mw = self.window()
@@ -814,6 +820,14 @@ class ImageListView(
                             )
                         ):
                             return
+                if (
+                    self.use_masonry
+                    and isinstance(prev_global, int)
+                    and prev_global >= 0
+                    and getattr(self, '_mouse_scrolling', False)
+                    and int(global_idx) != int(prev_global)
+                ):
+                    return
                 if (
                     self.use_masonry
                     and isinstance(prev_global, int)

@@ -4844,6 +4844,21 @@ class MainWindow(QMainWindow):
         if mapped < 0:
             return True
 
+        if (
+            view.use_masonry
+            and getattr(view, '_mouse_scrolling', False)
+            and isinstance(selected_global, int)
+            and selected_global >= 0
+            and int(mapped) != int(selected_global)
+        ):
+            schedule_rebind = getattr(view, '_schedule_rebind_current_index_to_selected_global', None)
+            if callable(schedule_rebind):
+                try:
+                    schedule_rebind()
+                except Exception:
+                    pass
+            return True
+
         if isinstance(restore_global, int) and restore_global >= 0 and int(mapped) != int(restore_global):
             return True
 
@@ -5133,6 +5148,39 @@ class MainWindow(QMainWindow):
                         model.save_reactions_to_db(image)
                 except Exception:
                     pass
+            try:
+                view = getattr(image_list, "list_view", None)
+                current_image = None
+                current_selected_global = None
+                if view is not None:
+                    current_index = view.currentIndex()
+                    current_selected_global = getattr(view, "_selected_global_index", None)
+                    if current_index.isValid():
+                        source_index = self.proxy_image_list_model.mapToSource(current_index)
+                        if source_index.isValid():
+                            current_image = model.data(source_index, Qt.ItemDataRole.UserRole)
+                if current_image is not None and any(
+                    getattr(current_image, "path", None) == getattr(image, "path", None)
+                    for image in changed_images
+                ):
+                    if not isinstance(current_selected_global, int) or current_selected_global < 0:
+                        if view is not None and hasattr(model, "get_global_index_for_row"):
+                            try:
+                                source_index = self.proxy_image_list_model.mapToSource(view.currentIndex())
+                                if source_index.isValid():
+                                    candidate = model.get_global_index_for_row(source_index.row())
+                                    if isinstance(candidate, int) and candidate >= 0:
+                                        current_selected_global = int(candidate)
+                            except Exception:
+                                pass
+                    if isinstance(current_selected_global, int) and current_selected_global >= 0:
+                        total_count = int(getattr(model, "_total_count", 0) or 0)
+                        next_global = current_selected_global + 1
+                        if total_count > 0:
+                            next_global = min(next_global, total_count - 1)
+                        setattr(image_list, "_reaction_sort_selection_global_override", int(next_global))
+            except Exception:
+                pass
         def _replay_reaction_sort():
             current_text = str(sort_combo.currentText() or "")
             if current_text != 'Love / Rate / Bomb':

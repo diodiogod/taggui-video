@@ -648,11 +648,19 @@ class MasonryCompletionService:
                                     sb_local.blockSignals(prev_block)
                                 v._last_stable_scroll_value = target_y
                                 try_show_reflow_guide = getattr(v, "_try_show_pending_target_reflow_guide", None)
+                                guide_shown = False
                                 if callable(try_show_reflow_guide):
                                     try:
-                                        try_show_reflow_guide(int(target_global))
+                                        guide_shown = bool(try_show_reflow_guide(int(target_global)))
                                     except Exception:
-                                        pass
+                                        guide_shown = False
+                                if not guide_shown:
+                                    maybe_followup_reflow_guide = getattr(v, "_maybe_show_followup_target_reflow_guide", None)
+                                    if callable(maybe_followup_reflow_guide):
+                                        try:
+                                            maybe_followup_reflow_guide(int(target_global))
+                                        except Exception:
+                                            pass
                                 return
 
                             # Anchor viewport to actual masonry item position.
@@ -688,6 +696,20 @@ class MasonryCompletionService:
                                 and item_top >= cur_scroll
                                 and item_bot <= (cur_scroll + vh)
                             ):
+                                try_show_reflow_guide = getattr(v, "_try_show_pending_target_reflow_guide", None)
+                                guide_shown = False
+                                if callable(try_show_reflow_guide):
+                                    try:
+                                        guide_shown = bool(try_show_reflow_guide(int(target_global)))
+                                    except Exception:
+                                        guide_shown = False
+                                if not guide_shown:
+                                    maybe_followup_reflow_guide = getattr(v, "_maybe_show_followup_target_reflow_guide", None)
+                                    if callable(maybe_followup_reflow_guide):
+                                        try:
+                                            maybe_followup_reflow_guide(int(target_global))
+                                        except Exception:
+                                            pass
                                 return  # Already visible — don't move viewport
 
                             target_y = item_top + (item_bot - item_top) // 2 - (vh // 2)
@@ -700,11 +722,19 @@ class MasonryCompletionService:
                                 sb_local.blockSignals(prev_block)
                             v._last_stable_scroll_value = target_y
                             try_show_reflow_guide = getattr(v, "_try_show_pending_target_reflow_guide", None)
+                            guide_shown = False
                             if callable(try_show_reflow_guide):
                                 try:
-                                    try_show_reflow_guide(int(target_global))
+                                    guide_shown = bool(try_show_reflow_guide(int(target_global)))
                                 except Exception:
-                                    pass
+                                    guide_shown = False
+                            if not guide_shown:
+                                maybe_followup_reflow_guide = getattr(v, "_maybe_show_followup_target_reflow_guide", None)
+                                if callable(maybe_followup_reflow_guide):
+                                    try:
+                                        maybe_followup_reflow_guide(int(target_global))
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
 

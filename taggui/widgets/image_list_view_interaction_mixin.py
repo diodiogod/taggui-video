@@ -178,17 +178,21 @@ class ImageListViewInteractionMixin:
             page_size = 1000
 
         self._selected_global_index = int(target_global)
+        self._current_page = max(0, int(target_global) // max(1, page_size))
         self._selected_global_lock_value = int(target_global)
         self._selected_global_lock_until = max(
             float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0),
             hold_until,
         )
-        self._restore_target_global_index = int(target_global)
-        self._restore_target_page = max(0, int(target_global) // max(1, page_size))
-        self._restore_anchor_until = max(
-            float(getattr(self, "_restore_anchor_until", 0.0) or 0.0),
-            hold_until,
-        )
+        preserve_restore_contract = False
+        current_restore_target = getattr(self, "_restore_target_global_index", None)
+        current_restore_until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+        if (
+            isinstance(current_restore_target, int)
+            and int(current_restore_target) == int(target_global)
+            and current_restore_until > now
+        ):
+            preserve_restore_contract = True
         try:
             jump_kind = getattr(self, "_last_explicit_jump_kind", None)
             jump_target = getattr(self, "_last_explicit_jump_target_global", None)
@@ -197,6 +201,7 @@ class ImageListViewInteractionMixin:
                 and isinstance(jump_target, int)
                 and int(jump_target) == int(target_global)
             ):
+                preserve_restore_contract = True
                 self._last_explicit_jump_until = max(
                     float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0),
                     hold_until,
@@ -207,6 +212,7 @@ class ImageListViewInteractionMixin:
             isinstance(getattr(self, "_exact_jump_settle_target_global", None), int)
             and int(getattr(self, "_exact_jump_settle_target_global", None)) == int(target_global)
         ):
+            preserve_restore_contract = True
             self._exact_jump_settle_until = max(
                 float(getattr(self, "_exact_jump_settle_until", 0.0) or 0.0),
                 hold_until,
@@ -217,8 +223,29 @@ class ImageListViewInteractionMixin:
             and hasattr(mw, "_restore_in_progress")
             and hasattr(mw, "_restore_target_global_rank")
         ):
-            mw._restore_in_progress = True
-            mw._restore_target_global_rank = int(target_global)
+            try:
+                if (
+                    getattr(mw, "_restore_in_progress", False)
+                    and int(getattr(mw, "_restore_target_global_rank", -1) or -1) == int(target_global)
+                ):
+                    preserve_restore_contract = True
+            except Exception:
+                pass
+
+        if preserve_restore_contract:
+            self._restore_target_global_index = int(target_global)
+            self._restore_target_page = max(0, int(target_global) // max(1, page_size))
+            self._restore_anchor_until = max(
+                float(getattr(self, "_restore_anchor_until", 0.0) or 0.0),
+                hold_until,
+            )
+            if (
+                mw is not None
+                and hasattr(mw, "_restore_in_progress")
+                and hasattr(mw, "_restore_target_global_rank")
+            ):
+                mw._restore_in_progress = True
+                mw._restore_target_global_rank = int(target_global)
 
     def _run_exact_jump_settle(self, token: int | None = None):
         import time as _t
@@ -250,6 +277,7 @@ class ImageListViewInteractionMixin:
         target_page = max(0, int(target_global) // max(1, page_size))
 
         self._selected_global_index = int(target_global)
+        self._current_page = int(target_page)
         self._restore_target_global_index = int(target_global)
         self._restore_target_page = int(target_page)
         self._restore_anchor_until = max(
@@ -1502,6 +1530,35 @@ class ImageListViewInteractionMixin:
             sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
         else:
             self.setCurrentIndex(proxy_idx)
+
+        paginated_masonry_active = bool(
+            self.use_masonry
+            and getattr(source_model, '_paginated_mode', False)
+        )
+        if paginated_masonry_active:
+            import time as _t
+
+            self._selected_global_index = int(target_global)
+            self._restore_target_page = int(target_page)
+            self._restore_target_global_index = int(target_global)
+            self._restore_anchor_until = max(
+                float(getattr(self, '_restore_anchor_until', 0.0) or 0.0),
+                _t.time() + 4.0,
+            )
+
+            item_rect = QRect()
+            if getattr(self, '_masonry_items', None):
+                try:
+                    item_rect = self._get_masonry_item_rect(int(target_global))
+                except Exception:
+                    item_rect = QRect()
+
+            if not item_rect.isValid():
+                self._last_masonry_window_signature = None
+                self._calculate_masonry_layout()
+                self.viewport().update()
+                return True
+
         self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
         self.viewport().update()
         return True

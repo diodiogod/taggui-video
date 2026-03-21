@@ -571,13 +571,158 @@ class ImageList(QDockWidget):
             traceback.print_exc()
 
     @Slot()
+    def _arm_sort_restore_anchor(self, source_model, target_global: int):
+        """Keep the selected global item as the masonry restore target after sort."""
+        if not (
+            source_model
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+        ):
+            return
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return
+        if target_global < 0:
+            return
+
+        try:
+            page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        except Exception:
+            page_size = 1000
+
+        import time as _t
+
+        self.list_view._selected_global_index = int(target_global)
+        self.list_view._restore_target_global_index = int(target_global)
+        self.list_view._restore_target_page = max(
+            0,
+            int(target_global) // max(1, page_size),
+        )
+        self.list_view._restore_anchor_until = max(
+            float(getattr(self.list_view, '_restore_anchor_until', 0.0) or 0.0),
+            _t.time() + 4.0,
+        )
+
+    def _start_sort_restore_to_global(self, source_model, target_global: int) -> bool:
+        """Use the stronger startup-style restore flow for sort-triggered reordering."""
+        if not (
+            source_model
+            and hasattr(source_model, '_paginated_mode')
+            and source_model._paginated_mode
+        ):
+            return False
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0:
+            return False
+
+        view = self.list_view
+        self._arm_sort_restore_anchor(source_model, int(target_global))
+        import time as _t
+        hold_until = _t.time() + 30.0
+        view._selected_global_index = int(target_global)
+        view._selected_global_lock_value = int(target_global)
+        view._selected_global_lock_until = max(
+            float(getattr(view, '_selected_global_lock_until', 0.0) or 0.0),
+            hold_until,
+        )
+
+        mw = self.window()
+        if (
+            mw is not None
+            and hasattr(mw, '_restore_in_progress')
+            and hasattr(mw, '_restore_target_global_rank')
+        ):
+            mw._restore_in_progress = True
+            mw._restore_target_global_rank = int(target_global)
+
+        queue_reflow_guide = getattr(view, '_queue_target_reflow_guide', None)
+        if callable(queue_reflow_guide):
+            try:
+                queue_reflow_guide(
+                    int(target_global),
+                    source_model=source_model,
+                    duration_ms=3200,
+                )
+            except Exception:
+                pass
+
+        is_paginated_strict = bool(
+            getattr(view, 'use_masonry', False)
+            and hasattr(view, '_use_local_anchor_masonry')
+            and view._use_local_anchor_masonry(source_model)
+        )
+
+        try:
+            page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
+        except Exception:
+            page_size = 1000
+        target_page = max(0, int(target_global) // max(1, page_size))
+        view._current_page = int(target_page)
+
+        if is_paginated_strict:
+            try:
+                total_count = int(getattr(source_model, '_total_count', 0) or 0)
+                max_page = max(1, (total_count + page_size - 1) // page_size) - 1
+                canonical_max = int(view._strict_canonical_domain_max(source_model))
+                if max_page > 0 and canonical_max > 0:
+                    target_scroll = int(target_page / max_page * canonical_max)
+                    sb = view.verticalScrollBar()
+                    prev_block = sb.blockSignals(True)
+                    try:
+                        sb.setMaximum(canonical_max)
+                        sb.setValue(target_scroll)
+                    finally:
+                        sb.blockSignals(prev_block)
+                    view._last_stable_scroll_value = int(target_scroll)
+            except Exception:
+                pass
+
+        try:
+            if hasattr(source_model, 'ensure_pages_for_range'):
+                start_idx = max(0, int(target_global) - max(1, page_size))
+                end_idx = max(start_idx + 1, int(target_global) + max(1, page_size))
+                source_model.ensure_pages_for_range(start_idx, end_idx)
+        except Exception:
+            pass
+
+        if hasattr(view, '_start_exact_jump_settle'):
+            try:
+                view._start_exact_jump_settle(int(target_global))
+                return True
+            except Exception:
+                pass
+
+        if hasattr(view, '_reanchor_keyboard_to_selected_global'):
+            try:
+                return bool(view._reanchor_keyboard_to_selected_global(source_model, int(target_global)))
+            except Exception:
+                return False
+        return False
+
+    @Slot()
     def _do_scroll_after_sort(self):
         """Scroll to the previously selected image after a sort operation completes."""
+        target_global_override = getattr(self, '_reaction_sort_selection_global_override', None)
+        has_global_override = isinstance(target_global_override, int) and target_global_override >= 0
         if not hasattr(self, '_image_to_scroll_to') or not self._image_to_scroll_to:
-            return
-            
-        selected_image = self._image_to_scroll_to
-        self._image_to_scroll_to = None  # Clear to prevent multiple triggers
+            if not has_global_override:
+                return
+        if has_global_override:
+            try:
+                delattr(self, '_reaction_sort_selection_global_override')
+            except Exception:
+                pass
+            selected_image = None
+        else:
+            selected_image = self._image_to_scroll_to
+        if not has_global_override:
+            self._image_to_scroll_to = None  # Clear to prevent multiple triggers
+        else:
+            self._image_to_scroll_to = None
         
         try:
             # Disconnect to prevent re-triggering from future layouts
@@ -589,30 +734,41 @@ class ImageList(QDockWidget):
             source_model = self.proxy_image_list_model.sourceModel()
             new_proxy_index = QModelIndex()
             
-            if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-                target_global = (
-                    source_model.get_global_rank_for_path(selected_image.path)
-                    if hasattr(source_model, 'get_global_rank_for_path')
+            if has_global_override and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                if self._start_sort_restore_to_global(source_model, int(target_global_override)):
+                    return
+                local_row = (
+                    source_model.get_loaded_row_for_global_index(int(target_global_override))
+                    if hasattr(source_model, 'get_loaded_row_for_global_index')
                     else -1
                 )
-                if isinstance(target_global, int) and target_global >= 0:
-                    self.list_view._selected_global_index = int(target_global)
-                    if hasattr(self.list_view, '_reanchor_keyboard_to_selected_global'):
-                        self.list_view._reanchor_keyboard_to_selected_global(source_model, int(target_global))
-                        return
-                    local_row = (
-                        source_model.get_loaded_row_for_global_index(int(target_global))
-                        if hasattr(source_model, 'get_loaded_row_for_global_index')
-                        else -1
+                if local_row >= 0:
+                    new_proxy_index = self.proxy_image_list_model.mapFromSource(
+                        source_model.index(local_row, 0)
                     )
-                    if local_row >= 0:
-                        new_proxy_index = self.proxy_image_list_model.mapFromSource(
-                            source_model.index(local_row, 0)
-                        )
-            else:
+            elif selected_image is not None:
                 try:
-                    new_source_row = source_model.images.index(selected_image)
-                    new_proxy_index = self.proxy_image_list_model.mapFromSource(source_model.index(new_source_row, 0))
+                    if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                        target_global = (
+                            source_model.get_global_rank_for_path(selected_image.path)
+                            if hasattr(source_model, 'get_global_rank_for_path')
+                            else -1
+                        )
+                        if isinstance(target_global, int) and target_global >= 0:
+                            if self._start_sort_restore_to_global(source_model, int(target_global)):
+                                return
+                            local_row = (
+                                source_model.get_loaded_row_for_global_index(int(target_global))
+                                if hasattr(source_model, 'get_loaded_row_for_global_index')
+                                else -1
+                            )
+                            if local_row >= 0:
+                                new_proxy_index = self.proxy_image_list_model.mapFromSource(
+                                    source_model.index(local_row, 0)
+                                )
+                    else:
+                        new_source_row = source_model.images.index(selected_image)
+                        new_proxy_index = self.proxy_image_list_model.mapFromSource(source_model.index(new_source_row, 0))
                 except (ValueError, AttributeError):
                     pass
 
