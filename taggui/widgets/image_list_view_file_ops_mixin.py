@@ -1,6 +1,45 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewFileOpsMixin:
+    def _open_in_system_default_app(self, file_path: Path) -> bool:
+        """Open a file with the OS default application."""
+        import sys
+
+        try:
+            file_path = Path(file_path)
+        except Exception:
+            return False
+
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+
+                result = ctypes.windll.shell32.ShellExecuteW(
+                    None,
+                    'open',
+                    str(file_path),
+                    None,
+                    None,
+                    1,  # SW_SHOWNORMAL
+                )
+                if int(result) > 32:
+                    return True
+            except Exception:
+                pass
+
+            try:
+                import os
+
+                os.startfile(str(file_path))
+                return True
+            except Exception:
+                return False
+
+        try:
+            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path))))
+        except Exception:
+            return False
+
     @staticmethod
     def _try_retarget_existing_windows_explorer(file_path: Path) -> bool:
         """Reuse an existing Explorer window for the same folder when possible."""
@@ -307,7 +346,7 @@ class ImageListViewFileOpsMixin:
     def open_image(self):
         selected_images = self.get_selected_images()
         image_path = selected_images[0].path
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(image_path)))
+        self._open_in_system_default_app(image_path)
 
 
     @Slot()

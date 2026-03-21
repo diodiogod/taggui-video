@@ -36,6 +36,12 @@ class ImageListViewInteractionMixin:
 
     def _open_double_click_in_system_app(self, image) -> bool:
         """Open the clicked item with the OS default application."""
+        open_in_system_app = getattr(self, "_open_in_system_default_app", None)
+        if callable(open_in_system_app):
+            try:
+                return bool(open_in_system_app(image.path))
+            except Exception:
+                pass
         try:
             return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(image.path))))
         except Exception:
