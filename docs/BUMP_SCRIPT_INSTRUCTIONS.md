@@ -15,6 +15,7 @@ You can also provide an explicit semantic version instead of `patch`, `minor`, o
 ## Rules
 
 - The script reads the current version automatically from `taggui/version.py`.
+- The version-bump commit description and changelog entry must summarize the full set of relevant changes since the previous version bump, not just the most recent commit.
 - The changelog description must be multiline. This is intentional so release notes stay useful.
 - Commit description explains implementation details for developers.
 - Changelog description explains user-facing impact for release notes.
