@@ -60,8 +60,8 @@ class ImageListView(
         proxy_image_list_model.layoutChanged.connect(lambda: self._on_layout_changed())
         proxy_image_list_model.filter_changed.connect(self._on_filter_changed)
 
-        # Handle dimension updates from enrichment (no layout invalidation)
-        source_model.dimensions_updated.connect(lambda: self._recalculate_masonry_if_needed("dimensions_updated"))
+        # Handle dimension updates from enrichment (prefer local incremental reflow)
+        source_model.dimensions_updated.connect(self._on_dimensions_updated)
         source_model.thumbnail_updates_ready.connect(self._on_thumbnail_updates_ready)
         
         # Handle full paginated enrichment completion (requires reloading pages)

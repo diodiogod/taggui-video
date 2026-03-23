@@ -1345,6 +1345,7 @@ class ImageListModel(QAbstractListModel):
         self._dimensions_update_timer.setInterval(300)
         self._dimensions_update_timer.timeout.connect(self._emit_dimensions_updated_debounced)
         self._last_dimensions_emit_at = 0.0
+        self._recent_dimension_update_pages: set[int] = set()
 
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
@@ -1416,6 +1417,14 @@ class ImageListModel(QAbstractListModel):
     def _emit_dimensions_updated_debounced(self):
         self._last_dimensions_emit_at = time.time()
         self.dimensions_updated.emit()
+
+    def consume_recent_dimension_update_pages(self) -> list[int]:
+        """Return and clear pages whose dimensions changed since the last emit."""
+        if not self._recent_dimension_update_pages:
+            return []
+        pages = sorted(int(page) for page in self._recent_dimension_update_pages if isinstance(page, int) and page >= 0)
+        self._recent_dimension_update_pages.clear()
+        return pages
 
     @property
     def is_paginated(self) -> bool:
@@ -2776,6 +2785,15 @@ class ImageListModel(QAbstractListModel):
 
             # Log processing (don't emit signals during enrichment to avoid crashes)
             if updated_indices and not self._suppress_enrichment_signals:
+                if self._paginated_mode:
+                    page_size = max(1, int(getattr(self, 'PAGE_SIZE', 1000) or 1000))
+                    self._recent_dimension_update_pages.update(
+                        int(idx) // page_size for idx in updated_indices if isinstance(idx, int) and idx >= 0
+                    )
+                    # Paginated masonry can now absorb these updates locally via
+                    # incremental page reflow; emit a coalesced signal so visible
+                    # placeholder windows correct themselves without waiting for resize.
+                    self._schedule_dimensions_updated()
                 batch_time = (time.time() - batch_start) * 1000
                 # Disabled: Too spammy for large datasets (1M images)
                 # if processed >= 50:  # Only log significant batches

@@ -253,6 +253,52 @@ class MasonryIncrementalService:
 
         return items
 
+    def reflow_cached_pages_from(self, page_num, items_data_loader):
+        """Recompute a cached contiguous block from page_num downward.
+
+        Returns the list of pages that were recomputed. Later pages ripple from
+        the changed page using the previous cached page's end heights as the
+        fixed upstream boundary.
+        """
+        if not self.is_active:
+            return []
+        if page_num not in self._page_cache:
+            return []
+
+        col_w, spacing, num_cols = self._cache_config
+        cached_pages = sorted(self._page_cache.keys())
+        if not cached_pages:
+            return []
+
+        pages_to_reflow = []
+        cur = int(page_num)
+        while cur in self._page_cache:
+            pages_to_reflow.append(cur)
+            cur += 1
+        if not pages_to_reflow:
+            return []
+
+        first_cached_page = cached_pages[0]
+        if (page_num - 1) in self._page_cache:
+            column_heights = list(self._page_cache[page_num - 1]['end_heights'])
+        else:
+            start_y = int(self._prefix_height if page_num == first_cached_page else 0)
+            column_heights = [start_y] * num_cols
+
+        recomputed = []
+        for p in pages_to_reflow:
+            items_data = []
+            if callable(items_data_loader):
+                items_data = list(items_data_loader(p) or [])
+            items = self._layout_items(items_data, column_heights, col_w, spacing, num_cols)
+            self._page_cache[p] = {
+                'items': items,
+                'end_heights': list(column_heights),
+            }
+            recomputed.append(p)
+
+        return recomputed
+
     def purge_far_pages(self, current_page, max_pages=20):
         """Remove pages that are too far from the current page."""
         if len(self._page_cache) <= max_pages:

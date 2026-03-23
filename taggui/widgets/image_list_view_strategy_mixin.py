@@ -322,6 +322,102 @@ class ImageListViewStrategyMixin:
 
         self.viewport().update()
 
+    def _build_masonry_page_items_data(self, source_model, page_num: int) -> list[tuple[int, float]]:
+        """Build (global_index, aspect_ratio) tuples for one loaded page."""
+        try:
+            page_images = getattr(source_model, '_pages', {}).get(int(page_num), [])
+            page_size = max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000))
+            start_idx = int(page_num) * page_size
+            items_data = []
+            for offset, image in enumerate(page_images):
+                if image is None:
+                    continue
+                items_data.append((start_idx + int(offset), image.aspect_ratio))
+            return items_data
+        except Exception:
+            return []
+
+    def _try_incremental_reflow_changed_pages(self, source_model, changed_pages, *, reason: str = "dimensions_updated") -> bool:
+        """Locally ripple masonry from enriched cached pages forward."""
+        if source_model is None:
+            return False
+        if not (hasattr(source_model, '_paginated_mode') and source_model._paginated_mode):
+            return False
+        if self._get_masonry_strategy(source_model) != "windowed_strict":
+            return False
+
+        incremental = self._get_masonry_incremental_service()
+        if not incremental.is_active:
+            return False
+
+        cached_pages = incremental.get_cached_pages()
+        candidate_pages = sorted(
+            int(page) for page in set(changed_pages or ())
+            if isinstance(page, int) and page in cached_pages
+        )
+        if not candidate_pages:
+            return False
+
+        anchor_global = None
+        anchor_old_y = None
+        try:
+            anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+            if isinstance(anchor_global, int) and anchor_global >= 0:
+                anchor_item = self._get_masonry_item_for_global_index(anchor_global)
+                if anchor_item is not None:
+                    anchor_old_y = int(anchor_item.get('y', 0))
+        except Exception:
+            anchor_global = None
+            anchor_old_y = None
+
+        reflowed_pages = set()
+        for page_num in candidate_pages:
+            if page_num in reflowed_pages:
+                continue
+            page_images = getattr(source_model, '_pages', {}).get(int(page_num))
+            if not page_images or self._page_needs_enrichment(page_images):
+                continue
+
+            changed = incremental.reflow_cached_pages_from(
+                int(page_num),
+                lambda p: self._build_masonry_page_items_data(source_model, p),
+            )
+            if changed:
+                reflowed_pages.update(changed)
+
+        if not reflowed_pages:
+            return False
+
+        self._last_masonry_signal = str(reason or "dimensions_updated")
+        self._apply_incremental_cache_refresh(
+            source_model,
+            anchor_global=anchor_global,
+            anchor_old_y=anchor_old_y,
+        )
+        self._last_masonry_window_signature = None
+        self._check_and_enrich_loaded_pages()
+        self._log_flow(
+            "MASONRY",
+            f"Incremental reflow pages {min(reflowed_pages)}-{max(reflowed_pages)} "
+            f"reason={str(reason or 'dimensions_updated')}",
+            throttle_key="incremental_reflow_changed_pages",
+            every_s=0.2,
+        )
+        return True
+
+    def _on_dimensions_updated(self):
+        """Handle dimension updates with local incremental ripple when possible."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model is None:
+            return
+
+        consume_pages = getattr(source_model, 'consume_recent_dimension_update_pages', None)
+        changed_pages = consume_pages() if callable(consume_pages) else []
+        if self._try_incremental_reflow_changed_pages(source_model, changed_pages, reason="dimensions_updated"):
+            return
+
+        self._recalculate_masonry_if_needed("dimensions_updated")
+
     def _get_current_or_selected_global_index(self, source_model=None) -> int | None:
         """Resolve the current stable global index without mutating selection."""
         target_global = getattr(self, '_selected_global_index', None)
@@ -1608,6 +1704,13 @@ class ImageListViewStrategyMixin:
         # restore completes, and the masonry refresh overwrites the scroll position.
         actual = getattr(source_model, '_enrichment_actual_count', -1)
         if actual == 0:
+            return
+
+        if target_pages and self._try_incremental_reflow_changed_pages(
+            source_model,
+            target_pages,
+            reason="enrichment_complete",
+        ):
             return
 
         # ALL window images enriched — do a single masonry refresh
