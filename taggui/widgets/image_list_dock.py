@@ -1,6 +1,7 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_view import ImageListView
-from PySide6.QtWidgets import QSizePolicy, QComboBox
+from PySide6.QtWidgets import QSizePolicy, QTabBar
+from utils.settings import DEFAULT_SETTINGS
 
 class ClickableLabel(QLabel):
     clicked = Signal()
@@ -11,6 +12,60 @@ class ClickableLabel(QLabel):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class MediaTypeTabBar(QTabBar):
+    currentTextChanged = Signal(str)
+
+    def __init__(self, key: str, parent=None):
+        super().__init__(parent)
+        self.key = key
+        self._labels: list[str] = []
+        self.setDocumentMode(True)
+        self.setDrawBase(False)
+        self.setExpanding(False)
+        self.setUsesScrollButtons(False)
+        self.setElideMode(Qt.TextElideMode.ElideNone)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.currentChanged.connect(self._on_current_changed)
+
+        if not settings.contains(key):
+            settings.setValue(key, DEFAULT_SETTINGS.get(key, 'All'))
+
+    def addItems(self, texts: list[str]):
+        for text in texts:
+            label = str(text)
+            self.addTab(label)
+            self._labels.append(label)
+        saved = str(settings.value(self.key, type=str) or '')
+        if saved:
+            self.setCurrentText(saved)
+        elif self.count() > 0:
+            self.setCurrentIndex(0)
+
+    def currentText(self) -> str:
+        index = self.currentIndex()
+        if 0 <= index < len(self._labels):
+            return self._labels[index]
+        return ''
+
+    def setCurrentText(self, text: str):
+        try:
+            index = self._labels.index(str(text))
+        except ValueError:
+            return
+        self.setCurrentIndex(index)
+
+    def itemText(self, index: int) -> str:
+        if 0 <= index < len(self._labels):
+            return self._labels[index]
+        return ''
+
+    def _on_current_changed(self, index: int):
+        text = self.itemText(index)
+        if text:
+            settings.setValue(self.key, text)
+        self.currentTextChanged.emit(text)
 
 
 class ImageList(QDockWidget):
@@ -35,24 +90,11 @@ class ImageList(QDockWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Fixed,
         )
+        self.filter_line_edit.setPlaceholderText('Filter images')
 
-        # Selection mode and Sort on same row
-        selection_sort_layout = QHBoxLayout()
-        selection_sort_layout.setContentsMargins(0, 0, 0, 0)
-        selection_mode_label = QLabel('Selection')
-        selection_mode_label.setSizePolicy(
-            QSizePolicy.Policy.Maximum,
-            QSizePolicy.Policy.Preferred,
-        )
-        self.selection_mode_combo_box = SettingsComboBox(
-            key='image_list_selection_mode')
-        self.selection_mode_combo_box.addItems(list(SelectionMode))
-        self.selection_mode_combo_box.setMinimumWidth(0)
-        self.selection_mode_combo_box.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Fixed,
-        )
-
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(4, 2, 4, 2)
+        header_layout.setSpacing(6)
         sort_label = QLabel('Sort')
         sort_label.setSizePolicy(
             QSizePolicy.Policy.Maximum,
@@ -66,27 +108,48 @@ class ImageList(QDockWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Fixed,
         )
+        self.sort_combo_box.setMinimumContentsLength(8)
 
-        self.media_type_combo_box = SettingsComboBox(key='media_type_filter')
+        self.media_type_combo_box = MediaTypeTabBar(key='media_type_filter')
         self.media_type_combo_box.addItems(['All', 'Images', 'Videos'])
-        self.media_type_combo_box.setMinimumContentsLength(4)
-        self.media_type_combo_box.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self.media_type_combo_box.setMinimumWidth(56)
+        self.media_type_combo_box.setMinimumWidth(168)
         self.media_type_combo_box.setSizePolicy(
-            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Fixed,
         )
+        self.media_type_combo_box.setStyleSheet(
+            """
+            QTabBar::tab {
+                padding: 5px 12px;
+                margin: 0 1px;
+                border: 1px solid palette(mid);
+                border-radius: 8px;
+                background: palette(base);
+                color: palette(text);
+            }
+            QTabBar::tab:selected {
+                background: palette(alternate-base);
+                color: palette(text);
+                border-color: palette(dark);
+                font-weight: 600;
+            }
+            QTabBar::tab:hover:!selected {
+                background: palette(button);
+                border-color: palette(dark);
+            }
+            """
+        )
 
-        selection_sort_layout.addWidget(selection_mode_label)
-        selection_sort_layout.addWidget(self.selection_mode_combo_box, stretch=1)
-        selection_sort_layout.addWidget(sort_label)
-        selection_sort_layout.addWidget(self.sort_combo_box, stretch=1)
-        selection_sort_layout.addWidget(self.media_type_combo_box)
+        header_layout.addWidget(self.filter_line_edit, stretch=5)
+        header_layout.addWidget(sort_label)
+        header_layout.addWidget(self.sort_combo_box, stretch=2)
+        header_layout.addWidget(self.media_type_combo_box)
 
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)
+        self.list_view.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
 
         # Status bar with image index (left) and cache status (right) on same line
         self.image_index_label = ClickableLabel()
@@ -153,8 +216,7 @@ class ImageList(QDockWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
         layout.setSpacing(0)  # Remove spacing between widgets
-        layout.addWidget(self.filter_line_edit)
-        layout.addLayout(selection_sort_layout)
+        layout.addLayout(header_layout)
         self.list_view.setMinimumWidth(0)
         self.list_view.setSizePolicy(
             QSizePolicy.Policy.Ignored,
@@ -163,10 +225,6 @@ class ImageList(QDockWidget):
         layout.addWidget(self.list_view)
         layout.addLayout(status_layout)
         self.setWidget(container)
-
-        self.selection_mode_combo_box.currentTextChanged.connect(
-            self.set_selection_mode)
-        self.set_selection_mode(self.selection_mode_combo_box.currentText())
 
         # Connect sort signal
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_changed)
@@ -183,14 +241,6 @@ class ImageList(QDockWidget):
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()
         return QSize(0, hint.height())
-
-    def set_selection_mode(self, selection_mode: str):
-        if selection_mode == SelectionMode.DEFAULT:
-            self.list_view.setSelectionMode(
-                QAbstractItemView.SelectionMode.ExtendedSelection)
-        elif selection_mode == SelectionMode.TOGGLE:
-            self.list_view.setSelectionMode(
-                QAbstractItemView.SelectionMode.MultiSelection)
 
     @Slot()
     def update_image_index_label(self, proxy_image_index: QModelIndex):

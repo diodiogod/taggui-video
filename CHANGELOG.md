@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.32] - 2026-03-23
+
+### Added
+
+- Clean up the image-list header
+- Put filter, sort, and media scope on one cleaner header row
+- Replace the media filter dropdown with clearer All, Images, and Videos tabs
+- Use a more discreet tab style so the panel draws less attention
+
+### Removed
+
+- Remove the confusing selection toggle from the Images panel
 ## [1.0.31] - 2026-03-23
 
 ### Added
