@@ -2015,7 +2015,7 @@ class ImageListViewInteractionMixin:
                         source_model._emit_pages_updated()
                     if hasattr(source_model, '_start_paginated_enrichment'):
                         source_model._start_paginated_enrichment(
-                            window_pages=range(enrich_start_page, enrich_end_page + 1),
+                            window_pages={int(target_page)},
                             scope='window',
                         )
         except Exception:

@@ -1717,7 +1717,7 @@ class ImageListViewStrategyMixin:
 
         if not exhausted:
             # Continue the exact target that started this repair batch.
-            next_target = target_pages if target_pages else range(ws, we + 1)
+            next_target = target_pages if target_pages else [cur_page]
             source_model._start_paginated_enrichment(
                 window_pages=next_target,
                 scope='window',
@@ -1736,6 +1736,10 @@ class ImageListViewStrategyMixin:
             target_pages,
             reason="enrichment_complete",
         ):
+            source_model._start_paginated_enrichment(
+                window_pages=range(ws, we + 1),
+                scope='preload',
+            )
             return
 
         # ALL window images enriched — do a single masonry refresh
@@ -2262,12 +2266,7 @@ class ImageListViewStrategyMixin:
         return True
 
     def _check_and_enrich_loaded_pages(self):
-        """Detect unenriched images on current WINDOW pages and trigger enrichment.
-
-        Only checks the pages in the active masonry window (current_page ± buffer),
-        not all loaded pages, to avoid an enrichment loop when distant pages are also
-        loaded but unenriched.
-        """
+        """Detect unenriched images on the active page and repair locally."""
         source_model = self.proxy_image_list_model.sourceModel()
         if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
             return
@@ -2280,17 +2279,25 @@ class ImageListViewStrategyMixin:
         if preferred_window is None:
             return
         window_start, window_end = preferred_window
+        owner_page = int(getattr(self, '_current_page', 0) or 0)
+        try:
+            transient_owner_page = self._get_transient_owner_anchor_page(source_model=source_model)
+            if isinstance(transient_owner_page, int):
+                owner_page = int(transient_owner_page)
+        except Exception:
+            pass
+        repair_page = max(int(window_start), min(int(window_end), int(owner_page)))
+        repair_target = {int(repair_page)}
 
         # Compare current window to what enrichment is targeting (if anything).
         now = time.time()
-        current_window = set(range(window_start, window_end + 1))
         target = getattr(source_model, '_enrichment_target_pages', None)
         target_window = set(target) if target is not None else set()
         target_scope = getattr(source_model, '_enrichment_scope', 'window')
         same_window_target = (
             target_scope == 'window'
             and bool(target_window)
-            and target_window == current_window
+            and target_window == repair_target
         )
 
         if getattr(source_model, '_enrichment_running', False):
@@ -2307,10 +2314,8 @@ class ImageListViewStrategyMixin:
 
         unenriched_count = 0
         with source_model._page_load_lock:
-            for page_num in range(window_start, window_end + 1):
-                page = source_model._pages.get(page_num)
-                if not page:
-                    continue
+            page = source_model._pages.get(int(repair_page))
+            if page:
                 for image in page:
                     if not image:
                         continue
@@ -2324,8 +2329,6 @@ class ImageListViewStrategyMixin:
                         unenriched_count += 1
                         if unenriched_count >= 5:
                             break
-                if unenriched_count >= 5:
-                    break
 
         if unenriched_count >= 5:
             self._last_enrich_trigger_time = now
@@ -2333,15 +2336,15 @@ class ImageListViewStrategyMixin:
             self._enrich_first_refresh_done = False
             self._log_flow(
                 "ENRICH",
-                f"Window pages {window_start}-{window_end} have unenriched images, triggering window repair",
+                f"Page {repair_page} has unenriched images, triggering local repair",
                 level="INFO",
                 throttle_key="enrich_trigger",
                 every_s=5.0,
             )
             if hasattr(source_model, '_start_paginated_enrichment'):
-                # Pass window range so enrichment targets ONLY these pages
                 source_model._start_paginated_enrichment(
-                    window_pages=range(window_start, window_end + 1)
+                    window_pages=repair_target,
+                    scope='window',
                 )
 
     def _recalculate_masonry_if_needed(self, signal_name="unknown"):
