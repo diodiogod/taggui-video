@@ -2626,36 +2626,16 @@ class ImageListModel(QAbstractListModel):
                 pass
         self._db = ImageIndexDB(self._directory_path)
 
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                self._pages.clear()
-                self._loading_pages.clear()
-                self._page_load_order.clear()
-
-            self.images = []
-            self._total_count = new_total
-        finally:
-            self.endResetModel()
-
-        for page_num in pages_to_reload:
-            page_images = preloaded_pages.get(int(page_num))
-            if page_images is None:
-                self._load_page_sync(int(page_num))
-                continue
-            self._store_page(int(page_num), page_images)
-
-        self.total_count_changed.emit(self._total_count)
-        self._emit_paginated_layout_refresh()
-        result['reloaded_page_count'] = len(pages_to_reload)
+        reloaded_pages = self._reload_paginated_model_after_db_update(
+            new_total=new_total,
+            preloaded_pages=preloaded_pages,
+        )
+        result['reloaded_page_count'] = len(reloaded_pages or pages_to_reload)
         result['refreshed_model'] = True
-
-        if pages_to_reload:
-            self._start_paginated_enrichment(window_pages=pages_to_reload, scope='window')
 
         print(
             "[REFRESH_NEW] Applied background refresh; "
-            f"reloaded {len(pages_to_reload)} page(s)"
+            f"reloaded {result['reloaded_page_count']} page(s)"
         )
         return result
 
@@ -2708,6 +2688,63 @@ class ImageListModel(QAbstractListModel):
             updated_count += 1
 
         return updated_count
+
+    def _reload_paginated_model_after_db_update(
+        self,
+        *,
+        new_total: int,
+        touched_paths: list[Path] | None = None,
+        preloaded_pages: dict[int, list[Image]] | None = None,
+    ) -> list[int]:
+        """Refresh loaded paginated pages after the DB changed without reloading the folder."""
+        if not self._paginated_mode:
+            return []
+
+        total_pages = max(0, (int(new_total) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        pages_to_reload = {
+            int(page_num) for page_num in self._pages.keys()
+            if 0 <= int(page_num) < total_pages
+        }
+
+        for image_path in touched_paths or []:
+            inserted_rank = self.get_global_rank_for_path(image_path)
+            if inserted_rank < 0:
+                continue
+            inserted_page = int(inserted_rank) // self.PAGE_SIZE
+            if 0 <= inserted_page < total_pages:
+                pages_to_reload.add(inserted_page)
+
+        if not pages_to_reload and new_total > 0:
+            pages_to_reload.add(0)
+
+        preloaded = dict(preloaded_pages or {})
+        for page_num in sorted(pages_to_reload):
+            if int(page_num) in preloaded:
+                continue
+            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
+            preloaded[int(page_num)] = page_images
+
+        self.beginResetModel()
+        try:
+            with self._page_load_lock:
+                self._pages.clear()
+                self._loading_pages.clear()
+                self._page_load_order.clear()
+            self.images = []
+            self._total_count = int(new_total)
+        finally:
+            self.endResetModel()
+
+        ordered_pages = sorted(preloaded.keys())
+        for page_num in ordered_pages:
+            self._store_page(int(page_num), preloaded[int(page_num)])
+
+        self.total_count_changed.emit(self._total_count)
+        self._emit_paginated_layout_refresh()
+        if ordered_pages:
+            self._start_paginated_enrichment(window_pages=ordered_pages, scope='window')
+
+        return ordered_pages
 
 
     def _process_enrichment_queue(self):
@@ -4253,6 +4290,37 @@ class ImageListModel(QAbstractListModel):
             self.enrichment_complete.emit()
             return
 
+        added_paths: list[Path] = []
+        for rel_path in result.get('added_db_paths') or []:
+            try:
+                added_paths.append(directory_path / rel_path)
+            except Exception:
+                continue
+
+        if self._paginated_mode and bool(result.get('db_synced')):
+            if self._db is not None:
+                try:
+                    self._db.close()
+                except Exception:
+                    pass
+            self._db = ImageIndexDB(self._directory_path)
+            new_total = int(self._db.count(
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+            ) or 0)
+            reloaded_pages = self._reload_paginated_model_after_db_update(
+                new_total=new_total,
+                touched_paths=added_paths,
+            )
+            self.background_validation_applied.emit({
+                'directory_path': str(directory_path),
+                'added_count': added_count,
+                'removed_count': removed_count,
+                'tag_updates_count': tag_updates,
+                'reloaded_page_count': len(reloaded_pages),
+            })
+            return
+
         self.load_directory(
             directory_path,
             precomputed_rel_paths=result.get('precomputed_rel_paths'),
@@ -4315,6 +4383,7 @@ class ImageListModel(QAbstractListModel):
                             'changes_detected': True,
                             'added_count': 0,
                             'removed_count': len(duplicate_db_paths),
+                            'added_db_paths': [],
                             'precomputed_rel_paths': {
                                 current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
                                 for rel_path in current_rel_paths
@@ -4427,6 +4496,7 @@ class ImageListModel(QAbstractListModel):
                 'changes_detected': changes_detected,
                 'added_count': len(added_rel_paths),
                 'removed_count': len(removed_db_paths),
+                'added_db_paths': added_db_paths,
                 'tag_updates_count': tag_updates_count,
                 'precomputed_rel_paths': merged_native_paths if changes_detected else None,
                 'db_synced': bool(changes_detected or tag_updates_count),
@@ -6871,53 +6941,14 @@ class ImageListModel(QAbstractListModel):
         )
         self._db.commit()
 
-        loaded_pages = sorted(int(page_num) for page_num in self._pages.keys())
         new_total = int(self._db.count(
             filter_sql=self._filter_sql,
             bindings=self._filter_bindings,
         ) or 0)
-        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        pages_to_reload = {
-            int(page_num) for page_num in loaded_pages
-            if 0 <= int(page_num) < total_pages
-        }
-
-        for image_path in inserted_paths:
-            inserted_rank = self.get_global_rank_for_path(image_path)
-            if inserted_rank >= 0:
-                inserted_page = int(inserted_rank) // self.PAGE_SIZE
-                if 0 <= inserted_page < total_pages:
-                    pages_to_reload.add(inserted_page)
-
-        if not pages_to_reload and new_total > 0:
-            pages_to_reload.add(0)
-
-        preloaded_pages: dict[int, list[Image]] = {}
-        for page_num in sorted(pages_to_reload):
-            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
-            preloaded_pages[int(page_num)] = page_images
-
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                self._pages.clear()
-                self._loading_pages.clear()
-                self._page_load_order.clear()
-            self.images = []
-            self._total_count = int(new_total)
-        finally:
-            self.endResetModel()
-
-        for page_num in sorted(preloaded_pages.keys()):
-            self._store_page(int(page_num), preloaded_pages[int(page_num)])
-
-        self.total_count_changed.emit(self._total_count)
-        self._emit_paginated_layout_refresh()
-        if preloaded_pages:
-            self._start_paginated_enrichment(
-                window_pages=sorted(preloaded_pages.keys()),
-                scope='window',
-            )
+        self._reload_paginated_model_after_db_update(
+            new_total=new_total,
+            touched_paths=inserted_paths,
+        )
         return len(inserted_paths)
 
     def remove_generated_media_batch(self, image_paths: list[Path]) -> int:
@@ -6996,45 +7027,11 @@ class ImageListModel(QAbstractListModel):
         if removed_count <= 0:
             return 0
 
-        loaded_pages = sorted(int(page_num) for page_num in self._pages.keys())
         new_total = int(self._db.count(
             filter_sql=self._filter_sql,
             bindings=self._filter_bindings,
         ) or 0)
-        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        pages_to_reload = [
-            int(page_num) for page_num in loaded_pages
-            if 0 <= int(page_num) < total_pages
-        ]
-        if not pages_to_reload and new_total > 0:
-            pages_to_reload = [0]
-
-        preloaded_pages: dict[int, list[Image]] = {}
-        for page_num in sorted(set(pages_to_reload)):
-            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
-            preloaded_pages[int(page_num)] = page_images
-
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                self._pages.clear()
-                self._loading_pages.clear()
-                self._page_load_order.clear()
-            self.images = []
-            self._total_count = int(new_total)
-        finally:
-            self.endResetModel()
-
-        for page_num in sorted(preloaded_pages.keys()):
-            self._store_page(int(page_num), preloaded_pages[int(page_num)])
-
-        self.total_count_changed.emit(self._total_count)
-        self._emit_paginated_layout_refresh()
-        if preloaded_pages:
-            self._start_paginated_enrichment(
-                window_pages=sorted(preloaded_pages.keys()),
-                scope='window',
-            )
+        self._reload_paginated_model_after_db_update(new_total=new_total)
         return removed_count
 
     def _trigger_metadata_backfill_later(self, directory_path):
