@@ -4185,6 +4185,11 @@ class ImageListModel(QAbstractListModel):
                          if rel_path not in seen:
                              prioritized_rel_paths.append(rel_path)
                              seen.add(rel_path)
+                     # Keep window repair local and ripple outward page-by-page.
+                     # Finishing the nearest page first avoids whole-window reshuffles
+                     # while the user is looking at a freshly landed target.
+                     if page_placeholders and scope == 'window':
+                         break
                  # DB query is the source of truth for what needs enrichment.
                  # No in-memory fallback — stale in-memory objects report dims=None
                  # even after DB has real values, causing infinite re-enrichment.

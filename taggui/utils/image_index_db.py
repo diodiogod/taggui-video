@@ -367,6 +367,16 @@ class ImageIndexDB:
                         scanned_at REAL NOT NULL
                     )
                 ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ordered_image_cache (
+                        cache_key TEXT NOT NULL,
+                        rank INTEGER NOT NULL,
+                        image_id INTEGER NOT NULL,
+                        PRIMARY KEY (cache_key, rank),
+                        UNIQUE (cache_key, image_id),
+                        FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                    )
+                ''')
                 self._create_image_markings_schema(cursor)
 
                 # Old folder DBs may already exist without newer columns.
@@ -398,6 +408,7 @@ class ImageIndexDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_ordered_image_cache_image ON ordered_image_cache(cache_key, image_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
 
@@ -1813,6 +1824,11 @@ class ImageIndexDB:
             random_seed,
         )
 
+    @staticmethod
+    def _serialize_order_cache_key(cache_key: tuple) -> str:
+        """Serialize cache key for durable DB storage."""
+        return json.dumps(list(cache_key), separators=(',', ':'), ensure_ascii=True)
+
     def _should_use_order_cache_for_page(self, page: int, page_size: int, sort_field: str) -> bool:
         """Use materialized rank cache for deep pages and random ordering."""
         try:
@@ -1848,6 +1864,7 @@ class ImageIndexDB:
         )
         safe_bindings = self._normalize_bindings(bindings)
         cache_key = self._order_cache_key(sort_field, sort_dir, filter_sql, safe_bindings, **kwargs)
+        cache_key_text = self._serialize_order_cache_key(cache_key)
 
         try:
             with self._db_lock:
@@ -1855,27 +1872,25 @@ class ImageIndexDB:
                     return True
 
                 cursor = self.conn.cursor()
-                started_at = time.time()
-                cursor.execute('DROP TABLE IF EXISTS temp.current_order_cache')
                 cursor.execute(
-                    'CREATE TEMP TABLE current_order_cache ('
-                    ' rank INTEGER PRIMARY KEY,'
-                    ' image_id INTEGER NOT NULL UNIQUE'
-                    ')'
+                    'SELECT 1 FROM ordered_image_cache WHERE cache_key = ? LIMIT 1',
+                    (cache_key_text,),
                 )
+                if cursor.fetchone():
+                    self._order_cache_signature = cache_key
+                    return True
+
+                started_at = time.time()
+                cursor.execute('DELETE FROM ordered_image_cache')
 
                 insert_sql = (
-                    'INSERT INTO temp.current_order_cache(rank, image_id) '
-                    f'SELECT ROW_NUMBER() OVER (ORDER BY {order_clause}) - 1, id '
+                    'INSERT INTO ordered_image_cache(cache_key, rank, image_id) '
+                    f"SELECT ?, ROW_NUMBER() OVER (ORDER BY {order_clause}) - 1, id "
                     'FROM images'
                 )
                 if filter_sql:
                     insert_sql += f' WHERE {filter_sql}'
-                cursor.execute(insert_sql, safe_bindings)
-                cursor.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_temp_current_order_cache_image_id '
-                    'ON current_order_cache(image_id)'
-                )
+                cursor.execute(insert_sql, (cache_key_text,) + safe_bindings)
                 self.conn.commit()
                 self._order_cache_signature = cache_key
                 elapsed_ms = (time.time() - started_at) * 1000.0
@@ -2063,12 +2078,14 @@ class ImageIndexDB:
                                    i.video_fps, i.video_duration, i.video_frame_count, i.mtime, i.rating,
                                    i.love, i.bomb, i.reaction_updated_at,
                                    i.file_size, i.file_type, i.ctime
-                            FROM temp.current_order_cache c
+                            FROM ordered_image_cache c
                             JOIN images i ON i.id = c.image_id
-                            WHERE c.rank >= ? AND c.rank < ?
+                            WHERE c.cache_key = ? AND c.rank >= ? AND c.rank < ?
                             ORDER BY c.rank
                             ''',
-                            (start_rank, end_rank),
+                            (self._serialize_order_cache_key(
+                                self._order_cache_key(sort_field, sort_dir, filter_sql, bindings, **kwargs)
+                             ), start_rank, end_rank),
                         )
                         rows = cursor.fetchall()
                         if not rows:
@@ -2651,12 +2668,14 @@ class ImageIndexDB:
                         cursor.execute(
                             '''
                             SELECT i.file_name
-                            FROM temp.current_order_cache c
+                            FROM ordered_image_cache c
                             JOIN images i ON i.id = c.image_id
-                            WHERE c.rank >= ? AND c.rank < ? AND i.width IS NULL
+                            WHERE c.cache_key = ? AND c.rank >= ? AND c.rank < ? AND i.width IS NULL
                             ORDER BY c.rank
                             ''',
-                            (safe_start, safe_end),
+                            (self._serialize_order_cache_key(
+                                self._order_cache_key(sort_field, sort_dir, filter_sql, bindings, **kwargs)
+                             ), safe_start, safe_end),
                         )
                         return [row[0] for row in cursor.fetchall()]
                 except sqlite3.Error as e:
