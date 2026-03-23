@@ -30,6 +30,19 @@ class ImageListViewStrategyMixin:
             restore_page = max(0, min(int(last_page), restore_page))
         return restore_page
 
+    def _has_pending_explicit_jump_hold(self) -> bool:
+        """Return True while an explicit one-shot jump still owns the viewport."""
+        try:
+            target_global = getattr(self, "_one_shot_jump_target_global", None)
+            if not (isinstance(target_global, int) and target_global >= 0):
+                return False
+            now = time.time()
+            strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+            restore_until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+            return now <= max(strict_jump_until, restore_until)
+        except Exception:
+            return False
+
     def _clear_post_jump_stabilization(self):
         self._post_jump_stabilize_until = 0.0
         self._post_jump_stabilize_target_global = None
@@ -69,6 +82,11 @@ class ImageListViewStrategyMixin:
             self._post_jump_stabilize_page = max(0, int(target_page))
             self._post_jump_stabilize_reason = str(reason or "sort_restore")
             self._post_jump_stabilize_scroll_value = int(self.verticalScrollBar().value())
+            self._release_page_lock_page = int(self._post_jump_stabilize_page)
+            self._release_page_lock_until = max(
+                float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
+                hold_until,
+            )
             self._log_flow(
                 "STABLE",
                 f"Arm post-jump stabilization reason={self._post_jump_stabilize_reason} "
@@ -375,7 +393,7 @@ class ImageListViewStrategyMixin:
             if page_num in reflowed_pages:
                 continue
             page_images = getattr(source_model, '_pages', {}).get(int(page_num))
-            if not page_images or self._page_needs_enrichment(page_images):
+            if not page_images:
                 continue
 
             changed = incremental.reflow_cached_pages_from(
@@ -1417,7 +1435,14 @@ class ImageListViewStrategyMixin:
             value = sb.value()
 
         user_driven = self._scrollbar_dragging or self._mouse_scrolling
-        if user_driven:
+        pending_explicit_jump_hold = False
+        has_pending_jump_hold = getattr(self, '_has_pending_explicit_jump_hold', None)
+        if callable(has_pending_jump_hold):
+            try:
+                pending_explicit_jump_hold = bool(has_pending_jump_hold())
+            except Exception:
+                pending_explicit_jump_hold = False
+        if user_driven and (not pending_explicit_jump_hold):
             # User is actively navigating: drop startup restore override.
             if getattr(self, '_restore_target_page', None) is not None:
                 self._restore_target_page = None

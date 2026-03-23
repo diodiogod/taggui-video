@@ -445,6 +445,15 @@ class ImageListViewScrollMixin:
             restore_page = resolve_restore_page(last_page=last_page)
             if restore_page is not None:
                 current_page = int(restore_page)
+        if current_page is None and strict_mode and (not dragging_mode):
+            strict_jump_target = getattr(self, '_strict_jump_target_global', None)
+            strict_jump_until = float(getattr(self, '_strict_jump_until', 0.0) or 0.0)
+            if (
+                isinstance(strict_jump_target, int)
+                and strict_jump_target >= 0
+                and current_time <= strict_jump_until
+            ):
+                current_page = max(0, min(last_page, int(strict_jump_target // source_model.PAGE_SIZE)))
         # Resize/zoom anchor override keeps ownership stable while viewport
         # geometry and strict domains are being recalculated.
         resize_page = getattr(self, '_resize_anchor_page', None)
@@ -508,6 +517,15 @@ class ImageListViewScrollMixin:
             current_page = max(0, min(last_page, int(self._release_page_lock_page)))
         elif anchor_active:
             current_page = max(0, min(last_page, int(self._drag_release_anchor_idx // source_model.PAGE_SIZE)))
+        elif strict_mode and (not dragging_mode):
+            waiting_target = getattr(self, '_strict_waiting_target_page', None)
+            strict_jump_until = float(getattr(self, '_strict_jump_until', 0.0) or 0.0)
+            if (
+                isinstance(waiting_target, int)
+                and waiting_target >= 0
+                and current_time <= strict_jump_until
+            ):
+                current_page = max(0, min(last_page, int(waiting_target)))
         elif strict_mode and (not dragging_mode):
             transient_owner_page = None
             resolve_owner_page = getattr(self, '_get_transient_owner_anchor_page', None)

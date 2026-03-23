@@ -4070,6 +4070,10 @@ class MainWindow(QMainWindow):
 
         self.image_list.list_view.layout_ready.connect(do_scroll)
 
+        # Startup restore should begin immediately; waiting for bootstrap
+        # layout just delays far-page loading on large datasets.
+        QTimer.singleShot(0, do_scroll)
+
         # Fallback timeout in case layout_ready doesn't fire (e.g., grid layout)
         QTimer.singleShot(2000, do_scroll)
 

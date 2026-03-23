@@ -242,8 +242,14 @@ class ImageListViewInteractionMixin:
         if target_item is None:
             attempts = int(getattr(self, "_one_shot_jump_attempts", 0) or 0) + 1
             self._one_shot_jump_attempts = attempts
-            if attempts <= 12:
-                QTimer.singleShot(80, lambda token=active_token: self._run_one_shot_targeted_jump_finalize(token))
+            try:
+                if hasattr(source_model, "_request_page_load"):
+                    page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                    source_model._request_page_load(max(0, int(target_global) // max(1, page_size)))
+            except Exception:
+                pass
+            if attempts <= 300:
+                QTimer.singleShot(100, lambda token=active_token: self._run_one_shot_targeted_jump_finalize(token))
             else:
                 self._cancel_one_shot_targeted_jump()
             return
@@ -292,7 +298,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
 
-        if reason == "startup_restore":
+        if reason in {"startup_restore", "page_drag", "index_input"}:
             try:
                 loaded_row = -1
                 if hasattr(source_model, "get_loaded_row_for_global_index"):
@@ -356,7 +362,8 @@ class ImageListViewInteractionMixin:
                     prefer_forward=prefer_forward,
                     emit_update=False,
                     request_async_window=True,
-                    restart_enrichment=False,
+                    restart_enrichment=True,
+                    prune_to_window=False,
                 )
             except Exception:
                 pass
@@ -390,33 +397,47 @@ class ImageListViewInteractionMixin:
         target_page = max(0, int(target_global) // max(1, page_size))
         prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
         publish_target_page_now = str(reason or "") in {"index_input", "page_drag"}
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        loaded_pages = sorted(getattr(source_model, "_pages", {}).keys()) if hasattr(source_model, "_pages") else []
+        nearest_loaded_gap = 0
+        if loaded_pages:
+            nearest_loaded_gap = min(abs(int(page) - int(target_page)) for page in loaded_pages)
+        target_page_loaded = int(target_page) in set(loaded_pages)
+        deep_unloaded_jump = bool(
+            (not target_page_loaded)
+            and loaded_pages
+            and nearest_loaded_gap > 2
+        )
+        sync_target_page = not deep_unloaded_jump
         self._mark_selection_log_source(str(reason), hold_s=20.0)
         self._selected_global_index = int(target_global)
         self._selected_global_lock_value = int(target_global)
-        self._selected_global_lock_until = _t.time() + 120.0
+        hold_s = 90.0 if deep_unloaded_jump else 20.0
+        self._selected_global_lock_until = _t.time() + hold_s
         self._current_page = int(target_page)
         self._strict_jump_target_global = int(target_global)
-        self._strict_jump_until = _t.time() + 20.0
+        self._strict_jump_until = _t.time() + hold_s
         self._last_explicit_jump_kind = str(reason)
         self._last_explicit_jump_target_global = int(target_global)
-        self._last_explicit_jump_until = _t.time() + 20.0
+        self._last_explicit_jump_until = _t.time() + hold_s
         self._release_page_lock_page = int(target_page)
-        self._release_page_lock_until = _t.time() + 20.0
+        self._release_page_lock_until = _t.time() + hold_s
         self._restore_target_page = int(target_page)
         self._restore_target_global_index = int(target_global)
-        self._restore_anchor_until = _t.time() + 20.0
+        self._restore_anchor_until = _t.time() + hold_s
 
         prepared_state = None
         if hasattr(source_model, "prepare_target_window"):
             try:
                 prepared_state = source_model.prepare_target_window(
                     int(target_global),
-                    sync_target_page=True,
-                    include_buffer=False,
+                    sync_target_page=sync_target_page,
+                    include_buffer=not deep_unloaded_jump,
                     prefer_forward=prefer_forward,
-                    emit_update=publish_target_page_now,
-                    request_async_window=False,
-                    restart_enrichment=False,
+                    emit_update=(publish_target_page_now and sync_target_page),
+                    request_async_window=True,
+                    restart_enrichment=not deep_unloaded_jump,
+                    prune_to_window=deep_unloaded_jump,
                 )
             except Exception:
                 prepared_state = None
@@ -432,7 +453,7 @@ class ImageListViewInteractionMixin:
                 loaded_row = int(source_model.get_loaded_row_for_global_index(int(target_global)))
             except Exception:
                 loaded_row = -1
-        if loaded_row < 0:
+        if loaded_row < 0 and not deep_unloaded_jump:
             return False
 
         try:
