@@ -158,6 +158,7 @@ class ImageListView(
         self._resize_timer.timeout.connect(self._on_resize_finished)
         self._skip_next_resize_recalc = False
         self._masonry_splitter_snapping = False
+        self._suppress_masonry_snap_cycles = 0
         self._zoom_resize_snap_defer_until = 0.0
         self._zoom_resize_wait_for_ctrl_release = False
         self._last_ctrl_wheel_zoom_direction = 0

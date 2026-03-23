@@ -5323,6 +5323,7 @@ class MainWindow(QMainWindow):
             list_view._zoom_resize_snap_defer_until = 0.0
             list_view._last_ctrl_wheel_zoom_direction = 0
             list_view._last_masonry_signal = "thumbnail_size_button"
+            list_view._suppress_masonry_snap_cycles = 2
             if hasattr(list_view, '_on_resize_finished'):
                 list_view._on_resize_finished()
             list_view.viewport().update()
