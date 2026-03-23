@@ -2940,13 +2940,26 @@ class ImageListModel(QAbstractListModel):
             if updated_indices and not self._suppress_enrichment_signals:
                 if self._paginated_mode:
                     page_size = max(1, int(getattr(self, 'PAGE_SIZE', 1000) or 1000))
-                    self._recent_dimension_update_pages.update(
-                        int(idx) // page_size for idx in updated_indices if isinstance(idx, int) and idx >= 0
+                    changed_pages = {
+                        int(idx) // page_size
+                        for idx in updated_indices
+                        if isinstance(idx, int) and idx >= 0
+                    }
+                    self._recent_dimension_update_pages.update(changed_pages)
+                    active_scope = getattr(self, '_enrichment_scope', 'window')
+                    active_target_pages = getattr(self, '_enrichment_target_pages', None)
+                    defer_visible_reflow = (
+                        active_scope == 'window'
+                        and isinstance(active_target_pages, frozenset)
+                        and len(active_target_pages) == 1
+                        and bool(changed_pages)
                     )
-                    # Paginated masonry can now absorb these updates locally via
-                    # incremental page reflow; emit a coalesced signal so visible
-                    # placeholder windows correct themselves without waiting for resize.
-                    self._schedule_dimensions_updated()
+                    # Local window repair should update geometry in memory during
+                    # the batch but only reflow the viewport once that page is
+                    # finished. Emitting here causes the same landed page to jump
+                    # multiple times in a row.
+                    if not defer_visible_reflow:
+                        self._schedule_dimensions_updated()
                 batch_time = (time.time() - batch_start) * 1000
                 # Disabled: Too spammy for large datasets (1M images)
                 # if processed >= 50:  # Only log significant batches
