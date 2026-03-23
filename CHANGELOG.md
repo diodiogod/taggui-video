@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.31] - 2026-03-23
+
+### Added
+
+- Jumped items now stay anchored more consistently while nearby pages load and enrich
+- Startup restore lands more smoothly and avoids long UI freezes
+- Page dragging, typed jumps, and sort restores behave more predictably
+- Splitter snapping works again after using the thumbnail zoom buttons
+
+### Changed
+
+- Improve deep jumps and masonry stability
+- Deep page and startup jumps are much faster and more reliable on very large datasets
 ## [1.0.30] - 2026-03-21
 
 ### Added
