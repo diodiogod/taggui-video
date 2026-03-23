@@ -2948,17 +2948,27 @@ class ImageListModel(QAbstractListModel):
                     self._recent_dimension_update_pages.update(changed_pages)
                     active_scope = getattr(self, '_enrichment_scope', 'window')
                     active_target_pages = getattr(self, '_enrichment_target_pages', None)
-                    defer_visible_reflow = (
+                    is_local_window_repair = (
                         active_scope == 'window'
                         and isinstance(active_target_pages, frozenset)
                         and len(active_target_pages) == 1
                         and bool(changed_pages)
                     )
-                    # Local window repair should update geometry in memory during
-                    # the batch but only reflow the viewport once that page is
-                    # finished. Emitting here causes the same landed page to jump
-                    # multiple times in a row.
-                    if not defer_visible_reflow:
+                    is_background_preload = (
+                        active_scope == 'preload'
+                        and bool(changed_pages)
+                    )
+                    # Paginated visible layout ownership now belongs to the
+                    # incremental cache, not to enrichment batches.
+                    #
+                    # - Local visible-page repair updates dimensions in memory
+                    #   during the batch but reflows once on completion.
+                    # - Preload updates future pages silently so they append
+                    #   with correct geometry when the user reaches them.
+                    #
+                    # Emitting dimensions_updated during either phase causes
+                    # bursty visible repositioning.
+                    if not (is_local_window_repair or is_background_preload):
                         self._schedule_dimensions_updated()
                 batch_time = (time.time() - batch_start) * 1000
                 # Disabled: Too spammy for large datasets (1M images)

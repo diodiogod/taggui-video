@@ -128,13 +128,12 @@ class ImageListViewStrategyMixin:
             model = self.model()
             source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
 
-        viewport_h = max(1, int(self.viewport().height()))
-        release_scroll_delta = max(viewport_h * 3, 1800)
-
-        if refresh_scroll and isinstance(scroll_value, int) and isinstance(stable_scroll, int):
-            if abs(int(scroll_value) - int(stable_scroll)) > release_scroll_delta:
+        window_buffer = 3
+        if isinstance(candidate_page, int):
+            candidate_page = max(0, int(candidate_page))
+            if abs(int(candidate_page) - int(target_page)) > window_buffer:
                 self._release_post_jump_stabilization(
-                    reason=f"scroll={int(scroll_value)} base={int(stable_scroll)}",
+                    reason=f"page={int(candidate_page)} target={int(target_page)}",
                 )
                 return None
 
@@ -378,15 +377,19 @@ class ImageListViewStrategyMixin:
 
         anchor_global = None
         anchor_old_y = None
+        anchor_page = None
         try:
             anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
             if isinstance(anchor_global, int) and anchor_global >= 0:
+                page_size = max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000))
+                anchor_page = int(anchor_global) // page_size
                 anchor_item = self._get_masonry_item_for_global_index(anchor_global)
                 if anchor_item is not None:
                     anchor_old_y = int(anchor_item.get('y', 0))
         except Exception:
             anchor_global = None
             anchor_old_y = None
+            anchor_page = None
 
         reflowed_pages = set()
         for page_num in candidate_pages:
@@ -396,10 +399,26 @@ class ImageListViewStrategyMixin:
             if not page_images:
                 continue
 
-            changed = incremental.reflow_cached_pages_from(
-                int(page_num),
-                lambda p: self._build_masonry_page_items_data(source_model, p),
-            )
+            if (
+                isinstance(anchor_page, int)
+                and isinstance(anchor_global, int)
+                and int(page_num) == int(anchor_page)
+            ):
+                changed = incremental.reflow_cached_pages_from_anchor_page(
+                    int(page_num),
+                    int(anchor_global),
+                    lambda p: self._build_masonry_page_items_data(source_model, p),
+                )
+            elif isinstance(anchor_page, int) and int(page_num) < int(anchor_page):
+                changed = incremental.reflow_cached_pages_upward_from(
+                    int(page_num),
+                    lambda p: self._build_masonry_page_items_data(source_model, p),
+                )
+            else:
+                changed = incremental.reflow_cached_pages_from(
+                    int(page_num),
+                    lambda p: self._build_masonry_page_items_data(source_model, p),
+                )
             if changed:
                 reflowed_pages.update(changed)
 
