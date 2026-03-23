@@ -30,6 +30,123 @@ class ImageListViewStrategyMixin:
             restore_page = max(0, min(int(last_page), restore_page))
         return restore_page
 
+    def _has_pending_explicit_jump_hold(self) -> bool:
+        """Return True while an explicit one-shot jump still owns the viewport."""
+        try:
+            target_global = getattr(self, "_one_shot_jump_target_global", None)
+            if not (isinstance(target_global, int) and target_global >= 0):
+                return False
+            now = time.time()
+            strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+            restore_until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
+            return now <= max(strict_jump_until, restore_until)
+        except Exception:
+            return False
+
+    def _clear_post_jump_stabilization(self):
+        self._post_jump_stabilize_until = 0.0
+        self._post_jump_stabilize_target_global = None
+        self._post_jump_stabilize_page = None
+        self._post_jump_stabilize_reason = None
+        self._post_jump_stabilize_scroll_value = None
+
+    def _release_post_jump_stabilization(self, *, reason: str):
+        self._log_flow(
+            "STABLE",
+            f"Release post-jump stabilization reason={str(reason or 'unknown')}",
+            throttle_key="post_jump_stabilize_release",
+            every_s=0.1,
+        )
+        self._clear_post_jump_stabilization()
+
+    def _arm_post_jump_stabilization(
+        self,
+        target_global: int,
+        *,
+        target_page: int | None = None,
+        reason: str = "sort_restore",
+        hold_s: float = 180.0,
+    ) -> bool:
+        """Freeze visible-window ownership after a successful targeted landing."""
+        if not isinstance(target_global, int) or target_global < 0:
+            return False
+        try:
+            now = time.time()
+            hold_until = now + max(5.0, float(hold_s or 0.0))
+            if target_page is None:
+                source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), "sourceModel") else self.model()
+                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000) if source_model is not None else 1000
+                target_page = max(0, int(target_global) // max(1, page_size))
+            self._post_jump_stabilize_until = hold_until
+            self._post_jump_stabilize_target_global = int(target_global)
+            self._post_jump_stabilize_page = max(0, int(target_page))
+            self._post_jump_stabilize_reason = str(reason or "sort_restore")
+            self._post_jump_stabilize_scroll_value = int(self.verticalScrollBar().value())
+            self._release_page_lock_page = int(self._post_jump_stabilize_page)
+            self._release_page_lock_until = max(
+                float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
+                hold_until,
+            )
+            self._log_flow(
+                "STABLE",
+                f"Arm post-jump stabilization reason={self._post_jump_stabilize_reason} "
+                f"page={int(self._post_jump_stabilize_page)} target={int(target_global)}",
+                throttle_key="post_jump_stabilize_arm",
+                every_s=0.1,
+            )
+            return True
+        except Exception:
+            self._clear_post_jump_stabilization()
+            return False
+
+    def _consume_post_jump_stabilization(
+        self,
+        *,
+        source_model=None,
+        candidate_page: int | None = None,
+        scroll_value: int | None = None,
+        refresh_scroll: bool = False,
+    ) -> dict | None:
+        """Return live stabilization state while the user remains near the landed window."""
+        try:
+            until = float(getattr(self, "_post_jump_stabilize_until", 0.0) or 0.0)
+        except Exception:
+            until = 0.0
+        if until <= 0.0 or time.time() > until:
+            self._clear_post_jump_stabilization()
+            return None
+
+        target_global = getattr(self, "_post_jump_stabilize_target_global", None)
+        target_page = getattr(self, "_post_jump_stabilize_page", None)
+        reason = getattr(self, "_post_jump_stabilize_reason", None)
+        stable_scroll = getattr(self, "_post_jump_stabilize_scroll_value", None)
+        if not (isinstance(target_global, int) and target_global >= 0 and isinstance(target_page, int) and target_page >= 0):
+            self._clear_post_jump_stabilization()
+            return None
+
+        if source_model is None:
+            model = self.model()
+            source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+
+        window_buffer = 3
+        if isinstance(candidate_page, int):
+            candidate_page = max(0, int(candidate_page))
+            if abs(int(candidate_page) - int(target_page)) > window_buffer:
+                self._release_post_jump_stabilization(
+                    reason=f"page={int(candidate_page)} target={int(target_page)}",
+                )
+                return None
+
+        return {
+            "target_global": int(target_global),
+            "target_page": int(target_page),
+            "reason": str(reason or "sort_restore"),
+            "scroll_value": int(self._post_jump_stabilize_scroll_value)
+            if isinstance(getattr(self, "_post_jump_stabilize_scroll_value", None), int)
+            else None,
+            "until": float(until),
+        }
+
     def _get_preferred_enrichment_window_pages(
         self,
         source_model,
@@ -51,6 +168,14 @@ class ImageListViewStrategyMixin:
 
         last_page = max(0, (total_items - 1) // page_size)
         window_buffer = max(1, int(window_buffer))
+
+        stabilize_state = self._consume_post_jump_stabilization(source_model=source_model)
+        if stabilize_state is not None:
+            stable_page = max(0, min(last_page, int(stabilize_state["target_page"])))
+            return (
+                max(0, stable_page - window_buffer),
+                min(last_page, stable_page + window_buffer),
+            )
 
         visible_pages = set()
         try:
@@ -214,6 +339,122 @@ class ImageListViewStrategyMixin:
 
         self.viewport().update()
 
+    def _build_masonry_page_items_data(self, source_model, page_num: int) -> list[tuple[int, float]]:
+        """Build (global_index, aspect_ratio) tuples for one loaded page."""
+        try:
+            page_images = getattr(source_model, '_pages', {}).get(int(page_num), [])
+            page_size = max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000))
+            start_idx = int(page_num) * page_size
+            items_data = []
+            for offset, image in enumerate(page_images):
+                if image is None:
+                    continue
+                items_data.append((start_idx + int(offset), image.aspect_ratio))
+            return items_data
+        except Exception:
+            return []
+
+    def _try_incremental_reflow_changed_pages(self, source_model, changed_pages, *, reason: str = "dimensions_updated") -> bool:
+        """Locally ripple masonry from enriched cached pages forward."""
+        if source_model is None:
+            return False
+        if not (hasattr(source_model, '_paginated_mode') and source_model._paginated_mode):
+            return False
+        if self._get_masonry_strategy(source_model) != "windowed_strict":
+            return False
+
+        incremental = self._get_masonry_incremental_service()
+        if not incremental.is_active:
+            return False
+
+        cached_pages = incremental.get_cached_pages()
+        candidate_pages = sorted(
+            int(page) for page in set(changed_pages or ())
+            if isinstance(page, int) and page in cached_pages
+        )
+        if not candidate_pages:
+            return False
+
+        anchor_global = None
+        anchor_old_y = None
+        anchor_page = None
+        try:
+            anchor_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+            if isinstance(anchor_global, int) and anchor_global >= 0:
+                page_size = max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000))
+                anchor_page = int(anchor_global) // page_size
+                anchor_item = self._get_masonry_item_for_global_index(anchor_global)
+                if anchor_item is not None:
+                    anchor_old_y = int(anchor_item.get('y', 0))
+        except Exception:
+            anchor_global = None
+            anchor_old_y = None
+            anchor_page = None
+
+        reflowed_pages = set()
+        for page_num in candidate_pages:
+            if page_num in reflowed_pages:
+                continue
+            page_images = getattr(source_model, '_pages', {}).get(int(page_num))
+            if not page_images:
+                continue
+
+            if (
+                isinstance(anchor_page, int)
+                and isinstance(anchor_global, int)
+                and int(page_num) == int(anchor_page)
+            ):
+                changed = incremental.reflow_cached_pages_from_anchor_page(
+                    int(page_num),
+                    int(anchor_global),
+                    lambda p: self._build_masonry_page_items_data(source_model, p),
+                )
+            elif isinstance(anchor_page, int) and int(page_num) < int(anchor_page):
+                changed = incremental.reflow_cached_pages_upward_from(
+                    int(page_num),
+                    lambda p: self._build_masonry_page_items_data(source_model, p),
+                )
+            else:
+                changed = incremental.reflow_cached_pages_from(
+                    int(page_num),
+                    lambda p: self._build_masonry_page_items_data(source_model, p),
+                )
+            if changed:
+                reflowed_pages.update(changed)
+
+        if not reflowed_pages:
+            return False
+
+        self._last_masonry_signal = str(reason or "dimensions_updated")
+        self._apply_incremental_cache_refresh(
+            source_model,
+            anchor_global=anchor_global,
+            anchor_old_y=anchor_old_y,
+        )
+        self._last_masonry_window_signature = None
+        self._check_and_enrich_loaded_pages()
+        self._log_flow(
+            "MASONRY",
+            f"Incremental reflow pages {min(reflowed_pages)}-{max(reflowed_pages)} "
+            f"reason={str(reason or 'dimensions_updated')}",
+            throttle_key="incremental_reflow_changed_pages",
+            every_s=0.2,
+        )
+        return True
+
+    def _on_dimensions_updated(self):
+        """Handle dimension updates with local incremental ripple when possible."""
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        if source_model is None:
+            return
+
+        consume_pages = getattr(source_model, 'consume_recent_dimension_update_pages', None)
+        changed_pages = consume_pages() if callable(consume_pages) else []
+        if self._try_incremental_reflow_changed_pages(source_model, changed_pages, reason="dimensions_updated"):
+            return
+
+        self._recalculate_masonry_if_needed("dimensions_updated")
+
     def _get_current_or_selected_global_index(self, source_model=None) -> int | None:
         """Resolve the current stable global index without mutating selection."""
         target_global = getattr(self, '_selected_global_index', None)
@@ -266,6 +507,15 @@ class ImageListViewStrategyMixin:
             pass
 
         try:
+            stabilize_state = self._consume_post_jump_stabilization(source_model=source_model)
+            if stabilize_state is not None:
+                stable_target = stabilize_state.get("target_global")
+                if isinstance(stable_target, int) and stable_target >= 0:
+                    return int(stable_target)
+        except Exception:
+            pass
+
+        try:
             mw = self.window()
             restore_target = int(getattr(mw, "_restore_target_global_rank", -1) or -1) if mw is not None else -1
             if mw is not None and getattr(mw, "_restore_in_progress", False) and restore_target >= 0:
@@ -314,19 +564,28 @@ class ImageListViewStrategyMixin:
         """Anchor non-startup masonry reflows to nearby selection or viewport center."""
         if source_model is None:
             source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        exact_target = None
+        resolve_exact_target = getattr(self, "_get_active_exact_target_global", None)
+        if callable(resolve_exact_target):
+            try:
+                exact_target = resolve_exact_target(source_model=source_model)
+            except Exception:
+                exact_target = None
+        if isinstance(exact_target, int) and exact_target >= 0:
+            return int(exact_target)
         selected_global = self._get_current_or_selected_global_index(source_model=source_model)
         signal = getattr(self, "_last_masonry_signal", None)
         if signal in {"resize", "resize_drag", "zoom_resize", "thumbnail_size_button"}:
             if isinstance(selected_global, int) and selected_global >= 0:
                 return int(selected_global)
 
-        selected_item = self._get_masonry_item_for_global_index(selected_global) if isinstance(selected_global, int) else None
-        if selected_item is not None and self._is_masonry_item_near_viewport(selected_item):
-            return int(selected_global)
-
         center_global = self._get_viewport_center_anchor_global()
         if isinstance(center_global, int) and center_global >= 0:
             return int(center_global)
+
+        selected_item = self._get_masonry_item_for_global_index(selected_global) if isinstance(selected_global, int) else None
+        if selected_item is not None and self._is_masonry_item_near_viewport(selected_item):
+            return int(selected_global)
 
         if isinstance(selected_global, int) and selected_global >= 0:
             return int(selected_global)
@@ -347,6 +606,15 @@ class ImageListViewStrategyMixin:
         strict_jump_until = float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
         if now <= strict_jump_until:
             target_global = getattr(self, "_strict_jump_target_global", None)
+            if isinstance(target_global, int) and target_global >= 0:
+                return int(target_global)
+
+        resolve_exact_target = getattr(self, "_get_active_exact_target_global", None)
+        if callable(resolve_exact_target):
+            try:
+                target_global = resolve_exact_target(source_model=source_model)
+            except Exception:
+                target_global = None
             if isinstance(target_global, int) and target_global >= 0:
                 return int(target_global)
 
@@ -406,7 +674,13 @@ class ImageListViewStrategyMixin:
         except Exception:
             return None
 
-    def _activate_selected_idle_anchor(self, source_model=None, hold_s: float = 1.5) -> bool:
+    def _activate_selected_idle_anchor(
+        self,
+        source_model=None,
+        hold_s: float = 1.5,
+        *,
+        prefer_viewport_center: bool = False,
+    ) -> bool:
         """Temporarily anchor idle masonry settle passes around the local viewport."""
         import time
         if source_model is None:
@@ -418,7 +692,12 @@ class ImageListViewStrategyMixin:
         if self._scrollbar_dragging or self._mouse_scrolling:
             return False
 
-        target_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+        if prefer_viewport_center:
+            target_global = self._get_viewport_center_anchor_global()
+            if not (isinstance(target_global, int) and target_global >= 0):
+                target_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
+        else:
+            target_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
         if not (isinstance(target_global, int) and target_global >= 0):
             return False
 
@@ -1044,14 +1323,24 @@ class ImageListViewStrategyMixin:
 
     def _get_restore_anchor_scroll_value(self, source_model=None, domain_max=None):
         """Resolve restore-time scroll anchor from target global index (fallback: target page)."""
+        post_jump_state = None
+        try:
+            post_jump_state = self._consume_post_jump_stabilization(source_model=source_model)
+        except Exception:
+            post_jump_state = None
+
         try:
             until = float(getattr(self, "_restore_anchor_until", 0.0) or 0.0)
         except Exception:
             until = 0.0
-        if until <= 0.0 or time.time() > until:
+        restore_live = until > 0.0 and time.time() <= until
+        if (not restore_live) and post_jump_state is None:
             return None
 
-        target_global = getattr(self, "_restore_target_global_index", None)
+        if restore_live:
+            target_global = getattr(self, "_restore_target_global_index", None)
+        else:
+            target_global = post_jump_state.get("target_global") if isinstance(post_jump_state, dict) else None
         if target_global is None:
             return None
         try:
@@ -1072,6 +1361,13 @@ class ImageListViewStrategyMixin:
         prefer_exact_item_anchor = False
         try:
             now = time.time()
+            stabilize_reason = (
+                str(post_jump_state.get("reason", "") or "")
+                if isinstance(post_jump_state, dict)
+                else ""
+            )
+            if stabilize_reason in {"sort_restore", "startup_restore"}:
+                prefer_exact_item_anchor = True
             jump_kind = getattr(self, "_last_explicit_jump_kind", None)
             jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
             jump_target = getattr(self, "_last_explicit_jump_target_global", None)
@@ -1121,6 +1417,10 @@ class ImageListViewStrategyMixin:
 
         # Fallback until target item is materialized: keep target page ownership.
         restore_page = self._get_live_restore_target_page()
+        if restore_page is None and isinstance(post_jump_state, dict):
+            stabilize_page = post_jump_state.get("target_page")
+            if isinstance(stabilize_page, int) and stabilize_page >= 0:
+                restore_page = int(stabilize_page)
         if restore_page is None or not source_model:
             return None
         try:
@@ -1154,7 +1454,14 @@ class ImageListViewStrategyMixin:
             value = sb.value()
 
         user_driven = self._scrollbar_dragging or self._mouse_scrolling
-        if user_driven:
+        pending_explicit_jump_hold = False
+        has_pending_jump_hold = getattr(self, '_has_pending_explicit_jump_hold', None)
+        if callable(has_pending_jump_hold):
+            try:
+                pending_explicit_jump_hold = bool(has_pending_jump_hold())
+            except Exception:
+                pending_explicit_jump_hold = False
+        if user_driven and (not pending_explicit_jump_hold):
             # User is actively navigating: drop startup restore override.
             if getattr(self, '_restore_target_page', None) is not None:
                 self._restore_target_page = None
@@ -1429,7 +1736,7 @@ class ImageListViewStrategyMixin:
 
         if not exhausted:
             # Continue the exact target that started this repair batch.
-            next_target = target_pages if target_pages else range(ws, we + 1)
+            next_target = target_pages if target_pages else [cur_page]
             source_model._start_paginated_enrichment(
                 window_pages=next_target,
                 scope='window',
@@ -1443,8 +1750,35 @@ class ImageListViewStrategyMixin:
         if actual == 0:
             return
 
+        if target_pages and self._try_incremental_reflow_changed_pages(
+            source_model,
+            target_pages,
+            reason="enrichment_complete",
+        ):
+            source_model._start_paginated_enrichment(
+                window_pages=range(ws, we + 1),
+                scope='preload',
+            )
+            return
+
         # ALL window images enriched — do a single masonry refresh
         self._enrich_first_refresh_done = True
+
+        post_jump_state = None
+        try:
+            post_jump_state = self._consume_post_jump_stabilization(source_model=source_model)
+        except Exception:
+            post_jump_state = None
+        post_jump_reason = (
+            str(post_jump_state.get("reason", "") or "")
+            if isinstance(post_jump_state, dict)
+            else ""
+        )
+        if post_jump_reason == "startup_restore":
+            self._last_masonry_window_signature = None
+            self._last_masonry_signal = "enrichment_complete"
+            self._recalculate_masonry_if_needed("enrichment_complete")
+            return
 
         incremental = self._get_masonry_incremental_service()
         if incremental.is_active and target_pages:
@@ -1951,18 +2285,12 @@ class ImageListViewStrategyMixin:
         return True
 
     def _check_and_enrich_loaded_pages(self):
-        """Detect unenriched images on current WINDOW pages and trigger enrichment.
-
-        Only checks the pages in the active masonry window (current_page ± buffer),
-        not all loaded pages, to avoid an enrichment loop when distant pages are also
-        loaded but unenriched.
-        """
+        """Detect unenriched images on the active page and repair locally."""
         source_model = self.proxy_image_list_model.sourceModel()
         if not source_model or not hasattr(source_model, '_paginated_mode') or not source_model._paginated_mode:
             return
         if not hasattr(source_model, '_pages') or not source_model._pages:
             return
-
         preferred_window = self._get_preferred_enrichment_window_pages(
             source_model,
             window_buffer=3,
@@ -1970,17 +2298,25 @@ class ImageListViewStrategyMixin:
         if preferred_window is None:
             return
         window_start, window_end = preferred_window
+        owner_page = int(getattr(self, '_current_page', 0) or 0)
+        try:
+            transient_owner_page = self._get_transient_owner_anchor_page(source_model=source_model)
+            if isinstance(transient_owner_page, int):
+                owner_page = int(transient_owner_page)
+        except Exception:
+            pass
+        repair_page = max(int(window_start), min(int(window_end), int(owner_page)))
+        repair_target = {int(repair_page)}
 
         # Compare current window to what enrichment is targeting (if anything).
         now = time.time()
-        current_window = set(range(window_start, window_end + 1))
         target = getattr(source_model, '_enrichment_target_pages', None)
         target_window = set(target) if target is not None else set()
         target_scope = getattr(source_model, '_enrichment_scope', 'window')
         same_window_target = (
             target_scope == 'window'
             and bool(target_window)
-            and target_window == current_window
+            and target_window == repair_target
         )
 
         if getattr(source_model, '_enrichment_running', False):
@@ -1997,10 +2333,8 @@ class ImageListViewStrategyMixin:
 
         unenriched_count = 0
         with source_model._page_load_lock:
-            for page_num in range(window_start, window_end + 1):
-                page = source_model._pages.get(page_num)
-                if not page:
-                    continue
+            page = source_model._pages.get(int(repair_page))
+            if page:
                 for image in page:
                     if not image:
                         continue
@@ -2014,8 +2348,6 @@ class ImageListViewStrategyMixin:
                         unenriched_count += 1
                         if unenriched_count >= 5:
                             break
-                if unenriched_count >= 5:
-                    break
 
         if unenriched_count >= 5:
             self._last_enrich_trigger_time = now
@@ -2023,15 +2355,15 @@ class ImageListViewStrategyMixin:
             self._enrich_first_refresh_done = False
             self._log_flow(
                 "ENRICH",
-                f"Window pages {window_start}-{window_end} have unenriched images, triggering window repair",
+                f"Page {repair_page} has unenriched images, triggering local repair",
                 level="INFO",
                 throttle_key="enrich_trigger",
                 every_s=5.0,
             )
             if hasattr(source_model, '_start_paginated_enrichment'):
-                # Pass window range so enrichment targets ONLY these pages
                 source_model._start_paginated_enrichment(
-                    window_pages=range(window_start, window_end + 1)
+                    window_pages=repair_target,
+                    scope='window',
                 )
 
     def _recalculate_masonry_if_needed(self, signal_name="unknown"):

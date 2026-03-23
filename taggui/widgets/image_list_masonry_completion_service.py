@@ -544,13 +544,22 @@ class MasonryCompletionService:
                             if now < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0):
                                 return
 
+                            stabilize_state = None
+                            consume_stabilization = getattr(v, '_consume_post_jump_stabilization', None)
+                            if callable(consume_stabilization):
+                                try:
+                                    stabilize_state = consume_stabilization()
+                                except Exception:
+                                    stabilize_state = None
+
                             resize_anchor_live = (
                                 getattr(v, '_resize_anchor_page', None) is not None
                                 and now <= float(getattr(v, '_resize_anchor_until', 0.0) or 0.0)
                             )
                             restore_anchor_live = now <= float(getattr(v, '_restore_anchor_until', 0.0) or 0.0)
+                            stabilize_anchor_live = isinstance(stabilize_state, dict)
                             idle_anchor_live = now <= float(getattr(v, '_idle_anchor_until', 0.0) or 0.0)
-                            if not (resize_anchor_live or restore_anchor_live or idle_anchor_live):
+                            if not (resize_anchor_live or restore_anchor_live or stabilize_anchor_live or idle_anchor_live):
                                 return
 
                             # If user is intentionally at an edge, never pull the viewport
@@ -574,7 +583,19 @@ class MasonryCompletionService:
                                 jump_kind_candidate = getattr(v, '_last_explicit_jump_kind', None)
                                 if isinstance(jump_kind_candidate, str) and jump_kind_candidate:
                                     explicit_jump_kind = jump_kind_candidate
-                            prefer_exact_item_anchor = explicit_jump_kind == "index_input"
+                            stabilize_reason = (
+                                str(stabilize_state.get("reason", "") or "")
+                                if isinstance(stabilize_state, dict)
+                                else ""
+                            )
+                            prefer_exact_item_anchor = explicit_jump_kind in {
+                                "index_input",
+                                "sort_restore",
+                                "startup_restore",
+                            } or stabilize_reason in {
+                                "sort_restore",
+                                "startup_restore",
+                            }
                             current_signal = getattr(v, "_last_masonry_signal", None)
                             force_center_anchor = current_signal in {
                                 "resize",
@@ -584,11 +605,20 @@ class MasonryCompletionService:
                             }
 
                             if prefer_exact_item_anchor:
-                                target_global = int(explicit_jump_target)
+                                if isinstance(explicit_jump_target, int) and explicit_jump_target >= 0:
+                                    target_global = int(explicit_jump_target)
+                                else:
+                                    target_global = (
+                                        stabilize_state.get("target_global")
+                                        if isinstance(stabilize_state, dict)
+                                        else None
+                                    )
                             elif idle_anchor_live:
                                 target_global = getattr(v, '_idle_anchor_target_global', None)
                             elif resize_anchor_live:
                                 target_global = getattr(v, '_resize_anchor_target_global', None)
+                            elif stabilize_anchor_live:
+                                target_global = stabilize_state.get("target_global")
                             elif restore_anchor_live:
                                 target_global = getattr(v, '_restore_target_global_index', None)
                             else:
@@ -607,7 +637,11 @@ class MasonryCompletionService:
                                 return
 
                             strict_restore_target_y = None
-                            if strict_mode and restore_anchor_live and hasattr(v, '_get_strict_canonical_scroll_for_global'):
+                            if (
+                                strict_mode
+                                and (restore_anchor_live or stabilize_anchor_live)
+                                and hasattr(v, '_get_strict_canonical_scroll_for_global')
+                            ):
                                 strict_restore_target_y = v._get_strict_canonical_scroll_for_global(
                                     target_global,
                                     source_model=source_model_local,
@@ -617,7 +651,7 @@ class MasonryCompletionService:
                             # IMPORTANT: avoid selection rebinding during resize/zoom anchoring.
                             # It can remap through transient buffered rows and cause jumpy
                             # "wrong image selected" behavior. Keep rebind only for restore.
-                            if restore_anchor_live and (not resize_anchor_live):
+                            if (restore_anchor_live or stabilize_anchor_live) and (not resize_anchor_live):
                                 if hasattr(source_model_local, 'get_loaded_row_for_global_index'):
                                     loaded_row = source_model_local.get_loaded_row_for_global_index(target_global)
                                     if loaded_row >= 0:

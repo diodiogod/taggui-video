@@ -109,24 +109,23 @@ class ImageListViewCalculationMixin:
                     float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0) > time.time()
                     and getattr(self, "_selected_global_lock_value", None) is not None
                 )
-                explicit_jump_live = (
-                    isinstance(getattr(self, "_strict_jump_target_global", None), int)
-                    and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
-                )
+                explicit_jump_live = False
+                try:
+                    has_pending_jump_hold = getattr(self, "_has_pending_explicit_jump_hold", None)
+                    explicit_jump_live = bool(callable(has_pending_jump_hold) and has_pending_jump_hold())
+                except Exception:
+                    explicit_jump_live = False
+                if not explicit_jump_live:
+                    explicit_jump_live = (
+                        isinstance(getattr(self, "_strict_jump_target_global", None), int)
+                        and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+                    )
                 if drag_jump_lock_live:
                     self._release_page_lock_page = int(ctx.current_page)
                     self._release_page_lock_until = max(
                         float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
                         time.time() + 8.0,
                     )
-                if explicit_jump_live and hasattr(source_model, "_load_page_sync"):
-                    try:
-                        source_model._load_page_sync(int(ctx.current_page))
-                        target_ready = len(source_model._pages.get(int(ctx.current_page), [])) > 0
-                        if target_ready and hasattr(source_model, "_emit_pages_updated"):
-                            source_model._emit_pages_updated()
-                    except Exception:
-                        target_ready = False
                 resize_anchor_live = (
                     getattr(self, '_resize_anchor_page', None) is not None
                     and time.time() <= float(getattr(self, '_resize_anchor_until', 0.0) or 0.0)
@@ -143,7 +142,7 @@ class ImageListViewCalculationMixin:
                 snapped_to_loaded_page = False
                 if target_ready:
                     pass
-                elif wait_count > 20 and not resize_anchor_live:
+                elif wait_count > 20 and not resize_anchor_live and not explicit_jump_live:
                     loaded_list = sorted(loaded_pages_now) if loaded_pages_now else []
                     sb = self.verticalScrollBar()
                     sb_val = int(sb.value())
@@ -190,12 +189,29 @@ class ImageListViewCalculationMixin:
                 if target_ready:
                     pass
                 elif not snapped_to_loaded_page:
+                    if explicit_jump_live:
+                        hold_until = time.time() + 15.0
+                        self._strict_jump_until = max(
+                            float(getattr(self, "_strict_jump_until", 0.0) or 0.0),
+                            hold_until,
+                        )
+                        self._restore_anchor_until = max(
+                            float(getattr(self, "_restore_anchor_until", 0.0) or 0.0),
+                            hold_until,
+                        )
+                        self._release_page_lock_until = max(
+                            float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
+                            hold_until,
+                        )
                     if wait_count > 40:
                         # Keep waiting while resize anchor is active; avoid snapping
                         # to a different loaded page and losing viewport context.
-                        self._strict_wait_count = 20
+                        self._strict_wait_count = 20 if not explicit_jump_live else 40
                     try:
-                        if hasattr(source_model, "ensure_pages_for_range"):
+                        if explicit_jump_live:
+                            if hasattr(source_model, "_request_page_load"):
+                                source_model._request_page_load(int(ctx.current_page))
+                        elif hasattr(source_model, "ensure_pages_for_range"):
                             start_row = ctx.window_start_page * ctx.page_size
                             end_row = min(ctx.total_items - 1, ((ctx.window_end_page + 1) * ctx.page_size) - 1)
                             source_model.ensure_pages_for_range(start_row, end_row)
@@ -265,17 +281,41 @@ class ImageListViewCalculationMixin:
             return False
         self._last_masonry_window_signature = window_signature
 
-        for p in range(
-            max(0, ctx.current_page - ctx.window_buffer),
-            min(ctx.max_page, ctx.current_page + ctx.window_buffer + 1),
-        ):
-            if p not in source_model._pages and p not in source_model._loading_pages:
-                source_model._request_page_load(p)
+        explicit_jump_live = False
+        try:
+            has_pending_jump_hold = getattr(self, "_has_pending_explicit_jump_hold", None)
+            explicit_jump_live = bool(callable(has_pending_jump_hold) and has_pending_jump_hold())
+        except Exception:
+            explicit_jump_live = False
+        if not explicit_jump_live:
+            try:
+                explicit_jump_live = (
+                    isinstance(getattr(self, "_strict_jump_target_global", None), int)
+                    and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+                )
+            except Exception:
+                explicit_jump_live = False
+
+        if explicit_jump_live and ctx.strict_mode and (not ctx.full_layout_mode):
+            if (
+                int(ctx.current_page) not in source_model._pages
+                and int(ctx.current_page) not in source_model._loading_pages
+            ):
+                source_model._request_page_load(int(ctx.current_page))
+        else:
+            for p in range(
+                max(0, ctx.current_page - ctx.window_buffer),
+                min(ctx.max_page, ctx.current_page + ctx.window_buffer + 1),
+            ):
+                if p not in source_model._pages and p not in source_model._loading_pages:
+                    source_model._request_page_load(p)
 
         filtered_items = [item for item in ctx.items_data if ctx.min_idx <= item[0] < ctx.max_idx]
         if ctx.strict_mode and (not ctx.full_layout_mode) and not filtered_items:
             try:
-                if hasattr(source_model, "ensure_pages_for_range"):
+                if explicit_jump_live and hasattr(source_model, "_request_page_load"):
+                    source_model._request_page_load(int(ctx.current_page))
+                elif hasattr(source_model, "ensure_pages_for_range"):
                     start_row = ctx.window_start_page * ctx.page_size
                     end_row = min(ctx.total_items - 1, ((ctx.window_end_page + 1) * ctx.page_size) - 1)
                     source_model.ensure_pages_for_range(start_row, end_row)
@@ -304,10 +344,17 @@ class ImageListViewCalculationMixin:
                 cached_pages = set()
             current_page_cached = int(ctx.current_page) in cached_pages
             if (not current_page_cached):
-                explicit_jump_live = (
-                    isinstance(getattr(self, "_strict_jump_target_global", None), int)
-                    and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
-                )
+                explicit_jump_live = False
+                try:
+                    has_pending_jump_hold = getattr(self, "_has_pending_explicit_jump_hold", None)
+                    explicit_jump_live = bool(callable(has_pending_jump_hold) and has_pending_jump_hold())
+                except Exception:
+                    explicit_jump_live = False
+                if not explicit_jump_live:
+                    explicit_jump_live = (
+                        isinstance(getattr(self, "_strict_jump_target_global", None), int)
+                        and time.time() < float(getattr(self, "_strict_jump_until", 0.0) or 0.0)
+                    )
                 release_lock_live = (
                     getattr(self, "_release_page_lock_page", None) is not None
                     and time.time() < float(getattr(self, "_release_page_lock_until", 0.0) or 0.0)

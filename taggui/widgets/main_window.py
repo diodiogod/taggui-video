@@ -3928,16 +3928,30 @@ class MainWindow(QMainWindow):
         # Try to restore selection by path (more robust)
         self._restore_global_rank = -1
         if select_path:
-            src_row = self.image_list_model.get_index_for_path(Path(select_path))
-            if src_row != -1:
-                # Store global rank for scroll restore (local rows shift as pages load)
-                self._restore_global_rank = self.image_list_model.get_global_index_for_row(src_row)
-                # Map source row to proxy index (considering filter/sort)
-                src_idx = self.image_list_model.index(src_row, 0)
-                proxy_idx = self.proxy_image_list_model.mapFromSource(src_idx)
-                if proxy_idx.isValid():
-                    select_index = proxy_idx.row()
-                    print(f"[RESTORE] Restored selection from path: {select_path} (Row {select_index})")
+            restore_path = Path(select_path)
+            if (
+                getattr(self.image_list_model, '_paginated_mode', False)
+                and hasattr(self.image_list_model, 'resolve_restore_target')
+            ):
+                restore_target = self.image_list_model.resolve_restore_target(restore_path)
+                if isinstance(restore_target, dict):
+                    self._restore_global_rank = int(restore_target.get('target_global', -1))
+                    if self._restore_global_rank >= 0:
+                        print(
+                            f"[RESTORE] Resolved startup target from path: {select_path} "
+                            f"(Global {self._restore_global_rank})"
+                        )
+            if self._restore_global_rank < 0:
+                src_row = self.image_list_model.get_index_for_path(restore_path)
+                if src_row != -1:
+                    # Store global rank for scroll restore (local rows shift as pages load)
+                    self._restore_global_rank = self.image_list_model.get_global_index_for_row(src_row)
+                    # Map source row to proxy index (considering filter/sort)
+                    src_idx = self.image_list_model.index(src_row, 0)
+                    proxy_idx = self.proxy_image_list_model.mapFromSource(src_idx)
+                    if proxy_idx.isValid():
+                        select_index = proxy_idx.row()
+                        print(f"[RESTORE] Restored selection from path: {select_path} (Row {select_index})")
 
         # Clear the current index first to make sure that the `currentChanged`
         # signal is emitted even if the image at the index is already selected.
@@ -3989,16 +4003,6 @@ class MainWindow(QMainWindow):
             and view._use_local_anchor_masonry(source_model)
         )
         if is_paginated_strict and _restore_global_rank >= 0:
-            page_size = getattr(source_model, 'PAGE_SIZE', 1000)
-            queue_reflow_guide = getattr(view, '_queue_target_reflow_guide', None)
-            if callable(queue_reflow_guide):
-                try:
-                    queue_reflow_guide(int(_restore_global_rank), source_model=source_model, duration_ms=3200)
-                except Exception:
-                    pass
-            view._restore_target_page = _restore_global_rank // page_size
-            view._restore_target_global_index = _restore_global_rank
-            view._restore_anchor_until = time.time() + 30.0
             self._restore_in_progress = True
             self._restore_target_global_rank = int(_restore_global_rank)
         else:
@@ -4048,173 +4052,15 @@ class MainWindow(QMainWindow):
                 pass
 
             if is_paginated_strict and _restore_global_rank >= 0:
-                page_size = getattr(source_model, 'PAGE_SIZE', 1000)
-                target_page = _restore_global_rank // page_size
-                canonical_max = view._strict_canonical_domain_max(source_model)
-                total_count = getattr(source_model, '_total_count', 0) or 0
-                max_page = max(1, (total_count + page_size - 1) // page_size) - 1
-                if max_page > 0 and canonical_max > 0:
-                    # Set restore target page directly on view — bypasses all
-                    # scrollbar-to-page derivation (which drifts through
-                    # competing writers in completion/updateGeometries/_check_and_load_pages).
-                    view._restore_target_page = target_page
-
-                    target_scroll = int(target_page / max_page * canonical_max)
-                    sb = view.verticalScrollBar()
-                    sb.setMaximum(canonical_max)
-                    sb.setValue(target_scroll)
-                    print(f"[RESTORE] Scrollbar moved to page {target_page} "
-                          f"(rank {_restore_global_rank})")
-
-                    # After masonry recalcs for the target page, find the item
-                    # in masonry_items by global index and center the viewport.
-                    final_done = [False]
-                    final_attempts = [0]
-
-                    def do_final_scroll():
-                        if final_done[0]:
-                            return
-                        if load_session_id != self._load_session_id:
-                            final_done[0] = True
-                            try:
-                                view.layout_ready.disconnect(do_final_scroll)
-                            except Exception:
-                                pass
-                            return
-                        # User clicked — restore is superseded.
-                        if not getattr(self, '_restore_in_progress', False):
-                            final_done[0] = True
-                            try:
-                                view.layout_ready.disconnect(do_final_scroll)
-                            except Exception:
-                                pass
-                            return
-                        final_attempts[0] += 1
-
-                        # Rebind current selection by GLOBAL rank (not stale local row).
-                        # During restore, newly loaded pages can be inserted before the
-                        # selected page, so the original local row may drift to another image.
-                        target_idx = _restore_global_rank
-                        rebound_proxy_index = QModelIndex()
-                        if hasattr(source_model, 'get_loaded_row_for_global_index'):
-                            loaded_row = source_model.get_loaded_row_for_global_index(target_idx)
-                            if loaded_row >= 0:
-                                src_idx = source_model.index(loaded_row, 0)
-                                proxy_model = view.model()
-                                rebound_proxy_index = (
-                                    proxy_model.mapFromSource(src_idx)
-                                    if hasattr(proxy_model, 'mapFromSource')
-                                    else src_idx
-                                )
-                                rebound_proxy_index = _fresh_view_index(rebound_proxy_index)
-                                if (rebound_proxy_index.isValid()
-                                        and view.currentIndex() != rebound_proxy_index):
-                                    _set_current_and_select(rebound_proxy_index)
-
-                        # Find item position directly in masonry items.
-                        for item in (view._masonry_items or []):
-                            if item.get('index') == target_idx:
-                                final_done[0] = True
-                                try:
-                                    view.layout_ready.disconnect(do_final_scroll)
-                                except Exception:
-                                    pass
-                                # Center viewport on this item
-                                item_center_y = item['y'] + item['height'] // 2
-                                viewport_h = view.viewport().height()
-                                scroll_to = max(0, item_center_y - viewport_h // 2)
-                                view.verticalScrollBar().setValue(scroll_to)
-                                # Ensure current index/viewer are synchronized with target.
-                                if not rebound_proxy_index.isValid() and hasattr(source_model, 'get_loaded_row_for_global_index'):
-                                    loaded_row = source_model.get_loaded_row_for_global_index(target_idx)
-                                    if loaded_row >= 0:
-                                        src_idx = source_model.index(loaded_row, 0)
-                                        proxy_model = view.model()
-                                        rebound_proxy_index = (
-                                            proxy_model.mapFromSource(src_idx)
-                                            if hasattr(proxy_model, 'mapFromSource')
-                                            else src_idx
-                                        )
-                                        rebound_proxy_index = _fresh_view_index(rebound_proxy_index)
-                                if rebound_proxy_index.isValid():
-                                    _set_current_and_select(rebound_proxy_index)
-                                if hasattr(view, '_start_exact_jump_settle'):
-                                    try:
-                                        view._start_exact_jump_settle(int(target_idx))
-                                    except Exception:
-                                        self._restore_in_progress = False
-                                        self._restore_target_global_rank = -1
-                                else:
-                                    self._restore_in_progress = False
-                                    self._restore_target_global_rank = -1
-                                print(f"[RESTORE] Centered on global index "
-                                      f"{target_idx} at y={item['y']}")
-                                return
-
-                        # Retry briefly while target page/window is still materializing.
-                        if final_attempts[0] < 20:
-                            QTimer.singleShot(150, do_final_scroll)
-                            return
-
-                        # Fallback: keep whichever index is known-correct.
-                        final_done[0] = True
-                        try:
-                            view.layout_ready.disconnect(do_final_scroll)
-                        except Exception:
-                            pass
-                        fallback_index = (
-                            rebound_proxy_index
-                            if rebound_proxy_index.isValid()
-                            else selected_index
-                        )
-                        fallback_index = _fresh_view_index(fallback_index)
-                        if fallback_index.isValid():
-                            _set_current_and_select(fallback_index)
-                            view.scrollTo(
-                                fallback_index,
-                                QAbstractItemView.ScrollHint.PositionAtCenter,
-                            )
-                        if hasattr(view, '_start_exact_jump_settle'):
-                            try:
-                                view._start_exact_jump_settle(int(target_idx))
-                            except Exception:
-                                self._restore_in_progress = False
-                                self._restore_target_global_rank = -1
-                        else:
-                            self._restore_in_progress = False
-                            self._restore_target_global_rank = -1
-
-                    view.layout_ready.connect(do_final_scroll)
-                    # Keep restore override alive through startup page-load/recalc bursts.
-                    # It is also cleared immediately on user-driven scrolling.
-                    def _clear_restore():
-                        if hasattr(view, '_cancel_exact_jump_settle'):
-                            try:
-                                view._cancel_exact_jump_settle()
-                                return
-                            except Exception:
-                                pass
-                        view._restore_target_page = None
-                        view._restore_target_global_index = None
-                        view._restore_anchor_until = 0.0
-                        self._restore_in_progress = False
-                        self._restore_target_global_rank = -1
-                    QTimer.singleShot(30000, _clear_restore)
-                    QTimer.singleShot(2000, do_final_scroll)
-                    return
-
-                # Single-page strict restore (max_page == 0): no scrollbar page jump
-                # happens, so we must still bind current selection explicitly.
-                selected_index_fresh = _fresh_view_index(selected_index)
-                if selected_index_fresh.isValid():
-                    _set_current_and_select(selected_index_fresh)
-                    view.scrollTo(
-                        selected_index_fresh,
-                        QAbstractItemView.ScrollHint.PositionAtCenter,
-                    )
+                if hasattr(view, 'start_targeted_relocation'):
+                    if view.start_targeted_relocation(
+                        int(_restore_global_rank),
+                        reason='startup_restore',
+                        source_model=source_model,
+                    ):
+                        return
                 self._restore_in_progress = False
                 self._restore_target_global_rank = -1
-                return
 
             # Non-paginated or no restore info: simple scrollTo
             selected_index_fresh = _fresh_view_index(selected_index)
@@ -4223,6 +4069,10 @@ class MainWindow(QMainWindow):
                     selected_index_fresh, QAbstractItemView.ScrollHint.PositionAtCenter)
 
         self.image_list.list_view.layout_ready.connect(do_scroll)
+
+        # Startup restore should begin immediately; waiting for bootstrap
+        # layout just delays far-page loading on large datasets.
+        QTimer.singleShot(0, do_scroll)
 
         # Fallback timeout in case layout_ready doesn't fire (e.g., grid layout)
         QTimer.singleShot(2000, do_scroll)
@@ -4682,6 +4532,14 @@ class MainWindow(QMainWindow):
         view = self.image_list.list_view
         if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
             return
+        save_source = "program"
+        try:
+            source_until = float(getattr(view, '_selection_log_source_until', 0.0) or 0.0)
+            source_value = getattr(view, '_selection_log_source', None)
+            if _t.time() <= source_until and isinstance(source_value, str) and source_value.strip():
+                save_source = source_value.strip()
+        except Exception:
+            save_source = "program"
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None
                         else 'filtered_image_index')
@@ -4717,9 +4575,13 @@ class MainWindow(QMainWindow):
                         diagnostic_print(
                             f"{diagnostic_time_prefix()} [SAVE] Selected path: {img.path.name} "
                             f"| page={debug_page} | index={debug_index} "
-                            f"| enriched={enriched_state} | dims={dims_state}",
+                            f"| enriched={enriched_state} | dims={dims_state} "
+                            f"| source={save_source}",
                             detail="essential",
                         )
+                        if save_source == "user_click":
+                            view._selection_log_source = "program"
+                            view._selection_log_source_until = 0.0
                         self._update_main_window_title(img.path.name)
                     else:
                         self._update_main_window_title()
@@ -4887,9 +4749,9 @@ class MainWindow(QMainWindow):
         # point to the stable selected global.
         return int(mapped) != int(selected_global)
 
-    def commit_thumbnail_click_selection(self):
+    def commit_thumbnail_click_selection(self, proxy_image_index: QModelIndex | None = None):
         """Apply deferred thumbnail click selection after release (not drag)."""
-        index = self.image_list_selection_model.currentIndex()
+        index = proxy_image_index if isinstance(proxy_image_index, QModelIndex) and proxy_image_index.isValid() else self.image_list_selection_model.currentIndex()
         if not index.isValid():
             return
         view = self.image_list.list_view
@@ -5465,6 +5327,7 @@ class MainWindow(QMainWindow):
             list_view._zoom_resize_snap_defer_until = 0.0
             list_view._last_ctrl_wheel_zoom_direction = 0
             list_view._last_masonry_signal = "thumbnail_size_button"
+            list_view._suppress_masonry_snap_cycles = 2
             if hasattr(list_view, '_on_resize_finished'):
                 list_view._on_resize_finished()
             list_view.viewport().update()

@@ -3,6 +3,89 @@ from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.settings import DEFAULT_SETTINGS, settings
 
 class ImageListViewInteractionMixin:
+    def _mark_selection_log_source(self, source: str, *, hold_s: float = 2.0):
+        """Tag upcoming selection persistence with a short-lived origin label."""
+        import time as _t
+
+        try:
+            source_text = str(source or "").strip()
+        except Exception:
+            source_text = ""
+        if not source_text:
+            source_text = "program"
+        self._selection_log_source = source_text
+        self._selection_log_source_until = _t.time() + max(0.25, float(hold_s or 0.0))
+
+    def _arm_pending_targeted_relocation(
+        self,
+        target_global: int,
+        *,
+        reason: str = "sort_restore",
+        source_model=None,
+        hold_s: float = 30.0,
+    ) -> bool:
+        """Preserve a targeted relocation goal across a model reset."""
+        import time as _t
+
+        if source_model is None:
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), "sourceModel")
+                else self.model()
+            )
+        if source_model is None:
+            return False
+
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0:
+            return False
+
+        try:
+            page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        except Exception:
+            page_size = 1000
+        target_page = max(0, int(target_global) // max(1, page_size))
+        hold_until = _t.time() + max(2.0, float(hold_s or 0.0))
+
+        self._pending_targeted_relocation_target_global = int(target_global)
+        self._pending_targeted_relocation_target_page = int(target_page)
+        self._pending_targeted_relocation_reason = str(reason or "sort_restore")
+        self._pending_targeted_relocation_until = hold_until
+        self._selected_global_index = int(target_global)
+        self._current_page = int(target_page)
+        self._restore_target_page = int(target_page)
+        self._restore_target_global_index = int(target_global)
+        self._restore_anchor_until = max(
+            float(getattr(self, "_restore_anchor_until", 0.0) or 0.0),
+            hold_until,
+        )
+        self._selected_global_lock_value = int(target_global)
+        self._selected_global_lock_until = max(
+            float(getattr(self, "_selected_global_lock_until", 0.0) or 0.0),
+            hold_until,
+        )
+
+        mw = self.window()
+        if (
+            mw is not None
+            and hasattr(mw, "_restore_in_progress")
+            and hasattr(mw, "_restore_target_global_rank")
+        ):
+            mw._restore_in_progress = True
+            mw._restore_target_global_rank = int(target_global)
+
+        self._mark_selection_log_source(str(reason or "sort_restore"), hold_s=max(2.0, float(hold_s or 0.0)))
+        return True
+
+    def _clear_pending_targeted_relocation(self):
+        self._pending_targeted_relocation_target_global = None
+        self._pending_targeted_relocation_target_page = None
+        self._pending_targeted_relocation_reason = None
+        self._pending_targeted_relocation_until = 0.0
+
     def _get_image_list_double_click_action(self) -> str:
         """Return normalized configured double-click action."""
         try:
@@ -81,7 +164,13 @@ class ImageListViewInteractionMixin:
         self._last_explicit_jump_kind = None
         self._last_explicit_jump_target_global = None
         self._last_explicit_jump_until = 0.0
+        cancel_one_shot = getattr(self, "_cancel_one_shot_targeted_jump", None)
+        if callable(cancel_one_shot):
+            cancel_one_shot()
         self._cancel_exact_jump_settle()
+        clear_stabilization = getattr(self, "_clear_post_jump_stabilization", None)
+        if callable(clear_stabilization):
+            clear_stabilization()
         clear_reflow_guide = getattr(self, "_clear_pending_target_reflow_guide", None)
         if callable(clear_reflow_guide):
             clear_reflow_guide()
@@ -120,6 +209,330 @@ class ImageListViewInteractionMixin:
     def _on_exact_jump_layout_ready(self):
         token = int(getattr(self, "_exact_jump_settle_token", 0) or 0)
         QTimer.singleShot(0, lambda token=token: self._run_exact_jump_settle(token))
+
+    def _cancel_one_shot_targeted_jump(self):
+        self._one_shot_jump_target_global = None
+        self._one_shot_jump_reason = None
+        self._one_shot_jump_token = int(getattr(self, "_one_shot_jump_token", 0) or 0) + 1
+        self._one_shot_jump_attempts = 0
+        self._strict_waiting_target_page = None
+        self._strict_waiting_window_pages = None
+
+    def _run_one_shot_targeted_jump_finalize(self, token: int | None = None):
+        import time as _t
+
+        active_token = int(getattr(self, "_one_shot_jump_token", 0) or 0)
+        if token is not None and int(token) != active_token:
+            return
+
+        target_global = getattr(self, "_one_shot_jump_target_global", None)
+        reason = str(getattr(self, "_one_shot_jump_reason", "") or "")
+        if not (isinstance(target_global, int) and target_global >= 0):
+            self._cancel_one_shot_targeted_jump()
+            return
+
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
+        )
+        if source_model is None:
+            self._cancel_one_shot_targeted_jump()
+            return
+
+        target_item = self._get_masonry_item_for_global_index(int(target_global))
+        if target_item is None:
+            attempts = int(getattr(self, "_one_shot_jump_attempts", 0) or 0) + 1
+            self._one_shot_jump_attempts = attempts
+            try:
+                if hasattr(source_model, "_request_page_load"):
+                    page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                    source_model._request_page_load(max(0, int(target_global) // max(1, page_size)))
+            except Exception:
+                pass
+            if attempts <= 300:
+                QTimer.singleShot(100, lambda token=active_token: self._run_one_shot_targeted_jump_finalize(token))
+            else:
+                self._cancel_one_shot_targeted_jump()
+            return
+
+        try:
+            sb = self.verticalScrollBar()
+            viewport_h = max(1, int(self.viewport().height()))
+            item_top = int(target_item.get("y", 0))
+            item_center_y = item_top + int(target_item.get("height", 0)) // 2
+            if reason == "page_input":
+                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                target_page = max(0, int(target_global) // max(1, page_size))
+                page_start = int(target_page) * max(1, page_size)
+                page_end = page_start + max(1, page_size)
+                page_top = item_top
+                try:
+                    for it in (self._masonry_items or []):
+                        idx = int(it.get("index", -1))
+                        if page_start <= idx < page_end:
+                            page_top = min(page_top, int(it.get("y", 0)))
+                except Exception:
+                    page_top = item_top
+                top_margin = max(12, min(48, viewport_h // 12))
+                target_scroll = max(0, min(page_top - top_margin, int(sb.maximum())))
+            else:
+                target_scroll = max(
+                    0,
+                    min(
+                        item_center_y - (viewport_h // 2),
+                        int(sb.maximum()),
+                    ),
+                )
+            prev_block = sb.blockSignals(True)
+            try:
+                sb.setValue(target_scroll)
+            finally:
+                sb.blockSignals(prev_block)
+            self._last_stable_scroll_value = int(target_scroll)
+        except Exception:
+            pass
+
+        try_show_reflow_guide = getattr(self, "_try_show_pending_target_reflow_guide", None)
+        if callable(try_show_reflow_guide):
+            try:
+                try_show_reflow_guide(int(target_global))
+            except Exception:
+                pass
+
+        if reason in {"startup_restore", "page_drag", "index_input"}:
+            try:
+                loaded_row = -1
+                if hasattr(source_model, "get_loaded_row_for_global_index"):
+                    loaded_row = int(source_model.get_loaded_row_for_global_index(int(target_global)))
+                if loaded_row >= 0:
+                    src_idx = source_model.index(loaded_row, 0)
+                    proxy_model = self.model()
+                    proxy_idx = (
+                        proxy_model.mapFromSource(src_idx)
+                        if proxy_model and hasattr(proxy_model, "mapFromSource")
+                        else src_idx
+                    )
+                    if proxy_idx.isValid():
+                        sel_model = self.selectionModel()
+                        if sel_model is not None:
+                            sel_model.setCurrentIndex(
+                                proxy_idx,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
+                        else:
+                            self.setCurrentIndex(proxy_idx)
+                        host = self.window()
+                        if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
+                            host.commit_thumbnail_click_selection(proxy_idx)
+            except Exception:
+                pass
+
+        page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        target_page = max(0, int(target_global) // max(1, page_size))
+        arm_stabilization = getattr(self, "_arm_post_jump_stabilization", None)
+        if callable(arm_stabilization):
+            try:
+                arm_stabilization(
+                    int(target_global),
+                    target_page=int(target_page),
+                    reason=reason or "sort_restore",
+                    hold_s=180.0,
+                )
+            except Exception:
+                pass
+
+        self._restore_anchor_until = 0.0
+        self._restore_target_page = None
+        self._restore_target_global_index = None
+        mw = self.window()
+        if (
+            mw is not None
+            and hasattr(mw, "_restore_in_progress")
+            and hasattr(mw, "_restore_target_global_rank")
+        ):
+            mw._restore_in_progress = False
+            mw._restore_target_global_rank = -1
+
+        if hasattr(source_model, "prepare_target_window"):
+            try:
+                prefer_forward = reason in {"sort_restore", "startup_restore"}
+                source_model.prepare_target_window(
+                    int(target_global),
+                    sync_target_page=False,
+                    include_buffer=True,
+                    prefer_forward=prefer_forward,
+                    emit_update=False,
+                    request_async_window=True,
+                    restart_enrichment=True,
+                    prune_to_window=False,
+                )
+            except Exception:
+                pass
+
+        self.viewport().update()
+        self._cancel_one_shot_targeted_jump()
+
+    def _start_one_shot_targeted_jump(
+        self,
+        target_global: int,
+        *,
+        reason: str,
+        source_model,
+    ) -> bool:
+        import time as _t
+
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        if target_global < 0 or source_model is None:
+            return False
+
+        self._cancel_one_shot_targeted_jump()
+        self._cancel_exact_jump_settle()
+        clear_stabilization = getattr(self, "_clear_post_jump_stabilization", None)
+        if callable(clear_stabilization):
+            clear_stabilization()
+        self._strict_waiting_target_page = None
+        self._strict_waiting_window_pages = None
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
+        if hasattr(source_model, "_enrichment_cancelled"):
+            try:
+                source_model._enrichment_cancelled.set()
+            except Exception:
+                pass
+
+        page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+        target_page = max(0, int(target_global) // max(1, page_size))
+        prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
+        publish_target_page_now = str(reason or "") in {"index_input", "page_drag"}
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        loaded_pages = sorted(getattr(source_model, "_pages", {}).keys()) if hasattr(source_model, "_pages") else []
+        nearest_loaded_gap = 0
+        if loaded_pages:
+            nearest_loaded_gap = min(abs(int(page) - int(target_page)) for page in loaded_pages)
+        target_page_loaded = int(target_page) in set(loaded_pages)
+        deep_unloaded_jump = bool(
+            (not target_page_loaded)
+            and loaded_pages
+            and nearest_loaded_gap > 2
+        )
+        sync_target_page = not deep_unloaded_jump
+        self._mark_selection_log_source(str(reason), hold_s=20.0)
+        self._selected_global_index = int(target_global)
+        self._selected_global_lock_value = int(target_global)
+        hold_s = 90.0 if deep_unloaded_jump else 20.0
+        self._selected_global_lock_until = _t.time() + hold_s
+        self._current_page = int(target_page)
+        self._strict_jump_target_global = int(target_global)
+        self._strict_jump_until = _t.time() + hold_s
+        self._last_explicit_jump_kind = str(reason)
+        self._last_explicit_jump_target_global = int(target_global)
+        self._last_explicit_jump_until = _t.time() + hold_s
+        self._release_page_lock_page = int(target_page)
+        self._release_page_lock_until = _t.time() + hold_s
+        self._restore_target_page = int(target_page)
+        self._restore_target_global_index = int(target_global)
+        self._restore_anchor_until = _t.time() + hold_s
+
+        prepared_state = None
+        if hasattr(source_model, "prepare_target_window"):
+            try:
+                prepared_state = source_model.prepare_target_window(
+                    int(target_global),
+                    sync_target_page=sync_target_page,
+                    include_buffer=not deep_unloaded_jump,
+                    prefer_forward=prefer_forward,
+                    emit_update=(publish_target_page_now and sync_target_page),
+                    request_async_window=True,
+                    restart_enrichment=not deep_unloaded_jump,
+                    prune_to_window=deep_unloaded_jump,
+                )
+            except Exception:
+                prepared_state = None
+
+        loaded_row = -1
+        if isinstance(prepared_state, dict):
+            try:
+                loaded_row = int(prepared_state.get("loaded_row", -1))
+            except Exception:
+                loaded_row = -1
+        if loaded_row < 0 and hasattr(source_model, "get_loaded_row_for_global_index"):
+            try:
+                loaded_row = int(source_model.get_loaded_row_for_global_index(int(target_global)))
+            except Exception:
+                loaded_row = -1
+        if loaded_row < 0 and not deep_unloaded_jump:
+            return False
+
+        try:
+            src_idx = source_model.index(loaded_row, 0)
+            proxy_model = self.model()
+            proxy_idx = (
+                proxy_model.mapFromSource(src_idx)
+                if proxy_model and hasattr(proxy_model, "mapFromSource")
+                else src_idx
+            )
+        except Exception:
+            proxy_idx = QModelIndex()
+
+        if proxy_idx.isValid():
+            sel_model = self.selectionModel()
+            if sel_model is not None:
+                sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            else:
+                self.setCurrentIndex(proxy_idx)
+
+        mw = self.window()
+        if (
+            mw is not None
+            and hasattr(mw, "_restore_in_progress")
+            and hasattr(mw, "_restore_target_global_rank")
+        ):
+            mw._restore_in_progress = True
+            mw._restore_target_global_rank = int(target_global)
+
+        queue_reflow_guide = getattr(self, "_queue_target_reflow_guide", None)
+        if self.use_masonry and callable(queue_reflow_guide):
+            try:
+                queue_reflow_guide(int(target_global), source_model=source_model, duration_ms=2200)
+            except Exception:
+                pass
+
+        try:
+            jump_domain = int(self._get_strict_scroll_domain_max(source_model, include_drag_baseline=True))
+        except Exception:
+            jump_domain = int(self._strict_canonical_domain_max(source_model))
+        try:
+            sb = self.verticalScrollBar()
+            target_scroll = self._get_strict_canonical_scroll_for_global(
+                int(target_global),
+                source_model=source_model,
+                domain_max=int(jump_domain),
+            )
+            if target_scroll is None:
+                target_scroll = 0
+            prev_block = sb.blockSignals(True)
+            try:
+                sb.setRange(0, int(jump_domain))
+                sb.setValue(max(0, min(int(target_scroll), int(jump_domain))))
+            finally:
+                sb.blockSignals(prev_block)
+            self._last_stable_scroll_value = int(sb.value())
+        except Exception:
+            pass
+
+        self._one_shot_jump_target_global = int(target_global)
+        self._one_shot_jump_reason = str(reason)
+        token = int(getattr(self, "_one_shot_jump_token", 0) or 0) + 1
+        self._one_shot_jump_token = token
+        self._one_shot_jump_attempts = 0
+        self._last_masonry_window_signature = None
+        self._calculate_masonry_layout()
+        QTimer.singleShot(80, lambda token=token: self._run_one_shot_targeted_jump_finalize(token))
+        return True
 
     def _start_exact_jump_settle(self, target_global: int):
         import time as _t
@@ -363,7 +776,15 @@ class ImageListViewInteractionMixin:
                 pass
 
         current_global = self._current_global_from_current_index(source_model)
-        loading_pages = bool(getattr(source_model, "_loading_pages", set()))
+        target_page_loading = False
+        try:
+            loading_pages = getattr(source_model, "_loading_pages", set())
+            if isinstance(loading_pages, set):
+                target_page_loading = int(target_page) in loading_pages
+            else:
+                target_page_loading = int(target_page) in set(loading_pages or ())
+        except Exception:
+            target_page_loading = False
         target_visible = False
         if target_item is not None:
             try:
@@ -380,7 +801,7 @@ class ImageListViewInteractionMixin:
             and int(current_global) == int(target_global)
             and target_item is not None
             and target_visible
-            and not loading_pages
+            and not target_page_loading
         )
         if stable_now:
             try_show_reflow_guide = getattr(self, "_try_show_pending_target_reflow_guide", None)
@@ -389,10 +810,28 @@ class ImageListViewInteractionMixin:
                     try_show_reflow_guide(int(target_global))
                 except Exception:
                     pass
-        self._exact_jump_settle_stable_hits = (
+        stable_hits = (
             int(getattr(self, "_exact_jump_settle_stable_hits", 0) or 0) + 1
             if stable_now else 0
         )
+        self._exact_jump_settle_stable_hits = stable_hits
+        jump_kind = str(getattr(self, "_last_explicit_jump_kind", "") or "")
+        stable_hits_needed = 1 if jump_kind in {"sort_restore", "startup_restore"} else 2
+        if stable_now and stable_hits >= stable_hits_needed:
+            if jump_kind in {"sort_restore", "startup_restore"}:
+                arm_stabilization = getattr(self, "_arm_post_jump_stabilization", None)
+                if callable(arm_stabilization):
+                    try:
+                        arm_stabilization(
+                            int(target_global),
+                            target_page=int(target_page),
+                            reason=jump_kind,
+                            hold_s=180.0,
+                        )
+                    except Exception:
+                        pass
+            self._cancel_exact_jump_settle()
+            return
         delay_ms = 350 if stable_now else 150
         QTimer.singleShot(delay_ms, lambda token=active_token: self._run_exact_jump_settle(token))
 
@@ -601,16 +1040,22 @@ class ImageListViewInteractionMixin:
                 self._spawn_drag_index = QPersistentModelIndex(start_index)
                 self._spawn_drag_origin_global_pos = self._event_global_point(event)
                 self._suppress_selection_commit_until_release = True
+                self._pending_click_commit_index = QPersistentModelIndex()
+                self._pending_click_commit_global = None
             else:
                 self._spawn_drag_start_pos = None
                 self._spawn_drag_index = QPersistentModelIndex()
                 self._spawn_drag_origin_global_pos = QPoint()
                 self._suppress_selection_commit_until_release = False
+                self._pending_click_commit_index = QPersistentModelIndex()
+                self._pending_click_commit_global = None
         else:
             self._spawn_drag_start_pos = None
             self._spawn_drag_index = QPersistentModelIndex()
             self._spawn_drag_origin_global_pos = QPoint()
             self._suppress_selection_commit_until_release = False
+            self._pending_click_commit_index = QPersistentModelIndex()
+            self._pending_click_commit_global = None
     
         # Pause enrichment during interaction to prevent crashes
         if source_model and hasattr(source_model, '_enrichment_timer') and source_model._enrichment_timer:
@@ -642,6 +1087,9 @@ class ImageListViewInteractionMixin:
                         event.accept()
                         return
 
+                    self._mark_selection_log_source("user_click", hold_s=2.5)
+                    self._pending_click_commit_index = QPersistentModelIndex(index)
+                    self._pending_click_commit_global = int(clicked_global) if clicked_global >= 0 else None
                     self._user_click_selection_frozen_until = 0.0
                     clicked_global = -1
                     try:
@@ -665,63 +1113,91 @@ class ImageListViewInteractionMixin:
                         active_exact_target = self._get_active_exact_target_global(source_model=source_model)
                     except Exception:
                         active_exact_target = None
-                    preserve_exact_target_hold = bool(
+                preserve_exact_target_hold = bool(
+                    not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                    and isinstance(active_exact_target, int)
+                    and active_exact_target >= 0
+                    and int(clicked_global) == int(active_exact_target)
+                )
+                stabilize_state = None
+                consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+                if callable(consume_stabilization):
+                    try:
+                        stabilize_state = consume_stabilization(source_model=source_model)
+                    except Exception:
+                        stabilize_state = None
+                if not preserve_exact_target_hold:
+                    self._selected_global_lock_until = 0.0
+                    self._selected_global_lock_value = None
+                    self._clear_explicit_jump_tracking()
+                    if (
                         not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
-                        and isinstance(active_exact_target, int)
-                        and active_exact_target >= 0
-                        and int(clicked_global) == int(active_exact_target)
-                    )
-                    if not preserve_exact_target_hold:
-                        self._selected_global_lock_until = 0.0
-                        self._selected_global_lock_value = None
-                        self._clear_explicit_jump_tracking()
-                    self._strict_jump_target_global = None
-                    self._strict_jump_until = 0.0
-
-                    sel_model = self.selectionModel()
-                    if sel_model is not None:
-                        # Prevent Qt's native auto-scroll-to-current in virtual-list mode.
-                        self._suppress_virtual_auto_scroll_once = True
-                        if modifiers & Qt.ControlModifier:
-                            was_selected = sel_model.isSelected(index)
-                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-                            sel_model.select(
-                                index,
-                                QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
-                            )
-                        elif modifiers & Qt.ShiftModifier:
-                            current = self.currentIndex()
-                            if current.isValid():
-                                start_row = min(current.row(), index.row())
-                                end_row = max(current.row(), index.row())
-                                selection = QItemSelection()
-                                for item_row in range(start_row, end_row + 1):
-                                    item_index = model.index(item_row, 0)
-                                    selection.select(item_index, item_index)
-                                sel_model.select(selection, QItemSelectionModel.Select)
-                                sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-                            else:
-                                sel_model.setCurrentIndex(
-                                    index,
-                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                        and isinstance(clicked_global, int)
+                        and clicked_global >= 0
+                        and isinstance(stabilize_state, dict)
+                    ):
+                        arm_stabilization = getattr(self, "_arm_post_jump_stabilization", None)
+                        if callable(arm_stabilization):
+                            try:
+                                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                            except Exception:
+                                page_size = 1000
+                            try:
+                                arm_stabilization(
+                                    int(clicked_global),
+                                    target_page=max(0, int(clicked_global) // max(1, page_size)),
+                                    reason=str(stabilize_state.get("reason", "browse_click") or "browse_click"),
+                                    hold_s=90.0,
                                 )
+                            except Exception:
+                                pass
+                self._strict_jump_target_global = None
+                self._strict_jump_until = 0.0
+
+                sel_model = self.selectionModel()
+                if sel_model is not None:
+                    # Prevent Qt's native auto-scroll-to-current in virtual-list mode.
+                    self._suppress_virtual_auto_scroll_once = True
+                    if modifiers & Qt.ControlModifier:
+                        was_selected = sel_model.isSelected(index)
+                        sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                        sel_model.select(
+                            index,
+                            QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
+                        )
+                    elif modifiers & Qt.ShiftModifier:
+                        current = self.currentIndex()
+                        if current.isValid():
+                            start_row = min(current.row(), index.row())
+                            end_row = max(current.row(), index.row())
+                            selection = QItemSelection()
+                            for item_row in range(start_row, end_row + 1):
+                                item_index = model.index(item_row, 0)
+                                selection.select(item_index, item_index)
+                            sel_model.select(selection, QItemSelectionModel.Select)
+                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
                         else:
                             sel_model.setCurrentIndex(
-                                    index,
-                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                                )
-                        # If Qt skipped scrollTo for this selection mutation, clear the guard.
-                        QTimer.singleShot(
-                            0,
-                            lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
-                        )
+                                index,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
                     else:
-                        self._suppress_virtual_auto_scroll_once = True
-                        self.setCurrentIndex(index)
-                        QTimer.singleShot(
-                            0,
-                            lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
-                        )
+                        sel_model.setCurrentIndex(
+                                index,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
+                    # If Qt skipped scrollTo for this selection mutation, clear the guard.
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                    )
+                else:
+                    self._suppress_virtual_auto_scroll_once = True
+                    self.setCurrentIndex(index)
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                    )
 
                     try:
                         current_global = self._current_global_from_current_index(source_model)
@@ -897,13 +1373,44 @@ class ImageListViewInteractionMixin:
                     and active_exact_target >= 0
                     and int(clicked_global) == int(active_exact_target)
                 )
+                stabilize_state = None
+                consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+                if callable(consume_stabilization):
+                    try:
+                        stabilize_state = consume_stabilization(source_model=source_model)
+                    except Exception:
+                        stabilize_state = None
                 if not preserve_exact_target_hold:
                     # Explicit click means user is choosing a new selection identity.
                     self._selected_global_lock_until = 0.0
                     self._selected_global_lock_value = None
                     self._clear_explicit_jump_tracking()
+                    if (
+                        not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                        and isinstance(clicked_global, int)
+                        and clicked_global >= 0
+                        and isinstance(stabilize_state, dict)
+                    ):
+                        arm_stabilization = getattr(self, "_arm_post_jump_stabilization", None)
+                        if callable(arm_stabilization):
+                            try:
+                                page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
+                            except Exception:
+                                page_size = 1000
+                            try:
+                                arm_stabilization(
+                                    int(clicked_global),
+                                    target_page=max(0, int(clicked_global) // max(1, page_size)),
+                                    reason=str(stabilize_state.get("reason", "browse_click") or "browse_click"),
+                                    hold_s=90.0,
+                                )
+                            except Exception:
+                                pass
                 self._strict_jump_target_global = None
                 self._strict_jump_until = 0.0
+                self._mark_selection_log_source("user_click", hold_s=2.5)
+                self._pending_click_commit_index = QPersistentModelIndex(index)
+                self._pending_click_commit_global = int(clicked_global) if clicked_global >= 0 else None
 
                 if modifiers & Qt.ControlModifier:
                     # Ctrl+Click: toggle selection WITHOUT clearing others
@@ -1215,10 +1722,50 @@ class ImageListViewInteractionMixin:
         if should_commit_click_selection:
             host = self.window()
             if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
+                commit_index = QModelIndex()
+                pending_global = getattr(self, "_pending_click_commit_global", None)
+                if isinstance(pending_global, int) and pending_global >= 0:
+                    try:
+                        source_model = (
+                            self.model().sourceModel()
+                            if self.model() and hasattr(self.model(), "sourceModel")
+                            else self.model()
+                        )
+                        loaded_row = -1
+                        if source_model is not None and hasattr(source_model, "get_loaded_row_for_global_index"):
+                            loaded_row = int(source_model.get_loaded_row_for_global_index(int(pending_global)))
+                        if loaded_row >= 0 and source_model is not None:
+                            src_idx = source_model.index(loaded_row, 0)
+                            proxy_model = self.model()
+                            if proxy_model is not None and hasattr(proxy_model, "mapFromSource"):
+                                mapped_idx = proxy_model.mapFromSource(src_idx)
+                            else:
+                                mapped_idx = src_idx
+                            if mapped_idx.isValid():
+                                commit_index = mapped_idx
+                    except Exception:
+                        commit_index = QModelIndex()
+                pending_commit = QPersistentModelIndex(
+                    getattr(self, "_pending_click_commit_index", QPersistentModelIndex())
+                )
+                if (not commit_index.isValid()) and pending_commit.isValid():
+                    try:
+                        live_model = self.model()
+                        if live_model is not None:
+                            if isinstance(pending_commit, QPersistentModelIndex) and pending_commit.isValid():
+                                live_index = QModelIndex(pending_commit)
+                            else:
+                                live_index = live_model.index(pending_commit.row(), pending_commit.column())
+                            if live_index.isValid():
+                                commit_index = live_index
+                    except Exception:
+                        commit_index = QModelIndex()
                 try:
-                    host.commit_thumbnail_click_selection()
+                    host.commit_thumbnail_click_selection(commit_index)
                 except Exception:
                     pass
+        self._pending_click_commit_index = QPersistentModelIndex()
+        self._pending_click_commit_global = None
         self._suppress_selection_commit_until_release = False
 
     def leaveEvent(self, event):
@@ -1468,7 +2015,7 @@ class ImageListViewInteractionMixin:
                         source_model._emit_pages_updated()
                     if hasattr(source_model, '_start_paginated_enrichment'):
                         source_model._start_paginated_enrichment(
-                            window_pages=range(enrich_start_page, enrich_end_page + 1),
+                            window_pages={int(target_page)},
                             scope='window',
                         )
         except Exception:
@@ -1935,20 +2482,29 @@ class ImageListViewInteractionMixin:
         total_pages = max(1, (total_items + max(1, page_size) - 1) // max(1, page_size))
         target_page = max(0, min(total_pages - 1, int(page_1_based) - 1))
         target_global = max(0, min(total_items - 1, target_page * max(1, page_size)))
-        self._pending_explicit_jump_kind = "page_input"
+        self._pending_explicit_jump_kind = "index_input"
         diagnostic_print(
             f"{diagnostic_time_prefix()} [jump page requested] page {target_page + 1} via=input",
             detail="essential",
         )
         return self.go_to_global_index(target_global)
 
-    def go_to_global_index(self, target_global: int) -> bool:
-        """Jump to stable global index and select it."""
-        source_model = (
-            self.model().sourceModel()
-            if self.model() and hasattr(self.model(), "sourceModel")
-            else self.model()
-        )
+    def start_targeted_relocation(
+        self,
+        target_global: int,
+        *,
+        reason: str = "global_jump",
+        source_model=None,
+    ) -> bool:
+        """Relocate the viewport/selection to a stable global target."""
+        import time as _t
+
+        if source_model is None:
+            source_model = (
+                self.model().sourceModel()
+                if self.model() and hasattr(self.model(), "sourceModel")
+                else self.model()
+            )
         if source_model is None:
             return False
 
@@ -1964,11 +2520,7 @@ class ImageListViewInteractionMixin:
             return False
         target_global = max(0, min(total_items - 1, target_global))
 
-        import time as _t
-        jump_kind = getattr(self, "_pending_explicit_jump_kind", None)
-        if not isinstance(jump_kind, str) or not jump_kind:
-            jump_kind = "global_jump"
-        self._pending_explicit_jump_kind = None
+        jump_kind = str(reason or "").strip() or "global_jump"
         strict_paginated_masonry = bool(
             self.use_masonry
             and hasattr(source_model, "_paginated_mode")
@@ -1976,6 +2528,26 @@ class ImageListViewInteractionMixin:
             and hasattr(self, "_use_local_anchor_masonry")
             and self._use_local_anchor_masonry(source_model)
         )
+        prefer_forward_window = jump_kind in {"sort_restore", "startup_restore"}
+
+        if strict_paginated_masonry and jump_kind in {
+            "sort_restore",
+            "startup_restore",
+            "page_drag",
+            "index_input",
+        }:
+            return self._start_one_shot_targeted_jump(
+                int(target_global),
+                reason=str(jump_kind),
+                source_model=source_model,
+            )
+
+        start_ts = _t.monotonic()
+        self._clear_pending_targeted_relocation()
+        clear_stabilization = getattr(self, "_clear_post_jump_stabilization", None)
+        if callable(clear_stabilization):
+            clear_stabilization()
+        self._mark_selection_log_source(str(jump_kind), hold_s=30.0 if strict_paginated_masonry else 8.0)
         queue_reflow_guide = getattr(self, "_queue_target_reflow_guide", None)
         if self.use_masonry and callable(queue_reflow_guide):
             try:
@@ -1983,19 +2555,16 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
 
-        # New explicit jump overrides drag/release edge and lock state.
         if strict_paginated_masonry:
+            lock_until = _t.time() + 30.0
             self._selected_global_lock_value = int(target_global)
-            self._selected_global_lock_until = _t.time() + 30.0
+            self._selected_global_lock_until = lock_until
             self._suppress_masonry_auto_scroll_until = _t.time() + 8.0
             self._strict_jump_target_global = int(target_global)
-            # Far buffered jumps can take several seconds to materialize their
-            # target window. Keep explicit jump ownership alive long enough so
-            # strict mode cannot fall back to stale old-window pages mid-jump.
-            self._strict_jump_until = _t.time() + 30.0
+            self._strict_jump_until = lock_until
             self._last_explicit_jump_kind = str(jump_kind)
             self._last_explicit_jump_target_global = int(target_global)
-            self._last_explicit_jump_until = _t.time() + 30.0
+            self._last_explicit_jump_until = lock_until
         else:
             self._selected_global_lock_until = 0.0
             self._selected_global_lock_value = None
@@ -2004,6 +2573,7 @@ class ImageListViewInteractionMixin:
             self._last_explicit_jump_kind = str(jump_kind)
             self._last_explicit_jump_target_global = int(target_global)
             self._last_explicit_jump_until = _t.time() + 8.0
+
         self._drag_release_anchor_active = False
         self._drag_release_anchor_idx = None
         self._drag_release_anchor_until = 0.0
@@ -2024,8 +2594,22 @@ class ImageListViewInteractionMixin:
             self._resize_anchor_target_global = None
             self._resize_anchor_until = 0.0
 
-        # Load target page eagerly when possible.
-        if not strict_paginated_masonry:
+        prepared_state = None
+        if getattr(source_model, "_paginated_mode", False) and hasattr(source_model, "prepare_target_window"):
+            try:
+                prepared_state = source_model.prepare_target_window(
+                    int(target_global),
+                    sync_target_page=True,
+                    include_buffer=True,
+                    prefer_forward=prefer_forward_window,
+                    emit_update=True,
+                    request_async_window=True,
+                    restart_enrichment=bool(strict_paginated_masonry),
+                )
+            except Exception:
+                prepared_state = None
+
+        if prepared_state is None and not strict_paginated_masonry:
             try:
                 pages = getattr(source_model, "_pages", {})
                 if isinstance(pages, dict) and target_page not in pages and hasattr(source_model, "_load_page_sync"):
@@ -2035,24 +2619,30 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
 
-        # Request window around target for buffered pagination.
-        try:
-            if hasattr(source_model, "ensure_pages_for_range"):
-                window = max(1, page_size)
-                start_idx = max(0, target_global - window)
-                end_idx = min(total_items, target_global + window)
-                source_model.ensure_pages_for_range(start_idx, end_idx)
-        except Exception:
-            pass
+        if prepared_state is None:
+            try:
+                if hasattr(source_model, "ensure_pages_for_range"):
+                    window = max(1, page_size)
+                    start_idx = max(0, target_global - window)
+                    end_idx = min(total_items, target_global + window)
+                    source_model.ensure_pages_for_range(start_idx, end_idx)
+            except Exception:
+                pass
 
         self._current_page = max(0, int(target_page))
         self._restore_target_page = int(target_page)
         self._restore_target_global_index = int(target_global)
-        restore_hold_s = 30.0 if jump_kind == "index_input" else 4.0
-        self._restore_anchor_until = _t.time() + restore_hold_s
+        self._restore_anchor_until = _t.time() + 30.0
         self._selected_global_index = int(target_global)
-        if jump_kind == "index_input" and bool(getattr(self, "use_masonry", False)):
-            self._start_exact_jump_settle(int(target_global))
+
+        mw = self.window()
+        if (
+            mw is not None
+            and hasattr(mw, "_restore_in_progress")
+            and hasattr(mw, "_restore_target_global_rank")
+        ):
+            mw._restore_in_progress = True
+            mw._restore_target_global_rank = int(target_global)
 
         if strict_paginated_masonry:
             try:
@@ -2060,45 +2650,14 @@ class ImageListViewInteractionMixin:
             except Exception:
                 jump_domain = int(self._strict_canonical_domain_max(source_model))
             self._strict_scroll_max_floor = max(
-                int(getattr(self, '_strict_scroll_max_floor', 0) or 0),
+                int(getattr(self, "_strict_scroll_max_floor", 0) or 0),
                 int(jump_domain),
             )
             self._strict_drag_frozen_max = max(
-                int(getattr(self, '_strict_drag_frozen_max', 0) or 0),
+                int(getattr(self, "_strict_drag_frozen_max", 0) or 0),
                 int(jump_domain),
             )
             self._strict_drag_frozen_until = _t.time() + 8.0
-            try:
-                buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
-            except Exception:
-                buffer_pages = 3
-            buffer_pages = max(1, min(buffer_pages, 6))
-            start_page = max(0, int(target_page) - buffer_pages)
-            end_page = min(max(0, (total_items - 1) // max(1, page_size)), int(target_page) + buffer_pages)
-
-            loaded_sync = False
-            try:
-                if hasattr(source_model, "set_page_protection_window"):
-                    source_model.set_page_protection_window(start_page, end_page)
-                pages = getattr(source_model, "_pages", {})
-                page_loaded = False
-                if isinstance(pages, dict):
-                    try:
-                        page_loaded = bool(pages.get(int(target_page)))
-                    except Exception:
-                        page_loaded = False
-                if (not page_loaded) and hasattr(source_model, "_load_page_sync"):
-                    source_model._load_page_sync(int(target_page))
-                    loaded_sync = True
-                if loaded_sync and hasattr(source_model, "_emit_pages_updated"):
-                    source_model._emit_pages_updated()
-                if hasattr(source_model, "_start_paginated_enrichment"):
-                    source_model._start_paginated_enrichment(
-                        window_pages=range(start_page, end_page + 1),
-                        scope='window',
-                    )
-            except Exception:
-                pass
 
             try:
                 sb = self.verticalScrollBar()
@@ -2127,31 +2686,85 @@ class ImageListViewInteractionMixin:
             self._calculate_masonry_layout()
 
         loaded_row = -1
-        if hasattr(source_model, "get_loaded_row_for_global_index"):
-            loaded_row = source_model.get_loaded_row_for_global_index(target_global)
-        else:
-            loaded_row = target_global
+        if isinstance(prepared_state, dict):
+            try:
+                loaded_row = int(prepared_state.get("loaded_row", -1))
+            except Exception:
+                loaded_row = -1
         if loaded_row < 0:
-            return bool(strict_paginated_masonry)
+            if hasattr(source_model, "get_loaded_row_for_global_index"):
+                try:
+                    loaded_row = int(source_model.get_loaded_row_for_global_index(target_global))
+                except Exception:
+                    loaded_row = -1
+            else:
+                loaded_row = target_global
 
-        src_idx = source_model.index(loaded_row, 0)
-        proxy_model = self.model()
-        proxy_idx = (
-            proxy_model.mapFromSource(src_idx)
-            if proxy_model and hasattr(proxy_model, "mapFromSource")
-            else src_idx
+        proxy_idx = QModelIndex()
+        if loaded_row >= 0:
+            try:
+                src_idx = source_model.index(loaded_row, 0)
+                proxy_model = self.model()
+                proxy_idx = (
+                    proxy_model.mapFromSource(src_idx)
+                    if proxy_model and hasattr(proxy_model, "mapFromSource")
+                    else src_idx
+                )
+            except Exception:
+                proxy_idx = QModelIndex()
+
+        if proxy_idx.isValid():
+            sel_model = self.selectionModel()
+            if sel_model is not None:
+                sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            else:
+                self.setCurrentIndex(proxy_idx)
+
+        if strict_paginated_masonry:
+            print(
+                f"[RELOCATE] {jump_kind}: target={int(target_global)} page={int(target_page)} "
+                f"window={'forward' if prefer_forward_window else 'centered'} "
+                f"prepared_ms={int((_t.monotonic() - start_ts) * 1000)}"
+            )
+            self._start_exact_jump_settle(int(target_global))
+            self.viewport().update()
+            return True
+
+        if proxy_idx.isValid():
+            self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.viewport().update()
+            return True
+        return False
+
+    def go_to_global_index(self, target_global: int) -> bool:
+        """Jump to stable global index and select it."""
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), "sourceModel")
+            else self.model()
         )
-        if not proxy_idx.isValid():
-            return bool(strict_paginated_masonry)
+        if source_model is None:
+            return False
 
-        sel_model = self.selectionModel()
-        if sel_model is not None:
-            sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
-        else:
-            self.setCurrentIndex(proxy_idx)
-        self.scrollTo(proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
-        self.viewport().update()
-        return True
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
+        if total_items <= 0:
+            total_items = int(self.model().rowCount()) if self.model() else 0
+        if total_items <= 0:
+            return False
+
+        try:
+            target_global = int(target_global)
+        except Exception:
+            return False
+        jump_kind = getattr(self, "_pending_explicit_jump_kind", None)
+        if not isinstance(jump_kind, str) or not jump_kind:
+            jump_kind = "global_jump"
+        self._pending_explicit_jump_kind = None
+        return self.start_targeted_relocation(
+            int(target_global),
+            reason=str(jump_kind),
+            source_model=source_model,
+        )
 
 
     def wheelEvent(self, event):

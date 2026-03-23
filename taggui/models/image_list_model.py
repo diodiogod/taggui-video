@@ -814,6 +814,206 @@ class ImageListModel(QAbstractListModel):
             print(f"[RESTORE] get_global_rank_for_path error: {e}")
             return -1
 
+    def resolve_restore_target(self, path: Path) -> dict[str, int] | None:
+        """Resolve a stable global restore target without forcing page materialization."""
+        try:
+            target_global = int(self.get_global_rank_for_path(path))
+        except Exception:
+            return None
+        if target_global < 0:
+            return None
+
+        try:
+            page_size = int(getattr(self, 'PAGE_SIZE', 1000) or 1000)
+        except Exception:
+            page_size = 1000
+
+        total_items = int(getattr(self, '_total_count', 0) or 0)
+        if total_items <= 0 and not self._paginated_mode:
+            total_items = len(self.images)
+        if total_items <= 0:
+            total_items = max(1, target_global + 1)
+
+        target_page = max(0, int(target_global) // max(1, page_size))
+        return {
+            'target_global': int(target_global),
+            'target_page': int(target_page),
+            'page_size': int(page_size),
+            'total_items': int(total_items),
+        }
+
+    def _get_target_window_pages(
+        self,
+        target_global: int,
+        *,
+        include_buffer: bool = True,
+        prefer_forward: bool = False,
+    ) -> tuple[int, int, int, int]:
+        """Return target/visible page window for a global index."""
+        total_items = int(getattr(self, '_total_count', 0) or 0)
+        page_size = int(getattr(self, 'PAGE_SIZE', 1000) or 1000)
+        last_page = max(0, (max(0, total_items) - 1) // max(1, page_size)) if total_items > 0 else 0
+        target_page = max(0, min(last_page, int(target_global) // max(1, page_size)))
+
+        if include_buffer:
+            try:
+                buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))
+            except Exception:
+                buffer_pages = 3
+            buffer_pages = max(1, min(buffer_pages, 6))
+        else:
+            buffer_pages = 0
+
+        if prefer_forward:
+            start_page = int(target_page)
+            end_page = min(last_page, target_page + buffer_pages)
+        else:
+            start_page = max(0, target_page - buffer_pages)
+            end_page = min(last_page, target_page + buffer_pages)
+        return int(target_page), int(start_page), int(end_page), int(last_page)
+
+    def prepare_target_window(
+        self,
+        target_global: int,
+        *,
+        sync_target_page: bool = True,
+        include_buffer: bool = True,
+        prefer_forward: bool = False,
+        emit_update: bool = True,
+        request_async_window: bool = True,
+        restart_enrichment: bool = True,
+        prune_to_window: bool = False,
+    ) -> dict[str, int]:
+        """Materialize the target page first, then request the surrounding window."""
+        state = {
+            'target_global': -1,
+            'target_page': -1,
+            'start_page': -1,
+            'end_page': -1,
+            'page_size': int(getattr(self, 'PAGE_SIZE', 1000) or 1000),
+            'total_items': int(getattr(self, '_total_count', 0) or 0),
+            'loaded_sync': 0,
+            'loaded_row': -1,
+        }
+        if not self._paginated_mode:
+            return state
+
+        total_items = int(getattr(self, '_total_count', 0) or 0)
+        if total_items <= 0:
+            return state
+
+        try:
+            target_global = max(0, min(total_items - 1, int(target_global)))
+        except Exception:
+            return state
+
+        page_size = int(getattr(self, 'PAGE_SIZE', 1000) or 1000)
+        target_page, start_page, end_page, _last_page = self._get_target_window_pages(
+            int(target_global),
+            include_buffer=include_buffer,
+            prefer_forward=prefer_forward,
+        )
+
+        state.update({
+            'target_global': int(target_global),
+            'target_page': int(target_page),
+            'start_page': int(start_page),
+            'end_page': int(end_page),
+            'page_size': int(page_size),
+            'total_items': int(total_items),
+        })
+
+        self.set_page_protection_window(start_page, end_page)
+        try:
+            self._page_load_priority_page = int(target_page)
+            self._page_load_priority_until = time.time() + 20.0
+        except Exception:
+            self._page_load_priority_page = None
+            self._page_load_priority_until = 0.0
+
+        if prune_to_window:
+            try:
+                self._prune_loaded_pages_to_window(int(start_page), int(end_page))
+            except Exception:
+                pass
+
+        if sync_target_page:
+            with self._page_load_lock:
+                page_loaded = int(target_page) in self._pages
+            if not page_loaded:
+                self._load_page_sync(int(target_page))
+                state['loaded_sync'] = 1
+                self._bootstrap_complete = bool(getattr(self, '_pages', {}))
+                if emit_update:
+                    self._emit_pages_updated()
+
+        if request_async_window:
+            requested_pages = []
+            if not state['loaded_sync']:
+                requested_pages.append(int(target_page))
+            for page_num in range(int(start_page), int(end_page) + 1):
+                if int(page_num) == int(target_page):
+                    continue
+                requested_pages.append(int(page_num))
+            for page_num in requested_pages:
+                self._request_page_load(int(page_num))
+
+        if restart_enrichment and hasattr(self, '_start_paginated_enrichment'):
+            try:
+                self._start_paginated_enrichment(
+                    window_pages={int(target_page)},
+                    scope='window',
+                )
+            except Exception:
+                pass
+
+        if hasattr(self, 'get_loaded_row_for_global_index'):
+            try:
+                state['loaded_row'] = int(self.get_loaded_row_for_global_index(int(target_global)))
+            except Exception:
+                state['loaded_row'] = -1
+        return state
+
+    def _prune_loaded_pages_to_window(self, start_page: int, end_page: int):
+        """Drop far loaded pages immediately so deep jumps isolate to the target band."""
+        try:
+            keep_start = int(start_page)
+            keep_end = int(end_page)
+        except Exception:
+            return
+        if keep_start > keep_end:
+            keep_start, keep_end = keep_end, keep_start
+
+        evicted_pages: list[int] = []
+        with self._page_load_lock:
+            stale_pages = [
+                int(page_num)
+                for page_num in list(self._pages.keys())
+                if not (keep_start <= int(page_num) <= keep_end)
+            ]
+            if not stale_pages:
+                return
+            stale_set = set(stale_pages)
+            for page_num in stale_pages:
+                if page_num in self._pages:
+                    del self._pages[page_num]
+                    evicted_pages.append(page_num)
+            if evicted_pages:
+                self._page_load_order = [
+                    int(page_num)
+                    for page_num in self._page_load_order
+                    if int(page_num) not in stale_set
+                ]
+
+        for page_num in evicted_pages:
+            try:
+                self._cancel_page_thumbnails(int(page_num))
+            except Exception:
+                pass
+
+        if evicted_pages:
+            self._emit_pages_updated()
+
     def get_index_for_path(self, path: Path) -> int:
         """Find the source row index for a given file path. Returns -1 if not found."""
         try:
@@ -1124,6 +1324,8 @@ class ImageListModel(QAbstractListModel):
         self._page_debouncer.setInterval(50)  # 50ms delay
         self._page_debouncer.timeout.connect(self._process_pending_page_requests)
         self._pending_page_range = None
+        self._page_load_priority_page = None
+        self._page_load_priority_until = 0.0
         # DISABLED: Cache warming causes UI blocking
         # Cache warming executor: 2 workers for proactive cache building when idle (low priority)
         # Reduced to 1 worker to minimize resource usage during idle warming
@@ -1182,6 +1384,7 @@ class ImageListModel(QAbstractListModel):
         self._enrichment_log_signature = None
         self._enrichment_log_batches = 0
         self._enrichment_log_total = 0
+        self._enrichment_generation = 0
 
         # Queue for thread-safe dimension updates from background enrichment
         from queue import Queue
@@ -1203,6 +1406,9 @@ class ImageListModel(QAbstractListModel):
         self._dimensions_update_timer.setInterval(300)
         self._dimensions_update_timer.timeout.connect(self._emit_dimensions_updated_debounced)
         self._last_dimensions_emit_at = 0.0
+        self._recent_dimension_update_pages: set[int] = set()
+        self._pending_paginated_dimension_updates = []
+        self._paginated_dimension_updates_lock = threading.Lock()
 
     def _log_flow(self, component: str, message: str, *, level: str = "DEBUG",
                   throttle_key: str | None = None, every_s: float | None = None):
@@ -1274,6 +1480,77 @@ class ImageListModel(QAbstractListModel):
     def _emit_dimensions_updated_debounced(self):
         self._last_dimensions_emit_at = time.time()
         self.dimensions_updated.emit()
+
+    def consume_recent_dimension_update_pages(self) -> list[int]:
+        """Return and clear pages whose dimensions changed since the last emit."""
+        if not self._recent_dimension_update_pages:
+            return []
+        pages = sorted(int(page) for page in self._recent_dimension_update_pages if isinstance(page, int) and page >= 0)
+        self._recent_dimension_update_pages.clear()
+        return pages
+
+    def _queue_paginated_dimension_updates(self, updates: list[tuple[str, tuple[int, int], object]]):
+        """Queue DB-enriched page dimension updates for main-thread application."""
+        if not updates:
+            return
+        with self._paginated_dimension_updates_lock:
+            self._pending_paginated_dimension_updates.extend(updates)
+        QMetaObject.invokeMethod(
+            self,
+            "_apply_pending_paginated_dimension_updates",
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    @Slot()
+    def _apply_pending_paginated_dimension_updates(self):
+        """Apply paginated window-repair dimensions to loaded in-memory pages."""
+        with self._paginated_dimension_updates_lock:
+            pending = list(self._pending_paginated_dimension_updates)
+            self._pending_paginated_dimension_updates.clear()
+
+        if not pending or not self._paginated_mode or not self._directory_path:
+            return
+
+        update_map = {}
+        for rel_path, dimensions, video_metadata in pending:
+            if not rel_path or not dimensions:
+                continue
+            update_map[str(rel_path).replace("\\", "/").casefold()] = (dimensions, video_metadata)
+        if not update_map:
+            return
+
+        changed_pages = set()
+        with self._page_load_lock:
+            for page_num, page_images in self._pages.items():
+                page_changed = False
+                for image in page_images:
+                    if not image:
+                        continue
+                    try:
+                        rel_path = str(image.path.relative_to(self._directory_path)).replace("\\", "/").casefold()
+                    except Exception:
+                        rel_path = image.path.name.casefold()
+                    update = update_map.get(rel_path)
+                    if not update:
+                        continue
+                    dimensions, video_metadata = update
+                    try:
+                        old_dims = getattr(image, 'dimensions', None)
+                        new_dims = (int(dimensions[0]), int(dimensions[1]))
+                    except Exception:
+                        continue
+                    if old_dims == new_dims:
+                        continue
+                    image.dimensions = new_dims
+                    if video_metadata is not None:
+                        image.video_metadata = video_metadata
+                    page_changed = True
+                if page_changed:
+                    changed_pages.add(int(page_num))
+
+        if changed_pages:
+            self._recent_dimension_update_pages.update(changed_pages)
+            self._schedule_dimensions_updated()
 
     @property
     def is_paginated(self) -> bool:
@@ -2102,7 +2379,24 @@ class ImageListModel(QAbstractListModel):
 
         # 2. Submit new requests
         requested_any = False
-        for page_num in range(start_page, end_page + 1):
+        request_pages = list(range(start_page, end_page + 1))
+        try:
+            priority_page = getattr(self, "_page_load_priority_page", None)
+            priority_until = float(getattr(self, "_page_load_priority_until", 0.0) or 0.0)
+            if (
+                isinstance(priority_page, int)
+                and time.time() <= priority_until
+                and start_page <= int(priority_page) <= end_page
+            ):
+                request_pages = [int(priority_page)] + [
+                    int(page_num)
+                    for page_num in request_pages
+                    if int(page_num) != int(priority_page)
+                ]
+        except Exception:
+            pass
+
+        for page_num in request_pages:
              should_load = False
              
              with self._page_load_lock:
@@ -2132,6 +2426,13 @@ class ImageListModel(QAbstractListModel):
         """Called on main thread when a page finishes loading (via signal)."""
         if not self._paginated_mode:
             return
+
+        try:
+            if int(page_num) == int(getattr(self, "_page_load_priority_page", -1) or -1):
+                self._page_load_priority_page = None
+                self._page_load_priority_until = 0.0
+        except Exception:
+            pass
 
         self._log_flow("PAGE", f"Loaded page {page_num}; in-memory pages={len(self._pages)}",
                        throttle_key="page_loaded", every_s=0.2)
@@ -2484,36 +2785,16 @@ class ImageListModel(QAbstractListModel):
                 pass
         self._db = ImageIndexDB(self._directory_path)
 
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                self._pages.clear()
-                self._loading_pages.clear()
-                self._page_load_order.clear()
-
-            self.images = []
-            self._total_count = new_total
-        finally:
-            self.endResetModel()
-
-        for page_num in pages_to_reload:
-            page_images = preloaded_pages.get(int(page_num))
-            if page_images is None:
-                self._load_page_sync(int(page_num))
-                continue
-            self._store_page(int(page_num), page_images)
-
-        self.total_count_changed.emit(self._total_count)
-        self._emit_paginated_layout_refresh()
-        result['reloaded_page_count'] = len(pages_to_reload)
+        reloaded_pages = self._reload_paginated_model_after_db_update(
+            new_total=new_total,
+            preloaded_pages=preloaded_pages,
+        )
+        result['reloaded_page_count'] = len(reloaded_pages or pages_to_reload)
         result['refreshed_model'] = True
-
-        if pages_to_reload:
-            self._start_paginated_enrichment(window_pages=pages_to_reload, scope='window')
 
         print(
             "[REFRESH_NEW] Applied background refresh; "
-            f"reloaded {len(pages_to_reload)} page(s)"
+            f"reloaded {result['reloaded_page_count']} page(s)"
         )
         return result
 
@@ -2567,6 +2848,66 @@ class ImageListModel(QAbstractListModel):
 
         return updated_count
 
+    def _reload_paginated_model_after_db_update(
+        self,
+        *,
+        new_total: int,
+        touched_paths: list[Path] | None = None,
+        preloaded_pages: dict[int, list[Image]] | None = None,
+    ) -> list[int]:
+        """Refresh loaded paginated pages after the DB changed without reloading the folder."""
+        if not self._paginated_mode:
+            return []
+
+        total_pages = max(0, (int(new_total) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        pages_to_reload = {
+            int(page_num) for page_num in self._pages.keys()
+            if 0 <= int(page_num) < total_pages
+        }
+
+        for image_path in touched_paths or []:
+            inserted_rank = self.get_global_rank_for_path(image_path)
+            if inserted_rank < 0:
+                continue
+            inserted_page = int(inserted_rank) // self.PAGE_SIZE
+            if 0 <= inserted_page < total_pages:
+                pages_to_reload.add(inserted_page)
+
+        if not pages_to_reload and new_total > 0:
+            pages_to_reload.add(0)
+
+        preloaded = dict(preloaded_pages or {})
+        for page_num in sorted(pages_to_reload):
+            if int(page_num) in preloaded:
+                continue
+            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
+            preloaded[int(page_num)] = page_images
+
+        self.beginResetModel()
+        try:
+            with self._page_load_lock:
+                self._pages.clear()
+                self._loading_pages.clear()
+                self._page_load_order.clear()
+            self.images = []
+            self._total_count = int(new_total)
+        finally:
+            self.endResetModel()
+
+        ordered_pages = sorted(preloaded.keys())
+        for page_num in ordered_pages:
+            self._store_page(int(page_num), preloaded[int(page_num)])
+
+        self.total_count_changed.emit(self._total_count)
+        self._emit_paginated_layout_refresh()
+        if ordered_pages:
+            self._start_paginated_enrichment(
+                window_pages={int(ordered_pages[0])},
+                scope='window',
+            )
+
+        return ordered_pages
+
 
     def _process_enrichment_queue(self):
         """Process dimension updates from background thread (runs on main thread via timer)."""
@@ -2597,6 +2938,38 @@ class ImageListModel(QAbstractListModel):
 
             # Log processing (don't emit signals during enrichment to avoid crashes)
             if updated_indices and not self._suppress_enrichment_signals:
+                if self._paginated_mode:
+                    page_size = max(1, int(getattr(self, 'PAGE_SIZE', 1000) or 1000))
+                    changed_pages = {
+                        int(idx) // page_size
+                        for idx in updated_indices
+                        if isinstance(idx, int) and idx >= 0
+                    }
+                    self._recent_dimension_update_pages.update(changed_pages)
+                    active_scope = getattr(self, '_enrichment_scope', 'window')
+                    active_target_pages = getattr(self, '_enrichment_target_pages', None)
+                    is_local_window_repair = (
+                        active_scope == 'window'
+                        and isinstance(active_target_pages, frozenset)
+                        and len(active_target_pages) == 1
+                        and bool(changed_pages)
+                    )
+                    is_background_preload = (
+                        active_scope == 'preload'
+                        and bool(changed_pages)
+                    )
+                    # Paginated visible layout ownership now belongs to the
+                    # incremental cache, not to enrichment batches.
+                    #
+                    # - Local visible-page repair updates dimensions in memory
+                    #   during the batch but reflows once on completion.
+                    # - Preload updates future pages silently so they append
+                    #   with correct geometry when the user reaches them.
+                    #
+                    # Emitting dimensions_updated during either phase causes
+                    # bursty visible repositioning.
+                    if not (is_local_window_repair or is_background_preload):
+                        self._schedule_dimensions_updated()
                 batch_time = (time.time() - batch_start) * 1000
                 # Disabled: Too spammy for large datasets (1M images)
                 # if processed >= 50:  # Only log significant batches
@@ -3734,6 +4107,16 @@ class ImageListModel(QAbstractListModel):
         )
         current_target_pages = getattr(self, '_enrichment_target_pages', None)
         current_scope = getattr(self, '_enrichment_scope', 'window')
+        last_zero_target_pages = getattr(self, '_enrichment_zero_target_pages', None)
+        last_zero_scope = getattr(self, '_enrichment_zero_scope', None)
+
+        if (
+            scope == 'window'
+            and requested_target_pages
+            and last_zero_scope == 'window'
+            and last_zero_target_pages == requested_target_pages
+        ):
+            return
 
         # Re-requesting the same running window/preload target only burns work
         # and makes deep-page masonry repair feel random because batches keep
@@ -3754,6 +4137,8 @@ class ImageListModel(QAbstractListModel):
         elif not hasattr(self, '_enrichment_cancelled') or self._enrichment_cancelled.is_set():
             self._enrichment_cancelled = threading.Event()
 
+        self._enrichment_generation = int(getattr(self, '_enrichment_generation', 0) or 0) + 1
+        generation = int(self._enrichment_generation)
         self._enrichment_running = True
         self._enrichment_scope = scope
         self._enrichment_target_pages = requested_target_pages
@@ -3772,6 +4157,10 @@ class ImageListModel(QAbstractListModel):
              import time
              from pathlib import Path
              import imagesize
+
+             if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
+                 self._enrichment_running = False
+                 return
 
              if not self._directory_path:
                  self._enrichment_running = False
@@ -3822,6 +4211,11 @@ class ImageListModel(QAbstractListModel):
                          if rel_path not in seen:
                              prioritized_rel_paths.append(rel_path)
                              seen.add(rel_path)
+                     # Keep window repair local and ripple outward page-by-page.
+                     # Finishing the nearest page first avoids whole-window reshuffles
+                     # while the user is looking at a freshly landed target.
+                     if page_placeholders and scope == 'window':
+                         break
                  # DB query is the source of truth for what needs enrichment.
                  # No in-memory fallback — stale in-memory objects report dims=None
                  # even after DB has real values, causing infinite re-enrichment.
@@ -3861,6 +4255,8 @@ class ImageListModel(QAbstractListModel):
              placeholder_count = len(placeholders)
 
              if not placeholders:
+                 self._enrichment_zero_scope = scope
+                 self._enrichment_zero_target_pages = requested_target_pages
                  self._enrichment_exhausted = True
                  self._enrichment_actual_count = 0
                  self._enrichment_running = False
@@ -3892,6 +4288,7 @@ class ImageListModel(QAbstractListModel):
              batch_number = self._enrichment_log_batches
 
              enriched_count = 0
+             paginated_ui_updates = []
              commit_interval = 100
              video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
              
@@ -3986,6 +4383,17 @@ class ImageListModel(QAbstractListModel):
                            mtime = full_path.stat().st_mtime
                            # Save dimensions
                            db_bg.save_info(rel_path, dimensions[0], dimensions[1], int(is_video), mtime, video_metadata)
+                           if scoped_page_repair:
+                               try:
+                                   paginated_ui_updates.append(
+                                       (
+                                           str(rel_path),
+                                           (int(dimensions[0]), int(dimensions[1])),
+                                           video_metadata if is_video else None,
+                                       )
+                                   )
+                               except Exception:
+                                   pass
                            
                            if not scoped_page_repair:
                                # Legacy/full enrichment also backfills tag sidecars.
@@ -4007,12 +4415,26 @@ class ImageListModel(QAbstractListModel):
                       pass
 
              db_bg.commit()
+             if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
+                 self._enrichment_running = False
+                 return
+             if enriched_count > 0:
+                 self._enrichment_zero_scope = None
+                 self._enrichment_zero_target_pages = None
+             elif scope == 'window':
+                 self._enrichment_zero_scope = scope
+                 self._enrichment_zero_target_pages = requested_target_pages
              self._enrichment_exhausted = (
                  placeholder_count < max_enrich_per_cycle
                  or enriched_count == 0
              )
              self._enrichment_actual_count = enriched_count
              self._enrichment_running = False
+             if paginated_ui_updates:
+                 try:
+                     self._queue_paginated_dimension_updates(paginated_ui_updates)
+                 except Exception:
+                     pass
              self._enrichment_log_total += enriched_count
              cumulative_total = self._enrichment_log_total
              if self._enrichment_exhausted:
@@ -4093,6 +4515,37 @@ class ImageListModel(QAbstractListModel):
             self.enrichment_complete.emit()
             return
 
+        added_paths: list[Path] = []
+        for rel_path in result.get('added_db_paths') or []:
+            try:
+                added_paths.append(directory_path / rel_path)
+            except Exception:
+                continue
+
+        if self._paginated_mode and bool(result.get('db_synced')):
+            if self._db is not None:
+                try:
+                    self._db.close()
+                except Exception:
+                    pass
+            self._db = ImageIndexDB(self._directory_path)
+            new_total = int(self._db.count(
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+            ) or 0)
+            reloaded_pages = self._reload_paginated_model_after_db_update(
+                new_total=new_total,
+                touched_paths=added_paths,
+            )
+            self.background_validation_applied.emit({
+                'directory_path': str(directory_path),
+                'added_count': added_count,
+                'removed_count': removed_count,
+                'tag_updates_count': tag_updates,
+                'reloaded_page_count': len(reloaded_pages),
+            })
+            return
+
         self.load_directory(
             directory_path,
             precomputed_rel_paths=result.get('precomputed_rel_paths'),
@@ -4155,6 +4608,7 @@ class ImageListModel(QAbstractListModel):
                             'changes_detected': True,
                             'added_count': 0,
                             'removed_count': len(duplicate_db_paths),
+                            'added_db_paths': [],
                             'precomputed_rel_paths': {
                                 current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
                                 for rel_path in current_rel_paths
@@ -4267,6 +4721,7 @@ class ImageListModel(QAbstractListModel):
                 'changes_detected': changes_detected,
                 'added_count': len(added_rel_paths),
                 'removed_count': len(removed_db_paths),
+                'added_db_paths': added_db_paths,
                 'tag_updates_count': tag_updates_count,
                 'precomputed_rel_paths': merged_native_paths if changes_detected else None,
                 'db_synced': bool(changes_detected or tag_updates_count),
@@ -4976,7 +5431,7 @@ class ImageListModel(QAbstractListModel):
         self._emit_paginated_layout_refresh()
         if self._pages:
             self._start_paginated_enrichment(
-                window_pages=sorted(self._pages.keys()),
+                window_pages={0},
                 scope='window',
             )
         QTimer.singleShot(
@@ -6711,53 +7166,14 @@ class ImageListModel(QAbstractListModel):
         )
         self._db.commit()
 
-        loaded_pages = sorted(int(page_num) for page_num in self._pages.keys())
         new_total = int(self._db.count(
             filter_sql=self._filter_sql,
             bindings=self._filter_bindings,
         ) or 0)
-        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        pages_to_reload = {
-            int(page_num) for page_num in loaded_pages
-            if 0 <= int(page_num) < total_pages
-        }
-
-        for image_path in inserted_paths:
-            inserted_rank = self.get_global_rank_for_path(image_path)
-            if inserted_rank >= 0:
-                inserted_page = int(inserted_rank) // self.PAGE_SIZE
-                if 0 <= inserted_page < total_pages:
-                    pages_to_reload.add(inserted_page)
-
-        if not pages_to_reload and new_total > 0:
-            pages_to_reload.add(0)
-
-        preloaded_pages: dict[int, list[Image]] = {}
-        for page_num in sorted(pages_to_reload):
-            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
-            preloaded_pages[int(page_num)] = page_images
-
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                self._pages.clear()
-                self._loading_pages.clear()
-                self._page_load_order.clear()
-            self.images = []
-            self._total_count = int(new_total)
-        finally:
-            self.endResetModel()
-
-        for page_num in sorted(preloaded_pages.keys()):
-            self._store_page(int(page_num), preloaded_pages[int(page_num)])
-
-        self.total_count_changed.emit(self._total_count)
-        self._emit_paginated_layout_refresh()
-        if preloaded_pages:
-            self._start_paginated_enrichment(
-                window_pages=sorted(preloaded_pages.keys()),
-                scope='window',
-            )
+        self._reload_paginated_model_after_db_update(
+            new_total=new_total,
+            touched_paths=inserted_paths,
+        )
         return len(inserted_paths)
 
     def remove_generated_media_batch(self, image_paths: list[Path]) -> int:
@@ -6836,45 +7252,11 @@ class ImageListModel(QAbstractListModel):
         if removed_count <= 0:
             return 0
 
-        loaded_pages = sorted(int(page_num) for page_num in self._pages.keys())
         new_total = int(self._db.count(
             filter_sql=self._filter_sql,
             bindings=self._filter_bindings,
         ) or 0)
-        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        pages_to_reload = [
-            int(page_num) for page_num in loaded_pages
-            if 0 <= int(page_num) < total_pages
-        ]
-        if not pages_to_reload and new_total > 0:
-            pages_to_reload = [0]
-
-        preloaded_pages: dict[int, list[Image]] = {}
-        for page_num in sorted(set(pages_to_reload)):
-            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
-            preloaded_pages[int(page_num)] = page_images
-
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                self._pages.clear()
-                self._loading_pages.clear()
-                self._page_load_order.clear()
-            self.images = []
-            self._total_count = int(new_total)
-        finally:
-            self.endResetModel()
-
-        for page_num in sorted(preloaded_pages.keys()):
-            self._store_page(int(page_num), preloaded_pages[int(page_num)])
-
-        self.total_count_changed.emit(self._total_count)
-        self._emit_paginated_layout_refresh()
-        if preloaded_pages:
-            self._start_paginated_enrichment(
-                window_pages=sorted(preloaded_pages.keys()),
-                scope='window',
-            )
+        self._reload_paginated_model_after_db_update(new_total=new_total)
         return removed_count
 
     def _trigger_metadata_backfill_later(self, directory_path):

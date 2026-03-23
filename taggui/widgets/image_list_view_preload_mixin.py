@@ -506,7 +506,7 @@ class ImageListViewPreloadMixin:
                             source_model.ensure_pages_for_range(start_row, end_row)
                             if hasattr(source_model, '_start_paginated_enrichment'):
                                 source_model._start_paginated_enrichment(
-                                    window_pages=range(start_page, end_page + 1),
+                                    window_pages={int(target_page)},
                                     scope='window',
                                 )
                     except Exception:

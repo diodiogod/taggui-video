@@ -479,6 +479,27 @@ class ImageList(QDockWidget):
                 
                 print(f"[SORT] Buffered mode: changed DB sort to {db_sort_field} {db_sort_dir} (Seed: {getattr(source_model, '_random_seed', 0)})")
 
+                sort_restore_target = None
+                if selected_image is not None and hasattr(source_model, 'resolve_restore_target'):
+                    try:
+                        sort_restore_target = source_model.resolve_restore_target(selected_image.path)
+                    except Exception:
+                        sort_restore_target = None
+                if (
+                    isinstance(sort_restore_target, dict)
+                    and int(sort_restore_target.get('target_global', -1)) >= 0
+                    and hasattr(self.list_view, '_arm_pending_targeted_relocation')
+                ):
+                    try:
+                        self.list_view._arm_pending_targeted_relocation(
+                            int(sort_restore_target['target_global']),
+                            reason='sort_restore',
+                            source_model=source_model,
+                            hold_s=30.0,
+                        )
+                    except Exception:
+                        pass
+
                 # CRITICAL: Inform Qt that the entire model is being reset
                 source_model.beginResetModel()
                 
@@ -488,23 +509,67 @@ class ImageList(QDockWidget):
                         source_model._pages.clear()
                         source_model._loading_pages.clear()
                         source_model._page_load_order.clear()
+                    if hasattr(source_model, '_page_debouncer'):
+                        source_model._page_debouncer.stop()
+                    if hasattr(source_model, '_pending_page_range'):
+                        source_model._pending_page_range = None
 
-                    # Reload first 3 pages with new sort order
-                    for page_num in range(3):
-                        source_model._load_page_sync(page_num)
+                    if (
+                        isinstance(sort_restore_target, dict)
+                        and int(sort_restore_target.get('target_global', -1)) >= 0
+                        and hasattr(source_model, 'prepare_target_window')
+                    ):
+                        source_model.prepare_target_window(
+                            int(sort_restore_target['target_global']),
+                            sync_target_page=True,
+                            include_buffer=False,
+                            prefer_forward=True,
+                            emit_update=False,
+                            request_async_window=False,
+                            restart_enrichment=False,
+                        )
+                    else:
+                        # Reload first 3 pages with new sort order
+                        for page_num in range(3):
+                            source_model._load_page_sync(page_num)
                 finally:
                     source_model.endResetModel()
 
-                # Trigger layout update - emit pages_updated FIRST so proxy invalidates
-                source_model._emit_pages_updated()
-                # source_model.layoutChanged.emit() # Redundant with endResetModel()
-                
-                # Restart background enrichment (essential for updating placeholders)
-                if hasattr(source_model, '_start_paginated_enrichment'):
-                    source_model._start_paginated_enrichment(
-                        window_pages=sorted(source_model._pages.keys()),
-                        scope='window',
-                    )
+                if (
+                    isinstance(sort_restore_target, dict)
+                    and int(sort_restore_target.get('target_global', -1)) >= 0
+                ):
+                    self._sort_restore_target_global = int(sort_restore_target['target_global'])
+                    if hasattr(source_model, '_emit_paginated_layout_refresh'):
+                        source_model._emit_paginated_layout_refresh()
+                    else:
+                        source_model._emit_pages_updated()
+                    if hasattr(source_model, 'prepare_target_window'):
+                        source_model.prepare_target_window(
+                            int(sort_restore_target['target_global']),
+                            sync_target_page=False,
+                            include_buffer=True,
+                            prefer_forward=True,
+                            emit_update=False,
+                            request_async_window=True,
+                            restart_enrichment=False,
+                        )
+                    QTimer.singleShot(0, self._do_scroll_after_sort)
+                else:
+                    try:
+                        delattr(self, '_sort_restore_target_global')
+                    except Exception:
+                        pass
+                    # Trigger layout update - emit pages_updated FIRST so proxy invalidates
+                    source_model._emit_pages_updated()
+                    # source_model.layoutChanged.emit() # Redundant with endResetModel()
+                    
+                    # Restart background enrichment (essential for updating placeholders)
+                    if hasattr(source_model, '_start_paginated_enrichment'):
+                        source_model._start_paginated_enrichment(
+                            window_pages={0},
+                            scope='window',
+                        )
 
             else:
                 # NORMAL MODE: Sort in-memory list
@@ -605,7 +670,7 @@ class ImageList(QDockWidget):
         )
 
     def _start_sort_restore_to_global(self, source_model, target_global: int) -> bool:
-        """Use the stronger startup-style restore flow for sort-triggered reordering."""
+        """Route sort restore through the shared relocation pipeline."""
         if not (
             source_model
             and hasattr(source_model, '_paginated_mode')
@@ -619,86 +684,16 @@ class ImageList(QDockWidget):
         if target_global < 0:
             return False
 
-        view = self.list_view
         self._arm_sort_restore_anchor(source_model, int(target_global))
-        import time as _t
-        hold_until = _t.time() + 30.0
-        view._selected_global_index = int(target_global)
-        view._selected_global_lock_value = int(target_global)
-        view._selected_global_lock_until = max(
-            float(getattr(view, '_selected_global_lock_until', 0.0) or 0.0),
-            hold_until,
-        )
-
-        mw = self.window()
-        if (
-            mw is not None
-            and hasattr(mw, '_restore_in_progress')
-            and hasattr(mw, '_restore_target_global_rank')
-        ):
-            mw._restore_in_progress = True
-            mw._restore_target_global_rank = int(target_global)
-
-        queue_reflow_guide = getattr(view, '_queue_target_reflow_guide', None)
-        if callable(queue_reflow_guide):
+        if hasattr(self.list_view, 'start_targeted_relocation'):
             try:
-                queue_reflow_guide(
-                    int(target_global),
-                    source_model=source_model,
-                    duration_ms=3200,
+                return bool(
+                    self.list_view.start_targeted_relocation(
+                        int(target_global),
+                        reason='sort_restore',
+                        source_model=source_model,
+                    )
                 )
-            except Exception:
-                pass
-
-        is_paginated_strict = bool(
-            getattr(view, 'use_masonry', False)
-            and hasattr(view, '_use_local_anchor_masonry')
-            and view._use_local_anchor_masonry(source_model)
-        )
-
-        try:
-            page_size = int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000)
-        except Exception:
-            page_size = 1000
-        target_page = max(0, int(target_global) // max(1, page_size))
-        view._current_page = int(target_page)
-
-        if is_paginated_strict:
-            try:
-                total_count = int(getattr(source_model, '_total_count', 0) or 0)
-                max_page = max(1, (total_count + page_size - 1) // page_size) - 1
-                canonical_max = int(view._strict_canonical_domain_max(source_model))
-                if max_page > 0 and canonical_max > 0:
-                    target_scroll = int(target_page / max_page * canonical_max)
-                    sb = view.verticalScrollBar()
-                    prev_block = sb.blockSignals(True)
-                    try:
-                        sb.setMaximum(canonical_max)
-                        sb.setValue(target_scroll)
-                    finally:
-                        sb.blockSignals(prev_block)
-                    view._last_stable_scroll_value = int(target_scroll)
-            except Exception:
-                pass
-
-        try:
-            if hasattr(source_model, 'ensure_pages_for_range'):
-                start_idx = max(0, int(target_global) - max(1, page_size))
-                end_idx = max(start_idx + 1, int(target_global) + max(1, page_size))
-                source_model.ensure_pages_for_range(start_idx, end_idx)
-        except Exception:
-            pass
-
-        if hasattr(view, '_start_exact_jump_settle'):
-            try:
-                view._start_exact_jump_settle(int(target_global))
-                return True
-            except Exception:
-                pass
-
-        if hasattr(view, '_reanchor_keyboard_to_selected_global'):
-            try:
-                return bool(view._reanchor_keyboard_to_selected_global(source_model, int(target_global)))
             except Exception:
                 return False
         return False
@@ -708,12 +703,20 @@ class ImageList(QDockWidget):
         """Scroll to the previously selected image after a sort operation completes."""
         target_global_override = getattr(self, '_reaction_sort_selection_global_override', None)
         has_global_override = isinstance(target_global_override, int) and target_global_override >= 0
+        sort_restore_target = getattr(self, '_sort_restore_target_global', None)
+        has_sort_restore_target = isinstance(sort_restore_target, int) and sort_restore_target >= 0
         if not hasattr(self, '_image_to_scroll_to') or not self._image_to_scroll_to:
-            if not has_global_override:
+            if not has_global_override and not has_sort_restore_target:
                 return
         if has_global_override:
             try:
                 delattr(self, '_reaction_sort_selection_global_override')
+            except Exception:
+                pass
+            selected_image = None
+        elif has_sort_restore_target:
+            try:
+                delattr(self, '_sort_restore_target_global')
             except Exception:
                 pass
             selected_image = None
@@ -734,7 +737,19 @@ class ImageList(QDockWidget):
             source_model = self.proxy_image_list_model.sourceModel()
             new_proxy_index = QModelIndex()
             
-            if has_global_override and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+            if has_sort_restore_target and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
+                if self._start_sort_restore_to_global(source_model, int(sort_restore_target)):
+                    return
+                local_row = (
+                    source_model.get_loaded_row_for_global_index(int(sort_restore_target))
+                    if hasattr(source_model, 'get_loaded_row_for_global_index')
+                    else -1
+                )
+                if local_row >= 0:
+                    new_proxy_index = self.proxy_image_list_model.mapFromSource(
+                        source_model.index(local_row, 0)
+                    )
+            elif has_global_override and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
                 if self._start_sort_restore_to_global(source_model, int(target_global_override)):
                     return
                 local_row = (

@@ -1795,9 +1795,10 @@ class ImageListViewGeometryMixin:
                 self._resize_timer.start(90)
                 return
 
-            explicit_thumbnail_resize = (
-                getattr(self, "_last_masonry_signal", None) == "thumbnail_size_button"
-            )
+            suppress_snap_cycles = int(getattr(self, "_suppress_masonry_snap_cycles", 0) or 0)
+            explicit_thumbnail_resize = suppress_snap_cycles > 0
+            if explicit_thumbnail_resize:
+                self._suppress_masonry_snap_cycles = max(0, suppress_snap_cycles - 1)
             if (
                 (not explicit_thumbnail_resize)
                 and (not self._is_full_width_masonry_mode())

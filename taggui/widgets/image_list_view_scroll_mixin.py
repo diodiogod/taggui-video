@@ -18,6 +18,18 @@ class ImageListViewScrollMixin:
                 every_s=0.3,
             )
 
+        stabilize_state = None
+        consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+        if callable(consume_stabilization):
+            try:
+                stabilize_state = consume_stabilization(
+                    source_model=source_model,
+                    scroll_value=int(self.verticalScrollBar().value()),
+                    refresh_scroll=True,
+                )
+            except Exception:
+                stabilize_state = None
+
         # DON'T flush cache saves immediately - still might be scrolling
         # Just mark that scroll detection stopped (200ms is too short for flush)
 
@@ -45,33 +57,27 @@ class ImageListViewScrollMixin:
             and hasattr(source_model, '_paginated_mode')
             and source_model._paginated_mode
             and hasattr(self, '_check_and_enrich_loaded_pages')
+            and stabilize_state is None
         ):
             try:
                 self._check_and_enrich_loaded_pages()
-                if hasattr(source_model, '_start_paginated_enrichment'):
-                    preferred_window = None
-                    resolve_window = getattr(self, '_get_preferred_enrichment_window_pages', None)
-                    if callable(resolve_window):
-                        preferred_window = resolve_window(source_model, window_buffer=3)
-                    if preferred_window is not None:
-                        window_start, window_end = preferred_window
-                        source_model._start_paginated_enrichment(
-                            window_pages=range(window_start, window_end + 1),
-                            scope='window',
-                        )
             except Exception:
                 pass
 
         # Also schedule a low-priority masonry settle pass when scrolling goes
         # idle. This makes already-arrived dimension updates reorganize the
         # visible window without requiring an extra nudge-scroll from the user.
-        if self.use_masonry and hasattr(self, '_recalculate_masonry_if_needed'):
+        if self.use_masonry and hasattr(self, '_recalculate_masonry_if_needed') and stabilize_state is None:
             try:
                 if (
                     source_model
                     and hasattr(self, '_activate_selected_idle_anchor')
                 ):
-                    self._activate_selected_idle_anchor(source_model=source_model, hold_s=1.5)
+                    self._activate_selected_idle_anchor(
+                        source_model=source_model,
+                        hold_s=1.5,
+                        prefer_viewport_center=True,
+                    )
                 self._recalculate_masonry_if_needed("scroll_idle")
             except Exception:
                 pass
@@ -428,6 +434,15 @@ class ImageListViewScrollMixin:
             restore_page = resolve_restore_page(last_page=last_page)
             if restore_page is not None:
                 current_page = int(restore_page)
+        if current_page is None and strict_mode and (not dragging_mode):
+            strict_jump_target = getattr(self, '_strict_jump_target_global', None)
+            strict_jump_until = float(getattr(self, '_strict_jump_until', 0.0) or 0.0)
+            if (
+                isinstance(strict_jump_target, int)
+                and strict_jump_target >= 0
+                and current_time <= strict_jump_until
+            ):
+                current_page = max(0, min(last_page, int(strict_jump_target // source_model.PAGE_SIZE)))
         # Resize/zoom anchor override keeps ownership stable while viewport
         # geometry and strict domains are being recalculated.
         resize_page = getattr(self, '_resize_anchor_page', None)
@@ -491,6 +506,22 @@ class ImageListViewScrollMixin:
             current_page = max(0, min(last_page, int(self._release_page_lock_page)))
         elif anchor_active:
             current_page = max(0, min(last_page, int(self._drag_release_anchor_idx // source_model.PAGE_SIZE)))
+        elif strict_mode and (not dragging_mode):
+            waiting_target = getattr(self, '_strict_waiting_target_page', None)
+            pending_explicit_jump_hold = False
+            has_pending_jump_hold = getattr(self, '_has_pending_explicit_jump_hold', None)
+            if callable(has_pending_jump_hold):
+                try:
+                    pending_explicit_jump_hold = bool(has_pending_jump_hold())
+                except Exception:
+                    pending_explicit_jump_hold = False
+            strict_jump_until = float(getattr(self, '_strict_jump_until', 0.0) or 0.0)
+            if (
+                isinstance(waiting_target, int)
+                and waiting_target >= 0
+                and (pending_explicit_jump_hold or current_time <= strict_jump_until)
+            ):
+                current_page = max(0, min(last_page, int(waiting_target)))
         elif strict_mode and (not dragging_mode):
             transient_owner_page = None
             resolve_owner_page = getattr(self, '_get_transient_owner_anchor_page', None)
@@ -605,6 +636,19 @@ class ImageListViewScrollMixin:
                 self._stick_to_edge = "bottom"
             elif current_page <= 0 and near_top_now:
                 self._stick_to_edge = "top"
+        if strict_mode and (not dragging_mode):
+            consume_stabilization = getattr(self, "_consume_post_jump_stabilization", None)
+            if callable(consume_stabilization):
+                try:
+                    stabilize_state = consume_stabilization(
+                        source_model=source_model,
+                        candidate_page=int(current_page) if current_page is not None else None,
+                        scroll_value=int(scroll_offset),
+                    )
+                except Exception:
+                    stabilize_state = None
+                if stabilize_state is not None:
+                    current_page = max(0, min(last_page, int(stabilize_state["target_page"])))
         if prev_stick != getattr(self, '_stick_to_edge', None):
             self._log_flow(
                 "STRICT",
