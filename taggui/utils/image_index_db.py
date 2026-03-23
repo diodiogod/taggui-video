@@ -228,6 +228,7 @@ class ImageIndexDB:
         self.db_path = self.db_base_path(self._directory_path)
         self.legacy_db_path = self.legacy_db_base_path(self._directory_path)
         self.conn = None
+        self._order_cache_signature = None
 
         # Lock for thread-safe DB access (multiple worker threads)
         self._db_lock = threading.Lock()
@@ -1801,6 +1802,90 @@ class ImageIndexDB:
 
         return sort_field, normalized_dir, sort_expr, f'{sort_expr} {normalized_dir}, id {normalized_dir}'
 
+    def _order_cache_key(self, sort_field: str, sort_dir: str, filter_sql: str, bindings: tuple, **kwargs) -> tuple:
+        """Stable cache key for the current ordered view."""
+        random_seed = int(kwargs.get('random_seed', 0) or 0) if sort_field == 'RANDOM()' else 0
+        return (
+            str(sort_field or ''),
+            str(sort_dir or ''),
+            str(filter_sql or ''),
+            tuple(self._normalize_bindings(bindings)),
+            random_seed,
+        )
+
+    def _should_use_order_cache_for_page(self, page: int, page_size: int, sort_field: str) -> bool:
+        """Use materialized rank cache for deep pages and random ordering."""
+        try:
+            page = max(0, int(page))
+            page_size = max(1, int(page_size))
+        except Exception:
+            return False
+        return str(sort_field) == 'RANDOM()' or (page * page_size) >= 50000
+
+    def _should_use_order_cache_for_rank(self, start_rank: int, sort_field: str) -> bool:
+        """Use materialized rank cache for deep rank-range queries and random ordering."""
+        try:
+            start_rank = max(0, int(start_rank))
+        except Exception:
+            return False
+        return str(sort_field) == 'RANDOM()' or start_rank >= 50000
+
+    def _ensure_order_cache(
+        self,
+        *,
+        sort_field: str,
+        sort_dir: str,
+        filter_sql: str = '',
+        bindings: tuple = (),
+        **kwargs,
+    ) -> bool:
+        """Build a temp rank->image_id table for the active ordered view."""
+        if not self._ensure_connection():
+            return False
+
+        sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
+            sort_field, sort_dir, **kwargs
+        )
+        safe_bindings = self._normalize_bindings(bindings)
+        cache_key = self._order_cache_key(sort_field, sort_dir, filter_sql, safe_bindings, **kwargs)
+
+        try:
+            with self._db_lock:
+                if self._order_cache_signature == cache_key:
+                    return True
+
+                cursor = self.conn.cursor()
+                started_at = time.time()
+                cursor.execute('DROP TABLE IF EXISTS temp.current_order_cache')
+                cursor.execute(
+                    'CREATE TEMP TABLE current_order_cache ('
+                    ' rank INTEGER PRIMARY KEY,'
+                    ' image_id INTEGER NOT NULL UNIQUE'
+                    ')'
+                )
+
+                insert_sql = (
+                    'INSERT INTO temp.current_order_cache(rank, image_id) '
+                    f'SELECT ROW_NUMBER() OVER (ORDER BY {order_clause}) - 1, id '
+                    'FROM images'
+                )
+                if filter_sql:
+                    insert_sql += f' WHERE {filter_sql}'
+                cursor.execute(insert_sql, safe_bindings)
+                cursor.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_temp_current_order_cache_image_id '
+                    'ON current_order_cache(image_id)'
+                )
+                self.conn.commit()
+                self._order_cache_signature = cache_key
+                elapsed_ms = (time.time() - started_at) * 1000.0
+                print(f"[DB] Rebuilt order cache in {elapsed_ms:.0f}ms for sort={sort_field} {sort_dir}")
+                return True
+        except sqlite3.Error as e:
+            print(f'Database order cache error: {e}')
+            self._order_cache_signature = None
+            return False
+
     def get_rank_of_image(self, rel_path: str, sort_field: str = 'file_name', sort_dir: str = 'ASC', 
                           filter_sql: str = '', bindings: tuple = (), **kwargs) -> int:
         """
@@ -1958,6 +2043,45 @@ class ImageIndexDB:
         sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
             sort_field, sort_dir, **kwargs
         )
+
+        if self._should_use_order_cache_for_page(page, page_size, sort_field):
+            if self._ensure_order_cache(
+                sort_field=sort_field,
+                sort_dir=sort_dir,
+                filter_sql=filter_sql,
+                bindings=bindings,
+                **kwargs,
+            ):
+                try:
+                    with self._db_lock:
+                        cursor = self.conn.cursor()
+                        start_rank = max(0, int(page) * int(page_size))
+                        end_rank = start_rank + max(1, int(page_size))
+                        cursor.execute(
+                            '''
+                            SELECT i.id, i.file_name, i.width, i.height, i.aspect_ratio, i.is_video,
+                                   i.video_fps, i.video_duration, i.video_frame_count, i.mtime, i.rating,
+                                   i.love, i.bomb, i.reaction_updated_at,
+                                   i.file_size, i.file_type, i.ctime
+                            FROM temp.current_order_cache c
+                            JOIN images i ON i.id = c.image_id
+                            WHERE c.rank >= ? AND c.rank < ?
+                            ORDER BY c.rank
+                            ''',
+                            (start_rank, end_rank),
+                        )
+                        rows = cursor.fetchall()
+                        if not rows:
+                            return []
+                        first = rows[0]
+                        if isinstance(first, sqlite3.Row):
+                            return [dict(row) for row in rows]
+                        col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+                        if col_names:
+                            return [dict(zip(col_names, row)) for row in rows]
+                        return []
+                except sqlite3.Error as e:
+                    print(f'Database cached page query error: {e}')
 
         try:
             with self._db_lock:
@@ -2510,6 +2634,33 @@ class ImageIndexDB:
         sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
             sort_field, sort_dir, **kwargs
         )
+
+        if self._should_use_order_cache_for_rank(start_rank, sort_field):
+            if self._ensure_order_cache(
+                sort_field=sort_field,
+                sort_dir=sort_dir,
+                filter_sql=filter_sql,
+                bindings=bindings,
+                **kwargs,
+            ):
+                try:
+                    with self._db_lock:
+                        cursor = self.conn.cursor()
+                        safe_start = max(0, int(start_rank))
+                        safe_end = max(safe_start, int(end_rank))
+                        cursor.execute(
+                            '''
+                            SELECT i.file_name
+                            FROM temp.current_order_cache c
+                            JOIN images i ON i.id = c.image_id
+                            WHERE c.rank >= ? AND c.rank < ? AND i.width IS NULL
+                            ORDER BY c.rank
+                            ''',
+                            (safe_start, safe_end),
+                        )
+                        return [row[0] for row in cursor.fetchall()]
+                except sqlite3.Error as e:
+                    print(f'Database cached placeholder range query error: {e}')
 
         try:
             with self._db_lock:

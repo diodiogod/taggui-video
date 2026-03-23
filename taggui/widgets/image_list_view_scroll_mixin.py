@@ -519,11 +519,18 @@ class ImageListViewScrollMixin:
             current_page = max(0, min(last_page, int(self._drag_release_anchor_idx // source_model.PAGE_SIZE)))
         elif strict_mode and (not dragging_mode):
             waiting_target = getattr(self, '_strict_waiting_target_page', None)
+            pending_explicit_jump_hold = False
+            has_pending_jump_hold = getattr(self, '_has_pending_explicit_jump_hold', None)
+            if callable(has_pending_jump_hold):
+                try:
+                    pending_explicit_jump_hold = bool(has_pending_jump_hold())
+                except Exception:
+                    pending_explicit_jump_hold = False
             strict_jump_until = float(getattr(self, '_strict_jump_until', 0.0) or 0.0)
             if (
                 isinstance(waiting_target, int)
                 and waiting_target >= 0
-                and current_time <= strict_jump_until
+                and (pending_explicit_jump_hold or current_time <= strict_jump_until)
             ):
                 current_page = max(0, min(last_page, int(waiting_target)))
         elif strict_mode and (not dragging_mode):

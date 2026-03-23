@@ -215,6 +215,8 @@ class ImageListViewInteractionMixin:
         self._one_shot_jump_reason = None
         self._one_shot_jump_token = int(getattr(self, "_one_shot_jump_token", 0) or 0) + 1
         self._one_shot_jump_attempts = 0
+        self._strict_waiting_target_page = None
+        self._strict_waiting_window_pages = None
 
     def _run_one_shot_targeted_jump_finalize(self, token: int | None = None):
         import time as _t
@@ -392,6 +394,15 @@ class ImageListViewInteractionMixin:
         clear_stabilization = getattr(self, "_clear_post_jump_stabilization", None)
         if callable(clear_stabilization):
             clear_stabilization()
+        self._strict_waiting_target_page = None
+        self._strict_waiting_window_pages = None
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
+        if hasattr(source_model, "_enrichment_cancelled"):
+            try:
+                source_model._enrichment_cancelled.set()
+            except Exception:
+                pass
 
         page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
         target_page = max(0, int(target_global) // max(1, page_size))
