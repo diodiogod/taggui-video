@@ -961,7 +961,7 @@ class ImageListModel(QAbstractListModel):
         if restart_enrichment and hasattr(self, '_start_paginated_enrichment'):
             try:
                 self._start_paginated_enrichment(
-                    window_pages=range(int(start_page), int(end_page) + 1),
+                    window_pages={int(target_page)},
                     scope='window',
                 )
             except Exception:
@@ -2901,7 +2901,10 @@ class ImageListModel(QAbstractListModel):
         self.total_count_changed.emit(self._total_count)
         self._emit_paginated_layout_refresh()
         if ordered_pages:
-            self._start_paginated_enrichment(window_pages=ordered_pages, scope='window')
+            self._start_paginated_enrichment(
+                window_pages={int(ordered_pages[0])},
+                scope='window',
+            )
 
         return ordered_pages
 
@@ -5405,7 +5408,7 @@ class ImageListModel(QAbstractListModel):
         self._emit_paginated_layout_refresh()
         if self._pages:
             self._start_paginated_enrichment(
-                window_pages=sorted(self._pages.keys()),
+                window_pages={0},
                 scope='window',
             )
         QTimer.singleShot(

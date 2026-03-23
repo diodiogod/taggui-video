@@ -567,7 +567,7 @@ class ImageList(QDockWidget):
                     # Restart background enrichment (essential for updating placeholders)
                     if hasattr(source_model, '_start_paginated_enrichment'):
                         source_model._start_paginated_enrichment(
-                            window_pages=sorted(source_model._pages.keys()),
+                            window_pages={0},
                             scope='window',
                         )
 

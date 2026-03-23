@@ -61,17 +61,6 @@ class ImageListViewScrollMixin:
         ):
             try:
                 self._check_and_enrich_loaded_pages()
-                if hasattr(source_model, '_start_paginated_enrichment'):
-                    preferred_window = None
-                    resolve_window = getattr(self, '_get_preferred_enrichment_window_pages', None)
-                    if callable(resolve_window):
-                        preferred_window = resolve_window(source_model, window_buffer=3)
-                    if preferred_window is not None:
-                        window_start, window_end = preferred_window
-                        source_model._start_paginated_enrichment(
-                            window_pages=range(window_start, window_end + 1),
-                            scope='window',
-                        )
             except Exception:
                 pass
 
