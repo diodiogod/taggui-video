@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.34] - 2026-03-24
+
+### Added
+
+- Reduce stale masonry recentering and show subfolder context in the title bar
+- Clicking another visible masonry item after closing a spawned viewer no longer recenters the viewport unexpectedly
+- The title bar now shows the selected file inside its collection subfolders, not just the root folder and filename
+- It is easier to tell which nested set or collection a media item belongs to while browsing
 ## [1.0.33] - 2026-03-24
 
 ### Added
