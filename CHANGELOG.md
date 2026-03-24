@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.33] - 2026-03-24
+
+### Added
+
+- Clean up image list controls and reduce masonry viewport jumps
+- Simplify the image list header with a cleaner single-row layout and media scope tabs
+- Keep reactions available on the menu row or on the main viewer overlay without the finicky detach behavior
+- Clicking a partially visible masonry tile no longer forces the viewport to move just to fully reveal it
+- Next and previous style navigation still reveals items when needed
+
+### Removed
+
+- Remove the old selection toggle from the image list controls
 ## [1.0.32] - 2026-03-23
 
 ### Added
