@@ -1402,14 +1402,27 @@ class MainWindow(QMainWindow):
                 self._reaction_controls_panel_visible and (not overlay_active)
             )
 
-    def _update_main_window_title(self, selected_file_name: str | None = None):
-        """Show folder and selected file name in the main window title."""
+    def _update_main_window_title(self, selected_media_path: str | Path | None = None):
+        """Show loaded root folder plus selected media path in the window title."""
         base_title = f"{APP_NAME} v{__version__}"
         folder_name = self.directory_path.name if self.directory_path else None
         if folder_name:
             base_title = f"{base_title} - {folder_name}"
-        if selected_file_name:
-            self.setWindowTitle(f"{base_title} - {selected_file_name}")
+        display_path = None
+        if selected_media_path:
+            try:
+                media_path = Path(selected_media_path)
+                if self.directory_path is not None:
+                    try:
+                        display_path = str(media_path.resolve().relative_to(self.directory_path.resolve()))
+                    except Exception:
+                        display_path = media_path.name
+                else:
+                    display_path = media_path.name
+            except Exception:
+                display_path = str(selected_media_path)
+        if display_path:
+            self.setWindowTitle(f"{base_title} - {display_path}")
         else:
             self.setWindowTitle(base_title)
 
@@ -4628,7 +4641,7 @@ class MainWindow(QMainWindow):
                         if save_source == "user_click":
                             view._selection_log_source = "program"
                             view._selection_log_source_until = 0.0
-                        self._update_main_window_title(img.path.name)
+                        self._update_main_window_title(img.path)
                     else:
                         self._update_main_window_title()
                 except (IndexError, AttributeError):
