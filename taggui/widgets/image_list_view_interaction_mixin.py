@@ -934,11 +934,23 @@ class ImageListViewInteractionMixin:
         self._skip_next_resize_recalc = True
         # Clear recenter intent from prior mode/zoom transitions.
         self._recenter_after_layout = False
+        self._suppress_masonry_auto_scroll_until = 0.0
         # Drop resize anchor lock so completion handler won't snap to stale target.
         if time.time() < float(getattr(self, '_resize_anchor_until', 0.0) or 0.0):
             self._resize_anchor_page = None
             self._resize_anchor_target_global = None
             self._resize_anchor_until = 0.0
+        # Deliberate click supersedes any stale targeted relocation or
+        # post-jump ownership left behind by prior jump/restore flows.
+        clear_pending_relocation = getattr(self, '_clear_pending_targeted_relocation', None)
+        if callable(clear_pending_relocation):
+            clear_pending_relocation()
+        clear_stabilization = getattr(self, '_clear_post_jump_stabilization', None)
+        if callable(clear_stabilization):
+            clear_stabilization()
+        clear_reflow_guide = getattr(self, '_clear_pending_target_reflow_guide', None)
+        if callable(clear_reflow_guide):
+            clear_reflow_guide()
         # Drop restore anchor — user's deliberate click supersedes startup restore.
         self._restore_anchor_until = 0.0
         self._restore_target_page = None
