@@ -261,6 +261,7 @@ class ImageListView(
         self._spawn_drag_arrow_overlay = None
         self._active_drag_preview_animations = []
         self._suppress_virtual_auto_scroll_once = False
+        self._suppress_masonry_auto_scroll_once = False
         self._reaction_feedback_overlay = ReactionFeedbackOverlay(self.viewport())
         self._strict_domain_service = StrictScrollDomainService(self)
         self._masonry_lifecycle_service = MasonryLifecycleService(self)

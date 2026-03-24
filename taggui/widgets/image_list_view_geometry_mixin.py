@@ -2401,6 +2401,13 @@ class ImageListViewGeometryMixin:
         item_top = rect.y()
         item_bot = rect.y() + rect.height()
 
+        if (
+            bool(getattr(self, "_suppress_masonry_auto_scroll_once", False))
+            and hint == QAbstractItemView.ScrollHint.EnsureVisible
+        ):
+            self._suppress_masonry_auto_scroll_once = False
+            return
+
         if hint == QAbstractItemView.ScrollHint.EnsureVisible:
             # Already fully visible → do nothing.
             if item_top >= scroll_val and item_bot <= scroll_val + vh:

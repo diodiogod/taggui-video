@@ -83,6 +83,12 @@ class SignalManager:
             getattr(reaction_overlay, 'love_button', None),
             getattr(reaction_overlay, 'bomb_button', None),
         )
+        menu_manager = getattr(self.main_window, 'menu_manager', None)
+        self._connect_reaction_controls(
+            getattr(menu_manager, 'rating_widget', None),
+            getattr(menu_manager, 'love_button', None),
+            getattr(menu_manager, 'bomb_button', None),
+        )
 
         toolbar_manager.add_action_group.triggered.connect(
             lambda action: image_viewer.add_marking(

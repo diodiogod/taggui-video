@@ -555,8 +555,21 @@ class MainWindow(QMainWindow):
         self.toolbar_manager.reset_toolbars_layout()
         self._default_window_state = self.saveState()
         self._sync_perf_hud_menu_action()
+        rating_toolbar = self.toolbar_manager.toolbars.get('rating')
+        if rating_toolbar is not None:
+            rating_toolbar.topLevelChanged.connect(
+                lambda *_: self._sync_reaction_controls_host()
+            )
+            rating_toolbar.visibilityChanged.connect(
+                lambda *_: self._sync_reaction_controls_host()
+            )
         self._main_viewer_controls_attached = settings.value(
             'main_viewer_controls_attached',
+            True,
+            type=bool,
+        )
+        self._reaction_controls_panel_visible = settings.value(
+            'reaction_controls_panel_visible',
             True,
             type=bool,
         )
@@ -571,6 +584,10 @@ class MainWindow(QMainWindow):
         )
         self.set_reaction_controls_attached(
             self._reaction_controls_attached,
+            save=False,
+        )
+        self.set_reaction_controls_panel_visible(
+            self._reaction_controls_panel_visible,
             save=False,
         )
         self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
@@ -1016,6 +1033,9 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         # Window resize should visibly relayout masonry even during playback.
         self._unfreeze_for_interaction(hold_ms=900)
+        menu_manager = getattr(self, 'menu_manager', None)
+        if menu_manager is not None:
+            menu_manager.position_menu_bar_right_host()
         if self._perf_hud_enabled:
             self._reposition_perf_hud()
 
@@ -1028,6 +1048,9 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         """Apply any deferred workspace preset once window is visible."""
         super().showEvent(event)
+        menu_manager = getattr(self, 'menu_manager', None)
+        if menu_manager is not None:
+            menu_manager.position_menu_bar_right_host()
         if self._perf_hud_enabled:
             self._reposition_perf_hud()
         if self._workspace_apply_pending_id:
@@ -1305,6 +1328,16 @@ class MainWindow(QMainWindow):
                 self._reaction_controls_attached,
             )
 
+    def set_reaction_controls_panel_visible(self, visible: bool, *, save: bool = True):
+        """Show or hide the non-overlay reaction controls host."""
+        self._reaction_controls_panel_visible = bool(visible)
+        self._sync_reaction_controls_host()
+        if save:
+            settings.setValue(
+                'reaction_controls_panel_visible',
+                self._reaction_controls_panel_visible,
+            )
+
     def _sync_main_viewer_overlay_hosts(self):
         """Route overlay-hosted control clusters between viewer and toolbars."""
         self._sync_main_viewer_controls_host()
@@ -1342,6 +1375,7 @@ class MainWindow(QMainWindow):
         toolbar_mgr = getattr(self, 'toolbar_manager', None)
         if toolbar_mgr is None:
             return
+        menu_mgr = getattr(self, 'menu_manager', None)
         workspace_id = self._current_workspace_id() if hasattr(self, '_current_workspace_id') else 'media_viewer'
         workspace_forces_toolbar_hidden = workspace_id == 'full_masonry'
         toolbar_mgr.set_reaction_controls_attached(self._reaction_controls_attached)
@@ -1355,13 +1389,17 @@ class MainWindow(QMainWindow):
                 and not workspace_forces_toolbar_hidden
             )
         )
+        overlay_active = bool(
+            self._reaction_controls_attached
+            and bool(self._main_viewer_visible)
+            and not workspace_forces_toolbar_hidden
+        )
         rating_toolbar = toolbar_mgr.toolbars.get('rating')
         if rating_toolbar is not None:
-            rating_toolbar.setVisible(
-                (
-                    ((not self._reaction_controls_attached) or (not bool(self._main_viewer_visible)))
-                    and not workspace_forces_toolbar_hidden
-                )
+            rating_toolbar.setVisible(False)
+        if menu_mgr is not None:
+            menu_mgr.set_reaction_controls_visible(
+                self._reaction_controls_panel_visible and (not overlay_active)
             )
 
     def _update_main_window_title(self, selected_file_name: str | None = None):
@@ -2254,6 +2292,11 @@ class MainWindow(QMainWindow):
         if self.rating_widget is not None:
             self.rating_widget.set_mixed_state(bool(mixed))
             self.rating_widget.set_rating(stars)
+        menu_manager = getattr(self, 'menu_manager', None)
+        menu_rating_widget = getattr(menu_manager, 'rating_widget', None)
+        if menu_rating_widget is not None:
+            menu_rating_widget.set_mixed_state(bool(mixed))
+            menu_rating_widget.set_rating(stars)
         overlay = getattr(self, '_reaction_controls_overlay', None)
         overlay_rating_widget = getattr(overlay, 'rating_widget', None)
         if overlay_rating_widget is not None:
@@ -2278,6 +2321,9 @@ class MainWindow(QMainWindow):
 
         _update_button(self.love_button, bool(love), bool(love_mixed))
         _update_button(self.bomb_button, bool(bomb), bool(bomb_mixed))
+        menu_manager = getattr(self, 'menu_manager', None)
+        _update_button(getattr(menu_manager, 'love_button', None), bool(love), bool(love_mixed))
+        _update_button(getattr(menu_manager, 'bomb_button', None), bool(bomb), bool(bomb_mixed))
 
         overlay = getattr(self, '_reaction_controls_overlay', None)
         _update_button(getattr(overlay, 'love_button', None), bool(love), bool(love_mixed))

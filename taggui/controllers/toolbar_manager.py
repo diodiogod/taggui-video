@@ -840,9 +840,14 @@ class ToolbarManager:
         """Create one host widget for the shared main-viewer controls."""
         return MainViewerControlsWidget(self, overlay_mode=overlay_mode, parent=parent)
 
-    def create_reaction_controls_widget(self, *, overlay_mode: bool, parent=None):
+    def create_reaction_controls_widget(self, *, overlay_mode: bool, compact_mode: bool = False, parent=None):
         """Create one host widget for the shared reaction controls."""
-        return ReactionControlsWidget(self, overlay_mode=overlay_mode, parent=parent)
+        return ReactionControlsWidget(
+            self,
+            overlay_mode=overlay_mode,
+            compact_mode=compact_mode,
+            parent=parent,
+        )
 
     def _delete_all_marked(self):
         """Delete all marked images."""

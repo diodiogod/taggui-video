@@ -1158,6 +1158,7 @@ class ImageListViewInteractionMixin:
                 if sel_model is not None:
                     # Prevent Qt's native auto-scroll-to-current in virtual-list mode.
                     self._suppress_virtual_auto_scroll_once = True
+                    self._suppress_masonry_auto_scroll_once = True
                     if modifiers & Qt.ControlModifier:
                         was_selected = sel_model.isSelected(index)
                         sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
@@ -1191,12 +1192,21 @@ class ImageListViewInteractionMixin:
                         0,
                         lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
                     )
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
+                    )
                 else:
                     self._suppress_virtual_auto_scroll_once = True
+                    self._suppress_masonry_auto_scroll_once = True
                     self.setCurrentIndex(index)
                     QTimer.singleShot(
                         0,
                         lambda: setattr(self, "_suppress_virtual_auto_scroll_once", False),
+                    )
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
                     )
 
                     try:
@@ -1417,6 +1427,7 @@ class ImageListViewInteractionMixin:
                     was_selected = self.selectionModel().isSelected(index)
 
                     # First, set as current index
+                    self._suppress_masonry_auto_scroll_once = True
                     self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
 
                     # Then toggle its selection state
@@ -1451,6 +1462,7 @@ class ImageListViewInteractionMixin:
 
                         # Apply selection (add to existing if Ctrl also held)
                         self.selectionModel().select(selection, QItemSelectionModel.Select)
+                        self._suppress_masonry_auto_scroll_once = True
                         self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
 
                         # Debug: show all selected indices
@@ -1459,6 +1471,7 @@ class ImageListViewInteractionMixin:
                     else:
                         # No current index, just select this one
                         self.selectionModel().select(index, QItemSelectionModel.Select)
+                        self._suppress_masonry_auto_scroll_once = True
                         self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
 
                     # Force repaint
@@ -1469,10 +1482,16 @@ class ImageListViewInteractionMixin:
                     # clearSelection()+select() during rapid layout updates.
                     sel_model = self.selectionModel()
                     if sel_model:
+                        self._suppress_masonry_auto_scroll_once = True
                         sel_model.setCurrentIndex(
                             index, QItemSelectionModel.SelectionFlag.ClearAndSelect
                         )
                         self.viewport().update()
+
+                QTimer.singleShot(
+                    0,
+                    lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
+                )
 
                 # Freeze selection against recalc-driven mutations.
                 # The click's own setCurrentIndex already fired synchronously above,

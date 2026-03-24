@@ -369,6 +369,7 @@ class MenuManager:
         self.toggle_auto_captioner_action = None
         self.toggle_auto_markings_action = None
         self.toggle_perf_hud_action = None
+        self.toggle_reaction_controls_action = None
         self.recent_folders_menu = None
         self.recent_folders_list_widget = None
         self.recent_folders_list_action = None
@@ -378,13 +379,31 @@ class MenuManager:
         self.spawn_floating_viewer_action = None
         self.close_all_floating_viewers_action = None
         self.toggle_floating_hold_action = None
+        self.menu_bar = None
+        self.menu_strip = None
+        self.menu_bar_right_host = None
+        self.menu_bar_right_layout = None
+        self.reaction_controls_widget = None
+        self.rating_widget = None
+        self.love_button = None
+        self.bomb_button = None
 
     def create_menus(self):
         """Create and setup menu bar."""
         # Create actions first (needed before menu creation)
         self._create_actions()
 
-        menu_bar = self.main_window.menuBar()
+        self.menu_strip = QWidget(self.main_window)
+        strip_layout = QHBoxLayout(self.menu_strip)
+        strip_layout.setContentsMargins(0, 0, 6, 0)
+        strip_layout.setSpacing(4)
+
+        menu_bar = QMenuBar(self.menu_strip)
+        menu_bar.setNativeMenuBar(False)
+        menu_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.menu_bar = menu_bar
+        strip_layout.addWidget(menu_bar, stretch=0)
+        strip_layout.addStretch(1)
 
         # File menu
         self._create_file_menu(menu_bar)
@@ -403,6 +422,8 @@ class MenuManager:
 
         # Delete marked menu (hidden by default, shown when images are marked)
         self._create_delete_marked_menu(menu_bar)
+        self._create_menu_bar_right_host(menu_bar)
+        self.main_window.setMenuWidget(self.menu_strip)
 
     def _create_actions(self):
         """Create menu actions."""
@@ -422,6 +443,8 @@ class MenuManager:
         self.toggle_auto_captioner_action = QAction('Auto-Captioner', parent=self.main_window)
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
         self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
+        self.toggle_reaction_controls_action = QAction('Rating toolbar', parent=self.main_window)
+        self.toggle_reaction_controls_action.setCheckable(True)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
         self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action = QAction('Hold Existing Spawned Viewers', parent=self.main_window)
@@ -601,9 +624,15 @@ class MenuManager:
         view_menu.addAction(self.toggle_toolbar_action)
         toolbar_groups_menu = view_menu.addMenu('Toolbar Groups')
         for toolbar in toolbar_manager.get_toolbars():
-            action = toolbar.toggleViewAction()
-            action.setText(toolbar.windowTitle())
-            toolbar_groups_menu.addAction(action)
+            if str(toolbar.property('toolbar_group_key') or '') == 'rating':
+                self.toggle_reaction_controls_action.triggered.connect(
+                    self.main_window.set_reaction_controls_panel_visible
+                )
+                toolbar_groups_menu.addAction(self.toggle_reaction_controls_action)
+            else:
+                action = toolbar.toggleViewAction()
+                action.setText(toolbar.windowTitle())
+                toolbar_groups_menu.addAction(action)
         view_menu.addAction(self.reset_toolbars_action)
         view_menu.addAction(self.reset_layout_action)
         view_menu.addSeparator()
@@ -869,28 +898,70 @@ class MenuManager:
 
         # Attach menu to button
         self.delete_marked_button.setMenu(self.delete_marked_menu)
-
-        # Position button manually after Help menu
-        # Get the Help menu position
-        help_action = None
-        for action in menu_bar.actions():
-            if 'Help' in action.text():
-                help_action = action
-                break
-
-        if help_action:
-            # Get Help menu's geometry
-            help_rect = menu_bar.actionGeometry(help_action)
-            # Position button right after Help menu
-            self.delete_marked_button.setGeometry(
-                help_rect.right() + 5,
-                help_rect.top(),
-                self.delete_marked_button.sizeHint().width(),
-                help_rect.height()
-            )
-
-        # Show/hide based on marked count
         self.delete_marked_button.setVisible(False)
+        self._refresh_menu_bar_right_host_visibility()
+
+    def _create_menu_bar_right_host(self, menu_bar: QMenuBar):
+        """Create one top-right host for persistent menu-row widgets."""
+        host = QWidget(self.menu_strip)
+        layout = QHBoxLayout(host)
+        layout.setContentsMargins(8, 2, 0, 2)
+        layout.setSpacing(8)
+        host.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+
+        toolbar_manager = getattr(self.main_window, 'toolbar_manager', None)
+        if toolbar_manager is not None:
+            self.reaction_controls_widget = toolbar_manager.create_reaction_controls_widget(
+                overlay_mode=False,
+                compact_mode=True,
+                parent=host,
+            )
+            self.rating_widget = self.reaction_controls_widget.rating_widget
+            self.love_button = self.reaction_controls_widget.love_button
+            self.bomb_button = self.reaction_controls_widget.bomb_button
+            layout.addWidget(self.reaction_controls_widget)
+
+        if self.delete_marked_button is not None:
+            self.delete_marked_button.setParent(host)
+            layout.addWidget(self.delete_marked_button)
+
+        self.menu_bar_right_host = host
+        self.menu_bar_right_layout = layout
+        if self.menu_strip is not None and self.menu_strip.layout() is not None:
+            self.menu_strip.layout().addWidget(host, stretch=0)
+        host.adjustSize()
+        host.setMinimumWidth(max(host.sizeHint().width(), host.minimumSizeHint().width()))
+        self._refresh_menu_bar_right_host_visibility()
+
+    def set_reaction_controls_visible(self, visible: bool):
+        widget = getattr(self, 'reaction_controls_widget', None)
+        if widget is not None:
+            widget.setVisible(bool(visible))
+        action = getattr(self, 'toggle_reaction_controls_action', None)
+        if action is not None:
+            blocker = action.blockSignals(True)
+            action.setChecked(bool(visible))
+            action.blockSignals(blocker)
+        self._refresh_menu_bar_right_host_visibility()
+
+    def position_menu_bar_right_host(self):
+        return
+
+    def _refresh_menu_bar_right_host_visibility(self):
+        host = getattr(self, 'menu_bar_right_host', None)
+        if host is None:
+            return
+        reaction_visible = bool(
+            getattr(self, 'reaction_controls_widget', None)
+            and not self.reaction_controls_widget.isHidden()
+        )
+        delete_visible = bool(
+            getattr(self, 'delete_marked_button', None)
+            and not self.delete_marked_button.isHidden()
+        )
+        host.setVisible(reaction_visible or delete_visible)
+        if host.isVisible():
+            QTimer.singleShot(0, self.position_menu_bar_right_host)
 
     def _delete_all_marked(self):
         """Delete all marked images."""
@@ -908,18 +979,4 @@ class MenuManager:
             self.delete_marked_button.setVisible(count > 0)
             if count > 0:
                 self.delete_marked_button.setText(f'🗑️ Delete Marked ({count})')
-                # Re-position in case window was resized
-                menu_bar = self.main_window.menuBar()
-                help_action = None
-                for action in menu_bar.actions():
-                    if 'Help' in action.text():
-                        help_action = action
-                        break
-                if help_action:
-                    help_rect = menu_bar.actionGeometry(help_action)
-                    self.delete_marked_button.setGeometry(
-                        help_rect.right() + 5,
-                        help_rect.top(),
-                        self.delete_marked_button.sizeHint().width(),
-                        help_rect.height()
-                    )
+            self._refresh_menu_bar_right_host_visibility()

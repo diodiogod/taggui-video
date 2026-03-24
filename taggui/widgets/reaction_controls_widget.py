@@ -7,21 +7,34 @@ from widgets.rating_controls import ReactionToggleButton, StarRatingWidget
 
 
 class ReactionControlsWidget(QFrame):
-    """Compact star/love/bomb cluster with attach/detach toggle."""
+    """Compact star/love/bomb cluster with optional viewer attach toggle."""
 
     hover_changed = Signal(bool)
 
-    def __init__(self, toolbar_manager, *, overlay_mode: bool = False, parent=None):
+    def __init__(
+        self,
+        toolbar_manager,
+        *,
+        overlay_mode: bool = False,
+        compact_mode: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.toolbar_manager = toolbar_manager
         self._overlay_mode = bool(overlay_mode)
+        self._compact_mode = bool(compact_mode)
         self.setObjectName("reactionControlsWidget")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMouseTracking(True)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(
+            2 if self._compact_mode else 8,
+            0 if self._compact_mode else 6,
+            2 if self._compact_mode else 8,
+            0 if self._compact_mode else 6,
+        )
+        layout.setSpacing(3 if self._compact_mode else 6)
 
         self._host_toggle_button = self._make_action_button(
             toolbar_manager.reaction_controls_host_toggle_action,
@@ -30,17 +43,23 @@ class ReactionControlsWidget(QFrame):
         layout.addWidget(self._host_toggle_button)
 
         spacer = QWidget(self)
-        spacer.setFixedWidth(4)
+        spacer.setFixedWidth(2 if self._compact_mode else 4)
         spacer.setObjectName("reactionControlsSpacer")
         layout.addWidget(spacer)
 
         self.rating_widget = StarRatingWidget(self)
+        if self._compact_mode:
+            self.rating_widget.setFixedHeight(26)
         layout.addWidget(self.rating_widget)
 
         self.love_button = ReactionToggleButton('love', self)
+        if self._compact_mode:
+            self.love_button.setFixedSize(28, 28)
         layout.addWidget(self.love_button)
 
         self.bomb_button = ReactionToggleButton('bomb', self)
+        if self._compact_mode:
+            self.bomb_button.setFixedSize(28, 28)
         layout.addWidget(self.bomb_button)
 
         self.set_overlay_mode(self._overlay_mode)
@@ -51,14 +70,18 @@ class ReactionControlsWidget(QFrame):
         button.setAutoRaise(False)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setProperty("controlRole", role)
-        button.setFixedSize(14, 28)
+        button.setFixedSize(14, 20 if self._compact_mode else 28)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         return button
 
     def sizeHint(self) -> QSize:
+        if self._compact_mode:
+            return super().sizeHint().expandedTo(QSize(232, 24))
         return super().sizeHint().expandedTo(QSize(238, 42))
 
     def minimumSizeHint(self) -> QSize:
+        if self._compact_mode:
+            return QSize(220, 24)
         return QSize(216, 40)
 
     def set_overlay_mode(self, overlay_mode: bool):
