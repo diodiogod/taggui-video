@@ -43,6 +43,7 @@ DEFAULT_SETTINGS = {
     'thumbnail_eviction_pages': 3,  # How many pages to keep loaded on each side (1-5, higher = more VRAM but smoother)
     'max_pages_in_memory': 20,  # Max paginated pages held in RAM (higher = smoother revisits, higher RAM)
     'pagination_threshold': 0,  # Minimum images to enable pagination mode (0 = always paginate, higher = only for large datasets)
+    'image_list_sort_dir': 'ASC',
     'diagnostic_log_mode': 'essential',  # off, essential, verbose
     'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump

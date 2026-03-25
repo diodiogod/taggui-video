@@ -504,7 +504,7 @@ class MainWindow(QMainWindow):
 
         self.image_list = ImageList(self.proxy_image_list_model,
                                     tag_separator, image_list_image_width)
-        self.image_list.sort_combo_box.currentTextChanged.connect(
+        self.image_list.sort_state_changed.connect(
             self._on_folder_sort_pref_changed)
         self.image_list.media_type_combo_box.currentTextChanged.connect(
             self._on_folder_media_pref_changed)
@@ -628,8 +628,8 @@ class MainWindow(QMainWindow):
             self._unfreeze_for_interaction)
 
         # Unfreeze on sort change
-        self.image_list.sort_combo_box.currentTextChanged.connect(
-            self._unfreeze_for_interaction)
+        self.image_list.sort_state_changed.connect(
+            lambda *_: self._unfreeze_for_interaction())
         # Forward any unhandled image changing key presses to the image list.
         key_press_forwarder = KeyPressForwarder(
             parent=self, target=self.image_list.list_view,
@@ -1583,16 +1583,19 @@ class MainWindow(QMainWindow):
         digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:20]
         return f"folder_view_prefs/{digest}"
 
-    def _get_folder_view_preferences(self, path: Path) -> tuple[str, str]:
+    def _get_folder_view_preferences(self, path: Path) -> tuple[str, str, str]:
         """Load folder-specific sort/media preferences."""
         prefix = self._folder_view_settings_prefix(path)
         if not prefix:
-            return "", ""
+            return "", "", ""
         sort_value = str(settings.value(f"{prefix}/sort", "", type=str) or "").strip()
+        sort_dir_value = str(settings.value(f"{prefix}/sort_dir", "", type=str) or "").strip().upper()
+        if sort_dir_value not in {"ASC", "DESC"}:
+            sort_dir_value = ""
         media_value = str(settings.value(f"{prefix}/media_type", "", type=str) or "").strip()
         if media_value not in {"All", "Images", "Videos"}:
             media_value = ""
-        return sort_value, media_value
+        return sort_value, sort_dir_value, media_value
 
     def _current_workspace_id(self) -> str:
         """Return the active workspace id with a safe fallback."""
@@ -1714,6 +1717,7 @@ class MainWindow(QMainWindow):
 
     def _save_folder_view_preferences(self, *,
                                       sort_value: str | None = None,
+                                      sort_dir_value: str | None = None,
                                       media_value: str | None = None):
         """Persist sort/media choices for the currently loaded folder."""
         if self.directory_path is None:
@@ -1722,8 +1726,14 @@ class MainWindow(QMainWindow):
         if not prefix:
             return
         sort_text = str(sort_value if sort_value is not None else self.image_list.sort_combo_box.currentText())
+        sort_dir = str(
+            sort_dir_value
+            if sort_dir_value is not None
+            else self.image_list.current_sort_direction()
+        )
         media_text = str(media_value if media_value is not None else self.image_list.media_type_combo_box.currentText())
         settings.setValue(f"{prefix}/sort", sort_text)
+        settings.setValue(f"{prefix}/sort_dir", sort_dir)
         settings.setValue(f"{prefix}/media_type", media_text)
         settings.setValue(f"{prefix}/path", str(self.directory_path))
 
@@ -1746,18 +1756,22 @@ class MainWindow(QMainWindow):
 
     def _apply_folder_view_preferences(self, path: Path):
         """Apply folder-specific sort/media values to combo boxes."""
-        sort_pref, media_pref = self._get_folder_view_preferences(path)
-        sort_combo = self.image_list.sort_combo_box
+        sort_pref, sort_dir_pref, media_pref = self._get_folder_view_preferences(path)
         media_combo = self.image_list.media_type_combo_box
 
         if sort_pref:
-            valid_sorts = {sort_combo.itemText(i) for i in range(sort_combo.count())}
-            if sort_pref in valid_sorts and sort_combo.currentText() != sort_pref:
-                prev = sort_combo.blockSignals(True)
-                try:
-                    sort_combo.setCurrentText(sort_pref)
-                finally:
-                    sort_combo.blockSignals(prev)
+            valid_sorts = {
+                self.image_list.sort_combo_box.itemText(i)
+                for i in range(self.image_list.sort_combo_box.count())
+            }
+            if sort_pref in valid_sorts:
+                self.image_list.set_sort_state(
+                    sort_pref,
+                    sort_dir_pref,
+                    preserve_selection=False,
+                    apply_sort=False,
+                    emit_signal=False,
+                )
 
         if media_pref:
             if media_pref in {"All", "Images", "Videos"} and media_combo.currentText() != media_pref:
@@ -1767,9 +1781,9 @@ class MainWindow(QMainWindow):
                 finally:
                     media_combo.blockSignals(prev)
 
-    @Slot(str)
-    def _on_folder_sort_pref_changed(self, sort_text: str):
-        self._save_folder_view_preferences(sort_value=sort_text)
+    @Slot(str, str)
+    def _on_folder_sort_pref_changed(self, sort_text: str, sort_dir: str):
+        self._save_folder_view_preferences(sort_value=sort_text, sort_dir_value=sort_dir)
 
     @Slot(str)
     def _on_folder_media_pref_changed(self, media_text: str):

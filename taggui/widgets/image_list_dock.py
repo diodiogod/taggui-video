@@ -1,6 +1,8 @@
+import hashlib
+
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_view import ImageListView
-from PySide6.QtWidgets import QSizePolicy, QTabBar
+from PySide6.QtWidgets import QSizePolicy, QStyle, QStyleOptionComboBox, QStylePainter, QTabBar
 from utils.settings import DEFAULT_SETTINGS
 
 class ClickableLabel(QLabel):
@@ -68,14 +70,70 @@ class MediaTypeTabBar(QTabBar):
         self.currentTextChanged.emit(text)
 
 
+class SortComboBox(SettingsComboBox):
+    def __init__(self, key: str, default: str | None = None):
+        super().__init__(key=key, default=default)
+        self._sort_direction = 'ASC'
+
+    def set_sort_direction(self, sort_dir: str):
+        normalized_dir = 'DESC' if str(sort_dir).upper() == 'DESC' else 'ASC'
+        if self._sort_direction == normalized_dir:
+            return
+        self._sort_direction = normalized_dir
+        self.update()
+
+    def sort_direction(self) -> str:
+        return self._sort_direction
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.subControls = (
+            QStyle.SubControl.SC_ComboBoxFrame
+            | QStyle.SubControl.SC_ComboBoxEditField
+        )
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+        arrow_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxArrow,
+            self,
+        )
+        arrow_option = QStyleOptionComboBox(option)
+        arrow_option.rect = arrow_rect
+        arrow_primitive = (
+            QStyle.PrimitiveElement.PE_IndicatorArrowUp
+            if self._sort_direction == 'DESC'
+            else QStyle.PrimitiveElement.PE_IndicatorArrowDown
+        )
+        painter.drawPrimitive(arrow_primitive, arrow_option)
+
+
 class ImageList(QDockWidget):
     deletion_marking_changed = Signal()
     directory_reload_requested = Signal()
+    sort_state_changed = Signal(str, str)
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
         super().__init__()
         self.proxy_image_list_model = proxy_image_list_model
+        self._default_sort_dirs = {
+            'Default': 'ASC',
+            'Name': 'ASC',
+            'Modified': 'DESC',
+            'Created': 'DESC',
+            'Size': 'DESC',
+            'Type': 'ASC',
+            'Love / Rate / Bomb': 'ASC',
+            'Random': 'ASC',
+        }
+        self._active_sort_by = ''
+        self._sort_dir = 'ASC'
+        self._skip_next_sort_activation = False
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_list')
         self.setWindowTitle('Images')
@@ -100,7 +158,7 @@ class ImageList(QDockWidget):
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Preferred,
         )
-        self.sort_combo_box = SettingsComboBox(key='image_list_sort_by')
+        self.sort_combo_box = SortComboBox(key='image_list_sort_by')
         self.sort_combo_box.addItems(['Default', 'Name', 'Modified', 'Created',
                                        'Size', 'Type', 'Love / Rate / Bomb', 'Random'])
         self.sort_combo_box.setMinimumWidth(0)
@@ -226,8 +284,16 @@ class ImageList(QDockWidget):
         layout.addLayout(status_layout)
         self.setWidget(container)
 
-        # Connect sort signal
-        self.sort_combo_box.currentTextChanged.connect(self._on_sort_changed)
+        initial_sort = str(self.sort_combo_box.currentText() or 'Default')
+        self._active_sort_by = initial_sort
+        self._sort_dir = self._normalize_sort_dir(
+            initial_sort,
+            settings.value('image_list_sort_dir', '', type=str),
+        )
+        self.sort_combo_box.set_sort_direction(self._sort_dir)
+        settings.setValue('image_list_sort_dir', self._sort_dir)
+        self.sort_combo_box.currentTextChanged.connect(self._on_sort_combo_text_changed)
+        self.sort_combo_box.activated.connect(self._on_sort_combo_activated)
 
         # DISABLED: Cache warming causes UI blocking
         # Connect cache warming signal to update cache status label
@@ -431,13 +497,96 @@ class ImageList(QDockWidget):
     def get_selected_image_indices(self) -> list[QModelIndex]:
         return self.list_view.get_selected_image_indices()
 
+    def _normalize_sort_dir(self, sort_by: str, sort_dir: str | None = None) -> str:
+        normalized_sort = str(sort_by or 'Default')
+        normalized_dir = str(sort_dir or '').upper()
+        if normalized_dir in {'ASC', 'DESC'}:
+            return normalized_dir
+        if normalized_sort == self._active_sort_by and self._sort_dir in {'ASC', 'DESC'}:
+            return self._sort_dir
+        return self._default_sort_dirs.get(normalized_sort, 'ASC')
+
+    def current_sort_direction(self) -> str:
+        return self._sort_dir
+
+    def set_sort_state(
+        self,
+        sort_by: str,
+        sort_dir: str | None = None,
+        *,
+        preserve_selection: bool = True,
+        apply_sort: bool = True,
+        emit_signal: bool = True,
+        reshuffle_random: bool = False,
+    ):
+        normalized_sort = str(sort_by or 'Default')
+        if normalized_sort not in self._default_sort_dirs:
+            normalized_sort = 'Default'
+        normalized_dir = self._normalize_sort_dir(normalized_sort, sort_dir)
+        sort_changed = normalized_sort != self._active_sort_by
+        dir_changed = normalized_dir != self._sort_dir
+
+        if self.sort_combo_box.currentText() != normalized_sort:
+            previous = self.sort_combo_box.blockSignals(True)
+            try:
+                self.sort_combo_box.setCurrentText(normalized_sort)
+            finally:
+                self.sort_combo_box.blockSignals(previous)
+
+        self._active_sort_by = normalized_sort
+        self._sort_dir = normalized_dir
+        self.sort_combo_box.set_sort_direction(normalized_dir)
+        settings.setValue('image_list_sort_dir', normalized_dir)
+
+        if apply_sort and (sort_changed or dir_changed or reshuffle_random):
+            self._on_sort_changed(
+                normalized_sort,
+                preserve_selection=preserve_selection,
+                sort_dir=normalized_dir,
+                reshuffle_random=reshuffle_random,
+            )
+        if emit_signal and (sort_changed or dir_changed):
+            self.sort_state_changed.emit(normalized_sort, normalized_dir)
+
     @Slot(str)
-    def _on_sort_changed(self, sort_by: str, preserve_selection: bool = True):
+    def _on_sort_combo_text_changed(self, sort_by: str):
+        previous_sort = self._active_sort_by
+        self._skip_next_sort_activation = str(sort_by or '') != previous_sort
+        self.set_sort_state(
+            sort_by,
+            self._normalize_sort_dir(sort_by),
+            preserve_selection=True,
+            apply_sort=True,
+            emit_signal=True,
+            reshuffle_random=(str(sort_by or '') == 'Random' and previous_sort != 'Random'),
+        )
+
+    @Slot(int)
+    def _on_sort_combo_activated(self, index: int):
+        activated_sort = str(self.sort_combo_box.itemText(index) or '')
+        if self._skip_next_sort_activation:
+            self._skip_next_sort_activation = False
+            return
+        if not activated_sort or activated_sort != self._active_sort_by:
+            return
+        toggled_dir = 'DESC' if self._sort_dir == 'ASC' else 'ASC'
+        self.set_sort_state(
+            activated_sort,
+            toggled_dir,
+            preserve_selection=True,
+            apply_sort=True,
+            emit_signal=True,
+            reshuffle_random=False,
+        )
+
+    @Slot(str)
+    def _on_sort_changed(self, sort_by: str, preserve_selection: bool = True, sort_dir: str | None = None, reshuffle_random: bool = False):
         """Sort images when sort option changes."""
         # Get the source model
         source_model = self.proxy_image_list_model.sourceModel()
         if not source_model or not hasattr(source_model, 'images'):
             return
+        sort_dir = self._normalize_sort_dir(sort_by, sort_dir)
 
         # Cancel any ongoing background enrichment (indices will be invalid after sort)
         if hasattr(source_model, '_enrichment_cancelled'):
@@ -508,22 +657,23 @@ class ImageList(QDockWidget):
             if hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
                 # Map UI sort option to DB field
                 sort_map = {
-                    'Default': ('file_name', 'ASC'),
-                    'Name': ('file_name', 'ASC'),
-                    'Modified': ('mtime', 'DESC'),
-                    'Created': ('ctime', 'DESC'),
-                    'Size': ('file_size', 'DESC'),
-                    'Type': ('file_type', 'ASC'),
-                    'Love / Rate / Bomb': ('love_rate_bomb', 'ASC'),
-                    'Random': ('RANDOM()', 'ASC')  # Now supported in DB
+                    'Default': 'file_name',
+                    'Name': 'file_name',
+                    'Modified': 'mtime',
+                    'Created': 'ctime',
+                    'Size': 'file_size',
+                    'Type': 'file_type',
+                    'Love / Rate / Bomb': 'love_rate_bomb',
+                    'Random': 'RANDOM()',  # Now supported in DB
                 }
 
-                db_sort_field, db_sort_dir = sort_map.get(sort_by, ('file_name', 'ASC'))
+                db_sort_field = sort_map.get(sort_by, 'file_name')
+                db_sort_dir = sort_dir
                 source_model._sort_field = db_sort_field
                 source_model._sort_dir = db_sort_dir
                 
                 # STABLE RANDOM: Generate a new seed if sorting by Random, to shuffle view
-                if sort_by == 'Random':
+                if sort_by == 'Random' and reshuffle_random:
                     import time
                     source_model._random_seed = int(time.time() * 1000) % 1000000
                 
@@ -625,20 +775,39 @@ class ImageList(QDockWidget):
                 # NORMAL MODE: Sort in-memory list
                 source_model.beginResetModel()
                 try:
+                    reverse = sort_dir == 'DESC'
                     if sort_by == 'Default':
                         # Use natural sort from image_list_model (same as initial load)
-                        source_model.images.sort(key=lambda img: natural_sort_key(img.path))
+                        source_model.images.sort(
+                            key=lambda img: natural_sort_key(img.path),
+                            reverse=reverse,
+                        )
                     elif sort_by == 'Name':
                         # Natural sort by filename only (not full path)
-                        source_model.images.sort(key=lambda img: natural_sort_key(Path(img.path.name)))
+                        source_model.images.sort(
+                            key=lambda img: natural_sort_key(Path(img.path.name)),
+                            reverse=reverse,
+                        )
                     elif sort_by == 'Modified':
-                        source_model.images.sort(key=lambda img: safe_stat(img, 'st_mtime'), reverse=True)
+                        source_model.images.sort(
+                            key=lambda img: safe_stat(img, 'st_mtime'),
+                            reverse=reverse,
+                        )
                     elif sort_by == 'Created':
-                        source_model.images.sort(key=lambda img: safe_stat(img, 'st_ctime'), reverse=True)
+                        source_model.images.sort(
+                            key=lambda img: safe_stat(img, 'st_ctime'),
+                            reverse=reverse,
+                        )
                     elif sort_by == 'Size':
-                        source_model.images.sort(key=lambda img: safe_stat(img, 'st_size'), reverse=True)
+                        source_model.images.sort(
+                            key=lambda img: safe_stat(img, 'st_size'),
+                            reverse=reverse,
+                        )
                     elif sort_by == 'Type':
-                        source_model.images.sort(key=lambda img: (img.path.suffix.lower(), natural_sort_key(img.path.name)))
+                        source_model.images.sort(
+                            key=lambda img: (img.path.suffix.lower(), natural_sort_key(img.path.name)),
+                            reverse=reverse,
+                        )
                     elif sort_by == 'Love / Rate / Bomb':
                         source_model.images.sort(
                             key=lambda img: (
@@ -646,11 +815,20 @@ class ImageList(QDockWidget):
                                 -float(img.rating or 0.0),
                                 -reaction_sort_time_value(img),
                                 natural_sort_key(img.path),
-                            )
+                            ),
+                            reverse=reverse,
                         )
                     elif sort_by == 'Random':
-                        import random
-                        random.shuffle(source_model.images)
+                        if reshuffle_random or not isinstance(getattr(source_model, '_random_seed', None), int):
+                            import time
+                            source_model._random_seed = int(time.time() * 1000) % 1000000
+                        random_seed = int(getattr(source_model, '_random_seed', 0) or 0)
+                        source_model.images.sort(
+                            key=lambda img: hashlib.sha1(
+                                f"{random_seed}:{img.path}".encode('utf-8', 'ignore')
+                            ).hexdigest(),
+                            reverse=reverse,
+                        )
 
                     # Rebuild aspect ratio cache after reordering
                     if hasattr(source_model, '_rebuild_aspect_ratio_cache'):

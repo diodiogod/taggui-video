@@ -1796,10 +1796,16 @@ class ImageIndexDB:
             normalized_dir = 'DESC'
 
         if sort_field == 'love_rate_bomb':
-            order_clause = (
-                f"{self._reaction_sort_bucket_expr()} ASC, "
-                f"COALESCE(rating, 0) DESC, {self._reaction_sort_time_expr()} DESC, file_name ASC, id ASC"
-            )
+            if normalized_dir == 'DESC':
+                order_clause = (
+                    f"{self._reaction_sort_bucket_expr()} DESC, "
+                    f"COALESCE(rating, 0) ASC, {self._reaction_sort_time_expr()} ASC, file_name DESC, id DESC"
+                )
+            else:
+                order_clause = (
+                    f"{self._reaction_sort_bucket_expr()} ASC, "
+                    f"COALESCE(rating, 0) DESC, {self._reaction_sort_time_expr()} DESC, file_name ASC, id ASC"
+                )
             return sort_field, normalized_dir, None, order_clause
 
         sort_expr = sort_field
