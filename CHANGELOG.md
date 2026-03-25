@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.35] - 2026-03-24
+
+### Added
+
+- Reduce masonry surprise recentering and clean up the top menu strip
+- Clicking a visible masonry item after closing a spawned viewer no longer recenters the viewport unexpectedly
+- The title bar now shows subfolder context for the selected media item
+- The top menu strip should stay visually closer to its previous height
+
+### Removed
+
+- The red delete-marked button is back next to the menu items instead of appearing after the reaction controls on the far right
 ## [1.0.34] - 2026-03-24
 
 ### Added
