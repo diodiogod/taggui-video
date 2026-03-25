@@ -403,7 +403,6 @@ class MenuManager:
         menu_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.menu_bar = menu_bar
         strip_layout.addWidget(menu_bar, stretch=0)
-        strip_layout.addStretch(1)
 
         # File menu
         self._create_file_menu(menu_bar)
@@ -422,6 +421,9 @@ class MenuManager:
 
         # Delete marked menu (hidden by default, shown when images are marked)
         self._create_delete_marked_menu(menu_bar)
+        if self.delete_marked_button is not None:
+            strip_layout.addWidget(self.delete_marked_button, stretch=0)
+        strip_layout.addStretch(1)
         self._create_menu_bar_right_host(menu_bar)
         self.main_window.setMenuWidget(self.menu_strip)
 
@@ -854,7 +856,7 @@ class MenuManager:
     def _create_delete_marked_menu(self, menu_bar):
         """Create Delete Marked menu (shown only when images are marked)."""
         # Create a custom button
-        self.delete_marked_button = QPushButton('🗑️ Delete Marked', menu_bar)
+        self.delete_marked_button = QPushButton('🗑️ Delete Marked', self.menu_strip or menu_bar)
         self.delete_marked_button.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -862,9 +864,9 @@ class MenuManager:
                 color: white;
                 border: 1px solid rgba(0, 0, 0, 0.2);
                 border-radius: 4px;
-                padding: 6px 12px;
+                padding: 4px 12px;
                 font-weight: 500;
-                margin: 2px;
+                margin: 0px 2px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -899,7 +901,6 @@ class MenuManager:
         # Attach menu to button
         self.delete_marked_button.setMenu(self.delete_marked_menu)
         self.delete_marked_button.setVisible(False)
-        self._refresh_menu_bar_right_host_visibility()
 
     def _create_menu_bar_right_host(self, menu_bar: QMenuBar):
         """Create one top-right host for persistent menu-row widgets."""
@@ -920,10 +921,6 @@ class MenuManager:
             self.love_button = self.reaction_controls_widget.love_button
             self.bomb_button = self.reaction_controls_widget.bomb_button
             layout.addWidget(self.reaction_controls_widget)
-
-        if self.delete_marked_button is not None:
-            self.delete_marked_button.setParent(host)
-            layout.addWidget(self.delete_marked_button)
 
         self.menu_bar_right_host = host
         self.menu_bar_right_layout = layout
@@ -955,11 +952,7 @@ class MenuManager:
             getattr(self, 'reaction_controls_widget', None)
             and not self.reaction_controls_widget.isHidden()
         )
-        delete_visible = bool(
-            getattr(self, 'delete_marked_button', None)
-            and not self.delete_marked_button.isHidden()
-        )
-        host.setVisible(reaction_visible or delete_visible)
+        host.setVisible(reaction_visible)
         if host.isVisible():
             QTimer.singleShot(0, self.position_menu_bar_right_host)
 
@@ -979,4 +972,3 @@ class MenuManager:
             self.delete_marked_button.setVisible(count > 0)
             if count > 0:
                 self.delete_marked_button.setText(f'🗑️ Delete Marked ({count})')
-            self._refresh_menu_bar_right_host_visibility()
