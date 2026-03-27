@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.36] - 2026-03-27
+
+### Added
+
+- Keep real image dimensions after sorting paginated results by Created
+- Prevent masonry from falling back to placeholder aspect ratios after reloads
+
+### Fixed
+
+- Fix masonry placeholders returning after sort
+- Fix the click crash triggered by virtual-list selection handling
 ## [1.0.35] - 2026-03-24
 
 ### Added

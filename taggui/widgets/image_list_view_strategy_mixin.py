@@ -1775,6 +1775,17 @@ class ImageListViewStrategyMixin:
             else ""
         )
         if post_jump_reason == "startup_restore":
+            # Startup restore skips the normal silent-refresh path to preserve
+            # the restored scroll position, but we still need the loaded page
+            # objects to pick up the final DB dimensions. Reload only the
+            # enriched target pages before the masonry recalc.
+            try:
+                pages_to_refresh = target_pages if target_pages else [cur_page]
+                for page_num in pages_to_refresh:
+                    if page_num in getattr(source_model, "_pages", {}):
+                        source_model._load_page_sync(int(page_num))
+            except Exception:
+                pass
             self._last_masonry_window_signature = None
             self._last_masonry_signal = "enrichment_complete"
             self._recalculate_masonry_if_needed("enrichment_complete")
@@ -2305,7 +2316,61 @@ class ImageListViewStrategyMixin:
                 owner_page = int(transient_owner_page)
         except Exception:
             pass
-        repair_page = max(int(window_start), min(int(window_end), int(owner_page)))
+
+        # Prefer repairing an actually loaded page with placeholder dimensions
+        # inside the current preferred window. This avoids stale owner-page
+        # state leaving newly visible subfolder pages permanently un-enriched.
+        loaded_pages = getattr(source_model, '_pages', {}) or {}
+        candidate_pages = []
+        for page_num in range(int(window_start), int(window_end) + 1):
+            if int(page_num) in loaded_pages:
+                candidate_pages.append(int(page_num))
+        if not candidate_pages:
+            return
+
+        clamped_owner_page = max(int(window_start), min(int(window_end), int(owner_page)))
+        if clamped_owner_page in candidate_pages:
+            ordered_candidate_pages = [clamped_owner_page]
+            ordered_candidate_pages.extend(
+                sorted(
+                    (page for page in candidate_pages if page != clamped_owner_page),
+                    key=lambda page: (abs(int(page) - int(clamped_owner_page)), int(page)),
+                )
+            )
+        else:
+            ordered_candidate_pages = sorted(
+                candidate_pages,
+                key=lambda page: (abs(int(page) - int(clamped_owner_page)), int(page)),
+            )
+
+        repair_page = None
+        unenriched_count = 0
+        with source_model._page_load_lock:
+            for page_num in ordered_candidate_pages:
+                page = loaded_pages.get(int(page_num))
+                if not page:
+                    continue
+                page_unenriched = 0
+                for image in page:
+                    if not image:
+                        continue
+                    dims = image.dimensions
+                    if (
+                        not dims
+                        or dims[0] is None
+                        or dims[1] is None
+                        or dims == (512, 512)
+                    ):
+                        page_unenriched += 1
+                        if page_unenriched >= 5:
+                            repair_page = int(page_num)
+                            unenriched_count = int(page_unenriched)
+                            break
+                if repair_page is not None:
+                    break
+
+        if repair_page is None:
+            return
         repair_target = {int(repair_page)}
 
         # Compare current window to what enrichment is targeting (if anything).
@@ -2330,24 +2395,6 @@ class ImageListViewStrategyMixin:
             last_trigger = getattr(self, '_last_enrich_trigger_time', 0.0)
             if now - last_trigger < 5.0:
                 return
-
-        unenriched_count = 0
-        with source_model._page_load_lock:
-            page = source_model._pages.get(int(repair_page))
-            if page:
-                for image in page:
-                    if not image:
-                        continue
-                    dims = image.dimensions
-                    if (
-                        not dims
-                        or dims[0] is None
-                        or dims[1] is None
-                        or dims == (512, 512)
-                    ):
-                        unenriched_count += 1
-                        if unenriched_count >= 5:
-                            break
 
         if unenriched_count >= 5:
             self._last_enrich_trigger_time = now
