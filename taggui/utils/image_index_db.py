@@ -2816,6 +2816,48 @@ class ImageIndexDB:
             except sqlite3.Error as e:
                 print(f'Database thumbnail cache flag write error: {e}')
 
+    def update_image_dimensions(self, file_name: str, width: int, height: int):
+        """Persist dimensions for an existing DB row without disturbing other metadata."""
+        if not self.enabled or not self.conn:
+            return
+
+        if not file_name:
+            return
+
+        try:
+            width = int(width)
+            height = int(height)
+        except Exception:
+            return
+
+        if width <= 0 or height <= 0:
+            return
+
+        normalized_file_name = str(file_name)
+        try:
+            candidate_path = Path(normalized_file_name)
+            if candidate_path.is_absolute():
+                normalized_file_name = str(candidate_path.relative_to(self._directory_path))
+        except Exception:
+            normalized_file_name = str(file_name)
+
+        aspect_ratio = width / height if height > 0 else 1.0
+
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    '''
+                    UPDATE images
+                    SET width = ?, height = ?, aspect_ratio = ?
+                    WHERE file_name = ?
+                    ''',
+                    (width, height, aspect_ratio, normalized_file_name),
+                )
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f'Database image dimension write error: {e}')
+
     # ========== Image ID Lookup ==========
 
     def get_image_id(self, file_name: str) -> Optional[int]:

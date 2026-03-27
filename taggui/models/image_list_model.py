@@ -3666,7 +3666,16 @@ class ImageListModel(QAbstractListModel):
                 
                 # Update DB in background 
                 if self._db and self._save_executor:
-                    self._save_executor.submit(lambda: self._db.update_image_dimensions(str(image.path), width, height))
+                    relative_path = None
+                    try:
+                        if self._directory_path:
+                            relative_path = str(image.path.relative_to(self._directory_path))
+                    except Exception:
+                        relative_path = None
+                    persist_key = relative_path or str(image.path)
+                    self._save_executor.submit(
+                        lambda key=persist_key, w=width, h=height: self._db.update_image_dimensions(key, w, h)
+                    )
 
                 # Trigger debounced dimension update signal so masonry refreshes smoothly.
                 self._schedule_dimensions_updated()

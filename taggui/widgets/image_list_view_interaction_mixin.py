@@ -1101,7 +1101,6 @@ class ImageListViewInteractionMixin:
 
                     self._mark_selection_log_source("user_click", hold_s=2.5)
                     self._pending_click_commit_index = QPersistentModelIndex(index)
-                    self._pending_click_commit_global = int(clicked_global) if clicked_global >= 0 else None
                     self._user_click_selection_frozen_until = 0.0
                     clicked_global = -1
                     try:
@@ -1118,6 +1117,9 @@ class ImageListViewInteractionMixin:
                             clicked_global = int(self._proxy_index_to_global_index(index))
                         except Exception:
                             clicked_global = -1
+                    self._pending_click_commit_global = (
+                        int(clicked_global) if clicked_global >= 0 else None
+                    )
 
                     modifiers = event.modifiers()
                     active_exact_target = None
