@@ -1,5 +1,6 @@
 """Database caching for image dimensions and metadata to speed up directory loading."""
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -12,6 +13,7 @@ from utils.settings import settings, DEFAULT_SETTINGS
 
 
 DB_VERSION = 10  # v10 adds reaction_updated_at for curator-priority sorting
+ORDER_CACHE_VERSION = 2  # bump when ordered_image_cache semantics change
 
 
 def _mapping_value(mapping: Any, key: str, default: Any = None) -> Any:
@@ -132,6 +134,18 @@ def build_sidecar_reaction_recovery(db_state: Any, meta: Any) -> dict[str, Any] 
         'bomb': bool(next_bomb),
         'reaction_updated_at': next_reaction_updated_at,
     }
+
+
+def stable_random_sort_key(value: Any, seed: Any) -> int:
+    """Return a deterministic 63-bit positive hash for seeded random ordering."""
+    try:
+        normalized_seed = int(seed or 0)
+    except Exception:
+        normalized_seed = 0
+    normalized_value = '' if value is None else str(value)
+    payload = f'{normalized_seed}:{normalized_value}'.encode('utf-8', 'surrogatepass')
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, 'big', signed=False) & 0x7FFF_FFFF_FFFF_FFFF
 
 
 class ImageIndexDB:
@@ -314,6 +328,19 @@ class ImageIndexDB:
                     except re.error:
                         return False
                 self.conn.create_function("REGEXP", 2, regexp)
+                try:
+                    self.conn.create_function(
+                        "STABLE_RANDOM_KEY",
+                        2,
+                        stable_random_sort_key,
+                        deterministic=True,
+                    )
+                except TypeError:
+                    self.conn.create_function(
+                        "STABLE_RANDOM_KEY",
+                        2,
+                        stable_random_sort_key,
+                    )
 
                 cursor = self.conn.cursor()
 
@@ -1811,7 +1838,7 @@ class ImageIndexDB:
         sort_expr = sort_field
         if sort_field == 'RANDOM()':
             seed = kwargs.get('random_seed', 1234567)
-            sort_expr = f"ABS(id * 1103515245 + {seed}) % 1000000007"
+            sort_expr = f"STABLE_RANDOM_KEY(file_name, {int(seed)})"
         elif sort_field == 'ctime':
             sort_expr = 'COALESCE(ctime, mtime)'
         elif sort_field == 'file_size':
@@ -1823,6 +1850,7 @@ class ImageIndexDB:
         """Stable cache key for the current ordered view."""
         random_seed = int(kwargs.get('random_seed', 0) or 0) if sort_field == 'RANDOM()' else 0
         return (
+            ORDER_CACHE_VERSION,
             str(sort_field or ''),
             str(sort_dir or ''),
             str(filter_sql or ''),
