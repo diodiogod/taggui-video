@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.38] - 2026-04-02
+
+### Added
+
+- Cold-cache paginated folders recover masonry layouts more reliably after fresh loads
+- Random sort now shows its active seed directly in the dropdown
+- Right-click the Random sort control to copy, reuse, or enter a seed and restore a prior order
+- Saved folder view preferences now keep the random seed with the Random sort mode
+
+### Changed
+
+- Improve masonry recovery and random sort replay
 ## [1.0.37] - 2026-04-02
 
 ### Added
