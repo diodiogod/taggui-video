@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.37] - 2026-04-02
+
+### Added
+
+- Keep masonry updating correctly as large thumbnails arrive instead of leaving random items stuck with placeholder sizing
+
+### Changed
+
+- Improve masonry recovery after clearing cache
+- Improve cold-cache behavior on small folders where dimensions and thumbnails load progressively
+
+### Fixed
+
+- Fix paginated folders that could reopen with stale placeholder dimensions after a cache clear
 ## [1.0.36] - 2026-03-27
 
 ### Added
