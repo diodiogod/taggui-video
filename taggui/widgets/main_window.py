@@ -1583,11 +1583,11 @@ class MainWindow(QMainWindow):
         digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:20]
         return f"folder_view_prefs/{digest}"
 
-    def _get_folder_view_preferences(self, path: Path) -> tuple[str, str, str]:
+    def _get_folder_view_preferences(self, path: Path) -> tuple[str, str, str, int]:
         """Load folder-specific sort/media preferences."""
         prefix = self._folder_view_settings_prefix(path)
         if not prefix:
-            return "", "", ""
+            return "", "", "", 0
         sort_value = str(settings.value(f"{prefix}/sort", "", type=str) or "").strip()
         sort_dir_value = str(settings.value(f"{prefix}/sort_dir", "", type=str) or "").strip().upper()
         if sort_dir_value not in {"ASC", "DESC"}:
@@ -1595,7 +1595,10 @@ class MainWindow(QMainWindow):
         media_value = str(settings.value(f"{prefix}/media_type", "", type=str) or "").strip()
         if media_value not in {"All", "Images", "Videos"}:
             media_value = ""
-        return sort_value, sort_dir_value, media_value
+        random_seed_value = int(settings.value(f"{prefix}/random_seed", 0, type=int) or 0)
+        if random_seed_value < 0:
+            random_seed_value = 0
+        return sort_value, sort_dir_value, media_value, random_seed_value
 
     def _current_workspace_id(self) -> str:
         """Return the active workspace id with a safe fallback."""
@@ -1732,9 +1735,15 @@ class MainWindow(QMainWindow):
             else self.image_list.current_sort_direction()
         )
         media_text = str(media_value if media_value is not None else self.image_list.media_type_combo_box.currentText())
+        random_seed = (
+            int(self.image_list.current_random_seed() or 0)
+            if sort_text == 'Random'
+            else 0
+        )
         settings.setValue(f"{prefix}/sort", sort_text)
         settings.setValue(f"{prefix}/sort_dir", sort_dir)
         settings.setValue(f"{prefix}/media_type", media_text)
+        settings.setValue(f"{prefix}/random_seed", random_seed)
         settings.setValue(f"{prefix}/path", str(self.directory_path))
 
     def _save_folder_last_selected_path(self, image_path: Path):
@@ -1756,7 +1765,7 @@ class MainWindow(QMainWindow):
 
     def _apply_folder_view_preferences(self, path: Path):
         """Apply folder-specific sort/media values to combo boxes."""
-        sort_pref, sort_dir_pref, media_pref = self._get_folder_view_preferences(path)
+        sort_pref, sort_dir_pref, media_pref, random_seed_pref = self._get_folder_view_preferences(path)
         media_combo = self.image_list.media_type_combo_box
 
         if sort_pref:
@@ -1771,6 +1780,8 @@ class MainWindow(QMainWindow):
                     preserve_selection=False,
                     apply_sort=False,
                     emit_signal=False,
+                    random_seed=random_seed_pref if sort_pref == 'Random' else None,
+                    remember_random_seed_history=False,
                 )
 
         if media_pref:

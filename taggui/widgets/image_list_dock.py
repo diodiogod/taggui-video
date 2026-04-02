@@ -1,9 +1,22 @@
 import hashlib
+import time
 
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_view import ImageListView
-from PySide6.QtWidgets import QSizePolicy, QStyle, QStyleOptionComboBox, QStylePainter, QTabBar
+from PySide6.QtWidgets import (
+    QInputDialog,
+    QSizePolicy,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
+    QTabBar,
+)
 from utils.settings import DEFAULT_SETTINGS
+
+RANDOM_SEED_MAX = 999_999
+RANDOM_SEED_GENERATED_MIN = 100_000
+RANDOM_SEED_GENERATED_SPACE = RANDOM_SEED_MAX - RANDOM_SEED_GENERATED_MIN + 1
+
 
 class ClickableLabel(QLabel):
     clicked = Signal()
@@ -71,9 +84,12 @@ class MediaTypeTabBar(QTabBar):
 
 
 class SortComboBox(SettingsComboBox):
+    random_seed_menu_requested = Signal(QPoint)
+
     def __init__(self, key: str, default: str | None = None):
         super().__init__(key=key, default=default)
         self._sort_direction = 'ASC'
+        self._display_text_override = ''
 
     def set_sort_direction(self, sort_dir: str):
         normalized_dir = 'DESC' if str(sort_dir).upper() == 'DESC' else 'ASC'
@@ -85,10 +101,23 @@ class SortComboBox(SettingsComboBox):
     def sort_direction(self) -> str:
         return self._sort_direction
 
+    def set_display_text_override(self, text: str | None):
+        normalized_text = str(text or '')
+        if self._display_text_override == normalized_text:
+            return
+        self._display_text_override = normalized_text
+        self.update()
+
+    def contextMenuEvent(self, event):
+        self.random_seed_menu_requested.emit(event.globalPos())
+        event.accept()
+
     def paintEvent(self, event):
         painter = QStylePainter(self)
         option = QStyleOptionComboBox()
         self.initStyleOption(option)
+        if self._display_text_override:
+            option.currentText = self._display_text_override
         option.subControls = (
             QStyle.SubControl.SC_ComboBoxFrame
             | QStyle.SubControl.SC_ComboBoxEditField
@@ -134,6 +163,7 @@ class ImageList(QDockWidget):
         self._active_sort_by = ''
         self._sort_dir = 'ASC'
         self._skip_next_sort_activation = False
+        self._max_random_seed_history = 12
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_list')
         self.setWindowTitle('Images')
@@ -290,10 +320,20 @@ class ImageList(QDockWidget):
             initial_sort,
             settings.value('image_list_sort_dir', '', type=str),
         )
+        initial_random_seed = self._normalize_random_seed(
+            settings.value('image_list_random_seed', 0, type=int),
+        )
+        source_model = self._get_source_model()
+        if source_model is not None and initial_random_seed > 0:
+            source_model._random_seed = initial_random_seed
         self.sort_combo_box.set_sort_direction(self._sort_dir)
+        self.sort_combo_box.random_seed_menu_requested.connect(
+            self._show_sort_combo_context_menu,
+        )
         settings.setValue('image_list_sort_dir', self._sort_dir)
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_combo_text_changed)
         self.sort_combo_box.activated.connect(self._on_sort_combo_activated)
+        self._update_sort_combo_display()
 
         # DISABLED: Cache warming causes UI blocking
         # Connect cache warming signal to update cache status label
@@ -509,6 +549,186 @@ class ImageList(QDockWidget):
     def current_sort_direction(self) -> str:
         return self._sort_dir
 
+    def _get_source_model(self):
+        source_model = self.proxy_image_list_model.sourceModel()
+        if source_model is None or not hasattr(source_model, 'images'):
+            return None
+        return source_model
+
+    def _normalize_random_seed(self, seed_value, default: int = 0) -> int:
+        try:
+            normalized_seed = int(seed_value)
+        except (TypeError, ValueError):
+            return int(default)
+        if normalized_seed <= 0:
+            return int(default)
+        if normalized_seed <= RANDOM_SEED_MAX:
+            return normalized_seed
+        return ((normalized_seed - 1) % RANDOM_SEED_MAX) + 1
+
+    def _generate_random_seed(self) -> int:
+        return RANDOM_SEED_GENERATED_MIN + (
+            int(time.time_ns()) % RANDOM_SEED_GENERATED_SPACE
+        )
+
+    def _random_seed_history(self) -> list[int]:
+        history = settings.value('image_list_random_seed_history', [], type=list) or []
+        normalized_history: list[int] = []
+        for entry in history:
+            normalized_seed = self._normalize_random_seed(entry)
+            if normalized_seed > 0 and normalized_seed not in normalized_history:
+                normalized_history.append(normalized_seed)
+        return normalized_history
+
+    def _remember_random_seed(self, seed: int, *, remember_history: bool = True) -> int:
+        normalized_seed = self._normalize_random_seed(seed)
+        if normalized_seed <= 0:
+            return 0
+
+        source_model = self._get_source_model()
+        if source_model is not None:
+            source_model._random_seed = normalized_seed
+
+        settings.setValue('image_list_random_seed', normalized_seed)
+
+        if remember_history:
+            history = [normalized_seed]
+            history.extend(
+                existing_seed
+                for existing_seed in self._random_seed_history()
+                if existing_seed != normalized_seed
+            )
+            settings.setValue(
+                'image_list_random_seed_history',
+                history[:self._max_random_seed_history],
+            )
+        self._update_sort_combo_display()
+        return normalized_seed
+
+    def _current_random_seed(self) -> int:
+        source_model = self._get_source_model()
+        if source_model is not None:
+            source_seed = self._normalize_random_seed(
+                getattr(source_model, '_random_seed', 0),
+            )
+            if source_seed > 0:
+                return source_seed
+        return self._normalize_random_seed(
+            settings.value('image_list_random_seed', 0, type=int),
+        )
+
+    def current_random_seed(self) -> int:
+        return self._current_random_seed()
+
+    def _update_sort_combo_display(self):
+        current_seed = self._current_random_seed()
+        display_text = None
+        tooltip_text = 'Sort images. Click the active sort again to reverse the order.'
+
+        if self._active_sort_by == 'Random':
+            display_text = (
+                f'Random ({current_seed})'
+                if current_seed > 0
+                else 'Random'
+            )
+            tooltip_text = (
+                f'Random order seed: {current_seed}. Right-click for seed actions.'
+                if current_seed > 0
+                else 'Random order. Right-click for seed actions.'
+            )
+
+        self.sort_combo_box.set_display_text_override(display_text)
+        self.sort_combo_box.setMinimumContentsLength(
+            max(8, min(len(display_text or 'Random'), 24)),
+        )
+        self.sort_combo_box.setToolTip(tooltip_text)
+
+    def _apply_random_seed(self, seed: int, *, preserve_selection: bool = True) -> bool:
+        normalized_seed = self._remember_random_seed(seed)
+        if normalized_seed <= 0:
+            return False
+
+        target_dir = (
+            self._sort_dir
+            if self._active_sort_by == 'Random'
+            else self._default_sort_dirs.get('Random', 'ASC')
+        )
+        self.set_sort_state(
+            'Random',
+            target_dir,
+            preserve_selection=preserve_selection,
+            apply_sort=True,
+            emit_signal=True,
+            reshuffle_random=False,
+            reapply_sort=True,
+        )
+        return True
+
+    def _prompt_for_random_seed(self):
+        current_seed = self._current_random_seed() or self._generate_random_seed()
+        seed, accepted = QInputDialog.getInt(
+            self,
+            'Apply Random Seed',
+            'Random seed:',
+            current_seed,
+            1,
+            RANDOM_SEED_MAX,
+            1,
+        )
+        if accepted:
+            self._apply_random_seed(seed)
+
+    @Slot(QPoint)
+    def _show_sort_combo_context_menu(self, global_pos: QPoint):
+        menu = QMenu(self)
+
+        current_seed = self._current_random_seed()
+        current_seed_action = menu.addAction(
+            f'Current Random Seed: {current_seed}'
+            if current_seed > 0
+            else 'Current Random Seed: unavailable'
+        )
+        if current_seed > 0:
+            current_seed_action.setToolTip('Click to copy the current random seed.')
+        else:
+            current_seed_action.setEnabled(False)
+
+        copy_seed_action = menu.addAction('Copy Random Seed')
+        copy_seed_action.setEnabled(current_seed > 0)
+
+        reshuffle_action = menu.addAction('New Random Order')
+        apply_seed_action = menu.addAction('Apply Random Seed...')
+
+        recent_menu = menu.addMenu('Recent Random Seeds')
+        recent_seed_actions = {}
+        for seed in self._random_seed_history():
+            action = recent_menu.addAction(f'Random ({seed})')
+            recent_seed_actions[action] = seed
+        if not recent_seed_actions:
+            empty_action = recent_menu.addAction('No saved seeds')
+            empty_action.setEnabled(False)
+
+        chosen_action = menu.exec(global_pos)
+        if chosen_action is None:
+            return
+
+        if chosen_action is current_seed_action and current_seed > 0:
+            QApplication.clipboard().setText(str(current_seed))
+            return
+        if chosen_action is copy_seed_action and current_seed > 0:
+            QApplication.clipboard().setText(str(current_seed))
+            return
+        if chosen_action is reshuffle_action:
+            self._apply_random_seed(self._generate_random_seed())
+            return
+        if chosen_action is apply_seed_action:
+            self._prompt_for_random_seed()
+            return
+
+        chosen_seed = recent_seed_actions.get(chosen_action)
+        if chosen_seed is not None:
+            self._apply_random_seed(chosen_seed)
+
     def set_sort_state(
         self,
         sort_by: str,
@@ -518,6 +738,9 @@ class ImageList(QDockWidget):
         apply_sort: bool = True,
         emit_signal: bool = True,
         reshuffle_random: bool = False,
+        reapply_sort: bool = False,
+        random_seed: int | None = None,
+        remember_random_seed_history: bool = False,
     ):
         normalized_sort = str(sort_by or 'Default')
         if normalized_sort not in self._default_sort_dirs:
@@ -525,6 +748,12 @@ class ImageList(QDockWidget):
         normalized_dir = self._normalize_sort_dir(normalized_sort, sort_dir)
         sort_changed = normalized_sort != self._active_sort_by
         dir_changed = normalized_dir != self._sort_dir
+
+        if normalized_sort == 'Random' and random_seed is not None:
+            self._remember_random_seed(
+                random_seed,
+                remember_history=remember_random_seed_history,
+            )
 
         if self.sort_combo_box.currentText() != normalized_sort:
             previous = self.sort_combo_box.blockSignals(True)
@@ -537,8 +766,9 @@ class ImageList(QDockWidget):
         self._sort_dir = normalized_dir
         self.sort_combo_box.set_sort_direction(normalized_dir)
         settings.setValue('image_list_sort_dir', normalized_dir)
+        self._update_sort_combo_display()
 
-        if apply_sort and (sort_changed or dir_changed or reshuffle_random):
+        if apply_sort and (sort_changed or dir_changed or reshuffle_random or reapply_sort):
             self._on_sort_changed(
                 normalized_sort,
                 preserve_selection=preserve_selection,
@@ -583,10 +813,11 @@ class ImageList(QDockWidget):
     def _on_sort_changed(self, sort_by: str, preserve_selection: bool = True, sort_dir: str | None = None, reshuffle_random: bool = False):
         """Sort images when sort option changes."""
         # Get the source model
-        source_model = self.proxy_image_list_model.sourceModel()
-        if not source_model or not hasattr(source_model, 'images'):
+        source_model = self._get_source_model()
+        if source_model is None:
             return
         sort_dir = self._normalize_sort_dir(sort_by, sort_dir)
+        random_seed_used = 0
 
         # Cancel any ongoing background enrichment (indices will be invalid after sort)
         if hasattr(source_model, '_enrichment_cancelled'):
@@ -674,8 +905,11 @@ class ImageList(QDockWidget):
                 
                 # STABLE RANDOM: Generate a new seed if sorting by Random, to shuffle view
                 if sort_by == 'Random' and reshuffle_random:
-                    import time
-                    source_model._random_seed = int(time.time() * 1000) % 1000000
+                    source_model._random_seed = self._generate_random_seed()
+                if sort_by == 'Random':
+                    random_seed_used = self._normalize_random_seed(
+                        getattr(source_model, '_random_seed', 0),
+                    )
                 
                 print(f"[SORT] Buffered mode: changed DB sort to {db_sort_field} {db_sort_dir} (Seed: {getattr(source_model, '_random_seed', 0)})")
 
@@ -820,9 +1054,9 @@ class ImageList(QDockWidget):
                         )
                     elif sort_by == 'Random':
                         if reshuffle_random or not isinstance(getattr(source_model, '_random_seed', None), int):
-                            import time
-                            source_model._random_seed = int(time.time() * 1000) % 1000000
+                            source_model._random_seed = self._generate_random_seed()
                         random_seed = int(getattr(source_model, '_random_seed', 0) or 0)
+                        random_seed_used = self._normalize_random_seed(random_seed)
                         source_model.images.sort(
                             key=lambda img: hashlib.sha1(
                                 f"{random_seed}:{img.path}".encode('utf-8', 'ignore')
@@ -839,6 +1073,11 @@ class ImageList(QDockWidget):
                 # Restart background enrichment with new sorted order
                 if hasattr(source_model, '_restart_enrichment'):
                     source_model._restart_enrichment()
+
+            if sort_by == 'Random' and random_seed_used > 0:
+                self._remember_random_seed(random_seed_used)
+            else:
+                self._update_sort_combo_display()
 
             # --- SELECTION RESTORATION ---
             # Use a class-level variable and a single shot timer to avoid multiple connections
@@ -862,6 +1101,7 @@ class ImageList(QDockWidget):
             import traceback
             print(f"Sort error: {e}")
             traceback.print_exc()
+            self._update_sort_combo_display()
 
     @Slot()
     def _arm_sort_restore_anchor(self, source_model, target_global: int):

@@ -56,6 +56,17 @@ Current sort options in the code are:
 - `Love / Rate / Bomb`: love-only first, then love+bomb, then normal items by rating, then bomb-only last
 - `Random`: randomized ordering
 
+When `Random` is active, the sort control shows the active seed as `Random (12345)`.
+That seed is what makes the random order reproducible.
+Seeds are capped at 6 digits to keep them practical to read and reuse.
+
+You can right-click the sort dropdown to:
+
+- copy the current random seed
+- generate a new random order
+- apply a specific seed
+- restore one of the recent random seeds
+
 ### DB-Backed Sort Support
 
 In the current DB-backed Video 1M path, sorting is connected to database fields such as:
