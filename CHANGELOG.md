@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.39] - 2026-04-02
+
+### Added
+
+- Different random seeds now produce different image orders in DB-backed paginated views
+- Reusing a saved random seed now restores the expected order instead of silently reusing the same list
+- Old cached random-order ranks are rebuilt automatically under the corrected logic
+
+### Fixed
+
+- Fix random sort seed replay in paginated folders
 ## [1.0.38] - 2026-04-02
 
 ### Added
