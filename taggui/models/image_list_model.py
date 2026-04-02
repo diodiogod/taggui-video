@@ -3663,6 +3663,18 @@ class ImageListModel(QAbstractListModel):
             if not image.dimensions or image.dimensions[0] is None or image.dimensions[1] is None:
                 # print(f"[JIT] Updating dimensions for {image.path.name}: {width}x{height}")
                 image.dimensions = (width, height)
+
+                if self._paginated_mode:
+                    try:
+                        global_index = int(self.get_global_index_for_row(idx))
+                    except Exception:
+                        global_index = -1
+                    if global_index >= 0:
+                        try:
+                            page_size = max(1, int(getattr(self, 'PAGE_SIZE', 1000) or 1000))
+                            self._recent_dimension_update_pages.add(int(global_index) // page_size)
+                        except Exception:
+                            pass
                 
                 # Update DB in background 
                 if self._db and self._save_executor:
@@ -4118,6 +4130,10 @@ class ImageListModel(QAbstractListModel):
         current_scope = getattr(self, '_enrichment_scope', 'window')
         last_zero_target_pages = getattr(self, '_enrichment_zero_target_pages', None)
         last_zero_scope = getattr(self, '_enrichment_zero_scope', None)
+        current_cancel_event = getattr(self, '_enrichment_cancelled', None)
+        cancel_requested = bool(
+            current_cancel_event is not None and current_cancel_event.is_set()
+        )
 
         if (
             scope == 'window'
@@ -4134,6 +4150,7 @@ class ImageListModel(QAbstractListModel):
             getattr(self, '_enrichment_running', False)
             and current_scope == scope
             and current_target_pages == requested_target_pages
+            and not cancel_requested
         ):
             return
 
@@ -4145,6 +4162,7 @@ class ImageListModel(QAbstractListModel):
             self._enrichment_cancelled = threading.Event()
         elif not hasattr(self, '_enrichment_cancelled') or self._enrichment_cancelled.is_set():
             self._enrichment_cancelled = threading.Event()
+        cancel_event = self._enrichment_cancelled
 
         self._enrichment_generation = int(getattr(self, '_enrichment_generation', 0) or 0) + 1
         generation = int(self._enrichment_generation)
@@ -4168,11 +4186,11 @@ class ImageListModel(QAbstractListModel):
              import imagesize
 
              if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
-                 self._enrichment_running = False
                  return
 
              if not self._directory_path:
-                 self._enrichment_running = False
+                 if generation == int(getattr(self, '_enrichment_generation', 0) or 0):
+                     self._enrichment_running = False
                  return
 
              db_bg = ImageIndexDB(self._directory_path)
@@ -4302,9 +4320,14 @@ class ImageListModel(QAbstractListModel):
              video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
              
              for i, rel_path in enumerate(placeholders):
-                 if hasattr(self, '_enrichment_cancelled') and self._enrichment_cancelled.is_set():
+                 if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
                      db_bg.commit()
-                     self._enrichment_running = False
+                     return
+
+                 if cancel_event is not None and cancel_event.is_set():
+                     db_bg.commit()
+                     if generation == int(getattr(self, '_enrichment_generation', 0) or 0):
+                         self._enrichment_running = False
                      diagnostic_print("[ENRICH] Cancelled", detail="verbose")
                      diagnostic_print(
                          f"{diagnostic_time_prefix()} [ENRICH] Cancelled {scope_label}",
@@ -4425,7 +4448,6 @@ class ImageListModel(QAbstractListModel):
 
              db_bg.commit()
              if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
-                 self._enrichment_running = False
                  return
              if enriched_count > 0:
                  self._enrichment_zero_scope = None
@@ -5377,6 +5399,42 @@ class ImageListModel(QAbstractListModel):
 
         # Initialize database
         self._directory_path = directory_path
+        # Reset enrichment/session state for a fresh paginated load. Without
+        # this, a previous folder session can leave stale "page already done"
+        # or pending dimension-update state behind, which suppresses repair on
+        # the new cold load and makes masonry/selection logs contradictory.
+        try:
+            self._enrichment_cancelled.set()
+        except Exception:
+            pass
+        self._enrichment_cancelled = threading.Event()
+        self._enrichment_paused.clear()
+        self._enrichment_running = False
+        self._enrichment_scope = 'window'
+        self._enrichment_target_pages = None
+        self._enrichment_zero_scope = None
+        self._enrichment_zero_target_pages = None
+        self._enrichment_exhausted = False
+        self._enrichment_actual_count = -1
+        self._enrichment_completed_flag = False
+        self._enrichment_log_signature = None
+        self._enrichment_log_batches = 0
+        self._enrichment_log_total = 0
+        self._recent_dimension_update_pages.clear()
+        with self._paginated_dimension_updates_lock:
+            self._pending_paginated_dimension_updates.clear()
+        try:
+            while True:
+                self._enrichment_queue.get_nowait()
+        except Exception:
+            pass
+        if self._final_recalc_timer is not None:
+            try:
+                self._final_recalc_timer.stop()
+                self._final_recalc_timer.deleteLater()
+            except Exception:
+                pass
+            self._final_recalc_timer = None
         
         # Load max pages from settings with safety guardrail:
         # keep at least the current +/- eviction window (+ current page).

@@ -339,6 +339,50 @@ class ImageListViewStrategyMixin:
 
         self.viewport().update()
 
+    def _prime_incremental_cache_from_current_layout(self, source_model) -> bool:
+        """Seed incremental masonry cache from the current visible layout.
+
+        This lets dimension updates ripple from the anchored page even during a
+        cold-start/single-window session where a strict placeholder layout is
+        already visible but the per-page incremental cache has not been marked
+        active yet.
+        """
+        if source_model is None:
+            return False
+        if not (hasattr(source_model, '_paginated_mode') and source_model._paginated_mode):
+            return False
+        if self._get_masonry_strategy(source_model) != "windowed_strict":
+            return False
+
+        incremental = self._get_masonry_incremental_service()
+        if incremental.is_active:
+            return True
+
+        masonry_items = list(getattr(self, "_masonry_items", None) or [])
+        if not masonry_items:
+            return False
+
+        try:
+            metrics = self._get_masonry_column_metrics()
+            page_size = max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000))
+            avg_h = float(getattr(self, '_strict_masonry_avg_h', 0.0) or 0.0)
+            if avg_h <= 1.0:
+                avg_h = float(getattr(self, '_strict_virtual_avg_height', 100.0) or 100.0)
+            if avg_h <= 1.0:
+                avg_h = 100.0
+            incremental.cache_from_full_result(
+                masonry_items,
+                page_size,
+                int(metrics["column_width"]),
+                int(metrics["spacing"]),
+                int(metrics["num_columns"]),
+                float(avg_h),
+            )
+        except Exception:
+            return False
+
+        return bool(incremental.is_active)
+
     def _build_masonry_page_items_data(self, source_model, page_num: int) -> list[tuple[int, float]]:
         """Build (global_index, aspect_ratio) tuples for one loaded page."""
         try:
@@ -364,6 +408,9 @@ class ImageListViewStrategyMixin:
             return False
 
         incremental = self._get_masonry_incremental_service()
+        primed_from_layout = False
+        if not incremental.is_active:
+            primed_from_layout = bool(self._prime_incremental_cache_from_current_layout(source_model))
         if not incremental.is_active:
             return False
 
@@ -453,6 +500,11 @@ class ImageListViewStrategyMixin:
         if self._try_incremental_reflow_changed_pages(source_model, changed_pages, reason="dimensions_updated"):
             return
 
+        # Dimensions changed but the incremental ripple path could not apply
+        # them. Force the next same-window calc to run instead of being dropped
+        # by the unchanged-signature guard; otherwise layout can stay stuck on
+        # placeholder geometry until an unrelated resize changes the signature.
+        self._last_masonry_window_signature = None
         self._recalculate_masonry_if_needed("dimensions_updated")
 
     def _get_current_or_selected_global_index(self, source_model=None) -> int | None:
