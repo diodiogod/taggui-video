@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.42] - 2026-04-03
+
+### Changed
+
+- Improve Python 3.13 installation reliability
+- Improve compatibility with newer Python environments
+
+### Fixed
+
+- Fix Windows installs failing while setting up sentencepiece
 ## [1.0.41] - 2026-04-03
 
 ### Added

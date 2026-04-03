@@ -21,7 +21,7 @@ timm==1.0.15
 # CogVLM
 einops==0.8.1
 protobuf==6.31.0
-sentencepiece==0.2.0
+sentencepiece==0.2.1
 xformers==0.0.31
 
 # InternLM-XComposer2
