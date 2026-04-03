@@ -13,6 +13,7 @@ Use the `Filter Images` box at the top of the `Images` pane.
 You can:
 
 - click tags in the `All Tags` pane for quick filtering
+- `Ctrl` / `Cmd` + click a tag there to add it with `AND`, or `Alt` + click to add it with `OR`
 - type direct filter expressions
 - switch between `All`, `Images`, and `Videos`
 - change sort order

@@ -3,9 +3,9 @@ from enum import Enum
 from PySide6.QtCore import (QItemSelection, QItemSelectionModel, Qt, Signal,
                             Slot)
 from PySide6.QtGui import QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import (QAbstractItemView, QDockWidget, QHBoxLayout,
-                               QLabel, QLineEdit, QListView, QMessageBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
+                               QHBoxLayout, QLabel, QLineEdit, QListView,
+                               QMessageBox, QVBoxLayout, QWidget)
 
 from models.proxy_tag_counter_model import ProxyTagCounterModel
 from models.tag_counter_model import TagCounterModel
@@ -30,7 +30,7 @@ class ClickAction(str, Enum):
 
 
 class AllTagsList(QListView):
-    image_list_filter_requested = Signal(str)
+    image_list_filter_requested = Signal(str, str)
     tag_addition_requested = Signal(str)
     tags_deletion_requested = Signal(list)
 
@@ -98,8 +98,18 @@ class AllTagsList(QListView):
             return
         if not selected.indexes():
             return
-        selected_tag = selected.indexes()[0].data(Qt.ItemDataRole.EditRole)
-        self.image_list_filter_requested.emit(selected_tag)
+        current_index = self.currentIndex()
+        if not current_index.isValid():
+            current_index = selected.indexes()[0]
+        selected_tag = current_index.data(Qt.ItemDataRole.EditRole)
+        modifiers = QApplication.keyboardModifiers()
+        composition_mode = 'replace'
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            composition_mode = 'or'
+        elif modifiers & (Qt.KeyboardModifier.ControlModifier
+                          | Qt.KeyboardModifier.MetaModifier):
+            composition_mode = 'and'
+        self.image_list_filter_requested.emit(selected_tag, composition_mode)
 
 
 class AllTagsEditor(QDockWidget):

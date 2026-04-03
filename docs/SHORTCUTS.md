@@ -58,6 +58,8 @@ To add the same tag to multiple files, select the images first and then add the 
 ## All Tags Pane
 
 - Show all images containing a tag: select the tag when `Tag click action` is set to `Filter images for tag`
+- Add a tag filter with `AND`: `Ctrl` / `Cmd` + click a tag when `Tag click action` is set to `Filter images for tag`
+- Add a tag filter with `OR`: `Alt` + click a tag when `Tag click action` is set to `Filter images for tag`
 - Add a tag to selected images: click the tag when `Tag click action` is set to `Add tag to selected images`
 - Delete all instances of a tag: select it and press `Delete`
 - Rename all instances of a tag: double-click it or press `F2`

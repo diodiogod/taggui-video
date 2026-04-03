@@ -5,6 +5,15 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.41] - 2026-04-03
+
+### Added
+
+- Add shortcut-based tag filter composition
+- Click a tag in All Tags to replace the current image filter
+- Ctrl/Cmd+click a tag to add it with AND
+- Alt+click a tag to add it with OR
+- Filtering and shortcuts docs now describe the new behavior
 ## [1.0.40] - 2026-04-03
 
 ### Added

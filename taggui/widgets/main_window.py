@@ -5208,16 +5208,28 @@ class MainWindow(QMainWindow):
         self.image_list_model.update_image_tags(image_index, new_tags)
 
 
-    @Slot()
-    def set_image_list_filter_text(self, selected_tag: str):
+    @Slot(str, str)
+    def set_image_list_filter_text(self, selected_tag: str,
+                                   composition_mode: str = 'replace'):
         """
         Construct and set the image list filter text from the selected tag in
         the all tags list.
         """
         escaped_selected_tag = (selected_tag.replace('\\', '\\\\')
                                 .replace('"', r'\"').replace("'", r"\'"))
+        tag_filter = f'tag:"{escaped_selected_tag}"'
+        if composition_mode == 'replace':
+            self.image_list.filter_line_edit.setText(tag_filter)
+            return
+
+        current_filter = self.image_list.filter_line_edit.text().strip()
+        if not current_filter:
+            self.image_list.filter_line_edit.setText(tag_filter)
+            return
+
+        operator = 'OR' if composition_mode == 'or' else 'AND'
         self.image_list.filter_line_edit.setText(
-            f'tag:"{escaped_selected_tag}"')
+            f'({current_filter}) {operator} {tag_filter}')
 
     @Slot(str)
     def add_tag_to_selected_images(self, tag: str):
