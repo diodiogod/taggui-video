@@ -162,6 +162,9 @@ class ImageIndexDB:
     SIDECAR_REACTION_MIGRATION_LAST_ID_KEY = 'sidecar_reaction_migration_v1_last_id'
     MARKING_MIGRATION_DONE_KEY = 'marking_migration_v1_done'
     MARKING_MIGRATION_LAST_ID_KEY = 'marking_migration_v1_last_id'
+    TAG_MIGRATION_DONE_KEY = 'tag_migration_v1_done'
+    TAG_MIGRATION_LAST_ID_KEY = 'tag_migration_v1_last_id'
+    TAG_RECONCILE_LAST_ID_KEY = 'tag_reconcile_v1_last_id'
 
     @classmethod
     def db_dir_path(cls, directory_path: Path) -> Path:
@@ -1139,6 +1142,243 @@ class ImageIndexDB:
                         ON CONFLICT(key) DO UPDATE SET value = excluded.value
                         ''',
                         (self.RATING_MIGRATION_DONE_KEY, '1'),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                pass
+
+        return migrated_total, scanned_sidecars, done
+
+    def migrate_tags_from_sidecars(
+        self,
+        directory_path: Path,
+        tag_separator: str,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 2.5,
+    ) -> tuple[int, int, bool]:
+        """
+        Incrementally reconcile legacy .txt sidecar tags into the DB tag index.
+
+        Returns:
+            (migrated_image_count, scanned_sidecars_count, done)
+        """
+        if not self.enabled or not self.conn:
+            return 0, 0, True
+
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 2.5
+
+        start_ts = time.monotonic()
+        migrated_total = 0
+        scanned_sidecars = 0
+        done = False
+        last_id = 0
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.TAG_MIGRATION_DONE_KEY,),
+                )
+                row = cursor.fetchone()
+                if row is not None and str(row[0]) == '1':
+                    return 0, 0, True
+
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.TAG_MIGRATION_LAST_ID_KEY,),
+                )
+                last_row = cursor.fetchone()
+                if last_row is not None:
+                    try:
+                        last_id = int(last_row[0])
+                    except Exception:
+                        last_id = 0
+        except sqlite3.Error:
+            return 0, 0, True
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT id, file_name, txt_sidecar_mtime
+                        FROM images
+                        WHERE id > ?
+                        ORDER BY id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+                    if not rows:
+                        done = True
+                        break
+
+                    image_ids = []
+                    stored_mtimes: dict[int, float | None] = {}
+                    rel_paths: dict[int, str] = {}
+                    for row in rows:
+                        try:
+                            image_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                            rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                            raw_mtime = (
+                                row['txt_sidecar_mtime'] if isinstance(row, sqlite3.Row) else row[2]
+                            )
+                        except Exception:
+                            continue
+                        image_ids.append(image_id)
+                        rel_paths[image_id] = rel_path
+                        stored_mtimes[image_id] = (
+                            float(raw_mtime) if raw_mtime is not None else None
+                        )
+                        if image_id > last_id:
+                            last_id = image_id
+
+                    if not image_ids:
+                        if len(rows) < batch_size:
+                            done = True
+                        continue
+
+                    placeholders = ','.join('?' for _ in image_ids)
+                    cursor.execute(
+                        f'''
+                        SELECT image_id, tag
+                        FROM image_tags
+                        WHERE image_id IN ({placeholders})
+                        ORDER BY image_id, rowid
+                        ''',
+                        tuple(image_ids),
+                    )
+                    current_tag_rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            db_tags_by_image: dict[int, list[str]] = {image_id: [] for image_id in image_ids}
+            for row in current_tag_rows:
+                try:
+                    image_id = int(row['image_id'] if isinstance(row, sqlite3.Row) else row[0])
+                    tag = str(row['tag'] if isinstance(row, sqlite3.Row) else row[1])
+                except Exception:
+                    continue
+                if image_id in db_tags_by_image:
+                    db_tags_by_image[image_id].append(tag)
+
+            mtime_only_updates: list[tuple[float | None, int]] = []
+            rewritten_images: list[tuple[int, float | None, list[str]]] = []
+
+            for image_id in image_ids:
+                rel_path = rel_paths.get(image_id)
+                if not rel_path:
+                    continue
+
+                text_path = (directory_path / rel_path).with_suffix('.txt')
+                current_txt_mtime: float | None = None
+                sidecar_tags: list[str] = []
+                db_tags = [
+                    tag for tag in (db_tags_by_image.get(image_id) or [])
+                    if tag and tag != '__no_tags__'
+                ]
+                stored_txt_mtime = stored_mtimes.get(image_id)
+
+                if text_path.exists():
+                    try:
+                        current_txt_mtime = float(text_path.stat().st_mtime)
+                    except OSError:
+                        current_txt_mtime = None
+
+                if ((current_txt_mtime is None and stored_txt_mtime is None and not db_tags)
+                        or (current_txt_mtime is not None
+                            and stored_txt_mtime is not None
+                            and abs(current_txt_mtime - stored_txt_mtime) <= 0.001)):
+                    continue
+
+                if text_path.exists():
+                    scanned_sidecars += 1
+                    try:
+                        caption = text_path.read_text(encoding='utf-8', errors='replace')
+                    except OSError:
+                        caption = ''
+                    if caption:
+                        sidecar_tags = [
+                            tag.strip()
+                            for tag in caption.split(tag_separator)
+                            if tag.strip()
+                        ]
+
+                unique_sidecar_tags = list(dict.fromkeys(sidecar_tags))
+                if unique_sidecar_tags == db_tags:
+                    mtime_only_updates.append((current_txt_mtime, image_id))
+                    continue
+
+                rewritten_images.append((image_id, current_txt_mtime, unique_sidecar_tags))
+
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    if rewritten_images:
+                        rewrite_ids = [image_id for image_id, _, _ in rewritten_images]
+                        placeholders = ','.join('?' for _ in rewrite_ids)
+                        cursor.execute(
+                            f'DELETE FROM image_tags WHERE image_id IN ({placeholders})',
+                            rewrite_ids,
+                        )
+
+                        insert_rows: list[tuple[int, str]] = []
+                        for image_id, _, tags in rewritten_images:
+                            if tags:
+                                insert_rows.extend((image_id, tag) for tag in tags)
+                            else:
+                                insert_rows.append((image_id, '__no_tags__'))
+                        if insert_rows:
+                            cursor.executemany(
+                                'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
+                                insert_rows,
+                            )
+                        cursor.executemany(
+                            'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
+                            [(mtime, image_id) for image_id, mtime, _ in rewritten_images],
+                        )
+                        migrated_total += len(rewritten_images)
+
+                    if mtime_only_updates:
+                        cursor.executemany(
+                            'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
+                            mtime_only_updates,
+                        )
+
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.TAG_MIGRATION_LAST_ID_KEY, str(int(last_id))),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                break
+
+            if len(rows) < batch_size:
+                done = True
+                break
+
+        if done:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.TAG_MIGRATION_DONE_KEY, '1'),
                     )
                     self.conn.commit()
             except sqlite3.Error:
@@ -2487,6 +2727,25 @@ class ImageIndexDB:
         except sqlite3.Error:
             return 0
 
+        return self._reconcile_tag_rows(
+            rows,
+            directory_path,
+            tag_separator,
+            batch_size=batch_size,
+        )
+
+    def _reconcile_tag_rows(
+        self,
+        rows,
+        directory_path: Path,
+        tag_separator: str,
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        """Reconcile DB tag rows for a preselected set of image rows."""
+        if not rows:
+            return 0
+
         updated_images = 0
         for start in range(0, len(rows), max(1, int(batch_size))):
             batch = rows[start:start + max(1, int(batch_size))]
@@ -2573,6 +2832,135 @@ class ImageIndexDB:
                 continue
 
         return updated_images
+
+    def reconcile_tags_for_relative_paths(
+        self,
+        directory_path: Path,
+        rel_paths: list[str],
+        tag_separator: str,
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        """Reconcile DB tag rows against .txt sidecars for specific relative paths."""
+        if not self.enabled or not self.conn or not directory_path or not rel_paths:
+            return 0
+
+        normalized_paths: list[str] = []
+        for rel_path in rel_paths:
+            path_text = str(rel_path or '').strip()
+            if not path_text:
+                continue
+            if path_text not in normalized_paths:
+                normalized_paths.append(path_text)
+        if not normalized_paths:
+            return 0
+
+        rows = []
+        query_batch = 500
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                for start in range(0, len(normalized_paths), query_batch):
+                    batch_paths = normalized_paths[start:start + query_batch]
+                    placeholders = ','.join('?' for _ in batch_paths)
+                    cursor.execute(
+                        f'''
+                        SELECT id, file_name, txt_sidecar_mtime
+                        FROM images
+                        WHERE file_name IN ({placeholders})
+                        ORDER BY id
+                        ''',
+                        tuple(batch_paths),
+                    )
+                    rows.extend(cursor.fetchall())
+        except sqlite3.Error:
+            return 0
+
+        return self._reconcile_tag_rows(
+            rows,
+            directory_path,
+            tag_separator,
+            batch_size=batch_size,
+        )
+
+    def reconcile_tags_incremental(
+        self,
+        directory_path: Path,
+        tag_separator: str,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 1.5,
+    ) -> tuple[int, int, bool]:
+        """
+        Reconcile one bounded batch of DB tag rows against sidecar mtimes.
+
+        Returns:
+            (updated_images, processed_rows, wrapped_to_start)
+        """
+        if not self.enabled or not self.conn or not directory_path:
+            return 0, 0, False
+
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 1.5
+
+        try:
+            last_id = int(self.get_meta_value(self.TAG_RECONCILE_LAST_ID_KEY, '0') or 0)
+        except Exception:
+            last_id = 0
+
+        updated_total = 0
+        processed_total = 0
+        wrapped = False
+        start_ts = time.monotonic()
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT id, file_name, txt_sidecar_mtime
+                        FROM images
+                        WHERE id > ?
+                        ORDER BY id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                if last_id != 0:
+                    self.set_meta_value(self.TAG_RECONCILE_LAST_ID_KEY, '0')
+                    wrapped = True
+                break
+
+            updated_total += self._reconcile_tag_rows(
+                rows,
+                directory_path,
+                tag_separator,
+                batch_size=batch_size,
+            )
+            processed_total += len(rows)
+
+            try:
+                last_row = rows[-1]
+                last_id = int(last_row['id'] if isinstance(last_row, sqlite3.Row) else last_row[0])
+            except Exception:
+                break
+
+            if len(rows) < batch_size:
+                self.set_meta_value(self.TAG_RECONCILE_LAST_ID_KEY, '0')
+                wrapped = True
+                break
+
+            self.set_meta_value(self.TAG_RECONCILE_LAST_ID_KEY, str(int(last_id)))
+
+        return updated_total, processed_total, wrapped
 
     def remove_images_by_paths(self, rel_paths: list):
         """Remove images (and their tags) from the DB by relative path."""

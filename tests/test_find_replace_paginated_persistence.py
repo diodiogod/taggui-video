@@ -85,6 +85,37 @@ def test_find_and_replace_paginated_handles_empty_result(tmp_path):
     assert model._db.added_tags == [(7, "__no_tags__")]
 
 
+def test_find_and_replace_paginated_reconciles_stale_db_when_sidecar_already_changed(tmp_path):
+    image_path = tmp_path / "sample.png"
+    image_path.write_bytes(b"")
+    txt_path = image_path.with_suffix(".txt")
+    txt_path.write_text("new5555", encoding="utf-8")
+
+    model = _build_model(tmp_path)
+
+    affected = model._find_and_replace_paginated("test", "new", False)
+
+    assert affected == 0
+    assert txt_path.read_text(encoding="utf-8") == "new5555"
+    assert model._db.tags_for_image[7] == ["new5555"]
+    assert model._db.added_tags == []
+    assert 7 in model._db.txt_mtimes
+
+
+def test_find_and_replace_paginated_reconciles_missing_sidecar_to_no_tags(tmp_path):
+    image_path = tmp_path / "sample.png"
+    image_path.write_bytes(b"")
+
+    model = _build_model(tmp_path)
+
+    affected = model._find_and_replace_paginated("test", "new", False)
+
+    assert affected == 0
+    assert model._db.tags_for_image[7] == []
+    assert model._db.added_tags == [(7, "__no_tags__")]
+    assert 7 in model._db.txt_mtimes
+
+
 def test_remove_duplicate_tags_paginated_writes_txt_and_db(tmp_path):
     image_path = tmp_path / "sample.png"
     image_path.write_bytes(b"")

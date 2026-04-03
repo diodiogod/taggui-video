@@ -1163,6 +1163,7 @@ class ImageListModel(QAbstractListModel):
     background_validation_applied = Signal(dict)  # applied background index refresh metadata
     new_media_refresh_finished = Signal(dict)  # Async additions-only refresh result
     sidecar_reaction_migration_applied = Signal(int)  # imported curator-state count
+    sidecar_tag_migration_applied = Signal(int)  # reconciled txt-sidecar tag count
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
     thumbnail_updates_ready = Signal()  # Batched visual refresh for paginated thumbnails
@@ -1400,6 +1401,7 @@ class ImageListModel(QAbstractListModel):
         self.page_loaded.connect(self._on_page_loaded_signal)
         self.stale_index_paths_detected.connect(self._on_stale_index_paths_detected)
         self.background_validation_progress.connect(self._on_background_validation_progress)
+        self.sidecar_tag_migration_applied.connect(self._on_sidecar_tag_migration_applied)
         self._flow_log_last: dict[str, float] = {}
         self._dimensions_update_timer = QTimer(self)
         self._dimensions_update_timer.setSingleShot(True)
@@ -5325,14 +5327,74 @@ class ImageListModel(QAbstractListModel):
             if self._paginated_maintenance_running:
                 return
             self._paginated_maintenance_running = True
+        loaded_rel_paths_snapshot: list[str] = []
+        seen_rel_paths: set[str] = set()
+        if directory_path == self._directory_path:
+            for page_images in self._pages.values():
+                for image in page_images:
+                    try:
+                        rel_path = str(image.path.relative_to(directory_path))
+                    except Exception:
+                        continue
+                    if rel_path in seen_rel_paths:
+                        continue
+                    seen_rel_paths.add(rel_path)
+                    loaded_rel_paths_snapshot.append(rel_path)
 
         def maintenance_worker():
             try:
                 db_bg = ImageIndexDB(directory_path)
                 db_bg.run_maintenance(directory_path)
+                tag_migrated_total = 0
+                loaded_tag_updates = 0
+                incremental_tag_updates = 0
                 migrated_total = 0
                 deadline = time.monotonic() + 20.0
+                tag_done = False
                 reaction_done = False
+                while time.monotonic() < deadline and not tag_done:
+                    migrated_tags, scanned_tag_sidecars, tag_done = db_bg.migrate_tags_from_sidecars(
+                        directory_path,
+                        self.tag_separator,
+                        batch_size=8000,
+                        max_seconds=1.5,
+                    )
+                    tag_migrated_total += int(migrated_tags or 0)
+                    if migrated_tags > 0:
+                        print(
+                            "[DB] Tag migration: imported "
+                            f"{migrated_tags} image tag sidecar(s) from {scanned_tag_sidecars} candidate sidecar(s)."
+                        )
+                    elif not tag_done and scanned_tag_sidecars > 0:
+                        print(
+                            "[DB] Tag migration: scanned "
+                            f"{scanned_tag_sidecars} candidate sidecar(s) (no new tag index rows yet)."
+                        )
+                if loaded_rel_paths_snapshot:
+                    loaded_tag_updates = int(
+                        db_bg.reconcile_tags_for_relative_paths(
+                            directory_path,
+                            loaded_rel_paths_snapshot,
+                            self.tag_separator,
+                            batch_size=1000,
+                        ) or 0
+                    )
+                    if loaded_tag_updates > 0:
+                        print(
+                            "[DB] Tag reconcile: refreshed "
+                            f"{loaded_tag_updates} loaded image sidecar(s)."
+                        )
+                incremental_tag_updates, processed_tag_rows, wrapped_tag_cursor = db_bg.reconcile_tags_incremental(
+                    directory_path,
+                    self.tag_separator,
+                    batch_size=4000,
+                    max_seconds=1.0,
+                )
+                if incremental_tag_updates > 0:
+                    print(
+                        "[DB] Tag reconcile: refreshed "
+                        f"{incremental_tag_updates} image sidecar(s) from {processed_tag_rows} indexed row(s)."
+                    )
                 while time.monotonic() < deadline and not reaction_done:
                     migrated, scanned, reaction_done = db_bg.migrate_reactions_from_sidecars(
                         directory_path,
@@ -5344,6 +5406,9 @@ class ImageListModel(QAbstractListModel):
                         print(f"[DB] Reaction migration: restored {migrated} curated item(s) from {scanned} candidate sidecar(s).")
                     elif not reaction_done and scanned > 0:
                         print(f"[DB] Reaction migration: scanned {scanned} candidate sidecar(s) (no new curator data yet).")
+                total_tag_updates = int(tag_migrated_total + loaded_tag_updates + incremental_tag_updates)
+                if total_tag_updates > 0 and directory_path == self._directory_path:
+                    self.sidecar_tag_migration_applied.emit(total_tag_updates)
                 if migrated_total > 0:
                     self.sidecar_reaction_migration_applied.emit(int(migrated_total))
                 db_bg.close()
@@ -6268,6 +6333,7 @@ class ImageListModel(QAbstractListModel):
 
             txt_path = path.with_suffix('.txt')
             if not txt_path.exists():
+                self._sync_paginated_db_tags_for_rel_path(rel_path, [], txt_path=txt_path)
                 continue
 
             try:
@@ -6275,18 +6341,34 @@ class ImageListModel(QAbstractListModel):
             except OSError as e:
                 print(f"Error reading tags for {rel_path}: {e}")
                 continue
+            current_tags_list = self._normalize_tags(caption.split(self.tag_separator)) if caption else []
 
             if use_regex:
                 if not re.search(pattern=find_text, string=caption):
+                    self._sync_paginated_db_tags_for_rel_path(
+                        rel_path,
+                        current_tags_list,
+                        txt_path=txt_path,
+                    )
                     continue
                 updated_caption = re.sub(pattern=find_text, repl=replace_text,
                                          string=caption)
             else:
                 if find_text not in caption:
+                    self._sync_paginated_db_tags_for_rel_path(
+                        rel_path,
+                        current_tags_list,
+                        txt_path=txt_path,
+                    )
                     continue
                 updated_caption = caption.replace(find_text, replace_text)
 
             if updated_caption == caption:
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    current_tags_list,
+                    txt_path=txt_path,
+                )
                 continue
 
             new_tags_list = [
@@ -6296,20 +6378,11 @@ class ImageListModel(QAbstractListModel):
 
             try:
                 txt_path.write_text(updated_caption, encoding='utf-8')
-                image_id = self._db.get_image_id(rel_path)
-                if image_id:
-                    if new_tags_list:
-                        self._db.set_tags_for_image(image_id, new_tags_list)
-                    else:
-                        self._db.set_tags_for_image(image_id, [])
-                        self._db.add_tag_to_image(image_id, '__no_tags__')
-
-                    txt_sidecar_mtime = None
-                    try:
-                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                    except OSError:
-                        pass
-                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    new_tags_list,
+                    txt_path=txt_path,
+                )
                 affected_count += 1
             except OSError as e:
                 print(f"Error updating tags for {rel_path}: {e}")
@@ -6325,6 +6398,47 @@ class ImageListModel(QAbstractListModel):
             self._load_page_sync(page)
         self.modelReset.emit()
         self._emit_pages_updated()
+
+    @Slot(int)
+    def _on_sidecar_tag_migration_applied(self, _count: int):
+        """Refresh paginated views after background DB tag migration."""
+        if not self._paginated_mode:
+            return
+        self._reload_loaded_pages_after_paginated_tag_change()
+
+    def _sync_paginated_db_tags_for_rel_path(
+        self,
+        rel_path: str,
+        tags: list[str],
+        *,
+        txt_path: Path | None = None,
+    ) -> list[str]:
+        """Persist the sidecar-derived tag state for one paginated image row."""
+        if not self._db:
+            return []
+
+        image_id = self._db.get_image_id(rel_path)
+        if not image_id:
+            return []
+
+        normalized_tags = self._normalize_tags(tags)
+        if normalized_tags:
+            self._db.set_tags_for_image(image_id, normalized_tags)
+        else:
+            self._db.set_tags_for_image(image_id, [])
+            self._db.add_tag_to_image(image_id, '__no_tags__')
+
+        if txt_path is None and self._directory_path:
+            txt_path = (self._directory_path / rel_path).with_suffix('.txt')
+
+        txt_sidecar_mtime = None
+        if txt_path is not None:
+            try:
+                txt_sidecar_mtime = float(txt_path.stat().st_mtime)
+            except OSError:
+                txt_sidecar_mtime = None
+        self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+        return normalized_tags
 
     def _apply_paginated_tag_transform(self, transform) -> tuple[int, int]:
         """
@@ -6364,20 +6478,11 @@ class ImageListModel(QAbstractListModel):
 
             try:
                 txt_path.write_text(self.tag_separator.join(new_tags), encoding='utf-8')
-                image_id = self._db.get_image_id(rel_path) if self._db else None
-                if image_id:
-                    if new_tags:
-                        self._db.set_tags_for_image(image_id, new_tags)
-                    else:
-                        self._db.set_tags_for_image(image_id, [])
-                        self._db.add_tag_to_image(image_id, '__no_tags__')
-
-                    txt_sidecar_mtime = None
-                    try:
-                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                    except OSError:
-                        pass
-                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    new_tags,
+                    txt_path=txt_path,
+                )
                 changed_image_count += 1
             except OSError as e:
                 print(f"Error updating tags for {rel_path}: {e}")
@@ -6692,21 +6797,11 @@ class ImageListModel(QAbstractListModel):
             txt_path = path.with_suffix('.txt')
             try:
                 txt_path.write_text(self.tag_separator.join(deduped_tags), encoding='utf-8')
-                image_id = self._db.get_image_id(rel_path) if self._db else None
-                if image_id:
-                    normalized_tags = self._normalize_tags(deduped_tags)
-                    if normalized_tags:
-                        self._db.set_tags_for_image(image_id, normalized_tags)
-                    else:
-                        self._db.set_tags_for_image(image_id, [])
-                        self._db.add_tag_to_image(image_id, '__no_tags__')
-
-                    txt_sidecar_mtime = None
-                    try:
-                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                    except OSError:
-                        pass
-                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    deduped_tags,
+                    txt_path=txt_path,
+                )
                 changed_image_count += 1
             except OSError as e:
                 print(f"Error updating tags for {rel_path}: {e}")
@@ -6786,20 +6881,11 @@ class ImageListModel(QAbstractListModel):
             txt_path = path.with_suffix('.txt')
             try:
                 txt_path.write_text(self.tag_separator.join(cleaned_tags), encoding='utf-8')
-                image_id = self._db.get_image_id(rel_path) if self._db else None
-                if image_id:
-                    if cleaned_tags:
-                        self._db.set_tags_for_image(image_id, cleaned_tags)
-                    else:
-                        self._db.set_tags_for_image(image_id, [])
-                        self._db.add_tag_to_image(image_id, '__no_tags__')
-
-                    txt_sidecar_mtime = None
-                    try:
-                        txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                    except OSError:
-                        pass
-                    self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    cleaned_tags,
+                    txt_path=txt_path,
+                )
                 changed_image_count += 1
             except OSError as e:
                 print(f"Error updating tags for {rel_path}: {e}")
@@ -6859,7 +6945,11 @@ class ImageListModel(QAbstractListModel):
                  try:
                      content = txt_path.read_text(encoding='utf-8', errors='replace')
                      current_tags = [t.strip() for t in content.split(self.tag_separator) if t.strip()]
-                 except: pass
+                 except Exception:
+                     pass
+             else:
+                 self._sync_paginated_db_tags_for_rel_path(rel_path, [], txt_path=txt_path)
+                 continue
             
              updated = False
              new_tags_list = []
@@ -6879,21 +6969,23 @@ class ImageListModel(QAbstractListModel):
                          updated = True
                      else:
                          new_tags_list.append(tag)
-            
+             
              if updated:
                  try:
                      txt_path.write_text(self.tag_separator.join(new_tags_list), encoding='utf-8')
-                     image_id = self._db.get_image_id(rel_path)
-                     if image_id:
-                         self._db.set_tags_for_image(image_id, new_tags_list)
-                         txt_sidecar_mtime = None
-                         try:
-                             txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                         except OSError:
-                             pass
-                         self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                     self._sync_paginated_db_tags_for_rel_path(
+                         rel_path,
+                         new_tags_list,
+                         txt_path=txt_path,
+                     )
                  except Exception as e:
                      print(f"Error updating tags for {rel_path}: {e}")
+             else:
+                 self._sync_paginated_db_tags_for_rel_path(
+                     rel_path,
+                     current_tags,
+                     txt_path=txt_path,
+                 )
 
     def _delete_tags_paginated(self, tags: list[str], scope, use_regex: bool):
         files_to_process = set()
@@ -6917,7 +7009,11 @@ class ImageListModel(QAbstractListModel):
                  try:
                      content = txt_path.read_text(encoding='utf-8', errors='replace')
                      current_tags = [t.strip() for t in content.split(self.tag_separator) if t.strip()]
-                 except: pass
+                 except Exception:
+                     pass
+             else:
+                 self._sync_paginated_db_tags_for_rel_path(rel_path, [], txt_path=txt_path)
+                 continue
              
              updated = False
              new_tags_list = []
@@ -6939,21 +7035,19 @@ class ImageListModel(QAbstractListModel):
              if updated:
                  try:
                      txt_path.write_text(self.tag_separator.join(new_tags_list), encoding='utf-8')
-                     image_id = self._db.get_image_id(rel_path)
-                     if image_id:
-                         if new_tags_list:
-                             self._db.set_tags_for_image(image_id, new_tags_list)
-                         else:
-                             self._db.set_tags_for_image(image_id, [])
-                             self._db.add_tag_to_image(image_id, '__no_tags__')
-                         txt_sidecar_mtime = None
-                         try:
-                             txt_sidecar_mtime = float(txt_path.stat().st_mtime)
-                         except OSError:
-                             pass
-                         self._db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                     self._sync_paginated_db_tags_for_rel_path(
+                         rel_path,
+                         new_tags_list,
+                         txt_path=txt_path,
+                     )
                  except Exception as e:
                      print(f"Error deleting tags for {rel_path}: {e}")
+             else:
+                 self._sync_paginated_db_tags_for_rel_path(
+                     rel_path,
+                     current_tags,
+                     txt_path=txt_path,
+                 )
 
     @Slot(list, str)
     def rename_tags(self, old_tags: list[str], new_tag: str,

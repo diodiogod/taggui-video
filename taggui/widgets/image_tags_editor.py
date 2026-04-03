@@ -388,6 +388,7 @@ class ImageTagsEditor(QDockWidget):
         self._flush_descriptive_sync()
         self.image_index = self.proxy_image_list_model.mapToSource(
             proxy_image_index)
+        source_model = self.proxy_image_list_model.sourceModel()
         image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
         # Safety check: if no image is selected or available, clear the tags
@@ -400,9 +401,24 @@ class ImageTagsEditor(QDockWidget):
             if caption_text is not None
             else self._filter_internal_tags(image.tags)
         )
+        should_refresh_paginated_source = False
         # Keep the in-memory image tags aligned with the sidecar source of truth.
         if image.tags != tags_from_source:
             image.tags = tags_from_source
+            if (source_model is not None
+                    and getattr(source_model, '_paginated_mode', False)
+                    and hasattr(source_model, '_sync_paginated_db_tags_for_rel_path')
+                    and getattr(source_model, '_directory_path', None) is not None):
+                try:
+                    rel_path = str(image.path.relative_to(source_model._directory_path))
+                    source_model._sync_paginated_db_tags_for_rel_path(
+                        rel_path,
+                        tags_from_source,
+                        txt_path=image.path.with_suffix('.txt'),
+                    )
+                    should_refresh_paginated_source = True
+                except Exception:
+                    pass
         # If the string list already contains the image's tags, do not reload
         # them. This is the case when the tags are edited directly through the
         # image tags editor. Removing this check breaks the functionality of
@@ -414,6 +430,12 @@ class ImageTagsEditor(QDockWidget):
                 self.descriptive_text_edit.blockSignals(True)
                 self.descriptive_text_edit.setPlainText(caption_text)
                 self.descriptive_text_edit.blockSignals(False)
+            if should_refresh_paginated_source and hasattr(
+                    source_model, '_reload_loaded_pages_after_paginated_tag_change'):
+                QTimer.singleShot(
+                    0,
+                    source_model._reload_loaded_pages_after_paginated_tag_change,
+                )
             return
         self.image_tag_list_model.setStringList(tags_from_source)
         self.count_tokens()
@@ -431,6 +453,12 @@ class ImageTagsEditor(QDockWidget):
             self.descriptive_text_edit.blockSignals(False)
         if self.image_tags_list.hasFocus():
             self.select_first_tag()
+        if should_refresh_paginated_source and hasattr(
+                source_model, '_reload_loaded_pages_after_paginated_tag_change'):
+            QTimer.singleShot(
+                0,
+                source_model._reload_loaded_pages_after_paginated_tag_change,
+            )
 
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,
