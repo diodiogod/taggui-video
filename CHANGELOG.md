@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.40] - 2026-04-03
+
+### Added
+
+- Opening a paginated folder now repairs loaded items first and continues small background sync work without full rescans
+- Clicking an item or running bulk tag operations now refreshes stale DB tag rows more reliably
+
+### Changed
+
+- Improve sidecar tag sync reliability
+
+### Fixed
+
+- Fix cases where All Tags, tag filters, and search/replace could show stale tag values after sidecar edits
 ## [1.0.39] - 2026-04-02
 
 ### Added
