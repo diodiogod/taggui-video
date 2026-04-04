@@ -5,6 +5,15 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.45] - 2026-04-04
+
+### Added
+
+- The default Remote API model name suggestion is now 'gemini-3-flash-preview', which has been confirmed to work well with the current Google Gemini endpoint
+
+### Changed
+
+- Update default Remote API model
 ## [1.0.44] - 2026-04-04
 
 ### Added

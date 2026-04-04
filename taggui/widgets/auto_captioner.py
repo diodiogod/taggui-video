@@ -76,7 +76,7 @@ class CaptionSettingsForm(QVBoxLayout):
         #remote only:
         self.remote_address_line_edit = SettingsLineEdit(key='remote_address', default='http://localhost:5000')
         self.api_key_line_edit = SettingsLineEdit(key='api_key', default='')
-        self.api_model_line_edit = SettingsLineEdit(key='api_model', default='gemini-2.0-flash')
+        self.api_model_line_edit = SettingsLineEdit(key='api_model', default='gemini-3-flash-preview')
         self.api_max_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='api_max_tokens', default=8192, minimum=100, maximum=200000)
 
