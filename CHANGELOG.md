@@ -5,6 +5,15 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.44] - 2026-04-04
+
+### Added
+
+- Add Max output tokens control for Remote API captioning
+- New 'Max output tokens' field appears in the Remote model settings panel
+- Default is 8192 (enough for detailed captions without truncating)
+- Adjustable from 100 to 200,000 to accommodate different API providers
+- Improved default prompt to discourage verbose markdown output from models like Gemini
 ## [1.0.43] - 2026-04-04
 
 ### Added

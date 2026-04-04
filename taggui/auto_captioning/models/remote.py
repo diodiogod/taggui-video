@@ -104,7 +104,8 @@ class RemoteGen(AutoCaptioningModel):
 
     @staticmethod
     def get_default_prompt() -> str:
-        return 'Describe the image in detail.'
+        return ('Describe this image in one or two concise paragraphs of plain prose. '
+                'No bullet points, no headers, no markdown formatting.')
 
     @staticmethod
     def format_prompt(prompt: str) -> str:
@@ -154,10 +155,8 @@ class RemoteGen(AutoCaptioningModel):
             }
         ]
 
-        # Advanced settings are hidden for Remote, so max_new_tokens from the
-        # spinner (default 100) is never user-configured. Use 4096 instead,
-        # which is sufficient for verbose models without being excessive.
-        max_tokens = 4096
+        # max_tokens is user-configurable via the 'Max output tokens' field.
+        max_tokens = self.caption_settings.get('api_max_tokens', 8192)
         temperature = self.generation_parameters.get('temperature', 1.0)
         top_p = self.generation_parameters.get('top_p', 1.0)
 

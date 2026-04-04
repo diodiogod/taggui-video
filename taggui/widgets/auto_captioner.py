@@ -77,6 +77,8 @@ class CaptionSettingsForm(QVBoxLayout):
         self.remote_address_line_edit = SettingsLineEdit(key='remote_address', default='http://localhost:5000')
         self.api_key_line_edit = SettingsLineEdit(key='api_key', default='')
         self.api_model_line_edit = SettingsLineEdit(key='api_model', default='gemini-2.0-flash')
+        self.api_max_tokens_spin_box = FocusedScrollSettingsSpinBox(
+            key='api_max_tokens', default=8192, minimum=100, maximum=200000)
 
 
         # Prompt field with history button
@@ -168,6 +170,7 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         basic_settings_form.addRow('API Key', self.api_key_line_edit)
         basic_settings_form.addRow('API Model Name', self.api_model_line_edit)
+        basic_settings_form.addRow('Max output tokens', self.api_max_tokens_spin_box)
         self.prompt_label = QLabel('Prompt')
         basic_settings_form.addRow(self.prompt_label, prompt_container)
         self.caption_start_label = QLabel('Start caption with')
@@ -391,6 +394,7 @@ class CaptionSettingsForm(QVBoxLayout):
         self.basic_settings_form.setRowVisible(self.remote_address_line_edit, is_remote_model)
         self.basic_settings_form.setRowVisible(self.api_key_line_edit, is_remote_model)
         self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
+        self.basic_settings_form.setRowVisible(self.api_max_tokens_spin_box, is_remote_model)
 
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
@@ -423,6 +427,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'api_url': self.remote_address_line_edit.text(),
             'api_key': self.api_key_line_edit.text(),
             'api_model': self.api_model_line_edit.text(),
+            'api_max_tokens': self.api_max_tokens_spin_box.value(),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),
