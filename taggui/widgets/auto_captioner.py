@@ -60,7 +60,8 @@ class CaptionSettingsForm(QVBoxLayout):
             self.is_bitsandbytes_available = True
         except RuntimeError:
             self.is_bitsandbytes_available = False
-        basic_settings_form = QFormLayout()
+        self.basic_settings_form = QFormLayout()
+        basic_settings_form = self.basic_settings_form
         basic_settings_form.setRowWrapPolicy(
             QFormLayout.RowWrapPolicy.WrapAllRows)
         basic_settings_form.setFieldGrowthPolicy(
@@ -75,6 +76,7 @@ class CaptionSettingsForm(QVBoxLayout):
         #remote only:
         self.remote_address_line_edit = SettingsLineEdit(key='remote_address', default='http://localhost:5000')
         self.api_key_line_edit = SettingsLineEdit(key='api_key', default='')
+        self.api_model_line_edit = SettingsLineEdit(key='api_model', default='gemini-2.0-flash')
 
 
         # Prompt field with history button
@@ -165,6 +167,7 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow('Model', self.model_combo_box)
         basic_settings_form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         basic_settings_form.addRow('API Key', self.api_key_line_edit)
+        basic_settings_form.addRow('API Model Name', self.api_model_line_edit)
         self.prompt_label = QLabel('Prompt')
         basic_settings_form.addRow(self.prompt_label, prompt_container)
         self.caption_start_label = QLabel('Start caption with')
@@ -361,41 +364,42 @@ class CaptionSettingsForm(QVBoxLayout):
 
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
-        wd_tagger_widgets = [self.wd_tagger_settings_form_container]
-        non_wd_tagger_widgets = [
-            self.prompt_label,
-            self.prompt_text_edit,
-            self.skip_hash_container,
-            self.caption_start_label,
-            self.caption_start_line_edit,
-            self.device_label,
-            self.device_combo_box,
-            self.load_in_4_bit_container,
-            self.remove_tag_separators_container,
-            self.remove_new_lines_container,
-            self.horizontal_line,
-            self.toggle_advanced_settings_form_button,
-            self.advanced_settings_form_container
-        ]
         is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        for widget in wd_tagger_widgets:
-            widget.setVisible(is_wd_tagger_model)
-            self.remote_address_line_edit.setVisible(False)
-            self.api_key_line_edit.setVisible(False)
-        for widget in non_wd_tagger_widgets:
-            self.remote_address_line_edit.setVisible(False)
-            self.api_key_line_edit.setVisible(False)
+        is_remote_model = get_model_class(model_id) == RemoteGen
+        is_local_model = not is_wd_tagger_model and not is_remote_model
+
+        # WD Tagger has its own dedicated settings panel
+        self.wd_tagger_settings_form_container.setVisible(is_wd_tagger_model)
+
+        # Shown for all non-WD-tagger models (local and remote)
+        for widget in [self.prompt_label, self.prompt_text_edit,
+                       self.skip_hash_container,
+                       self.caption_start_label, self.caption_start_line_edit,
+                       self.remove_tag_separators_container,
+                       self.remove_new_lines_container]:
             widget.setVisible(not is_wd_tagger_model)
-        if get_model_class(model_id) == RemoteGen:
-            self.remote_address_line_edit.setVisible(True)
-            self.api_key_line_edit.setVisible(True)
+
+        # Local models only: device selector and full advanced settings
+        for widget in [self.device_label, self.device_combo_box,
+                       self.load_in_4_bit_container,
+                       self.horizontal_line,
+                       self.toggle_advanced_settings_form_button,
+                       self.advanced_settings_form_container]:
+            widget.setVisible(is_local_model)
+
+        # Remote model only rows (setRowVisible hides label + field together)
+        self.basic_settings_form.setRowVisible(self.remote_address_line_edit, is_remote_model)
+        self.basic_settings_form.setRowVisible(self.api_key_line_edit, is_remote_model)
+        self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
+
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
     @Slot(str)
     def set_load_in_4_bit_visibility(self, device: str):
         model_id = self.model_combo_box.currentText()
         is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        if is_wd_tagger_model:
+        is_remote_model = get_model_class(model_id) == RemoteGen
+        if is_wd_tagger_model or is_remote_model:
             self.load_in_4_bit_container.setVisible(False)
             return
         is_load_in_4_bit_available = (self.is_bitsandbytes_available
@@ -418,6 +422,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'model_id': self.model_combo_box.currentText(),
             'api_url': self.remote_address_line_edit.text(),
             'api_key': self.api_key_line_edit.text(),
+            'api_model': self.api_model_line_edit.text(),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),

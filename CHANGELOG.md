@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.43] - 2026-04-04
+
+### Added
+
+- Add OpenAI-compatible remote API captioning
+- Use any OpenAI-compatible vision API for captions (local or cloud)
+- Works with LM Studio, Ollama, OpenAI, Google Gemini, Groq, etc.
+- Configure endpoint URL, API key, and model name directly in the Auto-Captioner panel
+- Remote settings (endpoint, key, model name) shown only when Remote is selected
+- Irrelevant local settings (Device, 4-bit, Advanced) hidden for Remote mode
+- Errors are shown in the console and never written as captions to images
+- Safety-blocked or empty responses are skipped cleanly with a console message
 ## [1.0.42] - 2026-04-03
 
 ### Changed
