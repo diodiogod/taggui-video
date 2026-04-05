@@ -5661,6 +5661,15 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     pass
+            elif workspace_id == "auto_captioning":
+                try:
+                    self.splitDockWidget(
+                        self.image_tags_editor,
+                        self.auto_captioner,
+                        Qt.Orientation.Vertical,
+                    )
+                except Exception:
+                    pass
             else:
                 # Keep right-side tools grouped as tabs, but only tabify widgets
                 # that are visible in this workspace to avoid unstable hidden-dock

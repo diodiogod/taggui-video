@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.47] - 2026-04-05
+
+### Added
+
+- Remote API Improvements and Workspace Adjustments
+- Improved the Remote API 'Endpoint' field by converting it into a dropdown with sane, pre-verified OpenAI-compatible suggestions (LM Studio, Ollama, Google AI, Groq, etc)
+- The Remote API endpoint and model name fields now remember their history
+- Updated the 'Auto Captioning' workspace layout specifically so that 'Image Tags' and 'Auto Captioner' panels sit on top of each other (split vertically) instead of behind tabs, allowing them to be used at the same time
 ## [1.0.46] - 2026-04-05
 
 ### Added

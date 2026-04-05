@@ -73,8 +73,24 @@ class CaptionSettingsForm(QVBoxLayout):
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
         
+        field_history = get_field_history()
+        history_endpoints = field_history.get_values('remote_address')
+        endpoints = [
+            'http://localhost:1234/v1/chat/completions',
+            'http://localhost:11434/v1/chat/completions',
+            'http://localhost:5000/v1/chat/completions',
+            'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+            'https://api.openai.com/v1/chat/completions',
+            'https://api.groq.com/openai/v1/chat/completions',
+        ]
+        for h in reversed(history_endpoints):
+            if h not in endpoints:
+                endpoints.insert(0, h)
+        
         #remote only:
-        self.remote_address_line_edit = SettingsLineEdit(key='remote_address', default='http://localhost:5000')
+        self.remote_address_line_edit = FocusedScrollSettingsComboBox(key='remote_address')
+        self.remote_address_line_edit.setEditable(True)
+        self.remote_address_line_edit.addItems(endpoints)
         self.api_key_line_edit = SettingsLineEdit(key='api_key', default='')
         self.api_key_line_edit.setEchoMode(self.api_key_line_edit.EchoMode.Password)
         self.api_model_line_edit = SettingsLineEdit(key='api_model', default='gemini-3-flash-preview')
@@ -630,6 +646,14 @@ class AutoCaptioner(QDockWidget):
 
         # Save field values to history
         field_history = get_field_history()
+
+        remote_address = self.caption_settings_form.remote_address_line_edit.currentText()
+        if remote_address and remote_address.strip():
+            field_history.add_value('remote_address', remote_address.strip())
+            
+        api_model = self.caption_settings_form.api_model_line_edit.text()
+        if api_model and api_model.strip():
+            field_history.add_value('api_model', api_model.strip())
 
         caption_start = self.caption_settings_form.caption_start_line_edit.text()
         if caption_start and caption_start.strip():
