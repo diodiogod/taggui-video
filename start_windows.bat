@@ -306,7 +306,7 @@ if %SHOULD_INSTALL% EQU 1 (
 
     if !SHOULD_INSTALL_REQUIREMENTS! EQU 1 (
         echo Installing requirements...
-        pip install -r requirements.txt > "%LOGFILE%" 2>&1
+        pip install --upgrade -r requirements.txt > "%LOGFILE%" 2>&1
         if !ERRORLEVEL! NEQ 0 (
             echo.
             echo ======================================================

@@ -23,7 +23,7 @@ High-level capabilities of TagGUI Video 1M.
 
 - Batch tag operations and filtering
 - Half-star ratings plus local love/bomb reactions
-- Auto-captioning integrations
+- Auto-captioning integrations (including native temporal video captioning via Qwen-VL and reasoning constraints)
 - Crop/masking workflow
 - Video frame tools including screenshot, extract, remove, repeat, and repair actions
 - Dataset export pipeline

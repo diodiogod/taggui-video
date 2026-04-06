@@ -690,6 +690,33 @@ class MenuManager:
 
     def _show_about_dialog(self):
         """Show application metadata and entry points."""
+        import importlib.metadata
+
+        def _ver(pkg: str) -> str:
+            try:
+                return importlib.metadata.version(pkg)
+            except Exception:
+                return 'not installed'
+
+        deps = [
+            ('transformers',    'transformers'),
+            ('torch',           'torch'),
+            ('accelerate',      'accelerate'),
+            ('bitsandbytes',    'bitsandbytes'),
+            ('PySide6',         'PySide6'),
+            ('qwen-vl-utils',   'qwen-vl-utils'),
+            ('opencv-python',   'opencv-python'),
+            ('Pillow',          'Pillow'),
+        ]
+        rows = ''.join(
+            f'<tr><td>{label}</td><td style="padding-left:12px;">{_ver(pkg)}</td></tr>'
+            for label, pkg in deps
+        )
+        dep_table = (
+            '<br><b>Installed packages:</b><br>'
+            f'<table style="font-size:small;">{rows}</table>'
+        )
+
         about_box = QMessageBox(self.main_window)
         about_box.setWindowTitle(f'About {APP_DISPLAY_NAME}')
         about_box.setIcon(QMessageBox.Icon.Information)
@@ -703,9 +730,11 @@ class MenuManager:
             'image and video datasets.<br><br>'
             f'Documentation Hub:<br><a href="{DOCUMENTATION_HUB_URL}">{DOCUMENTATION_HUB_URL}</a><br><br>'
             f'GitHub Repository:<br><a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_URL}</a>'
+            f'{dep_table}'
         )
         about_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         about_box.exec()
+
 
     def update_undo_and_redo_actions(self):
         """Update undo/redo menu action text and enabled state."""

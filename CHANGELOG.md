@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.48] - 2026-04-06
+
+### Added
+
+- Enable Native Video Captioning through Qwen3.5-VL
+- Integrated full support for Qwen2.5-VL and Qwen3.5-VL models
+- Added native video understanding that analyzes multiple frames across duration
+- New System Prompt field in the Auto-Captioner sidebar for granular control
+- Automatic Reasoning Stripping: Internal thoughts are now cleanly removed from metadata
+- Advanced settings now support beams, repetition penalty, and length penalty
+
+### Fixed
+
+- Increased default Max output tokens and added explicit error on truncation
 ## [1.0.47] - 2026-04-05
 
 ### Added

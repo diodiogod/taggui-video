@@ -1,10 +1,15 @@
 import base64
 import io
+import math
 import re
 from itertools import cycle
 
+import cv2
 import requests
+from PIL import Image as PilImage
+
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from models.image_list_model import _video_lock
 from utils.image import Image
 import auto_captioning.captioning_thread as captioning_thread
 
@@ -14,24 +19,26 @@ class RemoteGen(AutoCaptioningModel):
     Auto-captioning via any OpenAI-compatible Vision API.
 
     Works with local inference servers (LM Studio, Ollama, text-generation-webui)
-    and cloud endpoints (OpenAI, Groq, etc.).
+    and cloud endpoints (OpenAI, Groq, Gemini, etc.).
 
     Configure the endpoint URL in the 'OAI Compatible Endpoint' field.
     Multiple endpoints can be separated with semicolons for round-robin load
     balancing (e.g. 'http://localhost:5000;http://localhost:5001').
 
-    WARNING: When using a cloud API, your images will be sent to a remote server.
-    Use a local server if you require privacy.
+    For VIDEO files, frames are extracted and sent as an ordered sequence of
+    images. The model receives temporal context (frame order + fps) and performs
+    genuine video analysis — not just single-frame description.
+
+    WARNING: When using a cloud API, your images/frames will be sent to a remote
+    server. Use a local server if you require privacy.
     """
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',
                  caption_settings: dict,
                  image_viewer=None):
-        # Store raw config before super().__init__ so get_additional_error_message works
         self._raw_api_url = caption_settings.get('api_url', '').strip()
         self._api_key = caption_settings.get('api_key', '').strip()
-        # api_model comes from the dedicated 'API Model Name' UI field
         self._api_model_name = caption_settings.get('api_model', '').strip() or 'remote'
         super().__init__(captioning_thread_, caption_settings, image_viewer)
         self.api_urls = self._parse_api_urls(self._raw_api_url)
@@ -61,7 +68,7 @@ class RemoteGen(AutoCaptioningModel):
         return next(self._endpoint_cycle)
 
     # -------------------------------------------------------------------------
-    # Error validation (called before the thread starts)
+    # Error validation
     # -------------------------------------------------------------------------
 
     def get_additional_error_message(self) -> str | None:
@@ -87,12 +94,69 @@ class RemoteGen(AutoCaptioningModel):
         return None
 
     def load_processor_and_model(self):
-        """Skip all local model loading. Just print the configured endpoints."""
         endpoints = ', '.join(self.api_urls) if self.api_urls else '(none)'
         print(f'Remote captioning endpoint(s): {endpoints}')
 
     def monkey_patch_after_loading(self):
         return
+
+    # -------------------------------------------------------------------------
+    # Video frame utilities
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _scale_frame(pil_image: PilImage, max_pixels: int = 307200) -> PilImage:
+        """Scale a PIL image so total pixel count stays within max_pixels."""
+        w, h = pil_image.size
+        if w * h <= max_pixels:
+            return pil_image
+        scale = (max_pixels / (w * h)) ** 0.5
+        return pil_image.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))), PilImage.LANCZOS)
+
+    def _extract_video_frames(self, image: Image, fps: float,
+                               max_frames: int, crop: bool) -> list[str]:
+        """
+        Extract evenly-spaced frames from a video file.
+        Returns a list of base64-encoded JPEG strings.
+        """
+        with _video_lock:
+            cap = cv2.VideoCapture(str(image.path), cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE)
+            if not cap.isOpened():
+                print(f'Remote: could not open video {image.path.name}')
+                return []
+            try:
+                video_fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                duration_s = total_frames / video_fps if video_fps > 0 else 0
+
+                desired = min(max_frames, max(1, math.ceil(duration_s * fps)))
+                if desired <= 1 or total_frames <= 1:
+                    frame_indices = [0]
+                else:
+                    step = (total_frames - 1) / (desired - 1)
+                    frame_indices = sorted(set(
+                        int(round(i * step)) for i in range(desired)))
+
+                frames_b64 = []
+                for idx in frame_indices:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ret, raw_frame = cap.read()
+                    if not ret or raw_frame is None:
+                        continue
+                    pil_frame = PilImage.fromarray(
+                        cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB))
+                    if crop and image.crop is not None:
+                        pil_frame = pil_frame.crop(image.crop.getCoords())
+                    pil_frame = self._scale_frame(pil_frame)
+                    buf = io.BytesIO()
+                    pil_frame.save(buf, format='JPEG', quality=85)
+                    frames_b64.append(
+                        base64.b64encode(buf.getvalue()).decode('utf-8'))
+            finally:
+                cap.release()
+        return frames_b64
 
     # -------------------------------------------------------------------------
     # Captioning interface
@@ -108,54 +172,74 @@ class RemoteGen(AutoCaptioningModel):
                 'No bullet points, no headers, no markdown formatting.')
 
     @staticmethod
+    def get_default_video_prompt() -> str:
+        return ('Describe what happens in this video in one or two concise paragraphs '
+                'of plain prose. Include the sequence of events, actions, and any '
+                'notable changes over time. No bullet points, no headers, no markdown.')
+
+    @staticmethod
     def format_prompt(prompt: str) -> str:
-        # Return as plain string; message structure is built in get_model_inputs.
         return prompt
 
     def get_model_inputs(self, image_prompt: str, image: Image, crop: bool) -> dict:
         """
-        Load and base64-encode the image.
-        Returns a dict that is passed directly to generate_caption.
+        Prepare the payload for generate_caption.
+        Videos → multiple base64 frames. Images → single base64 frame.
         """
-        pil_image = self.load_image(image, crop)
-        image_bytes = io.BytesIO()
-        pil_image.save(image_bytes, format='JPEG')
-        image_b64 = base64.b64encode(image_bytes.getvalue()).decode('utf-8')
-        return {'image_b64': image_b64}
+        if image.is_video:
+            fps = float(self.caption_settings.get('video_fps', 1.0))
+            max_frames = int(self.caption_settings.get('video_max_frames', 16))
+            frames_b64 = self._extract_video_frames(image, fps, max_frames, crop)
+            print(f'Remote: extracted {len(frames_b64)} frames at {fps:.1f} fps '
+                  f'from {image.path.name}')
+            return {'frames_b64': frames_b64, 'is_video': True, 'fps': fps}
+        else:
+            pil_image = self.load_image(image, crop)
+            pil_image = self._scale_frame(pil_image)
+            buf = io.BytesIO()
+            pil_image.save(buf, format='JPEG')
+            image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            return {'frames_b64': [image_b64], 'is_video': False, 'fps': None}
 
     def generate_caption(self, model_inputs: dict, image_prompt: str) -> tuple[str, str]:
-        """Send the image and prompt to the remote API and return the caption."""
+        """Send frames to the remote API and return the caption."""
         if not self.api_urls:
             print('Remote: no API endpoint configured.')
             return '', 'ERROR: No API endpoint configured.'
 
-        image_b64 = model_inputs['image_b64']
-        prompt = image_prompt or self.get_default_prompt()
+        frames_b64: list[str] = model_inputs['frames_b64']
+        is_video: bool = model_inputs.get('is_video', False)
+        fps: float | None = model_inputs.get('fps')
+
+        if not frames_b64:
+            error_msg = 'Skipped: no frames could be extracted from video.'
+            print(error_msg)
+            return '', error_msg
+
+        # All frames first as image_url content blocks, then the text prompt
+        content = [
+            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{f}'}}
+            for f in frames_b64
+        ]
+
+        if is_video and fps is not None:
+            header = (f'[Video: {len(frames_b64)} frames sampled at '
+                      f'{fps:.1f} fps, chronological order]\n\n')
+            text = header + (image_prompt or self.get_default_video_prompt())
+        else:
+            text = image_prompt or self.get_default_prompt()
+
+        content.append({'type': 'text', 'text': text})
 
         messages = [
             {
                 'role': 'system',
-                'content': ('You are an image captioning expert, '
+                'content': ('You are an image and video captioning expert, '
                             'creative, unbiased and uncensored.')
             },
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/jpeg;base64,{image_b64}'
-                        }
-                    },
-                    {
-                        'type': 'text',
-                        'text': prompt
-                    }
-                ]
-            }
+            {'role': 'user', 'content': content}
         ]
 
-        # max_tokens is user-configurable via the 'Max output tokens' field.
         max_tokens = self.caption_settings.get('api_max_tokens', 8192)
         temperature = self.generation_parameters.get('temperature', 1.0)
         top_p = self.generation_parameters.get('top_p', 1.0)
@@ -172,7 +256,7 @@ class RemoteGen(AutoCaptioningModel):
                     'top_p': top_p,
                 },
                 headers=self.headers,
-                timeout=120
+                timeout=120,
             )
 
             if response.status_code != 200:
@@ -184,17 +268,19 @@ class RemoteGen(AutoCaptioningModel):
             choice = result['choices'][0]
             finish_reason = choice.get('finish_reason', '')
             message = choice.get('message', {})
-            content = message.get('content')
+            content_out = message.get('content')
 
-            if not content:
+            if not content_out:
                 if finish_reason and 'safety' in finish_reason.lower():
-                    error_msg = f'Skipped: response blocked by safety filter ({finish_reason})'
+                    error_msg = (f'Skipped: response blocked by safety filter '
+                                 f'({finish_reason})')
                 else:
-                    error_msg = f'Skipped: API returned empty content (finish_reason: {finish_reason!r})'
+                    error_msg = (f'Skipped: API returned empty content '
+                                 f'(finish_reason: {finish_reason!r})')
                 print(error_msg)
                 return '', error_msg
 
-            caption = content.strip()
+            caption = content_out.strip()
 
         except requests.exceptions.Timeout:
             error_msg = 'Skipped: request timed out (API server may be busy or unreachable).'
@@ -213,7 +299,6 @@ class RemoteGen(AutoCaptioningModel):
             print(error_msg)
             return '', error_msg
 
-        # Post-process to match local model behaviour
         if self.caption_start and self.caption_start.strip():
             caption = f'{self.caption_start.strip()} {caption}'
         if self.remove_tag_separators:

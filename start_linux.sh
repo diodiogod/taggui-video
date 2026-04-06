@@ -243,7 +243,7 @@ if [ $SHOULD_INSTALL -eq 1 ]; then
 
     if [ $SHOULD_INSTALL_REQUIREMENTS -eq 1 ]; then
         echo "Installing requirements..."
-        pip install -r requirements.txt >> "$LOGFILE" 2>&1 || {
+        pip install --upgrade -r requirements.txt >> "$LOGFILE" 2>&1 || {
             echo ""
             echo "======================================================"
             echo "ERROR: Failed to install dependencies"

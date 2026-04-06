@@ -9,8 +9,11 @@ import torch
 import pillow_jxl
 from PIL import Image as PilImage, UnidentifiedImageError
 from PIL.ImageOps import exif_transpose
-from transformers import (AutoModelForVision2Seq, AutoProcessor,
-                          BatchFeature, BitsAndBytesConfig)
+from transformers import AutoProcessor, BatchFeature, BitsAndBytesConfig
+try:
+    from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+except ImportError:
+    from transformers import AutoModelForVision2Seq
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
 import auto_captioning.captioning_thread as captioning_thread

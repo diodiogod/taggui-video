@@ -96,7 +96,39 @@ class CaptionSettingsForm(QVBoxLayout):
         self.api_model_line_edit = SettingsLineEdit(key='api_model', default='gemini-3-flash-preview')
         self.api_max_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='api_max_tokens', default=8192, minimum=100, maximum=200000)
+        self.video_fps_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='video_fps', default=1.0, minimum=0.1, maximum=8.0)
+        self.video_fps_spin_box.setSingleStep(0.5)
+        self.video_fps_spin_box.setToolTip(
+            'How many frames per second to sample from the video.\n'
+            'Higher values capture more motion detail but increase\n'
+            'request size and API cost. 1.0 fps is a good default.\n'
+            'Only applies to video files.')
+        self.video_max_frames_spin_box = FocusedScrollSettingsSpinBox(
+            key='video_max_frames', default=16, minimum=1, maximum=64)
+        self.video_max_frames_spin_box.setToolTip(
+            'Maximum number of frames sent to the API for video files.\n'
+            'Acts as a cap regardless of fps and video length.\n'
+            'Set to 1 to caption only a single frame (fastest, no temporal analysis).\n'
+            'Higher values give richer descriptions but cost more tokens.')
 
+
+        # System Prompt field with history button
+        system_prompt_container = QWidget()
+        system_prompt_layout = QHBoxLayout(system_prompt_container)
+        system_prompt_layout.setContentsMargins(0, 0, 0, 0)
+        system_prompt_layout.setSpacing(4)
+        
+        self.system_prompt_text_edit = SettingsPlainTextEdit(key='system_prompt', default='You are a media captioning assistant. Your reasoning is private and will not be shown to the user. Your response must contain the complete, detailed caption — do not summarize or abbreviate what you described in your reasoning. Write the full description in your response.')
+        set_text_edit_height(self.system_prompt_text_edit, 3)
+        
+        self.system_prompt_history_button = QPushButton("📜")
+        self.system_prompt_history_button.setToolTip("View System Prompt History")
+        self.system_prompt_history_button.setMaximumWidth(30)
+        self.system_prompt_history_button.setMaximumHeight(40)
+        
+        system_prompt_layout.addWidget(self.system_prompt_text_edit)
+        system_prompt_layout.addWidget(self.system_prompt_history_button)
 
         # Prompt field with history button
         prompt_container = QWidget()
@@ -188,6 +220,10 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow('API Key', self.api_key_line_edit)
         basic_settings_form.addRow('API Model Name', self.api_model_line_edit)
         basic_settings_form.addRow('Max output tokens', self.api_max_tokens_spin_box)
+        basic_settings_form.addRow('Video FPS', self.video_fps_spin_box)
+        basic_settings_form.addRow('Max video frames', self.video_max_frames_spin_box)
+        self.system_prompt_label = QLabel('System Prompt')
+        basic_settings_form.addRow(self.system_prompt_label, system_prompt_container)
         self.prompt_label = QLabel('Prompt')
         basic_settings_form.addRow(self.prompt_label, prompt_container)
         self.caption_start_label = QLabel('Start caption with')
@@ -285,9 +321,9 @@ class CaptionSettingsForm(QVBoxLayout):
         bad_forced_words_form.addRow('Include in caption',
                                      forced_words_container)
         self.min_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='min_new_tokens', default=1, minimum=1, maximum=999)
+            key='min_new_tokens', default=1, minimum=1, maximum=8192)
         self.max_new_token_count_spin_box = FocusedScrollSettingsSpinBox(
-            key='max_new_tokens', default=100, minimum=1, maximum=999)
+            key='max_new_tokens', default=100, minimum=1, maximum=8192)
         self.beam_count_spin_box = FocusedScrollSettingsSpinBox(
             key='num_beams', default=1, minimum=1, maximum=99)
         self.length_penalty_spin_box = FocusedScrollSettingsDoubleSpinBox(
@@ -387,12 +423,16 @@ class CaptionSettingsForm(QVBoxLayout):
         is_wd_tagger_model = get_model_class(model_id) == WdTagger
         is_remote_model = get_model_class(model_id) == RemoteGen
         is_local_model = not is_wd_tagger_model and not is_remote_model
+        lowercase_id = model_id.lower()
+        is_qwen_model = ('qwen2.5-vl' in lowercase_id
+                         or 'qwen3.5' in lowercase_id)
 
         # WD Tagger has its own dedicated settings panel
         self.wd_tagger_settings_form_container.setVisible(is_wd_tagger_model)
 
         # Shown for all non-WD-tagger models (local and remote)
-        for widget in [self.prompt_label, self.prompt_text_edit,
+        for widget in [self.system_prompt_label, self.system_prompt_text_edit,
+                       self.prompt_label, self.prompt_text_edit,
                        self.skip_hash_container,
                        self.caption_start_label, self.caption_start_line_edit,
                        self.remove_tag_separators_container,
@@ -412,6 +452,12 @@ class CaptionSettingsForm(QVBoxLayout):
         self.basic_settings_form.setRowVisible(self.api_key_line_edit, is_remote_model)
         self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
         self.basic_settings_form.setRowVisible(self.api_max_tokens_spin_box, is_remote_model)
+        # Video FPS: shown for Remote (multi-frame extraction) and QwenVL local (TMRoPE)
+        self.basic_settings_form.setRowVisible(
+            self.video_fps_spin_box, is_remote_model or is_qwen_model)
+        # Max frames: Supported by Remote AND natively by QwenVL
+        self.basic_settings_form.setRowVisible(
+            self.video_max_frames_spin_box, is_remote_model or is_qwen_model)
 
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
@@ -441,10 +487,13 @@ class CaptionSettingsForm(QVBoxLayout):
     def get_caption_settings(self) -> dict:
         return {
             'model_id': self.model_combo_box.currentText(),
-            'api_url': self.remote_address_line_edit.text(),
+            'api_url': self.remote_address_line_edit.currentText(),
             'api_key': self.api_key_line_edit.text(),
             'api_model': self.api_model_line_edit.text(),
             'api_max_tokens': self.api_max_tokens_spin_box.value(),
+            'video_fps': self.video_fps_spin_box.value(),
+            'video_max_frames': self.video_max_frames_spin_box.value(),
+            'system_prompt': self.system_prompt_text_edit.toPlainText(),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),
@@ -544,6 +593,11 @@ class AutoCaptioner(QDockWidget):
         # Connect prompt history button
         self.caption_settings_form.prompt_history_button.clicked.connect(
             self.show_prompt_history)
+
+        self.caption_settings_form.system_prompt_history_button.clicked.connect(
+            lambda: self.show_field_history('system_prompt',
+                                           self.caption_settings_form.system_prompt_text_edit,
+                                           "System Prompt History"))
 
         # Connect field history buttons
         self.caption_settings_form.caption_start_history_button.clicked.connect(

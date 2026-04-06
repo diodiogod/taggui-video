@@ -24,8 +24,8 @@ Current code indicates support for:
 
 GPU use requires compatible hardware and model support, but CPU generation is also supported for some workflows.
 
-> [!WARNING]
-> Video captioning is currently frame-based, not full-video understanding. For a single currently loaded video, TagGUI captions the frame you are viewing. For batch video captioning, TagGUI captions one representative still frame per file, preferring the saved loop-start marker when present and otherwise falling back to frame `0`. Crop-limited workflows are supported, but the app does not analyze an entire clip across its full timeline.
+> [!NOTE]
+> Video captioning behavior depends on the selected model. Standard models (like Florence-2 or LLaVA) are frame-based and caption a single representative still frame per video (preferring the saved loop-start marker). However, video-native models (like Qwen-VL) process the entire video timeline continuously, extracting multiple frames based on your Advanced Settings (`Video FPS` and `Max video frames`) to build a comprehensive temporal understanding of the clip.
 
 ## Basic Workflow
 
@@ -44,6 +44,13 @@ The app also supports loading previously downloaded local models through the mod
 ## Main Fields
 
 The current UI exposes these main captioning controls.
+
+### System Prompt
+
+The system prompt defines behavioral constraints and deep-level instructions, distinct from the standard prompt.
+
+- It is heavily utilized by modern reasoning models (e.g., Qwen3.5-VL) to direct their internal chain-of-thought analysis.
+- It is highly recommended to encourage "private reasoning" in the system prompt for reasoning models, allowing them to think thoroughly and output a highly polished final description.
 
 ### Prompt
 
@@ -142,6 +149,7 @@ TagGUI includes a broad set of captioning backends, including examples like:
 - LLaVA variants
 - Moondream
 - Phi-3 Vision
+- Qwen-VL (Qwen2.5-VL, Qwen3.5-VL natively supporting temporal video)
 - WD Tagger
 - remote generation path
 

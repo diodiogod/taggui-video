@@ -13,6 +13,11 @@ from auto_captioning.models.phi_3_vision import Phi3Vision
 from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models.remote import RemoteGen
 try:
+    from auto_captioning.models.qwen_vl import QwenVL
+    has_qwen_vl = True
+except Exception:
+    has_qwen_vl = False
+try:
     from auto_captioning.models.xcomposer2 import Xcomposer2, Xcomposer2_4khd
     hasgptqmodel = True
 except:
@@ -20,6 +25,11 @@ except:
     print("GPTQModel failed to install")
 
 MODELS = [
+    # Qwen VL — native video + image captioning (requires qwen-vl-utils)
+    'Qwen/Qwen2.5-VL-3B-Instruct',
+    'Qwen/Qwen2.5-VL-7B-Instruct',
+    'Qwen/Qwen3.5-4B',
+    'Qwen/Qwen3.5-9B',
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
     'THUDM/cogvlm-chat-hf',
     'THUDM/cogvlm2-llama3-chat-19B-int4',
@@ -73,6 +83,9 @@ if hasgptqmodel:
 
 def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
     lowercase_model_id = model_id.lower()
+    if has_qwen_vl:
+        if 'qwen2.5-vl' in lowercase_model_id or 'qwen3.5' in lowercase_model_id:
+            return QwenVL
     if 'cogvlm2' in lowercase_model_id:
         return Cogvlm2
     if 'cogvlm' in lowercase_model_id:
