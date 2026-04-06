@@ -135,10 +135,19 @@ class QwenVL(AutoCaptioningModel):
             messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs, video_kwargs = _process_vision_info_compat(messages)
         
-        # New transformers processors strictly type check kwargs
-        # qwen-vl-utils returns fps as a list, but processor expects float/int
-        if 'fps' in video_kwargs and isinstance(video_kwargs['fps'], list) and len(video_kwargs['fps']) == 1:
-            video_kwargs['fps'] = video_kwargs['fps'][0]
+        # New transformers processors (Qwen2.5-VL/Qwen3-VL) strictly type check kwargs.
+        # qwen-vl-utils may return 'fps' as a list (e.g. [1.0] or []).
+        # Processor expects a single float/int or None.
+        if 'fps' in video_kwargs:
+            val = video_kwargs['fps']
+            if isinstance(val, list):
+                if len(val) == 1:
+                    video_kwargs['fps'] = val[0]
+                else:
+                    # Remove empty list or multi-item lists which are invalid for single-sequence processing
+                    video_kwargs.pop('fps')
+            elif val is None:
+                 video_kwargs.pop('fps')
 
         if image.is_video:
             fps = float(self.caption_settings.get('video_fps', 1.0))

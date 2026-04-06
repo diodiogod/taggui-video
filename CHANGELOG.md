@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.49] - 2026-04-06
+
+### Added
+
+- DEPS: Updated and pinned stable dependency stack (Transformers 5.5, bitsandbytes 0.49, qwen-vl-utils 0.0.14).
+
+### Fixed
+
+- FIX: Resolved 'AttributeError' in Video Player when switching videos during active auto-captioning.
+- FIX: Patched Qwen-VL image captioning to handle strict 'fps' validation in newer transformers versions.
 ## [1.0.48] - 2026-04-06
 
 ### Added

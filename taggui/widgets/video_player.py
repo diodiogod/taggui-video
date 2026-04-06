@@ -2236,8 +2236,16 @@ class VideoPlayerWidget(QWidget):
             return True
 
         import sys
-        stdout_fd = sys.stdout.fileno()
-        stderr_fd = sys.stderr.fileno()
+        # Safely resolve file descriptors for OS-level suppression.
+        # Use sys.__stdout__ as fallback since sys.stdout might be a thread object
+        # without a fileno() (e.g. during captioning log redirection).
+        try:
+            stdout_fd = sys.stdout.fileno()
+            stderr_fd = sys.stderr.fileno()
+        except (AttributeError, Exception):
+            stdout_fd = sys.__stdout__.fileno()
+            stderr_fd = sys.__stderr__.fileno()
+
         with open(os.devnull, 'w') as devnull:
             old_stdout = os.dup(stdout_fd)
             old_stderr = os.dup(stderr_fd)
@@ -2273,8 +2281,16 @@ class VideoPlayerWidget(QWidget):
     def _open_capture_silently(self, video_path: Path):
         """Open OpenCV capture while suppressing ffmpeg chatter."""
         import sys
-        stdout_fd = sys.stdout.fileno()
-        stderr_fd = sys.stderr.fileno()
+        # Safely resolve file descriptors for OS-level suppression.
+        # Fall back to sys.__stdout__ if sys.stdout is redirected to a Python
+        # object without a fileno() (e.g. during captioning).
+        try:
+            stdout_fd = sys.stdout.fileno()
+            stderr_fd = sys.stderr.fileno()
+        except (AttributeError, Exception):
+            stdout_fd = sys.__stdout__.fileno()
+            stderr_fd = sys.__stderr__.fileno()
+
         with open(os.devnull, 'w') as devnull:
             old_stdout = os.dup(stdout_fd)
             old_stderr = os.dup(stderr_fd)
