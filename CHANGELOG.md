@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.51] - 2026-04-08
+
+### Added
+
+- Long descriptive entries now render on a single line instead of expanding the row height
+- Tag editing, filtering, and counts continue to use the original tag value
+
+### Fixed
+
+- Fix oversized rows in the All Tags panel
 ## [1.0.50] - 2026-04-08
 
 ### Added

@@ -7,6 +7,11 @@ from utils.image import Image
 from utils.utils import get_confirmation_dialog_reply, list_with_and, pluralize
 
 
+def _flatten_single_line_text(text: str) -> str:
+    """Collapse any whitespace, including newlines, into one visible line."""
+    return " ".join(str(text).split())
+
+
 class TagCounterModel(QAbstractListModel):
     tags_renaming_requested = Signal(list, str)
 
@@ -25,10 +30,14 @@ class TagCounterModel(QAbstractListModel):
         if role == Qt.ItemDataRole.UserRole:
             return tag, count
         if role == Qt.ItemDataRole.DisplayRole:
+            display_tag = _flatten_single_line_text(tag)
             if self.most_common_tags_filtered is None:
-                return f'{tag} ({count})'
+                return f'{display_tag} ({count})'
             else:
-                return f'{tag} ({self.most_common_tags_filtered[tag]}/{count})'
+                return (
+                    f'{display_tag} '
+                    f'({self.most_common_tags_filtered[tag]}/{count})'
+                )
         if role == Qt.ItemDataRole.EditRole:
             return tag
         if role == Qt.ItemDataRole.ToolTipRole:
