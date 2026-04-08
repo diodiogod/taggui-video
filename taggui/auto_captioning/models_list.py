@@ -30,6 +30,7 @@ MODELS = [
     'Qwen/Qwen2.5-VL-7B-Instruct',
     'Qwen/Qwen3.5-4B',
     'Qwen/Qwen3.5-9B',
+    'huihui-ai/Huihui-Qwen3.5-9B-abliterated',  # uncensored abliterated variant
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
     'THUDM/cogvlm-chat-hf',
     'THUDM/cogvlm2-llama3-chat-19B-int4',

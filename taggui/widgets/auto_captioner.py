@@ -111,6 +111,20 @@ class CaptionSettingsForm(QVBoxLayout):
             'Acts as a cap regardless of fps and video length.\n'
             'Set to 1 to caption only a single frame (fastest, no temporal analysis).\n'
             'Higher values give richer descriptions but cost more tokens.')
+        self.disable_thinking_container = QWidget()
+        disable_thinking_layout = QHBoxLayout(self.disable_thinking_container)
+        disable_thinking_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        disable_thinking_layout.setContentsMargins(0, 0, 0, 0)
+        self.disable_thinking_check_box = SettingsBigCheckBox(
+            key='disable_thinking', default=True)
+        self.disable_thinking_check_box.setToolTip(
+            'When checked, Qwen3.5 skips its internal reasoning chain (<think> block).\n'
+            'This makes captioning 2-5x faster with minimal quality loss for\n'
+            'straightforward descriptions. Disable this for complex video analysis\n'
+            'where reasoning improves accuracy.')
+        disable_thinking_layout.addWidget(QLabel('Disable reasoning (faster)'))
+        disable_thinking_layout.addWidget(self.disable_thinking_check_box)
+        basic_settings_form.addRow(self.disable_thinking_container)
 
 
         # System Prompt field with history button
@@ -458,6 +472,8 @@ class CaptionSettingsForm(QVBoxLayout):
         # Max frames: Supported by Remote AND natively by QwenVL
         self.basic_settings_form.setRowVisible(
             self.video_max_frames_spin_box, is_remote_model or is_qwen_model)
+        # Disable reasoning: only meaningful for Qwen3.5 reasoning models
+        self.disable_thinking_container.setVisible(is_qwen_model)
 
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
@@ -493,6 +509,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'api_max_tokens': self.api_max_tokens_spin_box.value(),
             'video_fps': self.video_fps_spin_box.value(),
             'video_max_frames': self.video_max_frames_spin_box.value(),
+            'disable_thinking': self.disable_thinking_check_box.isChecked(),
             'system_prompt': self.system_prompt_text_edit.toPlainText(),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),

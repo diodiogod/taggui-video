@@ -131,8 +131,18 @@ class QwenVL(AutoCaptioningModel):
 
     def get_model_inputs(self, image_prompt: str, image: Image, crop: bool):
         messages = self._build_messages(image_prompt, image, crop)
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True)
+        disable_thinking = self.caption_settings.get('disable_thinking', True)
+        # enable_thinking=False tells Qwen3.5 to skip its internal reasoning
+        # chain entirely, making generation 2-5x faster for simple captions.
+        # Qwen2.5-VL ignores this kwarg gracefully (no-op).
+        try:
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=not disable_thinking)
+        except TypeError:
+            # Older processor versions don't support enable_thinking — fall back
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs, video_kwargs = _process_vision_info_compat(messages)
         
         # New transformers processors (Qwen2.5-VL/Qwen3-VL) strictly type check kwargs.
@@ -202,8 +212,10 @@ class QwenVL(AutoCaptioningModel):
         if self.caption_start and self.caption_start.strip():
             caption = f'{self.caption_start.strip()} {caption}'
             
-        # Qwen3.5 is a reasoning model - it often outputs internal thoughts before </think>
-        if '</think>' in caption:
+        # Qwen3.5 is a reasoning model - it may output <think>...</think> before the answer.
+        # Only strip if thinking was enabled (disable_thinking=False).
+        disable_thinking = self.caption_settings.get('disable_thinking', True)
+        if not disable_thinking and '</think>' in caption:
             # Print the raw chain-of-thought to the terminal for interested users
             print(f'\n--- QwenVL Thought Process ({image_prompt[:50]}...) ---\n'
                   f'{caption}\n-----------------------------------\n')

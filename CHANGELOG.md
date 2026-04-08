@@ -5,6 +5,15 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.50] - 2026-04-08
+
+### Added
+
+- UI: Added 'huihui-ai/Huihui-Qwen3.5-9B-abliterated' to the model suggestion dropdown.
+
+### Changed
+
+- FEATURE: Added 'Disable reasoning' checkbox for Qwen models (enabled by default) for 2-5x faster captioning.
 ## [1.0.49] - 2026-04-06
 
 ### Added
