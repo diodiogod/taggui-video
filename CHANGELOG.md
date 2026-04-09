@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.55] - 2026-04-09
+
+### Added
+
+- Clicking an image now rereads its sidecar without resetting the masonry layout
+- External caption edits still appear when the image is selected
+- Passive sidecar sync no longer causes paginated page reload churn
+
+### Fixed
+
+- Fix masonry churn when sidecar tags resync on click
 ## [1.0.54] - 2026-04-09
 
 ### Added
