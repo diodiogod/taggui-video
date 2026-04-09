@@ -342,7 +342,13 @@ class ImageTagsEditor(QDockWidget):
         """Remove internal sentinel tags from the user-visible editor."""
         if not tags:
             return []
-        return [tag for tag in tags if tag and tag not in INTERNAL_HIDDEN_TAGS]
+        normalized_tags: list[str] = []
+        for tag in tags:
+            cleaned = str(tag).strip()
+            if not cleaned or cleaned in INTERNAL_HIDDEN_TAGS:
+                continue
+            normalized_tags.append(cleaned)
+        return normalized_tags
 
     def _read_caption_text_from_disk(self, image: Image) -> str | None:
         """Read the sidecar caption text exactly as stored on disk."""
@@ -353,6 +359,19 @@ class ImageTagsEditor(QDockWidget):
             return text_file_path.read_text(encoding='utf-8', errors='replace')
         except OSError:
             return None
+
+    def _emit_source_row_data_changed(self, source_model):
+        """Refresh the current row after a passive sidecar sync."""
+        if source_model is None or not self.image_index.isValid():
+            return
+        try:
+            source_model.dataChanged.emit(
+                self.image_index,
+                self.image_index,
+                [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.UserRole],
+            )
+        except Exception:
+            pass
 
     def _apply_pending_descriptive_sync(self):
         """Apply staged descriptive-text edits to the tag list model."""
@@ -401,22 +420,24 @@ class ImageTagsEditor(QDockWidget):
             if caption_text is not None
             else self._filter_internal_tags(image.tags)
         )
-        should_refresh_paginated_source = False
+        should_refresh_source_row = False
         # Keep the in-memory image tags aligned with the sidecar source of truth.
         if image.tags != tags_from_source:
             image.tags = tags_from_source
+            should_refresh_source_row = bool(self.image_index.isValid())
             if (source_model is not None
                     and getattr(source_model, '_paginated_mode', False)
                     and hasattr(source_model, '_sync_paginated_db_tags_for_rel_path')
                     and getattr(source_model, '_directory_path', None) is not None):
                 try:
                     rel_path = str(image.path.relative_to(source_model._directory_path))
+                    # Selection-time sidecar sync should only refresh this row.
+                    # Full paginated reloads are reserved for bulk tag edits.
                     source_model._sync_paginated_db_tags_for_rel_path(
                         rel_path,
                         tags_from_source,
                         txt_path=image.path.with_suffix('.txt'),
                     )
-                    should_refresh_paginated_source = True
                 except Exception:
                     pass
         # If the string list already contains the image's tags, do not reload
@@ -430,12 +451,8 @@ class ImageTagsEditor(QDockWidget):
                 self.descriptive_text_edit.blockSignals(True)
                 self.descriptive_text_edit.setPlainText(caption_text)
                 self.descriptive_text_edit.blockSignals(False)
-            if should_refresh_paginated_source and hasattr(
-                    source_model, '_reload_loaded_pages_after_paginated_tag_change'):
-                QTimer.singleShot(
-                    0,
-                    source_model._reload_loaded_pages_after_paginated_tag_change,
-                )
+            if should_refresh_source_row:
+                self._emit_source_row_data_changed(source_model)
             return
         self.image_tag_list_model.setStringList(tags_from_source)
         self.count_tokens()
@@ -453,12 +470,8 @@ class ImageTagsEditor(QDockWidget):
             self.descriptive_text_edit.blockSignals(False)
         if self.image_tags_list.hasFocus():
             self.select_first_tag()
-        if should_refresh_paginated_source and hasattr(
-                source_model, '_reload_loaded_pages_after_paginated_tag_change'):
-            QTimer.singleShot(
-                0,
-                source_model._reload_loaded_pages_after_paginated_tag_change,
-            )
+        if should_refresh_source_row:
+            self._emit_source_row_data_changed(source_model)
 
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,
