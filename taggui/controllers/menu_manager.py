@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -18,7 +19,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence, QPalette
 from PySide6.QtCore import QEvent, QSize, QTimer, QUrl, Qt, Signal
 
-from utils.settings import settings, DEFAULT_SETTINGS
+from utils.settings import (
+    settings,
+    DEFAULT_SETTINGS,
+    AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC,
+    AUTO_CAPTIONER_LAYOUT_MODE_COMPACT,
+    load_auto_captioner_layout_mode,
+)
 try:
     from version import APP_DISPLAY_NAME, __version__
 except ImportError:
@@ -349,6 +356,182 @@ class RecentFolderRowWidget(QWidget):
         tail_keep = max(10, max_chars - len(root) - 4)
         return f"{root}...{tail[-tail_keep:]}" if root else f"...{tail[-tail_keep:]}"
 
+
+class ToolbarToggleListWidget(QListWidget):
+    """Scrollable toolbar toggle list embedded inside the View menu."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.setUniformItemSizes(True)
+        self.setAlternatingRowColors(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.setSpacing(0)
+        self.setStyleSheet(
+            "QListWidget { border: none; outline: none; background: transparent; }"
+            "QListWidget::item { border: none; padding: 0px; margin: 0px; }"
+        )
+        self.currentItemChanged.connect(lambda *_: self._refresh_row_states())
+        self.itemEntered.connect(self._track_hover_item)
+
+    def mouseMoveEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item is not None:
+            self.setCurrentItem(item)
+        super().mouseMoveEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_item_widths()
+
+    def leaveEvent(self, event):
+        self.clearSelection()
+        self.setCurrentRow(-1)
+        self._refresh_row_states()
+        super().leaveEvent(event)
+
+    def _track_hover_item(self, item: QListWidgetItem):
+        if item is not None:
+            self.setCurrentItem(item)
+
+    def _refresh_row_states(self):
+        current_item = self.currentItem()
+        for index in range(self.count()):
+            item = self.item(index)
+            row_widget = self.itemWidget(item)
+            if isinstance(row_widget, ToolbarToggleRowWidget):
+                row_widget.set_selected(item is current_item)
+
+    def _sync_item_widths(self):
+        viewport_width = max(0, self.viewport().width())
+        if viewport_width <= 0:
+            return
+        for index in range(self.count()):
+            item = self.item(index)
+            row_widget = self.itemWidget(item)
+            if item is None or row_widget is None:
+                continue
+            item.setSizeHint(QSize(viewport_width, row_widget.sizeHint().height()))
+
+
+class ToolbarToggleRowWidget(QWidget):
+    """One toolbar toggle row inside the embedded toolbars menu."""
+
+    def __init__(self, action: QAction, parent=None):
+        super().__init__(parent)
+        self.action = action
+        self._selected = False
+        self._syncing = False
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 10, 4)
+        layout.setSpacing(6)
+
+        self.checkbox = QCheckBox(self)
+        self.checkbox.setTristate(False)
+        self.checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self.label = QLabel(self)
+        self.label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.label.setWordWrap(False)
+        self.label.setMargin(0)
+        self.label.setIndent(0)
+
+        layout.addWidget(self.checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.label, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        self.checkbox.toggled.connect(self._on_checkbox_toggled)
+        self.action.changed.connect(self._sync_from_action)
+        self.action.toggled.connect(lambda *_: self._sync_from_action())
+        self._sync_from_action()
+
+        row_height = max(28, self.sizeHint().height())
+        self.setMinimumHeight(row_height)
+        self.setMaximumHeight(row_height)
+
+    def sizeHint(self):
+        margins = self.layout().contentsMargins()
+        row_height = max(
+            self.checkbox.sizeHint().height(),
+            self.label.sizeHint().height(),
+        ) + margins.top() + margins.bottom()
+        row_width = max(0, self.layout().sizeHint().width())
+        return QSize(row_width, row_height)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.checkbox.toggle()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def set_selected(self, selected: bool):
+        selected = bool(selected)
+        if self._selected == selected:
+            return
+        self._selected = selected
+        self._apply_palette()
+
+    def _on_checkbox_toggled(self, checked: bool):
+        if self._syncing:
+            return
+        if self.action.isChecked() != checked:
+            self.action.trigger()
+
+    def _sync_from_action(self):
+        self._syncing = True
+        try:
+            self.checkbox.setChecked(self.action.isChecked())
+            self.checkbox.setEnabled(self.action.isEnabled())
+            self.label.setText(self.action.text())
+            self.label.setEnabled(self.action.isEnabled())
+            self._apply_palette()
+        finally:
+            self._syncing = False
+
+    def _apply_palette(self):
+        palette = self.palette()
+        highlight_color = palette.color(QPalette.ColorRole.Highlight)
+        highlight_text_color = palette.color(QPalette.ColorRole.HighlightedText)
+        text_color = palette.color(QPalette.ColorRole.Text)
+
+        row_bg = QColor(highlight_color)
+        row_bg.setAlpha(255 if self._selected else 0)
+        label_color = highlight_text_color if self._selected else text_color
+
+        self.setStyleSheet(
+            "background-color: "
+            f"{row_bg.name(QColor.NameFormat.HexArgb)};"
+            "border: none;"
+            "border-radius: 0px;"
+        )
+        self.label.setStyleSheet(
+            "QLabel {"
+            f"color: {label_color.name(QColor.NameFormat.HexArgb)};"
+            "background: transparent;"
+            "padding: 0px;"
+            "margin: 0px;"
+            "}"
+        )
+
 class MenuManager:
     """Manages menu bar creation and setup."""
 
@@ -367,6 +550,9 @@ class MenuManager:
         self.toggle_image_tags_editor_action = None
         self.toggle_all_tags_editor_action = None
         self.toggle_auto_captioner_action = None
+        self.auto_captioner_layout_action_group = None
+        self.auto_captioner_compact_layout_action = None
+        self.auto_captioner_classic_layout_action = None
         self.toggle_auto_markings_action = None
         self.toggle_perf_hud_action = None
         self.toggle_reaction_controls_action = None
@@ -374,6 +560,9 @@ class MenuManager:
         self.recent_folders_list_widget = None
         self.recent_folders_list_action = None
         self._recent_folders_preferred_path = None
+        self.toolbars_menu = None
+        self.toolbars_list_widget = None
+        self.toolbars_list_action = None
         self.workspace_actions = {}
         self.workspace_action_group = None
         self.spawn_floating_viewer_action = None
@@ -445,6 +634,14 @@ class MenuManager:
         self.toggle_auto_captioner_action = QAction('Auto-Captioner', parent=self.main_window)
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
         self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
+        self.auto_captioner_layout_action_group = QActionGroup(self.main_window)
+        self.auto_captioner_layout_action_group.setExclusive(True)
+        self.auto_captioner_compact_layout_action = QAction('Compact Layout', parent=self.main_window)
+        self.auto_captioner_classic_layout_action = QAction('Classic Layout', parent=self.main_window)
+        self.auto_captioner_compact_layout_action.setCheckable(True)
+        self.auto_captioner_classic_layout_action.setCheckable(True)
+        self.auto_captioner_layout_action_group.addAction(self.auto_captioner_compact_layout_action)
+        self.auto_captioner_layout_action_group.addAction(self.auto_captioner_classic_layout_action)
         self.toggle_reaction_controls_action = QAction('Rating toolbar', parent=self.main_window)
         self.toggle_reaction_controls_action.setCheckable(True)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
@@ -622,27 +819,24 @@ class MenuManager:
         self.toggle_perf_hud_action.triggered.connect(
             lambda checked: self.main_window.set_perf_hud_visible(checked)
         )
+        self.toggle_reaction_controls_action.triggered.connect(
+            self.main_window.set_reaction_controls_panel_visible
+        )
 
-        view_menu.addAction(self.toggle_toolbar_action)
-        toolbar_groups_menu = view_menu.addMenu('Toolbar Groups')
-        for toolbar in toolbar_manager.get_toolbars():
-            if str(toolbar.property('toolbar_group_key') or '') == 'rating':
-                self.toggle_reaction_controls_action.triggered.connect(
-                    self.main_window.set_reaction_controls_panel_visible
-                )
-                toolbar_groups_menu.addAction(self.toggle_reaction_controls_action)
-            else:
-                action = toolbar.toggleViewAction()
-                action.setText(toolbar.windowTitle())
-                toolbar_groups_menu.addAction(action)
-        view_menu.addAction(self.reset_toolbars_action)
+        self.toolbars_menu = view_menu.addMenu('Toolbars')
+        self.toolbars_menu.aboutToShow.connect(self._update_toolbars_menu)
+        toolbars_menu = self.toolbars_menu
         view_menu.addAction(self.reset_layout_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_main_viewer_action)
         view_menu.addAction(self.toggle_image_list_action)
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)
-        view_menu.addAction(self.toggle_auto_captioner_action)
+        auto_captioner_menu = view_menu.addMenu('Auto-Captioner')
+        auto_captioner_menu.addAction(self.toggle_auto_captioner_action)
+        auto_captioner_menu.addSeparator()
+        auto_captioner_menu.addAction(self.auto_captioner_compact_layout_action)
+        auto_captioner_menu.addAction(self.auto_captioner_classic_layout_action)
         view_menu.addAction(self.toggle_auto_markings_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_perf_hud_action)
@@ -662,6 +856,38 @@ class MenuManager:
         view_menu.addAction(self.toggle_floating_hold_action)
         view_menu.addAction(self.spawn_floating_viewer_action)
         view_menu.addAction(self.close_all_floating_viewers_action)
+
+        self.auto_captioner_compact_layout_action.triggered.connect(
+            lambda checked: checked and self._set_auto_captioner_layout(
+                AUTO_CAPTIONER_LAYOUT_MODE_COMPACT
+            )
+        )
+        self.auto_captioner_classic_layout_action.triggered.connect(
+            lambda checked: checked and self._set_auto_captioner_layout(
+                AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC
+            )
+        )
+        self.main_window.auto_captioner.layout_mode_changed.connect(
+            self._sync_auto_captioner_layout_actions
+        )
+        self._sync_auto_captioner_layout_actions(
+            getattr(self.main_window.auto_captioner, 'layout_mode', load_auto_captioner_layout_mode())
+        )
+
+    def _set_auto_captioner_layout(self, layout_mode: str):
+        auto_captioner = getattr(self.main_window, 'auto_captioner', None)
+        if auto_captioner is None:
+            return
+        auto_captioner.set_layout_mode(layout_mode)
+
+    def _sync_auto_captioner_layout_actions(self, layout_mode: str):
+        normalized = str(layout_mode or '').strip().lower()
+        self.auto_captioner_compact_layout_action.setChecked(
+            normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT
+        )
+        self.auto_captioner_classic_layout_action.setChecked(
+            normalized == AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC
+        )
 
     def _create_help_menu(self, menu_bar):
         """Create Help menu."""
@@ -833,6 +1059,58 @@ class MenuManager:
                 if item is not None and str(item.data(Qt.ItemDataRole.UserRole)) == preferred:
                     self.recent_folders_list_widget.setCurrentRow(row)
                     return
+
+    def _update_toolbars_menu(self):
+        """Update toolbars submenu with persistent toggle rows."""
+        if self.toolbars_menu is None:
+            return
+
+        self.toolbars_menu.clear()
+        self.toolbars_menu.addAction(self.toggle_toolbar_action)
+        self.toolbars_menu.addSeparator()
+
+        container = QWidget(self.toolbars_menu)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.toolbars_list_widget = ToolbarToggleListWidget(container)
+        self.toolbars_list_widget.setMinimumWidth(280)
+
+        toolbar_manager = getattr(self.main_window, 'toolbar_manager', None)
+        toolbar_actions = []
+        if toolbar_manager is not None:
+            for toolbar in toolbar_manager.get_toolbars():
+                if str(toolbar.property('toolbar_group_key') or '') == 'rating':
+                    toolbar_actions.append(self.toggle_reaction_controls_action)
+                else:
+                    action = toolbar.toggleViewAction()
+                    action.setText(toolbar.windowTitle())
+                    toolbar_actions.append(action)
+
+        for action in toolbar_actions:
+            item = QListWidgetItem()
+            self.toolbars_list_widget.addItem(item)
+            row_widget = ToolbarToggleRowWidget(action, self.toolbars_list_widget)
+            item.setSizeHint(QSize(0, row_widget.sizeHint().height()))
+            self.toolbars_list_widget.setItemWidget(item, row_widget)
+
+        self.toolbars_list_widget._sync_item_widths()
+
+        if toolbar_actions:
+            row_height = max(24, self.toolbars_list_widget.sizeHintForRow(0))
+            if row_height <= 0:
+                row_height = 24
+            list_height = (row_height * len(toolbar_actions)) + 4
+            self.toolbars_list_widget.setMinimumHeight(list_height)
+            self.toolbars_list_widget.setMaximumHeight(list_height)
+            layout.addWidget(self.toolbars_list_widget)
+            self.toolbars_list_action = QWidgetAction(self.toolbars_menu)
+            self.toolbars_list_action.setDefaultWidget(container)
+            self.toolbars_menu.addAction(self.toolbars_list_action)
+
+        self.toolbars_menu.addSeparator()
+        self.toolbars_menu.addAction(self.reset_toolbars_action)
         if self.recent_folders_list_widget.count() > 0:
             self.recent_folders_list_widget.setCurrentRow(0)
 

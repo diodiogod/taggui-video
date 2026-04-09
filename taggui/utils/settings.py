@@ -56,11 +56,13 @@ DEFAULT_SETTINGS = {
     'video_playback_backend': 'mpv_experimental',  # qt_hybrid, mpv_experimental, vlc_experimental
     'auto_marking_merge_overlaps': False,
     'auto_marking_merge_overlap_threshold': 0.6,
+    'disable_thinking': True,
     # GPU preferences
     'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving
     'video_ffmpeg_accel_mode': 'none',  # none, cuda
     'video_ffmpeg_cuda_device': 0,
     'video_controls_visibility_mode': 'auto',  # always, auto, off (main viewer)
+    'auto_captioner_layout_mode': 'compact',  # compact, classic
 }
 
 
@@ -85,6 +87,13 @@ VIDEO_CONTROLS_VISIBILITY_MODES = (
     VIDEO_CONTROLS_VISIBILITY_ALWAYS,
     VIDEO_CONTROLS_VISIBILITY_AUTO,
     VIDEO_CONTROLS_VISIBILITY_OFF,
+)
+
+AUTO_CAPTIONER_LAYOUT_MODE_COMPACT = 'compact'
+AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC = 'classic'
+AUTO_CAPTIONER_LAYOUT_MODES = (
+    AUTO_CAPTIONER_LAYOUT_MODE_COMPACT,
+    AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC,
 )
 
 
@@ -116,6 +125,29 @@ def persist_video_controls_visibility_mode(mode: str):
     settings.setValue(
         'video_always_show_controls',
         normalized == VIDEO_CONTROLS_VISIBILITY_ALWAYS,
+    )
+
+
+def normalize_auto_captioner_layout_mode(value) -> str:
+    text = str(value or '').strip().lower()
+    if text in AUTO_CAPTIONER_LAYOUT_MODES:
+        return text
+    return AUTO_CAPTIONER_LAYOUT_MODE_COMPACT
+
+
+def load_auto_captioner_layout_mode() -> str:
+    raw_mode = settings.value(
+        'auto_captioner_layout_mode',
+        defaultValue=DEFAULT_SETTINGS['auto_captioner_layout_mode'],
+        type=str,
+    )
+    return normalize_auto_captioner_layout_mode(raw_mode)
+
+
+def persist_auto_captioner_layout_mode(mode: str):
+    settings.setValue(
+        'auto_captioner_layout_mode',
+        normalize_auto_captioner_layout_mode(mode),
     )
 
 

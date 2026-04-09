@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.52] - 2026-04-09
+
+### Added
+
+- Add a cleaner compact auto-captioner layout while keeping the classic layout available
+- Add reset defaults for advanced caption generation settings
+- Make toolbar toggles easier to use from the View menu without it closing after every click
+- Clean up Auto-Captioner and Toolbars menu organization
+
+### Changed
+
+- Improve auto-captioner compact mode and view menu organization
+- Improve compact panel spacing, resizing, prompt editing, and advanced settings usability
 ## [1.0.51] - 2026-04-08
 
 ### Added
