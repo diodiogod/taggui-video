@@ -5732,6 +5732,11 @@ class MainWindow(QMainWindow):
                     [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
                     Qt.Orientation.Horizontal,
                 )
+                self.resizeDocks(
+                    [self.image_tags_editor, self.auto_captioner],
+                    [max(240, int(self.height() * 0.52)), max(220, int(self.height() * 0.48))],
+                    Qt.Orientation.Vertical,
+                )
             elif workspace_id == "full_masonry":
                 self.image_list.raise_()
                 fitted_size = self._compute_full_masonry_initial_size()

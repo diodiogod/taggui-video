@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.54] - 2026-04-09
+
+### Added
+
+- Polish All Tags panel and captioning workspace defaults
+- Add Ctrl+wheel zooming for the All Tags list while keeping the count column readable
+- Refine the contextual clear-filter action so it takes less panel space
+- Make the Auto Captioning workspace open with a more balanced split between Image Tags and Auto-Captioner
+
+### Fixed
+
+- Fix repeated sort selection so it toggles ascending and descending correctly
 ## [1.0.53] - 2026-04-09
 
 ### Added
