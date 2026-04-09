@@ -1099,6 +1099,9 @@ class MainWindow(QMainWindow):
         self.shutdown_background_workers()
 
         super().closeEvent(event)
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _save_main_window_layout_settings(self):
         """Persist main-window geometry, dock state, and window mode flags."""

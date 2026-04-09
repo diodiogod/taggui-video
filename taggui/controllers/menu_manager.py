@@ -454,7 +454,7 @@ class ToolbarToggleRowWidget(QWidget):
 
         self.checkbox.toggled.connect(self._on_checkbox_toggled)
         self.action.changed.connect(self._sync_from_action)
-        self.action.toggled.connect(lambda *_: self._sync_from_action())
+        self.action.toggled.connect(self._sync_from_action)
         self._sync_from_action()
 
         row_height = max(28, self.sizeHint().height())
@@ -496,14 +496,17 @@ class ToolbarToggleRowWidget(QWidget):
         if self.action.isChecked() != checked:
             self.action.trigger()
 
-    def _sync_from_action(self):
+    def _sync_from_action(self, *_):
         self._syncing = True
         try:
-            self.checkbox.setChecked(self.action.isChecked())
-            self.checkbox.setEnabled(self.action.isEnabled())
-            self.label.setText(self.action.text())
-            self.label.setEnabled(self.action.isEnabled())
-            self._apply_palette()
+            try:
+                self.checkbox.setChecked(self.action.isChecked())
+                self.checkbox.setEnabled(self.action.isEnabled())
+                self.label.setText(self.action.text())
+                self.label.setEnabled(self.action.isEnabled())
+                self._apply_palette()
+            except RuntimeError:
+                return
         finally:
             self._syncing = False
 

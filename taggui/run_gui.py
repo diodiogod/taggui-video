@@ -9,6 +9,10 @@ import threading
 import faulthandler
 from datetime import datetime
 
+CRASH_LOG_PATH = os.path.abspath('taggui_crash.log')
+FATAL_LOG_PATH = os.path.abspath('taggui_fatal.log')
+IMPORT_CRASH_LOG_PATH = os.path.abspath('taggui_import_crash.log')
+
 try:
     from version import APP_DISPLAY_NAME, APP_NAME, __version__
 except ImportError:
@@ -39,8 +43,16 @@ try:
     from utils.settings import settings
     from widgets.main_window import MainWindow
 except Exception as e:
-    with open('taggui_import_crash.log', 'w') as f:
-        f.write(str(e) + "\n" + traceback.format_exc())
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    import_details = str(e) + "\n" + traceback.format_exc()
+    with open(IMPORT_CRASH_LOG_PATH, 'w', encoding='utf-8') as f:
+        f.write(import_details)
+    with open(CRASH_LOG_PATH, 'a', encoding='utf-8') as f:
+        f.write("\n" + "=" * 80 + "\n")
+        f.write(f"{ts} | IMPORT EXCEPTION\n")
+        f.write("=" * 80 + "\n")
+        f.write(import_details)
+        f.write("\n")
     sys.exit(1)
 
 
@@ -54,8 +66,6 @@ def qt_message_handler(msg_type, msg_context, msg_string):
 
 qInstallMessageHandler(qt_message_handler)
 
-CRASH_LOG_PATH = os.path.abspath('taggui_crash.log')
-FATAL_LOG_PATH = os.path.abspath('taggui_fatal.log')
 _fatal_log_handle = None
 ENABLE_FATAL_CRASH_DUMPS = os.getenv('TAGGUI_ENABLE_FAULTHANDLER', '0') == '1'
 

@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.53] - 2026-04-09
+
+### Added
+
+- Refine captioning and tag panel UX
+- Add a more compact All Tags panel layout with cleaner controls and count display
+- Add Ctrl+wheel zooming for the All Tags list so text can be resized live
+- Show filtered versus total tag counts only when they differ
+- Make Clear Image List Filter contextual instead of always taking panel space
+
+### Fixed
+
+- Improve startup crash logging so failures are easier to diagnose
+- Fix app shutdown so the window and terminal close cleanly after saving layout and selection
 ## [1.0.52] - 2026-04-09
 
 ### Added

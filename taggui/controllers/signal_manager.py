@@ -318,6 +318,8 @@ class SignalManager:
 
         all_tags_editor.clear_filter_button.clicked.connect(
             image_list.filter_line_edit.clear)
+        image_list.filter_line_edit.textChanged.connect(
+            all_tags_editor.update_clear_filter_button_visibility)
         tag_counter_model.tags_renaming_requested.connect(
             image_list_model.rename_tags)
         tag_counter_model.tags_renaming_requested.connect(
@@ -333,6 +335,8 @@ class SignalManager:
         all_tags_editor.visibilityChanged.connect(
             lambda: menu_manager.toggle_all_tags_editor_action.setChecked(
                 all_tags_editor.isVisible()))
+        all_tags_editor.update_clear_filter_button_visibility(
+            image_list.filter_line_edit.text())
 
     def connect_auto_captioner_signals(self):
         """Connect auto captioner-related signals."""
