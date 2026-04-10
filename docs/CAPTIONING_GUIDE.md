@@ -25,7 +25,7 @@ Current code indicates support for:
 GPU use requires compatible hardware and model support, but CPU generation is also supported for some workflows.
 
 > [!NOTE]
-> Video captioning behavior depends on the selected model. Standard models (like Florence-2 or LLaVA) are frame-based and caption a single representative still frame per video (preferring the saved loop-start marker). However, video-native models (like Qwen-VL) process the entire video timeline continuously, extracting multiple frames based on your Advanced Settings (`Video FPS` and `Max video frames`) to build a comprehensive temporal understanding of the clip.
+> Video captioning behavior depends on the selected model. Standard models (like Florence-2 or LLaVA) are frame-based and caption a single representative still frame per video (preferring the saved loop-start marker). Video-native models such as Qwen-VL and Gemma 4 keep the input as a real video path and let the Transformers backend sample across the timeline using your `Video FPS` and `Max video frames` settings. If `Max video frames` is set to `0`, TagGUI does not apply an extra frame cap and lets the backend decide automatically.
 
 ## Basic Workflow
 
@@ -144,16 +144,32 @@ TagGUI includes a broad set of captioning backends, including examples like:
 - CogVLM2
 - Florence-2
 - Florence-2 PromptGen
+- Gemma 4
 - JoyCaption
 - Kosmos-2
 - LLaVA variants
 - Moondream
 - Phi-3 Vision
-- Qwen-VL (Qwen2.5-VL, Qwen3.5-VL natively supporting temporal video)
+- Qwen-VL (`Qwen2.5-VL`, `Qwen3.5-VL`) with native temporal video support
 - WD Tagger
 - remote generation path
 
-Exact behavior and supported prompt controls vary by model.
+Broadly, the current model families behave like this:
+
+- Frame-based image-captioning models:
+  Florence-2, LLaVA, CogVLM, Moondream, Phi-3 Vision, and similar image-first models caption one representative video frame rather than the full timeline.
+- Video-native local models:
+  Qwen-VL and Gemma 4 keep the input as a real video and use `Video FPS` plus `Max video frames` to guide native timeline sampling.
+- Remote generation:
+  the remote backend extracts frames inside TagGUI and sends them as an ordered sequence of images to the API endpoint.
+- Tagging-focused models:
+  WD Tagger models generate tag-style outputs instead of prose captions.
+
+Other useful notes:
+
+- `Max video frames = 0` means automatic backend-controlled sampling instead of a hard TagGUI cap.
+- The Auto-Captioner includes a small unload control beside the model selector so you can free a cached local model before switching to another one.
+- Exact prompt handling, reasoning controls, and generation constraints still vary by model family.
 
 ## Practical Use Cases
 
