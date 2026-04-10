@@ -186,7 +186,6 @@ Captioning in TagGUI Video 1M is useful for:
 - Caption generation may take time on first use, especially when models need to be loaded or downloaded.
 - Prompt quality still matters. Auto-captioning works best when followed by human review for important datasets.
 - Different models expose different strengths: some are better at descriptive captions, others are better at tag-style outputs.
-- A future model-specific reference page may be useful if you want to document recommended models for different tasks.
 
 ## Video Walkthrough
 
