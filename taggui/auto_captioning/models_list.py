@@ -2,6 +2,7 @@ from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.models.cogvlm import Cogvlm
 from auto_captioning.models.cogvlm2 import Cogvlm2
 from auto_captioning.models.florence_2 import Florence2, Florence2Promptgen
+from auto_captioning.models.gemma_4 import Gemma4
 from auto_captioning.models.joycaption import Joycaption
 from auto_captioning.models.kosmos_2 import Kosmos2
 from auto_captioning.models.llava_1_point_5 import Llava1Point5
@@ -31,6 +32,10 @@ MODELS = [
     'Qwen/Qwen3.5-4B',
     'Qwen/Qwen3.5-9B',
     'huihui-ai/Huihui-Qwen3.5-9B-abliterated',  # uncensored abliterated variant
+    'google/gemma-4-E2B-it',
+    'google/gemma-4-E4B-it',
+    'google/gemma-4-26B-A4B-it',
+    'google/gemma-4-31B-it',
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
     'THUDM/cogvlm-chat-hf',
     'THUDM/cogvlm2-llama3-chat-19B-int4',
@@ -87,6 +92,8 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
     if has_qwen_vl:
         if 'qwen2.5-vl' in lowercase_model_id or 'qwen3.5' in lowercase_model_id:
             return QwenVL
+    if 'gemma-4' in lowercase_model_id:
+        return Gemma4
     if 'cogvlm2' in lowercase_model_id:
         return Cogvlm2
     if 'cogvlm' in lowercase_model_id:

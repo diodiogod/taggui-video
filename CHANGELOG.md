@@ -5,6 +5,15 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-10
+
+### Added
+
+- Add Gemma 4 local captioning and model unload controls
+- Add support for the Gemma 4 multimodal model family in auto-captioning
+- Enable Gemma image and native video captioning from the model picker
+- Let Max video frames use 0 as automatic backend-controlled sampling
+- Add a compact unload control beside the model selector for switching local models
 ## [1.0.55] - 2026-04-09
 
 ### Added

@@ -1,3 +1,4 @@
+import gc
 import sys
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     SettingsPlainTextEdit)
 from utils.utils import pluralize
 from widgets.image_list import ImageList
+import torch
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -194,7 +196,8 @@ class CaptionSettingsForm:
         'max_new_tokens': 4096,
     }
 
-    def __init__(self, *, use_compact_style: bool = False):
+    def __init__(self, *, use_compact_style: bool = False,
+                 unload_model_callback=None):
         try:
             import bitsandbytes  # noqa: F401
             self.is_bitsandbytes_available = True
@@ -214,11 +217,45 @@ class CaptionSettingsForm:
         self.prompting_tab = None
         self.advanced_tab = None
         self.wd_tagger_tab = None
+        self.unload_model_callback = unload_model_callback
 
         self.model_combo_box = FocusedScrollSettingsComboBox(key='model_id')
         self.model_combo_box.setEditable(True)
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
+        self.unload_model_button = QPushButton('X')
+        self.unload_model_button.setToolTip(
+            'Unload the currently cached local model and free its memory.\n'
+            'Useful when testing different local models.'
+        )
+        self.unload_model_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.unload_model_button.setFlat(True)
+        self.unload_model_button.setFixedSize(16, 16)
+        self.unload_model_button.setStyleSheet(
+            'QPushButton {'
+            '  background: transparent;'
+            '  border: none;'
+            '  border-radius: 8px;'
+            '  padding: 0px;'
+            '  margin: 0px;'
+            '  color: #9ca3af;'
+            '  font-size: 11px;'
+            '  font-weight: 700;'
+            '}'
+            'QPushButton:hover {'
+            '  background: rgba(156, 163, 175, 0.16);'
+            '  color: #f3f4f6;'
+            '}'
+            'QPushButton:pressed {'
+            '  background: rgba(156, 163, 175, 0.24);'
+            '  color: #ffffff;'
+            '}'
+            'QPushButton:disabled {'
+            '  color: #6b7280;'
+            '}'
+        )
+        if callable(self.unload_model_callback):
+            self.unload_model_button.clicked.connect(self.unload_model_callback)
 
         field_history = get_field_history()
         history_endpoints = field_history.get_values('remote_address')
@@ -254,10 +291,11 @@ class CaptionSettingsForm:
             'request size and API cost. 1.0 fps is a good default.\n'
             'Only applies to video files.')
         self.video_max_frames_spin_box = FocusedScrollSettingsSpinBox(
-            key='video_max_frames', default=16, minimum=1, maximum=64)
+            key='video_max_frames', default=16, minimum=0, maximum=999)
         self.video_max_frames_spin_box.setToolTip(
-            'Maximum number of frames sent to the API for video files.\n'
+            'Maximum number of frames sampled from video files.\n'
             'Acts as a cap regardless of fps and video length.\n'
+            'Set to 0 to use automatic/native backend behavior with no extra cap.\n'
             'Set to 1 to caption only a single frame (fastest, no temporal analysis).\n'
             'Higher values give richer descriptions but cost more tokens.')
         self.disable_thinking_label_text = 'Disable reasoning (faster)'
@@ -638,13 +676,16 @@ class CaptionSettingsForm:
 
     def _get_generation_defaults_for_current_model(self) -> dict:
         lowercase_id = self.model_combo_box.currentText().lower()
-        if 'qwen2.5-vl' in lowercase_id or 'qwen3.5' in lowercase_id:
+        if ('qwen2.5-vl' in lowercase_id or 'qwen3.5' in lowercase_id
+                or 'gemma-4' in lowercase_id):
             return self.QWEN_GENERATION_DEFAULTS
         return self.GENERATION_DEFAULTS
 
     def _apply_model_suggested_generation_defaults(self, model_id: str):
         lowercase_id = str(model_id or '').lower()
-        if 'qwen2.5-vl' not in lowercase_id and 'qwen3.5' not in lowercase_id:
+        if ('qwen2.5-vl' not in lowercase_id
+                and 'qwen3.5' not in lowercase_id
+                and 'gemma-4' not in lowercase_id):
             return
 
         current_max_new_tokens = self.max_new_token_count_spin_box.value()
@@ -678,12 +719,34 @@ class CaptionSettingsForm:
             return child
         raise RuntimeError('Expected toggle row to contain a checkbox')
 
+    def _make_model_selector_row(self) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.model_combo_box.setMinimumWidth(0)
+        self.model_combo_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.unload_model_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(self.model_combo_box, 1)
+        layout.addWidget(self.unload_model_button, 0)
+        return container
+
+    def set_unload_button_state(self, *, visible: bool, enabled: bool):
+        self.unload_model_button.setVisible(visible)
+        self.unload_model_button.setEnabled(enabled)
+
     def _build_classic_basic_form(self) -> QFormLayout:
         container = QWidget()
         form = self._make_form(wrap_all_rows=True)
         container.setLayout(form)
         self.basic_settings_form = form
-        form.addRow('Model', self.model_combo_box)
+        form.addRow('Model', self._make_model_selector_row())
         form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
@@ -708,7 +771,7 @@ class CaptionSettingsForm:
         form = self._make_form(wrap_all_rows=True)
         container.setLayout(form)
         self.basic_settings_form = form
-        form.addRow('Model', self.model_combo_box)
+        form.addRow('Model', self._make_model_selector_row())
         form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
@@ -1113,6 +1176,7 @@ class CaptionSettingsForm:
         lowercase_id = model_id.lower()
         is_qwen_model = ('qwen2.5-vl' in lowercase_id
                          or 'qwen3.5' in lowercase_id)
+        is_gemma_model = 'gemma-4' in lowercase_id
 
         self.wd_tagger_settings_form_container.setVisible(is_wd_tagger_model)
 
@@ -1163,12 +1227,20 @@ class CaptionSettingsForm:
             self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_max_tokens_spin_box, is_remote_model)
             self.basic_settings_form.setRowVisible(
-                self.video_fps_spin_box, is_remote_model or is_qwen_model)
+                self.video_fps_spin_box,
+                is_remote_model or is_qwen_model or is_gemma_model)
             self.basic_settings_form.setRowVisible(
-                self.video_max_frames_spin_box, is_remote_model or is_qwen_model)
+                self.video_max_frames_spin_box,
+                is_remote_model or is_qwen_model or is_gemma_model)
         if self.basic_settings_form is not None:
             self.basic_settings_form.setRowVisible(
-                self.disable_thinking_container, is_qwen_model)
+                self.disable_thinking_container,
+                is_qwen_model or is_gemma_model)
+
+        self.set_unload_button_state(
+            visible=is_local_model,
+            enabled=is_local_model,
+        )
 
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
@@ -1361,7 +1433,8 @@ class AutoCaptioner(QDockWidget):
         self.caption_settings_form = CaptionSettingsForm(
             use_compact_style=(
                 normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT
-            )
+            ),
+            unload_model_callback=self.unload_loaded_model,
         )
         if normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT:
             self.compact_caption_settings_form = self.caption_settings_form
@@ -1430,6 +1503,7 @@ class AutoCaptioner(QDockWidget):
             self._apply_layout_style(root_page, normalized)
         self.layout_mode = normalized
         self._update_primary_button_text()
+        self._update_unload_button_state()
         self.updateGeometry()
         if persist:
             persist_auto_captioner_layout_mode(normalized)
@@ -1699,6 +1773,24 @@ class AutoCaptioner(QDockWidget):
         else:
             self.start_cancel_button.setText(compact_text)
 
+    def _update_unload_button_state(self):
+        forms = [
+            self.caption_settings_form,
+            self.classic_caption_settings_form,
+            self.compact_caption_settings_form,
+        ]
+        loaded_model_present = self.model is not None
+        for form in forms:
+            if form is None:
+                continue
+            model_id = str(form.model_combo_box.currentText() or '')
+            model_class = get_model_class(model_id)
+            is_local_model = model_class not in (WdTagger, RemoteGen)
+            form.set_unload_button_state(
+                visible=is_local_model,
+                enabled=is_local_model and loaded_model_present and not self.is_captioning,
+            )
+
     @Slot(str)
     def update_console_text_edit(self, text: str):
         # '\x1b[A' is the ANSI escape sequence for moving the cursor up.
@@ -1805,6 +1897,7 @@ class AutoCaptioner(QDockWidget):
             show_alert_when_finished = (confirmation_dialog
                                         .show_alert_check_box.isChecked())
         self.set_is_captioning(True)
+        self._update_unload_button_state()
         caption_settings = self.caption_settings_form.get_caption_settings()
         if caption_settings['caption_position'] != CaptionPosition.DO_NOT_ADD:
             self.image_list_model.add_to_undo_stack(
@@ -1835,6 +1928,7 @@ class AutoCaptioner(QDockWidget):
             self.progress_bar.setValue)
         self.captioning_thread.finished.connect(
             lambda: self.set_is_captioning(False))
+        self.captioning_thread.finished.connect(self._update_unload_button_state)
         self.captioning_thread.finished.connect(restore_stdout_and_stderr)
         self.captioning_thread.finished.connect(self.progress_bar.hide)
         self.captioning_thread.finished.connect(
@@ -1846,3 +1940,50 @@ class AutoCaptioner(QDockWidget):
         sys.stdout = self.captioning_thread
         sys.stderr = self.captioning_thread
         self.captioning_thread.start()
+
+    @Slot()
+    def unload_loaded_model(self):
+        if self.is_captioning:
+            return
+        thread = self.captioning_thread
+        thread_model_wrapper = getattr(thread, 'model', None) if thread is not None else None
+        nested_processor = getattr(thread_model_wrapper, 'processor', None)
+        nested_model = getattr(thread_model_wrapper, 'model', None)
+        processor = self.processor
+        model = self.model
+        self.processor = None
+        self.model = None
+        self.model_id = None
+        self.model_device_type = None
+        self.is_model_loaded_in_4_bit = None
+        if thread_model_wrapper is not None:
+            try:
+                thread_model_wrapper.processor = None
+                thread_model_wrapper.model = None
+            except Exception:
+                pass
+        if thread is not None:
+            try:
+                thread.model = None
+            except Exception:
+                pass
+            self.captioning_thread = None
+        if nested_processor is not None:
+            del nested_processor
+        if nested_model is not None:
+            del nested_model
+        if thread_model_wrapper is not None:
+            del thread_model_wrapper
+        if thread is not None:
+            del thread
+        if processor is not None:
+            del processor
+        if model is not None:
+            del model
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        self._update_unload_button_state()

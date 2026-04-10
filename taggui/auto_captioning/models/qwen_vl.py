@@ -104,16 +104,15 @@ class QwenVL(AutoCaptioningModel):
         
         if image.is_video:
             prompt = image_prompt or self.get_default_video_prompt()
-            content = [
-                {
-                    'type': 'video',
-                    'video': str(image.path),
-                    'fps': video_fps,
-                    'max_frames': video_max_frames,
-                    'max_pixels': 360 * 640,
-                },
-                {'type': 'text', 'text': prompt},
-            ]
+            video_content = {
+                'type': 'video',
+                'video': str(image.path),
+                'fps': video_fps,
+                'max_pixels': 360 * 640,
+            }
+            if video_max_frames > 0:
+                video_content['max_frames'] = video_max_frames
+            content = [video_content, {'type': 'text', 'text': prompt}]
         else:
             pil_image = self.load_image(image, crop)
             prompt = image_prompt or self.get_default_prompt()

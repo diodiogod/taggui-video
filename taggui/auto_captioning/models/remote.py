@@ -131,7 +131,9 @@ class RemoteGen(AutoCaptioningModel):
                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
                 duration_s = total_frames / video_fps if video_fps > 0 else 0
 
-                desired = min(max_frames, max(1, math.ceil(duration_s * fps)))
+                desired = max(1, math.ceil(duration_s * fps))
+                if max_frames > 0:
+                    desired = min(max_frames, desired)
                 if desired <= 1 or total_frames <= 1:
                     frame_indices = [0]
                 else:
