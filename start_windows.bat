@@ -37,6 +37,7 @@ set ENABLE_CRASH_DIAG=0
 set CUDA_OVERRIDE=
 set TORCH_VERSION=2.7.1
 set TORCHVISION_VERSION=0.22.1
+set NVIDIA_SMI_CMD=
 
 echo Logging to %LOGFILE%
 echo.
@@ -67,6 +68,8 @@ for %%A in (%*) do (
     set ARG=%%~A
     if /I "!ARG:~0,7!"=="--cuda=" set CUDA_OVERRIDE=!ARG:~7!
 )
+
+call :resolve_nvidia_smi
 
 :: Check if git repo exists
 if not exist .git goto no_git
@@ -225,18 +228,18 @@ if %SHOULD_INSTALL% EQU 1 (
             echo Using manual CUDA override: !CUDA_VERSION!
         ) else (
             echo Detecting CUDA version...
-            nvidia-smi >nul 2>&1
-            if !ERRORLEVEL! EQU 0 (
-                for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2^>nul`) do (
+            if defined NVIDIA_SMI_CMD !NVIDIA_SMI_CMD! >nul 2>&1
+            if defined NVIDIA_SMI_CMD if !ERRORLEVEL! EQU 0 (
+                for /f "usebackq tokens=1 delims=, " %%i in (`!NVIDIA_SMI_CMD! --query-gpu=driver_version --format=csv,noheader,nounits 2^>nul`) do (
                     if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
                 )
                 if not defined DRIVER_VERSION (
-                    for /f "usebackq tokens=1 delims=, " %%i in (`nvidia-smi --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
+                    for /f "usebackq tokens=1 delims=, " %%i in (`!NVIDIA_SMI_CMD! --query-gpu=driver_version --format=csv,noheader 2^>nul`) do (
                         if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
                     )
                 )
                 if not defined DRIVER_VERSION (
-                    for /f "tokens=6 delims= " %%i in ('nvidia-smi 2^>nul ^| findstr /C:"Driver Version"') do (
+                    for /f "tokens=6 delims= " %%i in ('!NVIDIA_SMI_CMD! 2^>nul ^| findstr /C:"Driver Version"') do (
                         if not defined DRIVER_VERSION set "DRIVER_VERSION=%%i"
                     )
                 )
@@ -268,9 +271,12 @@ if %SHOULD_INSTALL% EQU 1 (
                         )
                     )
                 )
-            ) else (
+            ) else if defined NVIDIA_SMI_CMD (
                 echo No NVIDIA GPU detected, installing CPU-only PyTorch
                 echo If this machine does have an NVIDIA GPU, rerun with --cuda=cu128 ^(or cu126 / cu118^)
+            ) else (
+                echo No NVIDIA GPU detected because nvidia-smi was not found
+                echo If NVIDIA drivers are installed, rerun with --cuda=cu128 ^(or cu126 / cu118^)
             )
         )
 
@@ -377,3 +383,18 @@ if not "%EXITCODE%"=="0" (
     pause
 )
 exit /b %EXITCODE%
+
+:resolve_nvidia_smi
+for /f "delims=" %%P in ('where nvidia-smi.exe 2^>nul') do (
+    if not defined NVIDIA_SMI_CMD set "NVIDIA_SMI_CMD=""%%~fP"""
+)
+if not defined NVIDIA_SMI_CMD if exist "%ProgramFiles%\NVIDIA Corporation\NVSMI\nvidia-smi.exe" (
+    set "NVIDIA_SMI_CMD=""%ProgramFiles%\NVIDIA Corporation\NVSMI\nvidia-smi.exe"""
+)
+if not defined NVIDIA_SMI_CMD if defined ProgramW6432 if exist "%ProgramW6432%\NVIDIA Corporation\NVSMI\nvidia-smi.exe" (
+    set "NVIDIA_SMI_CMD=""%ProgramW6432%\NVIDIA Corporation\NVSMI\nvidia-smi.exe"""
+)
+if not defined NVIDIA_SMI_CMD if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\NVIDIA Corporation\NVSMI\nvidia-smi.exe" (
+    set "NVIDIA_SMI_CMD=""%ProgramFiles(x86)%\NVIDIA Corporation\NVSMI\nvidia-smi.exe"""
+)
+exit /b 0

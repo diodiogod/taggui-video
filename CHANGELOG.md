@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-04-13
+
+### Added
+
+- Clarify which models support full video captions instead of single-frame captions
+- Keep the manual cu128 override path available when auto-detection still needs help
+
+### Changed
+
+- Improve captioning guidance and Windows GPU setup
+- Improve Windows Torch detection when NVIDIA drivers are installed but nvidia-smi is not on PATH
 ## [1.1.0] - 2026-04-10
 
 ### Added
