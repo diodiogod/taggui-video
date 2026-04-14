@@ -179,6 +179,22 @@ class InlineEditorResizeGrip(QFrame):
         painter.drawLine(w - 13, h - 3, w - 3, h - 13)
 
 
+class ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def __init__(self, text: str = '', parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.rect().contains(event.position().toPoint())):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class CaptionSettingsForm:
     GENERATION_DEFAULTS = {
         'min_new_tokens': 1,
@@ -213,6 +229,8 @@ class CaptionSettingsForm:
         self.basic_settings_form = None
         self.advanced_settings_form_container = None
         self.wd_tagger_settings_form_container = None
+        self.compact_video_controls_row = None
+        self.compact_device_gpu_row = None
         self.tabs_widget = None
         self.general_tab = None
         self.prompting_tab = None
@@ -777,18 +795,20 @@ class CaptionSettingsForm:
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
         form.addRow('Max output tokens', self.api_max_tokens_spin_box)
-        form.addRow(self._make_dual_field_row(
+        self.compact_video_controls_row = self._make_dual_field_row(
             'Video FPS',
             self.video_fps_spin_box,
             'Max video frames',
             self.video_max_frames_spin_box,
-        ))
-        form.addRow(self._make_dual_field_row(
+        )
+        form.addRow(self.compact_video_controls_row)
+        self.compact_device_gpu_row = self._make_dual_field_row(
             'Device',
             self.device_combo_box,
             'GPU index',
             self.gpu_index_spin_box,
-        ))
+        )
+        form.addRow(self.compact_device_gpu_row)
         form.addRow(self.load_in_4_bit_container)
         form.addRow(self.disable_thinking_container)
         return container
@@ -1204,11 +1224,8 @@ class CaptionSettingsForm:
             for widget in [self.load_in_4_bit_container,
                            self.advanced_settings_form_container]:
                 widget.setVisible(is_local_model)
-            if self.basic_settings_form is not None:
-                self.basic_settings_form.setRowVisible(
-                    self.device_combo_box, is_local_model)
-                self.basic_settings_form.setRowVisible(
-                    self.gpu_index_spin_box, is_local_model)
+            if self.compact_device_gpu_row is not None:
+                self.compact_device_gpu_row.setVisible(is_local_model)
         else:
             for widget in [self.device_label, self.device_combo_box,
                            self.load_in_4_bit_container,
@@ -1227,12 +1244,18 @@ class CaptionSettingsForm:
             self.basic_settings_form.setRowVisible(self.api_key_line_edit, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_max_tokens_spin_box, is_remote_model)
-            self.basic_settings_form.setRowVisible(
-                self.video_fps_spin_box,
-                is_remote_model or is_qwen_model or is_gemma_model)
-            self.basic_settings_form.setRowVisible(
-                self.video_max_frames_spin_box,
-                is_remote_model or is_qwen_model or is_gemma_model)
+            if self.use_compact_style:
+                if self.compact_video_controls_row is not None:
+                    self.compact_video_controls_row.setVisible(
+                        is_remote_model or is_qwen_model or is_gemma_model
+                    )
+            else:
+                self.basic_settings_form.setRowVisible(
+                    self.video_fps_spin_box,
+                    is_remote_model or is_qwen_model or is_gemma_model)
+                self.basic_settings_form.setRowVisible(
+                    self.video_max_frames_spin_box,
+                    is_remote_model or is_qwen_model or is_gemma_model)
         if self.basic_settings_form is not None:
             self.basic_settings_form.setRowVisible(
                 self.disable_thinking_container,
@@ -1361,11 +1384,41 @@ class AutoCaptioner(QDockWidget):
         self.status_label = QLabel()
         self.status_label.setObjectName('autoCaptionerStatus')
         self.status_label.hide()
+        self.console_panel = QWidget()
+        self.console_panel.setObjectName('autoCaptionerConsolePanel')
+        self.console_panel.hide()
+        self.console_collapsed = False
+        self.console_label = ClickableLabel('Console')
+        self.console_label.setObjectName('autoCaptionerConsoleLabel')
+        self.console_label.setToolTip('Click to collapse or expand the console.')
+        self.console_label.clicked.connect(self.toggle_console_panel)
         self.console_text_edit = QPlainTextEdit()
         self.console_text_edit.setObjectName('autoCaptionerConsole')
         set_text_edit_height(self.console_text_edit, 4)
         self.console_text_edit.setReadOnly(True)
         self.console_text_edit.hide()
+        self.console_text_edit.setMinimumHeight(72)
+        self.console_text_edit.setMaximumHeight(420)
+        self.console_text_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.console_text_edit.setFixedHeight(96)
+        self.console_text_edit._inline_resize_grip = InlineEditorResizeGrip(
+            self.console_text_edit,
+            minimum_height=72,
+            maximum_height=420,
+        )
+        console_layout = QVBoxLayout(self.console_panel)
+        console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(4)
+        console_header_layout = QHBoxLayout()
+        console_header_layout.setContentsMargins(0, 0, 0, 0)
+        console_header_layout.setSpacing(6)
+        console_header_layout.addWidget(self.console_label)
+        console_header_layout.addStretch(1)
+        console_layout.addLayout(console_header_layout)
+        console_layout.addWidget(self.console_text_edit)
         self.captioning_status_timer = QTimer(self)
         self.captioning_status_timer.setInterval(500)
         self.captioning_status_timer.timeout.connect(
@@ -1495,7 +1548,7 @@ class AutoCaptioner(QDockWidget):
             root_layout.addWidget(self.start_cancel_button)
             root_layout.addWidget(self.progress_bar)
             root_layout.addWidget(self.status_label)
-            root_layout.addWidget(self.console_text_edit)
+            root_layout.addWidget(self.console_panel)
             root_layout.addWidget(compact_content_scroll, 1)
             self.mode_layout.addWidget(root_page)
             self._apply_layout_style(root_page, normalized)
@@ -1505,7 +1558,7 @@ class AutoCaptioner(QDockWidget):
             root_layout.addWidget(self.start_cancel_button)
             root_layout.addWidget(self.progress_bar)
             root_layout.addWidget(self.status_label)
-            root_layout.addWidget(self.console_text_edit)
+            root_layout.addWidget(self.console_panel)
             root_layout.addWidget(settings_page)
             root_layout.addStretch(1)
             self.scroll_area.takeWidget()
@@ -1589,6 +1642,18 @@ class AutoCaptioner(QDockWidget):
             '  color: #cbd5e1;'
             '  font-size: 11px;'
             '  padding: 0px 2px 2px 2px;'
+            '}'
+            'QWidget#autoCaptionerConsolePanel {'
+            '  background: transparent;'
+            '}'
+            'QLabel#autoCaptionerConsoleLabel {'
+            '  color: #d1d5db;'
+            '  font-size: 11px;'
+            '  font-weight: 600;'
+            '  padding: 0px 2px;'
+            '}'
+            'QLabel#autoCaptionerConsoleLabel:hover {'
+            '  color: #f3f4f6;'
             '}'
             'QPlainTextEdit#autoCaptionerConsole {'
             '  background: #1e1e24;'
@@ -2114,6 +2179,21 @@ class AutoCaptioner(QDockWidget):
         self.status_label.setText(' | '.join(status_parts))
         self.status_label.show()
 
+    def _set_console_collapsed(self, collapsed: bool):
+        self.console_collapsed = collapsed
+        self.console_text_edit.setVisible(not collapsed)
+        self.console_label.setToolTip(
+            'Click to expand the console.' if collapsed
+            else 'Click to collapse the console.')
+
+    @Slot()
+    def toggle_console_panel(self):
+        if self.console_panel.isHidden():
+            self.console_panel.show()
+            self._set_console_collapsed(False)
+            return
+        self._set_console_collapsed(not self.console_collapsed)
+
     @Slot(str)
     def update_console_text_edit(self, text: str):
         # '\x1b[A' is the ANSI escape sequence for moving the cursor up.
@@ -2123,7 +2203,9 @@ class AutoCaptioner(QDockWidget):
         text = text.strip()
         if not text:
             return
-        if self.console_text_edit.isHidden():
+        if self.console_panel.isHidden():
+            self.console_panel.show()
+        if not self.console_collapsed and self.console_text_edit.isHidden():
             self.console_text_edit.show()
         if self.replace_last_console_text_edit_block:
             self.replace_last_console_text_edit_block = False
