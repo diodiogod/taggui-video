@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-04-14
+
+### Added
+
+- Add dataset-wide tag deletion tools
+- You can now purge all tags from a dataset with a stronger confirmation flow
+- Right-clicking no longer accidentally applies tag filters during bulk tag management
+
+### Changed
+
+- Large deletions use faster paginated database paths and update the layout immediately
+
+### Removed
+
+- The All Tags view now supports select-all and delete-selected actions for bulk cleanup
 ## [1.1.2] - 2026-04-14
 
 ### Added
