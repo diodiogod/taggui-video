@@ -2,6 +2,7 @@ import gc
 import re
 from contextlib import nullcontext
 from datetime import datetime
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -20,6 +21,12 @@ import auto_captioning.captioning_thread as captioning_thread
 from models.image_list_model import _video_lock
 from utils.enums import CaptionDevice
 from utils.image import Image
+
+
+class CaptionGenerationError(RuntimeError):
+    def __init__(self, message: str, console_output: str | None = None):
+        super().__init__(message)
+        self.console_output = console_output
 
 
 def replace_template_variable(match: re.Match, image: Image, skip_hash: bool) -> str:
@@ -369,6 +376,44 @@ class AutoCaptioningModel:
     def postprocess_generated_text(generated_text: str) -> str:
         return generated_text
 
+    def estimate_output_token_count(self, caption: str) -> int | None:
+        tokenizer = getattr(self, 'tokenizer', None)
+        if tokenizer is None:
+            return None
+        try:
+            token_ids = tokenizer(caption, add_special_tokens=False).input_ids
+        except Exception:
+            return None
+        if isinstance(token_ids, list):
+            if token_ids and isinstance(token_ids[0], list):
+                return len(token_ids[0])
+            return len(token_ids)
+        return None
+
+    @staticmethod
+    def format_console_output(raw_output: str | None,
+                              saved_caption: str | None) -> str:
+        raw_text = (raw_output or '').strip()
+        saved_text = (saved_caption or '').strip()
+        if raw_text and saved_text and raw_text != saved_text:
+            return (
+                f'Raw model output:\n{raw_text}\n\n'
+                f'Saved caption:\n{saved_text}'
+            )
+        return saved_text or raw_text
+
+    @staticmethod
+    def format_incomplete_console_output(raw_output: str | None,
+                                         note: str | None = None) -> str:
+        parts = []
+        raw_text = (raw_output or '').strip()
+        note_text = (note or '').strip()
+        if raw_text:
+            parts.append(f'Partial model output:\n{raw_text}')
+        if note_text:
+            parts.append(note_text)
+        return '\n\n'.join(parts).strip()
+
     def get_caption_from_generated_tokens(
             self, generated_token_ids: torch.Tensor, image_prompt: str) -> str:
         generated_text = self.processor.batch_decode(
@@ -398,12 +443,18 @@ class AutoCaptioningModel:
         forced_words_ids = self.get_forced_words_ids()
         additional_generation_parameters = (
             self.get_additional_generation_parameters())
+        generation_start = perf_counter()
         with torch.inference_mode():
             generated_token_ids = generation_model.generate(
                 **model_inputs, bad_words_ids=bad_words_ids,
                 force_words_ids=forced_words_ids, **self.generation_parameters,
                 **additional_generation_parameters)
+        generation_duration = perf_counter() - generation_start
         caption = self.get_caption_from_generated_tokens(generated_token_ids,
                                                          image_prompt)
+        self.thread.record_generation_metrics(
+            self.estimate_output_token_count(caption),
+            generation_duration,
+        )
         console_output_caption = caption
         return caption, console_output_caption

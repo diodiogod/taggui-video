@@ -45,17 +45,59 @@ class ModelThread(QThread):
             'Generating': 'Generating',
             'generating': 'generating'
         }
+        self.batch_started_at: float | None = None
+        self.total_items = 0
+        self.completed_items = 0
+        self.current_item_index: int | None = None
+        self.current_item_name: str | None = None
+        self.current_item_started_at: float | None = None
+        self.current_stage = 'idle'
+        self.total_completed_seconds = 0.0
+        self.last_item_duration: float | None = None
+        self.last_generation_duration: float | None = None
+        self.last_generation_token_count: int | None = None
+        self.last_generation_tokens_per_second: float | None = None
+
+    def reset_progress_state(self):
+        self.batch_started_at = None
+        self.total_items = 0
+        self.completed_items = 0
+        self.current_item_index = None
+        self.current_item_name = None
+        self.current_item_started_at = None
+        self.current_stage = 'idle'
+        self.total_completed_seconds = 0.0
+        self.last_item_duration = None
+        self.last_generation_duration = None
+        self.last_generation_token_count = None
+        self.last_generation_tokens_per_second = None
+
+    def record_generation_metrics(self, token_count: int | None,
+                                  generation_seconds: float | None):
+        self.last_generation_duration = generation_seconds
+        self.last_generation_token_count = token_count
+        if (token_count is not None and generation_seconds is not None
+                and generation_seconds > 0):
+            self.last_generation_tokens_per_second = (
+                float(token_count) / float(generation_seconds))
+        else:
+            self.last_generation_tokens_per_second = None
 
     def run_generating(self):
+        self.reset_progress_state()
+        self.batch_started_at = perf_counter()
+        self.total_items = len(self.selected_image_indices)
+        self.current_stage = 'loading_model'
+        self.clear_console_text_edit_requested.emit()
         self.load_model()
         if self.is_error:
-            self.clear_console_text_edit_requested.emit()
             print(self.error_message)
+            self.current_stage = 'error'
             return
         if self.is_canceled:
             print(f'Canceled {self.text['generating']}.')
+            self.current_stage = 'canceled'
             return
-        self.clear_console_text_edit_requested.emit()
         selected_image_count = len(self.selected_image_indices)
         are_multiple_images_selected = selected_image_count > 1
         generating_start_datetime = datetime.now()
@@ -66,23 +108,47 @@ class ModelThread(QThread):
             start_time = perf_counter()
             if self.is_canceled:
                 print(f'Canceled {self.text['generating']}.')
+                self.current_stage = 'canceled'
                 return
             image: Image = self.image_list_model.data(image_index,
                                                       Qt.ItemDataRole.UserRole)
+            self.current_item_index = i + 1
+            self.current_item_name = image.path.name
+            self.current_item_started_at = start_time
+            self.current_stage = 'preparing_input'
             try:
                 image_prompt, model_inputs = self.get_model_inputs(image)
             except UnidentifiedImageError:
                 print(f'Skipping {image.path.name} because its file format is '
                       'not supported or it is a corrupted image.')
-                continue
-            console_output_caption = self.generate_output(image_index, image,
-                                                          image_prompt, model_inputs)
-            if are_multiple_images_selected:
-                self.progress_bar_update_requested.emit(i + 1)
-            if i == 0 and not are_multiple_images_selected:
-                self.clear_console_text_edit_requested.emit()
-            print(f'{image.path.name} ({perf_counter() - start_time:.1f} s):\n'
-                  f'{console_output_caption}')
+            else:
+                self.current_stage = 'generating'
+                try:
+                    console_output_caption = self.generate_output(
+                        image_index, image, image_prompt, model_inputs)
+                except Exception as exception:
+                    partial_console_output = getattr(
+                        exception, 'console_output', None)
+                    if partial_console_output:
+                        print(
+                            f'{image.path.name} '
+                            f'({perf_counter() - start_time:.1f} s, incomplete):\n'
+                            f'{partial_console_output}'
+                        )
+                    raise
+                print(f'{image.path.name} ({perf_counter() - start_time:.1f} s):\n'
+                      f'{console_output_caption}')
+            finally:
+                item_duration = perf_counter() - start_time
+                self.completed_items = i + 1
+                self.last_item_duration = item_duration
+                self.total_completed_seconds += item_duration
+                if are_multiple_images_selected:
+                    self.progress_bar_update_requested.emit(self.completed_items)
+                self.current_item_name = None
+                self.current_item_started_at = None
+                self.current_item_index = None
+                self.current_stage = 'idle'
         if are_multiple_images_selected:
             generating_end_datetime = datetime.now()
             total_generating_duration = ((generating_end_datetime
@@ -94,6 +160,7 @@ class ModelThread(QThread):
                   f'{format_duration(total_generating_duration)} '
                   f'({average_generating_duration:.1f} s/image) at '
                   f'{generating_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.')
+        self.current_stage = 'finished'
 
     @abstractmethod
     def load_model(self):

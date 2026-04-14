@@ -1,4 +1,5 @@
 import re
+from time import perf_counter
 
 import torch
 
@@ -196,6 +197,7 @@ class Gemma4(AutoCaptioningModel):
 
     def generate_caption(self, model_inputs, image_prompt: str) -> tuple[str, str]:
         gen_params = self.generation_parameters
+        self.tokenizer = self.get_tokenizer()
         gen_kwargs = {
             'max_new_tokens': gen_params.get('max_new_tokens', 256),
             'do_sample': gen_params.get('do_sample', False),
@@ -208,13 +210,20 @@ class Gemma4(AutoCaptioningModel):
             gen_kwargs['top_p'] = gen_params.get('top_p', 1.0)
             gen_kwargs['top_k'] = gen_params.get('top_k', 50)
 
+        generation_start = perf_counter()
         with torch.inference_mode():
             generated_ids = self.model.generate(**model_inputs, **gen_kwargs)
+        generation_duration = perf_counter() - generation_start
 
         generated_ids_trimmed = [
             out_ids[len(in_ids):]
             for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids)
         ]
+        raw_console_output = self.processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0].strip()
 
         raw_response = self.processor.decode(
             generated_ids_trimmed[0],
@@ -248,4 +257,8 @@ class Gemma4(AutoCaptioningModel):
             caption = caption.replace('\n', ' ')
             caption = re.sub(r' +', ' ', caption)
 
-        return caption, caption
+        self.thread.record_generation_metrics(
+            self.estimate_output_token_count(caption),
+            generation_duration,
+        )
+        return caption, self.format_console_output(raw_console_output, caption)

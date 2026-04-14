@@ -1,8 +1,9 @@
 import gc
 import sys
 from pathlib import Path
+from time import perf_counter
 
-from PySide6.QtCore import QModelIndex, Qt, Signal, Slot, QSize, QRect
+from PySide6.QtCore import QModelIndex, Qt, Signal, Slot, QSize, QRect, QTimer
 from PySide6.QtGui import QFontMetrics, QTextCursor, QPainter, QColor, QPen
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
@@ -1354,13 +1355,21 @@ class AutoCaptioner(QDockWidget):
         self.start_cancel_button.setObjectName('autoCaptionerPrimaryButton')
         self.start_cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setFormat('%v / %m images captioned (%p%)')
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat('%v / %m items processed (%p%)')
         self.progress_bar.hide()
+        self.status_label = QLabel()
+        self.status_label.setObjectName('autoCaptionerStatus')
+        self.status_label.hide()
         self.console_text_edit = QPlainTextEdit()
         self.console_text_edit.setObjectName('autoCaptionerConsole')
         set_text_edit_height(self.console_text_edit, 4)
         self.console_text_edit.setReadOnly(True)
         self.console_text_edit.hide()
+        self.captioning_status_timer = QTimer(self)
+        self.captioning_status_timer.setInterval(500)
+        self.captioning_status_timer.timeout.connect(
+            self.refresh_captioning_status)
         self.classic_caption_settings_form = None
         self.compact_caption_settings_form = None
         self.caption_settings_form = None
@@ -1485,6 +1494,7 @@ class AutoCaptioner(QDockWidget):
             compact_content_scroll.setWidget(settings_page)
             root_layout.addWidget(self.start_cancel_button)
             root_layout.addWidget(self.progress_bar)
+            root_layout.addWidget(self.status_label)
             root_layout.addWidget(self.console_text_edit)
             root_layout.addWidget(compact_content_scroll, 1)
             self.mode_layout.addWidget(root_page)
@@ -1494,6 +1504,7 @@ class AutoCaptioner(QDockWidget):
             root_layout = QVBoxLayout(root_page)
             root_layout.addWidget(self.start_cancel_button)
             root_layout.addWidget(self.progress_bar)
+            root_layout.addWidget(self.status_label)
             root_layout.addWidget(self.console_text_edit)
             root_layout.addWidget(settings_page)
             root_layout.addStretch(1)
@@ -1573,6 +1584,11 @@ class AutoCaptioner(QDockWidget):
             'QProgressBar::chunk {'
             '  background-color: #3b82f6;'
             '  border-radius: 3px;'
+            '}'
+            'QLabel#autoCaptionerStatus {'
+            '  color: #cbd5e1;'
+            '  font-size: 11px;'
+            '  padding: 0px 2px 2px 2px;'
             '}'
             'QPlainTextEdit#autoCaptionerConsole {'
             '  background: #1e1e24;'
@@ -1791,6 +1807,184 @@ class AutoCaptioner(QDockWidget):
                 enabled=is_local_model and loaded_model_present and not self.is_captioning,
             )
 
+    @staticmethod
+    def _format_short_duration(seconds: float | None) -> str:
+        total_seconds = max(0, int(seconds or 0))
+        minutes, secs = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f'{hours}:{minutes:02d}:{secs:02d}'
+        return f'{minutes}:{secs:02d}'
+
+    @staticmethod
+    def _format_item_rate(rate: float | None) -> str | None:
+        if rate is None or rate <= 0:
+            return None
+        if rate >= 1:
+            return f'{rate:.2f} img/s'
+        if rate >= 0.1:
+            return f'{rate:.2f} img/s'
+        return f'{rate:.3f} img/s'
+
+    def _set_progress_bar_mode(self, total_items: int):
+        if total_items > 1:
+            self.progress_bar.setRange(0, total_items)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat('%v / %m items processed (%p%)')
+        else:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setFormat('Captioning...')
+        self.progress_bar.show()
+
+    def _current_captioning_thread(self):
+        thread = self.captioning_thread
+        if thread is None:
+            return None
+        if _shiboken_is_valid is not None and not _shiboken_is_valid(thread):
+            return None
+        return thread
+
+    def _compose_live_status(self) -> tuple[str, str]:
+        thread = self._current_captioning_thread()
+        if thread is None:
+            return '', ''
+
+        now = perf_counter()
+        total_items = max(0, int(getattr(thread, 'total_items', 0) or 0))
+        completed_items = max(0, int(getattr(thread, 'completed_items', 0) or 0))
+        batch_started_at = getattr(thread, 'batch_started_at', None)
+        batch_elapsed = (
+            max(0.0, now - batch_started_at)
+            if isinstance(batch_started_at, (int, float)) else 0.0
+        )
+        current_item_name = getattr(thread, 'current_item_name', None)
+        current_item_started_at = getattr(thread, 'current_item_started_at', None)
+        current_item_elapsed = (
+            max(0.0, now - current_item_started_at)
+            if isinstance(current_item_started_at, (int, float)) else None
+        )
+        total_completed_seconds = float(
+            getattr(thread, 'total_completed_seconds', 0.0) or 0.0
+        )
+        average_item_seconds = (
+            total_completed_seconds / completed_items
+            if completed_items > 0 and total_completed_seconds > 0 else None
+        )
+        item_rate = (
+            completed_items / total_completed_seconds
+            if completed_items > 0 and total_completed_seconds > 0 else None
+        )
+        eta_seconds = None
+        if average_item_seconds is not None and total_items > completed_items:
+            eta_seconds = average_item_seconds * (total_items - completed_items)
+
+        stage = getattr(thread, 'current_stage', 'idle') or 'idle'
+        if stage == 'loading_model':
+            phase_text = 'Loading model'
+        elif stage == 'preparing_input':
+            phase_text = 'Preparing input'
+        elif stage == 'generating':
+            phase_text = 'Generating caption'
+        elif stage == 'canceled':
+            phase_text = 'Captioning canceled'
+        elif stage == 'error':
+            phase_text = 'Captioning failed'
+        elif stage == 'finished':
+            phase_text = 'Captioning finished'
+        else:
+            phase_text = 'Captioning'
+
+        status_parts = [phase_text]
+        if total_items > 0:
+            status_parts.append(f'{completed_items}/{total_items}')
+        status_parts.append(f'elapsed {self._format_short_duration(batch_elapsed)}')
+        if current_item_name:
+            if current_item_elapsed is not None:
+                status_parts.append(
+                    f'current {current_item_name} ({self._format_short_duration(current_item_elapsed)})'
+                )
+            else:
+                status_parts.append(f'current {current_item_name}')
+        rate_text = self._format_item_rate(item_rate)
+        if rate_text:
+            status_parts.append(rate_text)
+        if eta_seconds is not None:
+            status_parts.append(f'ETA {self._format_short_duration(eta_seconds)}')
+        last_tps = getattr(thread, 'last_generation_tokens_per_second', None)
+        last_generation_duration = getattr(thread, 'last_generation_duration', None)
+        if isinstance(last_tps, (int, float)) and last_tps > 0:
+            status_parts.append(f'last {float(last_tps):.1f} tok/s')
+        elif isinstance(last_generation_duration, (int, float)) and last_generation_duration > 0:
+            status_parts.append(f'last {float(last_generation_duration):.1f}s')
+
+        progress_parts = []
+        if total_items > 1:
+            progress_parts.append(f'{completed_items} / {total_items} items processed')
+            if eta_seconds is not None:
+                progress_parts.append(f'ETA {self._format_short_duration(eta_seconds)}')
+            if rate_text:
+                progress_parts.append(rate_text)
+        elif current_item_name:
+            progress_parts.append(f'{phase_text}: {current_item_name}')
+        else:
+            progress_parts.append(phase_text)
+        return ' | '.join(status_parts), ' | '.join(progress_parts)
+
+    @Slot()
+    def refresh_captioning_status(self):
+        if not self.is_captioning:
+            return
+        status_text, progress_text = self._compose_live_status()
+        if status_text:
+            self.status_label.setText(status_text)
+            self.status_label.show()
+        if progress_text:
+            self.progress_bar.setFormat(progress_text)
+
+    @Slot()
+    def finalize_captioning_status(self):
+        self.captioning_status_timer.stop()
+        thread = self._current_captioning_thread()
+        if thread is None:
+            self.status_label.hide()
+            return
+
+        batch_started_at = getattr(thread, 'batch_started_at', None)
+        elapsed = (
+            max(0.0, perf_counter() - batch_started_at)
+            if isinstance(batch_started_at, (int, float)) else 0.0
+        )
+        completed_items = max(0, int(getattr(thread, 'completed_items', 0) or 0))
+        total_items = max(0, int(getattr(thread, 'total_items', 0) or 0))
+        total_completed_seconds = float(
+            getattr(thread, 'total_completed_seconds', 0.0) or 0.0
+        )
+        average_item_seconds = (
+            total_completed_seconds / completed_items
+            if completed_items > 0 and total_completed_seconds > 0 else None
+        )
+        rate_text = self._format_item_rate(
+            completed_items / total_completed_seconds
+            if completed_items > 0 and total_completed_seconds > 0 else None
+        )
+
+        status_parts = []
+        if getattr(thread, 'is_canceled', False):
+            status_parts.append('Captioning canceled')
+        elif getattr(thread, 'is_error', False):
+            status_parts.append('Captioning failed')
+        else:
+            status_parts.append('Captioning finished')
+        if total_items > 0:
+            status_parts.append(f'{completed_items}/{total_items}')
+        status_parts.append(f'elapsed {self._format_short_duration(elapsed)}')
+        if average_item_seconds is not None:
+            status_parts.append(f'avg {average_item_seconds:.1f}s/item')
+        if rate_text:
+            status_parts.append(rate_text)
+        self.status_label.setText(' | '.join(status_parts))
+        self.status_label.show()
+
     @Slot(str)
     def update_console_text_edit(self, text: str):
         # '\x1b[A' is the ANSI escape sequence for moving the cursor up.
@@ -1904,10 +2098,10 @@ class AutoCaptioner(QDockWidget):
                 action_name=f'Generate '
                             f'{pluralize("Caption", selected_image_count)}',
                 should_ask_for_confirmation=selected_image_count > 1)
-        if selected_image_count > 1:
-            self.progress_bar.setRange(0, selected_image_count)
-            self.progress_bar.setValue(0)
-            self.progress_bar.show()
+        if selected_image_count > 0:
+            self._set_progress_bar_mode(selected_image_count)
+            self.status_label.setText('Starting captioning...')
+            self.status_label.show()
         tag_separator = get_tag_separator()
         models_directory_path = settings.value(
             'models_directory_path',
@@ -1930,6 +2124,7 @@ class AutoCaptioner(QDockWidget):
             lambda: self.set_is_captioning(False))
         self.captioning_thread.finished.connect(self._update_unload_button_state)
         self.captioning_thread.finished.connect(restore_stdout_and_stderr)
+        self.captioning_thread.finished.connect(self.finalize_captioning_status)
         self.captioning_thread.finished.connect(self.progress_bar.hide)
         self.captioning_thread.finished.connect(
             lambda: self.start_cancel_button.setEnabled(True))
@@ -1940,6 +2135,8 @@ class AutoCaptioner(QDockWidget):
         sys.stdout = self.captioning_thread
         sys.stderr = self.captioning_thread
         self.captioning_thread.start()
+        self.refresh_captioning_status()
+        self.captioning_status_timer.start()
 
     @Slot()
     def unload_loaded_model(self):

@@ -1,4 +1,5 @@
 import re
+from time import perf_counter
 
 import torch
 from transformers import AutoProcessor
@@ -7,7 +8,10 @@ try:
 except ImportError:
     from transformers import AutoModelForVision2Seq
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.auto_captioning_model import (
+    AutoCaptioningModel,
+    CaptionGenerationError,
+)
 from utils.image import Image
 
 try:
@@ -173,6 +177,7 @@ class QwenVL(AutoCaptioningModel):
 
     def generate_caption(self, model_inputs, image_prompt: str) -> tuple[str, str]:
         gen_params = self.generation_parameters
+        self.tokenizer = self.get_tokenizer()
         gen_kwargs = {
             'max_new_tokens': gen_params.get('max_new_tokens', 256),
             'do_sample': gen_params.get('do_sample', False),
@@ -184,40 +189,51 @@ class QwenVL(AutoCaptioningModel):
             gen_kwargs['temperature'] = gen_params.get('temperature', 1.0)
             gen_kwargs['top_p'] = gen_params.get('top_p', 1.0)
 
+        generation_start = perf_counter()
         with torch.inference_mode():
             generated_ids = self.model.generate(**model_inputs, **gen_kwargs)
+        generation_duration = perf_counter() - generation_start
 
         # Qwen2.5-VL returns the full sequence including input — trim prefix
         generated_ids_trimmed = [
             out_ids[len(in_ids):]
             for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids)
         ]
-        
-        # Safeguard: if the model hit the token limit, it was cut off mid-thought or mid-sentence
-        if len(generated_ids_trimmed[0]) >= gen_kwargs['max_new_tokens'] - 1:
-            raise RuntimeError(
-                f"Generation reached the token limit of {gen_kwargs['max_new_tokens']} "
-                f"and was cut off early!\n"
-                f"Please open 'Advanced Settings' and increase 'Maximum tokens' "
-                f"(e.g., to 1024 or 2048) to give the model time to finish."
-            )
-
-        caption = self.processor.batch_decode(
+        raw_output = self.processor.batch_decode(
             generated_ids_trimmed,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0].strip()
+        
+        # Safeguard: if the model hit the token limit, it was cut off mid-thought or mid-sentence
+        if len(generated_ids_trimmed[0]) >= gen_kwargs['max_new_tokens'] - 1:
+            self.thread.record_generation_metrics(
+                self.estimate_output_token_count(raw_output),
+                generation_duration,
+            )
+            raise CaptionGenerationError(
+                f"Generation reached the token limit of {gen_kwargs['max_new_tokens']} "
+                f"and was cut off early!\n"
+                f"Please open 'Advanced Settings' and increase 'Maximum tokens' "
+                f"(e.g., to 1024 or 2048) to give the model time to finish.",
+                console_output=self.format_incomplete_console_output(
+                    raw_output,
+                    note=(
+                        f'Generation stopped after reaching the configured '
+                        f'limit of {gen_kwargs["max_new_tokens"]} new tokens.'
+                    ),
+                ),
+            )
+
+        caption = raw_output
 
         if self.caption_start and self.caption_start.strip():
             caption = f'{self.caption_start.strip()} {caption}'
-            
+
         # Qwen3.5 is a reasoning model - it may output <think>...</think> before the answer.
         # Only strip if thinking was enabled (disable_thinking=False).
         disable_thinking = self.caption_settings.get('disable_thinking', True)
         if not disable_thinking and '</think>' in caption:
-            # Print the raw chain-of-thought to the terminal for interested users
-            print(f'\n--- QwenVL Thought Process ({image_prompt[:50]}...) ---\n'
-                  f'{caption}\n-----------------------------------\n')
             caption = caption.split('</think>')[-1].strip()
 
         if self.remove_tag_separators:
@@ -226,4 +242,8 @@ class QwenVL(AutoCaptioningModel):
             caption = caption.replace('\n', ' ')
             caption = re.sub(r' +', ' ', caption)
 
-        return caption, caption
+        self.thread.record_generation_metrics(
+            self.estimate_output_token_count(caption),
+            generation_duration,
+        )
+        return caption, self.format_console_output(raw_output, caption)

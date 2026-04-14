@@ -3,6 +3,7 @@ import io
 import math
 import re
 from itertools import cycle
+from time import perf_counter
 
 import cv2
 import requests
@@ -248,6 +249,7 @@ class RemoteGen(AutoCaptioningModel):
 
         try:
             endpoint = self._get_next_endpoint()
+            generation_start = perf_counter()
             response = requests.post(
                 endpoint,
                 json={
@@ -260,6 +262,7 @@ class RemoteGen(AutoCaptioningModel):
                 headers=self.headers,
                 timeout=120,
             )
+            generation_duration = perf_counter() - generation_start
 
             if response.status_code != 200:
                 error_msg = f'API Error {response.status_code}: {response.text[:300]}'
@@ -309,4 +312,5 @@ class RemoteGen(AutoCaptioningModel):
             caption = caption.replace('\n', ' ')
             caption = re.sub(r' +', ' ', caption)
 
+        self.thread.record_generation_metrics(None, generation_duration)
         return caption, caption
