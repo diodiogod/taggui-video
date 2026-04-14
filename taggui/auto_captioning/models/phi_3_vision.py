@@ -35,8 +35,6 @@ class Phi3Vision(AutoCaptioningModel):
     def get_additional_generation_parameters(self) -> dict:
         return {'eos_token_id': self.tokenizer.eos_token_id}
 
-    def get_caption_from_generated_tokens(
-            self, generated_token_ids: torch.Tensor, image_prompt: str) -> str:
-        generated_token_ids = generated_token_ids[:, self.input_length:]
-        return super().get_caption_from_generated_tokens(
-            generated_token_ids, image_prompt)
+    def get_console_generated_token_ids(
+            self, generated_token_ids: torch.Tensor) -> torch.Tensor:
+        return generated_token_ids[:, self.input_length:]

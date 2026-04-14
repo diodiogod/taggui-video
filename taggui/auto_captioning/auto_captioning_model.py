@@ -414,12 +414,22 @@ class AutoCaptioningModel:
             parts.append(note_text)
         return '\n\n'.join(parts).strip()
 
-    def get_caption_from_generated_tokens(
-            self, generated_token_ids: torch.Tensor, image_prompt: str) -> str:
+    def get_console_generated_token_ids(
+            self, generated_token_ids: torch.Tensor) -> torch.Tensor:
+        return generated_token_ids
+
+    def decode_generated_text(self, generated_token_ids: torch.Tensor) -> str:
+        generated_token_ids = self.get_console_generated_token_ids(
+            generated_token_ids)
         generated_text = self.processor.batch_decode(
             generated_token_ids, skip_special_tokens=True)[0]
-        image_prompt = self.postprocess_image_prompt(image_prompt)
         generated_text = self.postprocess_generated_text(generated_text)
+        return generated_text.strip()
+
+    def get_caption_from_generated_tokens(
+            self, generated_token_ids: torch.Tensor, image_prompt: str) -> str:
+        generated_text = self.decode_generated_text(generated_token_ids)
+        image_prompt = self.postprocess_image_prompt(image_prompt)
         if image_prompt.strip() and generated_text.startswith(image_prompt):
             caption = generated_text[len(image_prompt):]
         elif (self.caption_start.strip()
@@ -450,11 +460,15 @@ class AutoCaptioningModel:
                 force_words_ids=forced_words_ids, **self.generation_parameters,
                 **additional_generation_parameters)
         generation_duration = perf_counter() - generation_start
+        raw_console_output = self.decode_generated_text(generated_token_ids)
         caption = self.get_caption_from_generated_tokens(generated_token_ids,
                                                          image_prompt)
         self.thread.record_generation_metrics(
             self.estimate_output_token_count(caption),
             generation_duration,
         )
-        console_output_caption = caption
+        console_output_caption = self.format_console_output(
+            raw_console_output,
+            caption,
+        )
         return caption, console_output_caption

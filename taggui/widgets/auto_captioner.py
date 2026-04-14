@@ -1808,6 +1808,135 @@ class AutoCaptioner(QDockWidget):
             )
 
     @staticmethod
+    def _format_memory_bytes(byte_count: int | float | None) -> str:
+        if byte_count is None:
+            return 'unknown'
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        value = float(byte_count)
+        unit_index = 0
+        while value >= 1024 and unit_index < len(units) - 1:
+            value /= 1024.0
+            unit_index += 1
+        if unit_index == 0:
+            return f'{int(value)} {units[unit_index]}'
+        return f'{value:.1f} {units[unit_index]}'
+
+    @staticmethod
+    def _cuda_memory_snapshot() -> tuple[int | None, int | None]:
+        if not torch.cuda.is_available():
+            return None, None
+        try:
+            return (
+                int(torch.cuda.memory_allocated()),
+                int(torch.cuda.memory_reserved()),
+            )
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def _clear_accelerate_hooks(module):
+        if module is None:
+            return
+        detach_names = ('detach_hook', 'remove', 'offload')
+        hook = getattr(module, '_hf_hook', None)
+        if hook is not None:
+            for method_name in detach_names:
+                detach = getattr(hook, method_name, None)
+                if callable(detach):
+                    try:
+                        detach(module)
+                        break
+                    except TypeError:
+                        try:
+                            detach()
+                            break
+                        except Exception:
+                            continue
+                    except Exception:
+                        continue
+            try:
+                module._hf_hook = None
+            except Exception:
+                pass
+        modules_method = getattr(module, 'modules', None)
+        if not callable(modules_method):
+            return
+        try:
+            submodules = list(modules_method())
+        except Exception:
+            return
+        for submodule in submodules:
+            if submodule is module:
+                continue
+            hook = getattr(submodule, '_hf_hook', None)
+            if hook is not None:
+                for method_name in detach_names:
+                    detach = getattr(hook, method_name, None)
+                    if callable(detach):
+                        try:
+                            detach(submodule)
+                            break
+                        except TypeError:
+                            try:
+                                detach()
+                                break
+                            except Exception:
+                                continue
+                        except Exception:
+                            continue
+                try:
+                    submodule._hf_hook = None
+                except Exception:
+                    pass
+
+    def _release_model_references(self, obj):
+        if obj is None:
+            return
+        self._clear_accelerate_hooks(obj)
+        for attr_name in (
+            'generation_config',
+            '_supports_cache_class',
+            '_past',
+            '_cache',
+            'past_key_values',
+            '_past_key_values',
+        ):
+            if hasattr(obj, attr_name):
+                try:
+                    setattr(obj, attr_name, None)
+                except Exception:
+                    pass
+        for method_name in ('to', 'cpu'):
+            move_method = getattr(obj, method_name, None)
+            if not callable(move_method):
+                continue
+            try:
+                if method_name == 'to':
+                    move_method('cpu')
+                else:
+                    move_method()
+                break
+            except Exception:
+                continue
+
+    def _log_unload_result(self, before_allocated, before_reserved,
+                           after_allocated, after_reserved):
+        summary = (
+            'Unloaded cached caption model.\n'
+            f'CUDA allocated: {self._format_memory_bytes(before_allocated)}'
+            f' -> {self._format_memory_bytes(after_allocated)}\n'
+            f'CUDA reserved: {self._format_memory_bytes(before_reserved)}'
+            f' -> {self._format_memory_bytes(after_reserved)}'
+        )
+        if (after_allocated is not None and after_reserved is not None
+                and after_allocated == 0 and after_reserved and after_reserved > 0):
+            summary += (
+                '\nSome VRAM may still appear in system tools because the CUDA '
+                'context stays alive even after model weights are released.'
+            )
+        self.update_console_text_edit(summary)
+
+    @staticmethod
     def _format_short_duration(seconds: float | None) -> str:
         total_seconds = max(0, int(seconds or 0))
         minutes, secs = divmod(total_seconds, 60)
@@ -2142,12 +2271,23 @@ class AutoCaptioner(QDockWidget):
     def unload_loaded_model(self):
         if self.is_captioning:
             return
+        before_allocated, before_reserved = self._cuda_memory_snapshot()
         thread = self.captioning_thread
         thread_model_wrapper = getattr(thread, 'model', None) if thread is not None else None
         nested_processor = getattr(thread_model_wrapper, 'processor', None)
         nested_model = getattr(thread_model_wrapper, 'model', None)
         processor = self.processor
         model = self.model
+        for candidate in (
+            nested_model,
+            model,
+            getattr(model, 'language_model', None),
+            getattr(model, 'text_model', None),
+            getattr(model, 'vision_tower', None),
+            getattr(model, 'multi_modal_projector', None),
+            getattr(model, 'model', None),
+        ):
+            self._release_model_references(candidate)
         self.processor = None
         self.model = None
         self.model_id = None
@@ -2172,15 +2312,41 @@ class AutoCaptioner(QDockWidget):
         if thread_model_wrapper is not None:
             del thread_model_wrapper
         if thread is not None:
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(2000)
+            except Exception:
+                pass
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
             del thread
         if processor is not None:
             del processor
         if model is not None:
             del model
         gc.collect()
+        gc.collect()
         if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             try:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+        after_allocated, after_reserved = self._cuda_memory_snapshot()
+        self._log_unload_result(
+            before_allocated,
+            before_reserved,
+            after_allocated,
+            after_reserved,
+        )
         self._update_unload_button_state()

@@ -285,7 +285,8 @@ class RemoteGen(AutoCaptioningModel):
                 print(error_msg)
                 return '', error_msg
 
-            caption = content_out.strip()
+            raw_output = content_out.strip()
+            caption = raw_output
 
         except requests.exceptions.Timeout:
             error_msg = 'Skipped: request timed out (API server may be busy or unreachable).'
@@ -313,4 +314,13 @@ class RemoteGen(AutoCaptioningModel):
             caption = re.sub(r' +', ' ', caption)
 
         self.thread.record_generation_metrics(None, generation_duration)
-        return caption, caption
+        console_output = self.format_console_output(raw_output, caption)
+        if finish_reason and finish_reason.lower() == 'length':
+            console_output = self.format_incomplete_console_output(
+                raw_output,
+                note=(
+                    'Remote API stopped because it reached its output token '
+                    'limit. The saved caption may be incomplete.'
+                ),
+            )
+        return caption, console_output

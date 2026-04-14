@@ -10,7 +10,10 @@ except ImportError:
     AutoModelForMultimodalLM = None
     _HAS_MULTIMODAL_LM = False
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.auto_captioning_model import (
+    AutoCaptioningModel,
+    CaptionGenerationError,
+)
 from utils.image import Image
 
 
@@ -224,6 +227,24 @@ class Gemma4(AutoCaptioningModel):
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0].strip()
+        if len(generated_ids_trimmed[0]) >= gen_kwargs['max_new_tokens'] - 1:
+            self.thread.record_generation_metrics(
+                self.estimate_output_token_count(raw_console_output),
+                generation_duration,
+            )
+            raise CaptionGenerationError(
+                f"Generation reached the token limit of {gen_kwargs['max_new_tokens']} "
+                f"and was cut off early!\n"
+                f"Please open 'Advanced Settings' and increase 'Maximum tokens' "
+                f"(e.g., to 1024 or 2048) to give the model time to finish.",
+                console_output=self.format_incomplete_console_output(
+                    raw_console_output,
+                    note=(
+                        f'Generation stopped after reaching the configured '
+                        f'limit of {gen_kwargs["max_new_tokens"]} new tokens.'
+                    ),
+                ),
+            )
 
         raw_response = self.processor.decode(
             generated_ids_trimmed[0],
