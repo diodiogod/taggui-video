@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-04-14
+
+### Added
+
+- Auto-captioning now shows live progress, elapsed time, speed, and ETA in the panel
+- The console now preserves raw or partial model output when captioning finishes or fails
+- Unloading caption models frees VRAM more aggressively and reports memory cleanup in the console
+- The compact auto-captioner console can collapse from its label, and video-only options stay hidden for models like JoyCaption
+
+### Changed
+
+- Improve auto-captioner feedback and compact layout
 ## [1.1.1] - 2026-04-13
 
 ### Added
