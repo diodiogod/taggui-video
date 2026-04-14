@@ -259,6 +259,7 @@ class AllTagsItemDelegate(TextEditItemDelegate):
 class ClickAction(str, Enum):
     FILTER_IMAGES = 'Filter images for tag'
     ADD_TO_SELECTED = 'Add tag to selected images'
+    MANAGE_TAGS = 'Manage tags (mass select)'
 
 
 class AllTagsList(QListView):
@@ -326,11 +327,36 @@ class AllTagsList(QListView):
     def keyPressEvent(self, event: QKeyEvent):
         """
         Delete all instances of the selected tag when the delete key or
-        backspace key is pressed.
+        backspace key is pressed. Also handle Ctrl+A for Select All.
         """
+        if event.key() == Qt.Key.Key_A and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._do_select_all_with_filter_clear()
+            event.accept()
+            return
         if event.key() not in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             super().keyPressEvent(event)
             return
+        self._delete_selected_tags()
+
+    def _do_select_all_with_filter_clear(self):
+        self._suppress_selection_clear_on_next_empty_filter = True
+        self._ignore_handle_selection = True
+        try:
+            main_window = self.window()
+            if hasattr(main_window, 'image_list'):
+                main_window.image_list.filter_line_edit.setText('')
+                if hasattr(main_window, 'apply_image_list_filter_now'):
+                    main_window.apply_image_list_filter_now()
+            
+            # By the time we reach here, the filter has applied and the tag
+            # counter model has rebuilt its rows. We can now select them all safely.
+            self.selectAll()
+        except Exception as e:
+            print(f"Error in select all: {e}")
+        finally:
+            self._ignore_handle_selection = False
+
+    def _delete_selected_tags(self):
         selected_indices = self.selectedIndexes()
         if not selected_indices:
             return
@@ -353,7 +379,40 @@ class AllTagsList(QListView):
         if reply == QMessageBox.StandardButton.Yes:
             self.tags_deletion_requested.emit(tags)
 
+    def contextMenuEvent(self, event):
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        menu = QMenu(self)
+        select_all_action = QAction('Select All', self)
+        
+        # When triggering selectAll from the context menu, we should apply the same
+        # logic as Ctrl+A where we temporarily disable filter events and clear the filter text.
+        select_all_action.triggered.connect(self._do_select_all_with_filter_clear)
+        menu.addAction(select_all_action)
+        
+        selected_count = len(self.selectedIndexes())
+        delete_selected_action = QAction(f'Delete {selected_count} Selected {pluralize("Tag", selected_count)} Globally', self)
+        delete_selected_action.triggered.connect(self._delete_selected_tags)
+        delete_selected_action.setEnabled(selected_count > 0)
+        menu.addAction(delete_selected_action)
+        
+        menu.addSeparator()
+        
+        purge_all_action = QAction('Purge Entire Tag Database...', self)
+        purge_all_wrapper = lambda: self.window().purge_all_tags() if hasattr(self.window(), 'purge_all_tags') else None
+        purge_all_action.triggered.connect(purge_all_wrapper)
+        menu.addAction(purge_all_action)
+        
+        menu.exec(event.globalPos())
+
     def handle_selection_change(self, selected: QItemSelection, _):
+        if getattr(self, '_ignore_handle_selection', False):
+            return
+            
+        mouse_buttons = QApplication.mouseButtons()
+        if mouse_buttons & Qt.MouseButton.RightButton:
+            return
+            
         click_action = (self.all_tags_editor.click_action_combo_box
                         .currentText())
         if click_action != ClickAction.FILTER_IMAGES:
@@ -639,7 +698,7 @@ class AllTagsEditor(QDockWidget):
 
     @Slot(str)
     def set_selection_mode(self, click_action: str):
-        if click_action == ClickAction.FILTER_IMAGES:
+        if click_action in (ClickAction.FILTER_IMAGES, ClickAction.MANAGE_TAGS):
             self.all_tags_list.setSelectionMode(
                 QAbstractItemView.SelectionMode.ExtendedSelection)
         elif click_action == ClickAction.ADD_TO_SELECTED:

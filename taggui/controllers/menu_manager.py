@@ -783,6 +783,13 @@ class MenuManager:
             self.main_window.remove_empty_tags)
         edit_menu.addAction(remove_empty_tags_action)
 
+        edit_menu.addSeparator()
+
+        purge_all_tags_action = QAction('Purge All Tags from Dataset...', parent=self.main_window)
+        purge_all_tags_action.triggered.connect(
+            self.main_window.purge_all_tags)
+        edit_menu.addAction(purge_all_tags_action)
+
     def _create_view_menu(self, menu_bar):
         """Create View menu."""
         view_menu = menu_bar.addMenu('View')

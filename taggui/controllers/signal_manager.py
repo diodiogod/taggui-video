@@ -324,6 +324,8 @@ class SignalManager:
             image_list_model.rename_tags)
         tag_counter_model.tags_renaming_requested.connect(
             image_list.filter_line_edit.clear)
+        tag_counter_model.tags_renaming_requested.connect(
+            self.main_window.apply_image_list_filter_now)
         all_tags_editor.all_tags_list.image_list_filter_requested.connect(
             self.main_window.set_image_list_filter_text)
         all_tags_editor.all_tags_list.tag_addition_requested.connect(
@@ -332,6 +334,8 @@ class SignalManager:
             image_list_model.delete_tags)
         all_tags_editor.all_tags_list.tags_deletion_requested.connect(
             image_list.filter_line_edit.clear)
+        all_tags_editor.all_tags_list.tags_deletion_requested.connect(
+            self.main_window.apply_image_list_filter_now)
         all_tags_editor.visibilityChanged.connect(
             lambda: menu_manager.toggle_all_tags_editor_action.setChecked(
                 all_tags_editor.isVisible()))

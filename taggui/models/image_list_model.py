@@ -6892,6 +6892,84 @@ class ImageListModel(QAbstractListModel):
 
         return changed_image_count, removed_tag_count
 
+    def purge_all_tags(self) -> int:
+        """
+        Remove ALL tags from ALL sidecar/image records entirely.
+        Return the number of removed tags.
+        """
+        self.add_to_undo_stack(action_name='Purge All Tags',
+                               should_ask_for_confirmation=False)
+        if self._paginated_mode:
+            changed_count, removed_tag_count = self._purge_all_tags_paginated()
+            if changed_count:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return removed_tag_count
+
+        changed_image_indices = []
+        removed_tag_count = 0
+        for image_index, image in enumerate(self.iter_all_images()):
+            raw_tags = []
+            try:
+                raw_tags = self._read_sidecar_tags(image.path, preserve_empty=True)
+            except OSError:
+                if getattr(image, 'tags', []):
+                    raw_tags = image.tags
+
+            old_tag_count = len(getattr(image, 'tags', []))
+            if old_tag_count == 0 and len(raw_tags) == 0:
+                continue
+                
+            changed_image_indices.append(image_index)
+            removed_tag_count += old_tag_count if old_tag_count > 0 else len(raw_tags)
+            image.tags = []
+            
+            txt_path = image.path.with_suffix('.txt')
+            try:
+                txt_path.write_text('', encoding='utf-8')
+            except OSError:
+                pass
+                
+            self.write_image_tags_to_disk(image)
+            
+        if changed_image_indices:
+            self.dataChanged.emit(self.index(changed_image_indices[0]),
+                                  self.index(changed_image_indices[-1]))
+        return removed_tag_count
+
+    def _purge_all_tags_paginated(self) -> tuple[int, int]:
+        """Remove all tags from all sidecar/DB records in paginated mode."""
+        files_to_process = self._db.get_all_paths() if self._db else []
+        changed_image_count = 0
+        removed_tag_count = 0
+
+        for rel_path in files_to_process:
+            path = self._directory_path / rel_path
+            if not path.exists():
+                continue
+
+            try:
+                raw_tags = self._read_sidecar_tags(path, preserve_empty=True)
+            except OSError as e:
+                continue
+
+            if not raw_tags:
+                continue
+
+            removed_tag_count += len(raw_tags)
+            txt_path = path.with_suffix('.txt')
+            try:
+                txt_path.write_text('', encoding='utf-8')
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    [],
+                    txt_path=txt_path,
+                )
+                changed_image_count += 1
+            except OSError as e:
+                print(f"Error purging tags for {rel_path}: {e}")
+
+        return changed_image_count, removed_tag_count
+
     def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
         if image.tags == tags:

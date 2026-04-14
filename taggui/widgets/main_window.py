@@ -4503,6 +4503,40 @@ class MainWindow(QMainWindow):
         message_box.setText(text)
         message_box.exec()
 
+    @Slot()
+    def purge_all_tags(self):
+        message_box = QMessageBox()
+        message_box.setWindowTitle('Purge All Tags from Dataset')
+        message_box.setIcon(QMessageBox.Icon.Warning)
+        message_box.setText("Are you sure you want to permanently delete ALL tags from every image in the dataset?\n\nThis cannot be undone easily if you do not have backups.")
+        message_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        message_box.setDefaultButton(QMessageBox.StandardButton.No)
+        if message_box.exec() == QMessageBox.StandardButton.Yes:
+            second_warning = QMessageBox()
+            second_warning.setWindowTitle('Confirm Purge')
+            second_warning.setIcon(QMessageBox.Icon.Critical)
+            second_warning.setText("FINAL WARNING: This will completely wipe all tags.")
+            second_warning.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            second_warning.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if second_warning.exec() == QMessageBox.StandardButton.Yes:
+                removed_tag_count = self.image_list_model.purge_all_tags()
+                success_box = QMessageBox()
+                success_box.setWindowTitle('Purge All Tags Complete')
+                success_box.setIcon(QMessageBox.Icon.Information)
+                if not removed_tag_count:
+                    text_msg = 'No tags were found to purge.'
+                else:
+                    text_msg = (f'Successfully purged {removed_tag_count} '
+                                f'{pluralize("tag", removed_tag_count)}.')
+                success_box.setText(text_msg)
+                success_box.exec()
+                
+                # Reapply filter to recalculate total counts and sync masonry
+                self.apply_image_list_filter_now()
+                if hasattr(self.image_list.list_view, '_recalculate_masonry_if_needed'):
+                    self.image_list.list_view._recalculate_masonry_if_needed('purge_all_tags')
+                    self.image_list.list_view.viewport().update()
+
 
     @Slot()
     def set_image_list_filter(self):
@@ -4550,6 +4584,12 @@ class MainWindow(QMainWindow):
         """Force the current filter to apply immediately."""
         if self._filter_timer.isActive():
             self._filter_timer.stop()
+            
+        # Bypass masonry debounce so UI updates instantly when filter is forced
+        if hasattr(self.image_list, 'list_view') and hasattr(self.image_list.list_view, '_last_filter_keystroke_time'):
+            self.image_list.list_view._last_filter_keystroke_time = 0
+            self.image_list.list_view._rapid_input_detected = False
+            
         self._execute_delayed_filter()
 
     def delayed_filter(self):
@@ -4562,11 +4602,15 @@ class MainWindow(QMainWindow):
                 self.image_list.filter_line_edit.text())
         # filter_changed.emit() is already called by set_filter() - don't emit twice!
         if filter_ is None:
-            all_tags_list_selection_model = (self.all_tags_editor
-                                             .all_tags_list.selectionModel())
-            all_tags_list_selection_model.clearSelection()
-            # Clear the current index.
-            self.all_tags_editor.all_tags_list.setCurrentIndex(QModelIndex())
+            suppress = getattr(self.all_tags_editor.all_tags_list, '_suppress_selection_clear_on_next_empty_filter', False)
+            if suppress:
+                self.all_tags_editor.all_tags_list._suppress_selection_clear_on_next_empty_filter = False
+            else:
+                all_tags_list_selection_model = (self.all_tags_editor
+                                                 .all_tags_list.selectionModel())
+                all_tags_list_selection_model.clearSelection()
+                # Clear the current index.
+                self.all_tags_editor.all_tags_list.setCurrentIndex(QModelIndex())
             # Select the previously selected image in the unfiltered image
             # list.
             select_index = settings.value('image_index', type=int) or 0
