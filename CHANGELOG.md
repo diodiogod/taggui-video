@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-04-14
+
+### Added
+
+- Add a global mass tag deletion workflow for large cleanup passes
+- Let auto-captioning downloads be canceled before a model finishes downloading
+- Show which caption models are already cached locally in the selector
+
+### Changed
+
+- Improve batch tag cleanup and caption model handling
+- Improve auto-captioner behavior when switching between downloaded models
 ## [1.1.3] - 2026-04-14
 
 ### Added
