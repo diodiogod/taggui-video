@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from datetime import datetime
 from time import perf_counter
+import subprocess
 
 import numpy as np
 from PIL import UnidentifiedImageError
@@ -57,6 +58,7 @@ class ModelThread(QThread):
         self.last_generation_duration: float | None = None
         self.last_generation_token_count: int | None = None
         self.last_generation_tokens_per_second: float | None = None
+        self.external_process: subprocess.Popen | None = None
 
     def reset_progress_state(self):
         self.batch_started_at = None
@@ -95,7 +97,7 @@ class ModelThread(QThread):
             self.current_stage = 'error'
             return
         if self.is_canceled:
-            print(f'Canceled {self.text['generating']}.')
+            print(f"Canceled {self.text['generating']}.")
             self.current_stage = 'canceled'
             return
         selected_image_count = len(self.selected_image_indices)
@@ -107,7 +109,7 @@ class ModelThread(QThread):
         for i, image_index in enumerate(self.selected_image_indices):
             start_time = perf_counter()
             if self.is_canceled:
-                print(f'Canceled {self.text['generating']}.')
+                print(f"Canceled {self.text['generating']}.")
                 self.current_stage = 'canceled'
                 return
             image: Image = self.image_list_model.data(image_index,
@@ -156,10 +158,12 @@ class ModelThread(QThread):
                                          .total_seconds())
             average_generating_duration = (total_generating_duration /
                                            selected_image_count)
-            print(f'Finished {self.text['generating']} {selected_image_count} images in '
-                  f'{format_duration(total_generating_duration)} '
-                  f'({average_generating_duration:.1f} s/image) at '
-                  f'{generating_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.')
+            print(
+                f"Finished {self.text['generating']} {selected_image_count} "
+                f'images in {format_duration(total_generating_duration)} '
+                f'({average_generating_duration:.1f} s/image) at '
+                f'{generating_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.'
+            )
         self.current_stage = 'finished'
 
     @abstractmethod
@@ -172,9 +176,11 @@ class ModelThread(QThread):
         if are_multiple_images_selected:
             generating_start_datetime_string = (
                 generating_start_datetime.strftime('%Y-%m-%d %H:%M:%S'))
-            return (f'{self.text['Generating']}... (device: {self.device}, '
-                    f'start time: {generating_start_datetime_string})')
-        return f'{self.text['Generating']}... (device: {self.device})'
+            return (
+                f"{self.text['Generating']}... (device: {self.device}, "
+                f'start time: {generating_start_datetime_string})'
+            )
+        return f"{self.text['Generating']}... (device: {self.device})"
 
     @abstractmethod
     def get_model_inputs(self, image: Image) -> tuple[
@@ -198,3 +204,32 @@ class ModelThread(QThread):
 
     def write(self, text: str):
         self.text_outputted.emit(text)
+
+    def set_external_process(self, process: subprocess.Popen | None):
+        self.external_process = process
+
+    def clear_external_process(self, process: subprocess.Popen | None = None):
+        if process is None or self.external_process is process:
+            self.external_process = None
+
+    def cancel_external_process(self):
+        process = self.external_process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+        except Exception:
+            pass
+        finally:
+            if self.external_process is process:
+                self.external_process = None
+
+    def request_cancel(self):
+        self.is_canceled = True
+        self.cancel_external_process()

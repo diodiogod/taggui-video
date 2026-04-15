@@ -1,8 +1,14 @@
 import gc
+import json
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from contextlib import nullcontext
 from datetime import datetime
-from time import perf_counter
+from pathlib import Path
+from time import perf_counter, sleep
 
 import cv2
 import numpy as np
@@ -18,6 +24,13 @@ except ImportError:
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
 import auto_captioning.captioning_thread as captioning_thread
+from auto_captioning.model_availability import (
+    MODEL_ARTIFACT_KIND_HUGGINGFACE,
+    MODEL_ARTIFACT_KIND_WD_TAGGER,
+    clear_model_availability_cache,
+    get_model_install_state,
+    get_models_directory_target_path,
+)
 from models.image_list_model import _video_lock
 from utils.enums import CaptionDevice
 from utils.image import Image
@@ -51,6 +64,44 @@ def replace_template_variables(text: str, image: Image, skip_hash: bool) -> str:
     return text
 
 
+_HF_DOWNLOAD_HELPER_SCRIPT = r"""
+import json
+import sys
+import traceback
+from pathlib import Path
+
+from huggingface_hub import hf_hub_download, snapshot_download
+
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+result_path = Path(sys.argv[2])
+error_path = Path(sys.argv[3])
+
+try:
+    mode = payload.pop('mode')
+    if mode == 'snapshot':
+        result = snapshot_download(**payload)
+    elif mode == 'files':
+        repo_id = payload.pop('repo_id')
+        filenames = payload.pop('filenames')
+        local_dir = payload.get('local_dir')
+        last_path = ''
+        for filename in filenames:
+            last_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                **payload,
+            )
+        result = local_dir or str(Path(last_path).parent)
+    else:
+        raise RuntimeError(f'Unsupported download mode: {mode}')
+    result_path.write_text(str(result or ''), encoding='utf-8')
+except Exception:
+    error_path.write_text(traceback.format_exc(), encoding='utf-8')
+    raise
+"""
+
+
 class AutoCaptioningModel:
     dtype = torch.float16
     # When loading a model, if the `use_safetensors` argument is not set and
@@ -61,6 +112,7 @@ class AutoCaptioningModel:
     model_load_context_manager = nullcontext()
     transformers_model_class = AutoModelForVision2Seq
     image_mode = 'RGB'
+    model_artifact_kind = MODEL_ARTIFACT_KIND_HUGGINGFACE
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',
@@ -71,6 +123,7 @@ class AutoCaptioningModel:
         self.image_viewer = image_viewer
         self.caption_settings = caption_settings
         self.model_id = caption_settings['model_id']
+        self.requested_model_id = self.model_id
         self.prompt = caption_settings['prompt']
         self.skip_hash = caption_settings['skip_hash']
         self.caption_start = caption_settings['caption_start']
@@ -114,6 +167,10 @@ class AutoCaptioningModel:
         return AutoProcessor.from_pretrained(self.model_id,
                                              trust_remote_code=True)
 
+    @classmethod
+    def get_download_revision(cls, model_id: str) -> str | None:
+        return None
+
     def get_model_load_arguments(self) -> dict:
         arguments = {'device_map': self.device, 'trust_remote_code': True,
                      'use_safetensors': self.use_safetensors}
@@ -149,14 +206,192 @@ class AutoCaptioningModel:
             model = self.load_model(model_load_arguments)
         return model
 
+    def get_snapshot_download_allow_patterns(self) -> list[str]:
+        return [
+            '*.json',
+            '*.txt',
+            '*.model',
+            '*.py',
+            '*.tiktoken',
+            '*.safetensors',
+            '*.safetensors.index.json',
+            '*.bin',
+            '*.bin.index.json',
+            '*.onnx',
+            '*.gguf',
+            '*.pt',
+            '*.pth',
+            'tokenizer*',
+            'vocab*',
+            'merges.txt',
+            'special_tokens_map.json',
+            'added_tokens.json',
+            'processor_config.json',
+            'preprocessor_config.json',
+            'image_processor*.json',
+            'feature_extractor*.json',
+        ]
+
+    def get_snapshot_download_ignore_patterns(self) -> list[str] | None:
+        if self.use_safetensors is True:
+            return ['*.bin', '*.bin.index.json']
+        if self.use_safetensors is False:
+            return ['*.safetensors', '*.safetensors.index.json']
+        return None
+
+    def _resolve_model_id_for_loading(self) -> str | None:
+        revision = self.get_download_revision(self.requested_model_id)
+        install_state = get_model_install_state(
+            self.requested_model_id,
+            self.thread.models_directory_path,
+            artifact_kind=self.model_artifact_kind,
+            revision=revision,
+        )
+
+        if install_state.source == 'local_path':
+            if install_state.installed and install_state.path is not None:
+                return str(install_state.path)
+            raise RuntimeError(
+                f'Local model path is incomplete: {install_state.path}'
+            )
+
+        if install_state.installed:
+            if (install_state.source == 'models_directory'
+                    and install_state.path is not None):
+                return str(install_state.path)
+            return self.requested_model_id
+
+        self._download_model_assets(
+            self.requested_model_id,
+            revision=revision,
+            resumable=install_state.status == 'partial',
+        )
+        if self.thread.is_canceled:
+            return None
+
+        clear_model_availability_cache()
+        refreshed_install_state = get_model_install_state(
+            self.requested_model_id,
+            self.thread.models_directory_path,
+            artifact_kind=self.model_artifact_kind,
+            revision=revision,
+        )
+        if (refreshed_install_state.installed
+                and refreshed_install_state.source == 'models_directory'
+                and refreshed_install_state.path is not None):
+            return str(refreshed_install_state.path)
+        return self.requested_model_id
+
+    def _download_model_assets(self, model_id: str, *,
+                               revision: str | None,
+                               resumable: bool):
+        target_dir = get_models_directory_target_path(
+            self.thread.models_directory_path,
+            model_id,
+        )
+        target_dir_existed = bool(target_dir and target_dir.exists())
+        self.thread.current_stage = 'downloading_model'
+        if resumable:
+            print(f'Resuming model download for {model_id}...')
+        else:
+            print(f'Downloading model files for {model_id}...')
+
+        if self.model_artifact_kind == MODEL_ARTIFACT_KIND_WD_TAGGER:
+            payload = {
+                'mode': 'files',
+                'repo_id': model_id,
+                'filenames': ['model.onnx', 'selected_tags.csv'],
+                'revision': revision,
+            }
+        else:
+            payload = {
+                'mode': 'snapshot',
+                'repo_id': model_id,
+                'revision': revision,
+                'allow_patterns': self.get_snapshot_download_allow_patterns(),
+                'ignore_patterns': self.get_snapshot_download_ignore_patterns(),
+            }
+        if target_dir is not None:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            payload['local_dir'] = str(target_dir)
+
+        self._run_cancelable_hf_download(
+            payload,
+            model_id=model_id,
+            cleanup_dir=target_dir,
+            cleanup_dir_existed=target_dir_existed,
+        )
+        self.thread.current_stage = 'loading_model'
+        if not self.thread.is_canceled:
+            print(f'Finished downloading {model_id}.')
+
+    def _run_cancelable_hf_download(self, payload: dict, *,
+                                    model_id: str,
+                                    cleanup_dir: Path | None,
+                                    cleanup_dir_existed: bool):
+        temp_dir = Path(tempfile.mkdtemp(prefix='taggui-model-download-'))
+        payload_path = temp_dir / 'payload.json'
+        result_path = temp_dir / 'result.txt'
+        error_path = temp_dir / 'error.txt'
+        payload_path.write_text(json.dumps(payload), encoding='utf-8')
+
+        process = subprocess.Popen(
+            [sys.executable, '-u', '-c', _HF_DOWNLOAD_HELPER_SCRIPT,
+             str(payload_path), str(result_path), str(error_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.thread.set_external_process(process)
+        try:
+            while True:
+                if self.thread.is_canceled:
+                    self.thread.cancel_external_process()
+                    self._cleanup_incomplete_local_download(
+                        cleanup_dir,
+                        cleanup_dir_existed,
+                    )
+                    clear_model_availability_cache()
+                    print(f'Canceled downloading {model_id}.')
+                    return
+                try:
+                    process.wait(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    sleep(0.05)
+                    continue
+
+            if process.returncode != 0:
+                error_text = ''
+                if error_path.is_file():
+                    error_text = error_path.read_text(
+                        encoding='utf-8',
+                        errors='replace',
+                    ).strip()
+                if cleanup_dir is not None and not cleanup_dir_existed:
+                    self._cleanup_incomplete_local_download(
+                        cleanup_dir,
+                        cleanup_dir_existed,
+                    )
+                raise RuntimeError(
+                    f'Failed downloading model files for {model_id}.\n'
+                    f'{error_text}'.rstrip()
+                )
+        finally:
+            self.thread.clear_external_process(process)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _cleanup_incomplete_local_download(target_dir: Path | None,
+                                           target_dir_existed: bool):
+        if target_dir is None or target_dir_existed:
+            return
+        shutil.rmtree(target_dir, ignore_errors=True)
+
     def load_processor_and_model(self):
-        models_directory_path = self.thread.models_directory_path
-        if models_directory_path:
-            config_path = models_directory_path / self.model_id / 'config.json'
-            tags_path = (models_directory_path / self.model_id
-                         / 'selected_tags.csv')
-            if config_path.is_file() or tags_path.is_file():
-                self.model_id = str(models_directory_path / self.model_id)
+        resolved_model_id = self._resolve_model_id_for_loading()
+        if resolved_model_id is None:
+            return
+        self.model_id = resolved_model_id
         # If the processor and model were previously loaded, use them.
         processor = self.thread_parent.processor
         model = self.thread_parent.model

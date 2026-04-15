@@ -10,6 +10,7 @@ import requests
 from PIL import Image as PilImage
 
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.model_availability import MODEL_ARTIFACT_KIND_REMOTE
 from models.image_list_model import _video_lock
 from utils.image import Image
 import auto_captioning.captioning_thread as captioning_thread
@@ -33,6 +34,7 @@ class RemoteGen(AutoCaptioningModel):
     WARNING: When using a cloud API, your images/frames will be sent to a remote
     server. Use a local server if you require privacy.
     """
+    model_artifact_kind = MODEL_ARTIFACT_KIND_REMOTE
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',

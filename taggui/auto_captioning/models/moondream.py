@@ -97,6 +97,10 @@ class Moondream2(Moondream):
         return AutoTokenizer.from_pretrained(self.model_id,
                                              trust_remote_code=True)
 
+    @classmethod
+    def get_download_revision(cls, model_id: str) -> str | None:
+        return MOONDREAM2_REVISION
+
     def get_model_load_arguments(self) -> dict:
         arguments = super().get_model_load_arguments()
         arguments['revision'] = MOONDREAM2_REVISION

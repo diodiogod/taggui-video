@@ -4,13 +4,19 @@ from pathlib import Path
 from time import perf_counter
 
 from PySide6.QtCore import QModelIndex, Qt, Signal, Slot, QSize, QRect, QTimer
-from PySide6.QtGui import QFontMetrics, QTextCursor, QPainter, QColor, QPen
+from PySide6.QtGui import QFontMetrics, QTextCursor, QPainter, QColor, QPen, QIcon
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
-                               QTabWidget, QSizePolicy, QVBoxLayout, QWidget)
+                               QStyle, QTabWidget, QSizePolicy, QVBoxLayout, QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
+from auto_captioning.model_availability import (
+    MODEL_ARTIFACT_KIND_HUGGINGFACE,
+    MODEL_ARTIFACT_KIND_WD_TAGGER,
+    clear_model_availability_cache,
+    get_model_install_state,
+)
 from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models.remote import RemoteGen
 from auto_captioning.models_list import MODELS, get_model_class
@@ -240,8 +246,18 @@ class CaptionSettingsForm:
 
         self.model_combo_box = FocusedScrollSettingsComboBox(key='model_id')
         self.model_combo_box.setEditable(True)
+        self.model_combo_box.setIconSize(QSize(12, 12))
+        model_combo_view = self.model_combo_box.view()
+        if model_combo_view is not None:
+            model_combo_view.setIconSize(QSize(12, 12))
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
+        self.model_cached_icon = self.model_combo_box.style().standardIcon(
+            QStyle.StandardPixmap.SP_DialogApplyButton
+        )
+        self.model_partial_icon = self.model_combo_box.style().standardIcon(
+            QStyle.StandardPixmap.SP_MessageBoxWarning
+        )
         self.unload_model_button = QPushButton('X')
         self.unload_model_button.setToolTip(
             'Unload the currently cached local model and free its memory.\n'
@@ -546,6 +562,9 @@ class CaptionSettingsForm:
         self.wd_tagger_settings_form_container.hide()
 
         self.model_combo_box.currentTextChanged.connect(self.show_settings_for_model)
+        self.model_combo_box.currentTextChanged.connect(
+            lambda _text: self.refresh_selected_model_status()
+        )
         self.device_combo_box.currentTextChanged.connect(self.set_load_in_4_bit_visibility)
         self.toggle_advanced_settings_form_button.clicked.connect(self.toggle_advanced_settings_form)
         self.min_new_token_count_spin_box.valueChanged.connect(self.max_new_token_count_spin_box.setMinimum)
@@ -652,6 +671,71 @@ class CaptionSettingsForm:
                 QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Fixed,
             )
+
+    @staticmethod
+    def _get_model_artifact_kind(model_id: str) -> str:
+        direct_path = Path(str(model_id or '').strip()).expanduser()
+        if direct_path.is_dir():
+            if ((direct_path / 'model.onnx').is_file()
+                    and (direct_path / 'selected_tags.csv').is_file()):
+                return MODEL_ARTIFACT_KIND_WD_TAGGER
+        model_class = get_model_class(model_id)
+        return getattr(
+            model_class,
+            'model_artifact_kind',
+            MODEL_ARTIFACT_KIND_HUGGINGFACE,
+        )
+
+    @staticmethod
+    def _get_model_revision(model_id: str) -> str | None:
+        model_class = get_model_class(model_id)
+        revision_getter = getattr(model_class, 'get_download_revision', None)
+        if callable(revision_getter):
+            return revision_getter(model_id)
+        return None
+
+    def _get_install_state(self, model_id: str):
+        models_directory_path = settings.value(
+            'models_directory_path',
+            defaultValue=DEFAULT_SETTINGS['models_directory_path'],
+            type=str,
+        )
+        models_directory_path = (
+            Path(models_directory_path)
+            if models_directory_path else None
+        )
+        return get_model_install_state(
+            model_id,
+            models_directory_path,
+            artifact_kind=self._get_model_artifact_kind(model_id),
+            revision=self._get_model_revision(model_id),
+        )
+
+    def refresh_model_availability(self):
+        for index in range(self.model_combo_box.count()):
+            model_id = self.model_combo_box.itemText(index)
+            install_state = self._get_install_state(model_id)
+            if install_state.status in ('cached', 'local'):
+                self.model_combo_box.setItemIcon(index, self.model_cached_icon)
+            elif install_state.status == 'partial':
+                self.model_combo_box.setItemIcon(index, self.model_partial_icon)
+            else:
+                self.model_combo_box.setItemIcon(index, QIcon())
+            self.model_combo_box.setItemData(
+                index,
+                install_state.detail,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.refresh_selected_model_status()
+
+    def refresh_selected_model_status(self):
+        model_id = str(self.model_combo_box.currentText() or '').strip()
+        if not model_id:
+            self.model_combo_box.setToolTip('')
+            return
+
+        install_state = self._get_install_state(model_id)
+        self.model_combo_box.setToolTip(install_state.detail)
 
     def _make_disable_thinking_container(self, *, use_switch: bool, checked: bool) -> tuple[QWidget, QWidget]:
         container = QWidget()
@@ -1050,6 +1134,7 @@ class CaptionSettingsForm:
             root_layout.addWidget(self._build_tabs())
             root_layout.addStretch(1)
         self.show_settings_for_model(self.model_combo_box.currentText())
+        self.refresh_model_availability()
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
         self._page_cache[layout_mode] = page
         return page
@@ -1568,6 +1653,7 @@ class AutoCaptioner(QDockWidget):
         self.layout_mode = normalized
         self._update_primary_button_text()
         self._update_unload_button_state()
+        self._refresh_model_availability_ui()
         self.updateGeometry()
         if persist:
             persist_auto_captioner_layout_mode(normalized)
@@ -1813,7 +1899,8 @@ class AutoCaptioner(QDockWidget):
     def start_or_cancel_captioning(self):
         if self.is_captioning:
             # Cancel captioning.
-            self.captioning_thread.is_canceled = True
+            if self.captioning_thread is not None:
+                self.captioning_thread.request_cancel()
             self.start_cancel_button.setEnabled(False)
             self._update_primary_button_text(canceling=True)
         else:
@@ -1871,6 +1958,16 @@ class AutoCaptioner(QDockWidget):
                 visible=is_local_model,
                 enabled=is_local_model and loaded_model_present and not self.is_captioning,
             )
+
+    def _refresh_model_availability_ui(self):
+        clear_model_availability_cache()
+        for form in (
+            self.caption_settings_form,
+            self.classic_caption_settings_form,
+            self.compact_caption_settings_form,
+        ):
+            if form is not None:
+                form.refresh_model_availability()
 
     @staticmethod
     def _format_memory_bytes(byte_count: int | float | None) -> str:
@@ -2075,6 +2172,8 @@ class AutoCaptioner(QDockWidget):
         stage = getattr(thread, 'current_stage', 'idle') or 'idle'
         if stage == 'loading_model':
             phase_text = 'Loading model'
+        elif stage == 'downloading_model':
+            phase_text = 'Downloading model'
         elif stage == 'preparing_input':
             phase_text = 'Preparing input'
         elif stage == 'generating':
@@ -2334,6 +2433,7 @@ class AutoCaptioner(QDockWidget):
         self.captioning_thread.finished.connect(
             lambda: self.set_is_captioning(False))
         self.captioning_thread.finished.connect(self._update_unload_button_state)
+        self.captioning_thread.finished.connect(self._refresh_model_availability_ui)
         self.captioning_thread.finished.connect(restore_stdout_and_stderr)
         self.captioning_thread.finished.connect(self.finalize_captioning_status)
         self.captioning_thread.finished.connect(self.progress_bar.hide)
@@ -2432,3 +2532,4 @@ class AutoCaptioner(QDockWidget):
             after_reserved,
         )
         self._update_unload_button_state()
+        self._refresh_model_availability_ui()

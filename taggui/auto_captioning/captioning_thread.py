@@ -63,6 +63,8 @@ class CaptioningThread(ModelThread):
             self.is_error = True
             return
         self.model.load_processor_and_model()
+        if self.is_canceled:
+            return
         self.model.monkey_patch_after_loading()
         self.device = self.model.device
         self.text = {

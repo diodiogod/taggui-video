@@ -12,6 +12,7 @@ from onnxruntime import InferenceSession
 
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.model_availability import MODEL_ARTIFACT_KIND_WD_TAGGER
 from utils.image import Image
 
 KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
@@ -91,11 +92,13 @@ class WdTaggerModel:
 
 class WdTagger(AutoCaptioningModel):
     image_mode = 'RGBA'
+    model_artifact_kind = MODEL_ARTIFACT_KIND_WD_TAGGER
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',
-                 caption_settings: dict):
-        super().__init__(captioning_thread_, caption_settings)
+                 caption_settings: dict,
+                 image_viewer=None):
+        super().__init__(captioning_thread_, caption_settings, image_viewer)
         self.wd_tagger_settings = self.caption_settings['wd_tagger_settings']
         self.show_probabilities = self.wd_tagger_settings['show_probabilities']
 
