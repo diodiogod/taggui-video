@@ -4,9 +4,7 @@ import time
 from typing import List, Dict, Any, Optional
 from fnmatch import fnmatchcase
 
-from PySide6.QtCore import (QModelIndex, QSortFilterProxyModel, Qt, QRect,
-                            QTimer,
-                            QSize, Signal)
+from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, QTimer, Signal
 from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
@@ -188,12 +186,12 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 return any(fnmatchcase(marking.type.name.lower(), target_type)
                            for marking in image.markings)
             if filter_[0] == 'crops':
-                crop = image.crop if image.crop is not None else QRect(0, 0, *image.dimensions)
+                crop = image.crop if image.crop is not None else image.dimensions_qrect()
                 return any(fnmatchcase(marking.label, filter_[1]) and
                            marking.rect.intersects(crop) and not crop.contains(marking.rect)
                            for marking in image.markings)
             if filter_[0] == 'visible':
-                crop = image.crop if image.crop is not None else QRect(0, 0, *image.dimensions)
+                crop = image.crop if image.crop is not None else image.dimensions_qrect()
                 return any(fnmatchcase(marking.label, filter_[1]) and
                            marking.rect.intersects(crop)
                            for marking in image.markings)
@@ -204,14 +202,19 @@ class ProxyImageListModel(QSortFilterProxyModel):
             if filter_[0] == 'size':
                 # accept any dimension separator of [x:]
                 dimension = (filter_[1]).replace(':', 'x').split('x')
+                valid_dimensions = image.valid_dimensions()
                 return (len(dimension) == 2
-                        and dimension[0] == str(image.dimensions[0])
-                        and dimension[1] == str(image.dimensions[1]))
+                        and valid_dimensions is not None
+                        and dimension[0] == str(valid_dimensions[0])
+                        and dimension[1] == str(valid_dimensions[1]))
             if filter_[0] == 'target':
                 # accept any dimension separator of [x:]
                 dimension = (filter_[1]).replace(':', 'x').split('x')
                 if image.target_dimension is None:
-                    image.target_dimension = target_dimension.get(QSize(*image.dimensions))
+                    image_size = image.dimensions_qsize()
+                    if image_size is None:
+                        return False
+                    image.target_dimension = target_dimension.get(image_size)
                 return (len(dimension) == 2
                         and dimension[0] == str(image.target_dimension.width())
                         and dimension[1] == str(image.target_dimension.height()))

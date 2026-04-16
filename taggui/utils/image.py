@@ -47,12 +47,45 @@ class Image:
     ctime: float | None = None
     mtime: float | None = None
 
+    def valid_dimensions(self) -> tuple[int, int] | None:
+        """Return normalized dimensions only when both sides are usable."""
+        if not self.dimensions or len(self.dimensions) < 2:
+            return None
+
+        width, height = self.dimensions[0], self.dimensions[1]
+        if width is None or height is None:
+            return None
+
+        try:
+            width = int(width)
+            height = int(height)
+        except (TypeError, ValueError):
+            return None
+
+        if width <= 0 or height <= 0:
+            return None
+
+        return width, height
+
+    def dimensions_qsize(self) -> QSize | None:
+        """Return dimensions as QSize when both values are valid."""
+        dimensions = self.valid_dimensions()
+        if dimensions is None:
+            return None
+        return QSize(*dimensions)
+
+    def dimensions_qrect(self) -> QRect:
+        """Return dimensions as QRect, or an empty rect when unknown."""
+        dimensions = self.valid_dimensions()
+        if dimensions is None:
+            return QRect()
+        return QRect(0, 0, *dimensions)
+
     @property
     def aspect_ratio(self) -> float:
         """Get aspect ratio (width/height), cached to avoid recalculation."""
-        if self.dimensions:
-            width, height = self.dimensions
-            # Handle potential None values unpacked from dimensions
-            if width is not None and height is not None and height > 0:
-                return width / height
+        dimensions = self.valid_dimensions()
+        if dimensions:
+            width, height = dimensions
+            return width / height
         return 1.0  # Default square for images without dimensions

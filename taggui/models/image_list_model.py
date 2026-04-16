@@ -585,19 +585,6 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
             sar_num = cap.get(cv2.CAP_PROP_SAR_NUM)
             sar_den = cap.get(cv2.CAP_PROP_SAR_DEN)
 
-            # Read first frame
-            ret, frame = cap.read()
-            cap.release()
-
-            if not ret:
-                return (width, height), None, None
-
-            # Convert BGR to RGB — return QImage (thread-safe; caller converts to QPixmap if needed)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = frame_rgb.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(frame_rgb.data.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
-
             video_metadata = {
                 'fps': fps,
                 'duration': duration,
@@ -606,6 +593,19 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
                 'sar_num': sar_num if sar_num > 0 else 1,
                 'sar_den': sar_den if sar_den > 0 else 1
             }
+
+            # Read first frame
+            ret, frame = cap.read()
+            cap.release()
+
+            if not ret:
+                return (width, height), video_metadata, None
+
+            # Convert BGR to RGB — return QImage (thread-safe; caller converts to QPixmap if needed)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame_rgb.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(frame_rgb.data.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
 
             return (width, height), video_metadata, qt_image
         except Exception as e:
@@ -1541,12 +1541,18 @@ class ImageListModel(QAbstractListModel):
                         new_dims = (int(dimensions[0]), int(dimensions[1]))
                     except Exception:
                         continue
-                    if old_dims == new_dims:
-                        continue
-                    image.dimensions = new_dims
-                    if video_metadata is not None:
+                    page_entry_changed = False
+                    if old_dims != new_dims:
+                        image.dimensions = new_dims
+                        page_entry_changed = True
+                    if (
+                        video_metadata is not None
+                        and getattr(image, 'video_metadata', None) != video_metadata
+                    ):
                         image.video_metadata = video_metadata
-                    page_changed = True
+                        page_entry_changed = True
+                    if page_entry_changed:
+                        page_changed = True
                 if page_changed:
                     changed_pages.add(int(page_num))
 
@@ -4103,14 +4109,22 @@ class ImageListModel(QAbstractListModel):
             return QSize(base_width, int(base_width * min(height / width, 3)))
         if role == Qt.ItemDataRole.ToolTipRole:
             path = image.path.relative_to(settings.value('directory_path', type=str))
-            dimensions = f'{image.dimensions[0]}:{image.dimensions[1]}'
+            valid_dimensions = image.valid_dimensions()
+            dimensions = (
+                f'{valid_dimensions[0]}:{valid_dimensions[1]}'
+                if valid_dimensions else 'unknown'
+            )
             if not image.target_dimension:
                 if image.crop:
                     image.target_dimension = target_dimension.get(image.crop.size())
                 else:
-                    image.target_dimension = target_dimension.get(QSize(*image.dimensions))
-            target = f'{image.target_dimension.width()}:{image.target_dimension.height()}'
-            return f'{path}\n{dimensions} 🠮 {target}'
+                    image_size = image.dimensions_qsize()
+                    if image_size is not None:
+                        image.target_dimension = target_dimension.get(image_size)
+            if image.target_dimension:
+                target = f'{image.target_dimension.width()}:{image.target_dimension.height()}'
+                return f'{path}\n{dimensions} 🠮 {target}'
+            return f'{path}\n{dimensions}'
 
     def _start_paginated_enrichment(self, *, window_pages=None, scope='window'):
         """Start background enrichment for paginated mode (using DB placeholders).

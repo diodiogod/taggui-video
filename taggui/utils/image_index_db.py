@@ -3065,7 +3065,8 @@ class ImageIndexDB:
         """Get unenriched file names within a rank range (page).
 
         Uses the same sort order as get_page so ranks correspond to pages.
-        Returns file_name values where width IS NULL (need enrichment).
+        Returns file_name values that still need dimension or video metadata
+        enrichment.
         """
         if not self.enabled or not self.conn:
             return []
@@ -3092,7 +3093,13 @@ class ImageIndexDB:
                             SELECT i.file_name
                             FROM ordered_image_cache c
                             JOIN images i ON i.id = c.image_id
-                            WHERE c.cache_key = ? AND c.rank >= ? AND c.rank < ? AND i.width IS NULL
+                            WHERE c.cache_key = ?
+                              AND c.rank >= ?
+                              AND c.rank < ?
+                              AND (
+                                  i.width IS NULL
+                                  OR (i.is_video = 1 AND i.video_frame_count IS NULL)
+                              )
                             ORDER BY c.rank
                             ''',
                             (self._serialize_order_cache_key(
@@ -3108,13 +3115,16 @@ class ImageIndexDB:
                 cursor = self.conn.cursor()
                 page_size = end_rank - start_rank
 
-                inner_query = 'SELECT file_name, width FROM images'
+                inner_query = 'SELECT file_name, width, is_video, video_frame_count FROM images'
                 if filter_sql:
                     inner_query += f' WHERE {filter_sql}'
                 inner_query += f' ORDER BY {order_clause} LIMIT ? OFFSET ?'
 
                 safe_bindings = self._normalize_bindings(bindings)
-                query = f'SELECT file_name FROM ({inner_query}) sub WHERE sub.width IS NULL'
+                query = (
+                    f'SELECT file_name FROM ({inner_query}) sub '
+                    'WHERE sub.width IS NULL OR (sub.is_video = 1 AND sub.video_frame_count IS NULL)'
+                )
                 cursor.execute(query, safe_bindings + (page_size, start_rank))
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
@@ -3124,7 +3134,7 @@ class ImageIndexDB:
     def get_placeholder_files(self, limit: int = 1000) -> List[str]:
         """
         Get list of files that have placeholder dimensions (need enrichment)
-        OR have no tags indexed (need tag extraction).
+        OR videos missing frame metadata OR have no tags indexed.
         """
         if not self.enabled or not self.conn:
             return []
@@ -3137,6 +3147,7 @@ class ImageIndexDB:
                 SELECT DISTINCT file_name FROM images 
                 LEFT JOIN image_tags ON images.id = image_tags.image_id
                 WHERE images.width IS NULL 
+                   OR (images.is_video = 1 AND images.video_frame_count IS NULL)
                    OR image_tags.image_id IS NULL
                 LIMIT ?
             ''', (limit,))
