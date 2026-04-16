@@ -4289,8 +4289,10 @@ class MainWindow(QMainWindow):
     def _deferred_load_floating_viewer_payload(self, payload: dict):
         """Load media into a spawned floating viewer after its window exists."""
         viewer = payload.get('viewer')
-        target_row = int(payload.get('target_row', -1) or -1)
-        target_col = int(payload.get('target_col', 0) or 0)
+        target_row_raw = payload.get('target_row', -1)
+        target_col_raw = payload.get('target_col', 0)
+        target_row = -1 if target_row_raw is None else int(target_row_raw)
+        target_col = 0 if target_col_raw is None else int(target_col_raw)
         source_video_state = payload.get('source_video_state')
         target_proxy_index = payload.get('target_proxy_index', QPersistentModelIndex())
 
@@ -4537,7 +4539,7 @@ class MainWindow(QMainWindow):
         )
         focus_window = None
 
-        for proxy_index, window_rect in zip(proxy_indices, rects):
+        for item_index, (proxy_index, window_rect) in enumerate(zip(proxy_indices, rects)):
             image = proxy_index.data(Qt.ItemDataRole.UserRole)
             window = self.spawn_floating_viewer_at(
                 target_index=proxy_index,
@@ -4545,7 +4547,7 @@ class MainWindow(QMainWindow):
                 raise_window=False,
                 activate_window=False,
                 set_active=False,
-                load_before_show=True,
+                load_before_show=(item_index != 0),
             )
             if window is None:
                 continue

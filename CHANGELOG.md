@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-04-16
+
+### Added
+
+- Make review badge changes from wall interactions appear in the image list immediately
+- Smooth out the masonry review workflow with more reliable first-item behavior
+
+### Fixed
+
+- Fix first-item masonry wall load and review repaint timing
+- Fix the first selected image or video opening black in the masonry review wall
 ## [1.2.0] - 2026-04-16
 
 ### Added
