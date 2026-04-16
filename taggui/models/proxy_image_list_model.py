@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
+from utils.review_marks import parse_review_flag_token
 import utils.target_dimension as target_dimension
 
 comparison_operators = {
@@ -232,6 +233,24 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 if normalized in {'0', 'false', 'no', 'off'}:
                     return not bool(getattr(image, 'bomb', False))
                 return False
+            if filter_[0] == 'review':
+                normalized = str(filter_[1]).strip().lower()
+                review_rank = int(getattr(image, 'review_rank', 0) or 0)
+                review_flags = int(getattr(image, 'review_flags', 0) or 0)
+                if normalized in {'1', '2', '3', '4', '5'}:
+                    return review_rank == int(normalized)
+                if normalized in {'0', 'none', 'false', 'no', 'off'}:
+                    return review_rank == 0 and review_flags == 0
+                if normalized in {'true', 'yes', 'on', 'any'}:
+                    return review_rank > 0 or review_flags != 0
+                if normalized == 'ranked':
+                    return review_rank > 0
+                if normalized == 'flagged':
+                    return review_flags != 0
+                review_flag = parse_review_flag_token(normalized)
+                if review_flag is not None:
+                    return (review_flags & int(review_flag)) != 0
+                return False
         if filter_[1] == 'AND':
             if len(filter_) < 3:
                 return self.does_image_match_filter(image, filter_[0])
@@ -255,6 +274,8 @@ class ProxyImageListModel(QSortFilterProxyModel):
             number_to_compare = len(self.tokenizer(caption).input_ids) - 2
         elif filter_[0] == 'stars':
             number_to_compare = image.rating * 5.0
+        elif filter_[0] == 'review_rank':
+            number_to_compare = int(getattr(image, 'review_rank', 0) or 0)
         elif filter_[0] == 'width':
             number_to_compare = image.dimensions[0]
         elif filter_[0] == 'height':

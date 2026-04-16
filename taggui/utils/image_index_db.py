@@ -9,10 +9,15 @@ import time
 import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from utils.review_marks import (
+    normalize_review_flags,
+    normalize_review_rank,
+    normalize_review_state,
+)
 from utils.settings import settings, DEFAULT_SETTINGS
 
 
-DB_VERSION = 10  # v10 adds reaction_updated_at for curator-priority sorting
+DB_VERSION = 11  # v11 adds structured review-mark persistence
 ORDER_CACHE_VERSION = 2  # bump when ordered_image_cache semantics change
 
 
@@ -77,6 +82,26 @@ def extract_sidecar_reaction_state(meta: Any) -> dict[str, Any] | None:
     return state
 
 
+def extract_sidecar_review_state(meta: Any) -> dict[str, Any] | None:
+    if not isinstance(meta, dict) or meta.get('version') != 1:
+        return None
+
+    state: dict[str, Any] = {
+        'review_rank': None,
+        'review_flags': None,
+        'review_updated_at': None,
+    }
+    if 'review_rank' in meta:
+        state['review_rank'] = normalize_review_rank(meta.get('review_rank'))
+    if 'review_flags' in meta:
+        state['review_flags'] = normalize_review_flags(meta.get('review_flags'))
+    if 'review_updated_at' in meta:
+        state['review_updated_at'] = normalize_sidecar_timestamp(
+            meta.get('review_updated_at')
+        )
+    return state
+
+
 def build_sidecar_reaction_recovery(db_state: Any, meta: Any) -> dict[str, Any] | None:
     sidecar_state = extract_sidecar_reaction_state(meta)
     if sidecar_state is None:
@@ -136,6 +161,75 @@ def build_sidecar_reaction_recovery(db_state: Any, meta: Any) -> dict[str, Any] 
     }
 
 
+def build_sidecar_review_recovery(db_state: Any, meta: Any) -> dict[str, Any] | None:
+    sidecar_state = extract_sidecar_review_state(meta)
+    if sidecar_state is None:
+        return None
+
+    db_rank, db_flags = normalize_review_state(
+        _mapping_value(db_state, 'review_rank', 0),
+        _mapping_value(db_state, 'review_flags', 0),
+    )
+    db_review_updated_at = normalize_sidecar_timestamp(
+        _mapping_value(db_state, 'review_updated_at')
+    )
+
+    sidecar_rank = sidecar_state.get('review_rank')
+    sidecar_flags = sidecar_state.get('review_flags')
+    sidecar_review_updated_at = sidecar_state.get('review_updated_at')
+
+    has_sidecar_rank = sidecar_rank is not None
+    has_sidecar_flags = sidecar_flags is not None
+    if not has_sidecar_rank and not has_sidecar_flags and sidecar_review_updated_at is None:
+        return None
+
+    sidecar_rank_value, sidecar_flags_value = normalize_review_state(
+        sidecar_rank if has_sidecar_rank else db_rank,
+        sidecar_flags if has_sidecar_flags else db_flags,
+    )
+
+    if (
+        sidecar_review_updated_at is not None
+        and (
+            db_review_updated_at is None
+            or sidecar_review_updated_at > float(db_review_updated_at) + 1e-6
+        )
+    ):
+        return {
+            'review_rank': int(sidecar_rank_value),
+            'review_flags': int(sidecar_flags_value),
+            'review_updated_at': sidecar_review_updated_at,
+        }
+
+    next_rank = db_rank
+    next_flags = db_flags
+    next_review_updated_at = db_review_updated_at
+    changed = False
+
+    if has_sidecar_rank and db_rank <= 0 and sidecar_rank_value > 0:
+        next_rank = int(sidecar_rank_value)
+        changed = True
+    if has_sidecar_flags:
+        merged_flags = int(db_flags) | int(sidecar_flags_value)
+        if merged_flags != int(db_flags):
+            next_flags = merged_flags
+            changed = True
+    next_rank, next_flags = normalize_review_state(next_rank, next_flags)
+
+    if sidecar_review_updated_at is not None and db_review_updated_at is None:
+        next_review_updated_at = sidecar_review_updated_at
+        changed = True
+
+    if not changed:
+        return None
+
+    return {
+        'review_rank': int(next_rank),
+        'review_flags': int(next_flags),
+        'review_updated_at': next_review_updated_at,
+    }
+
+
 def stable_random_sort_key(value: Any, seed: Any) -> int:
     """Return a deterministic 63-bit positive hash for seeded random ordering."""
     try:
@@ -160,6 +254,8 @@ class ImageIndexDB:
     RATING_MIGRATION_LAST_ID_KEY = 'rating_migration_v1_last_id'
     SIDECAR_REACTION_MIGRATION_DONE_KEY = 'sidecar_reaction_migration_v1_done'
     SIDECAR_REACTION_MIGRATION_LAST_ID_KEY = 'sidecar_reaction_migration_v1_last_id'
+    SIDECAR_REVIEW_MIGRATION_DONE_KEY = 'sidecar_review_migration_v1_done'
+    SIDECAR_REVIEW_MIGRATION_LAST_ID_KEY = 'sidecar_review_migration_v1_last_id'
     MARKING_MIGRATION_DONE_KEY = 'marking_migration_v1_done'
     MARKING_MIGRATION_LAST_ID_KEY = 'marking_migration_v1_last_id'
     TAG_MIGRATION_DONE_KEY = 'tag_migration_v1_done'
@@ -371,6 +467,9 @@ class ImageIndexDB:
                         love INTEGER DEFAULT 0,
                         bomb INTEGER DEFAULT 0,
                         reaction_updated_at REAL,
+                        review_rank INTEGER DEFAULT 0,
+                        review_flags INTEGER DEFAULT 0,
+                        review_updated_at REAL,
                         indexed_at REAL,
                         thumbnail_cached INTEGER DEFAULT 0,
                         file_size INTEGER,
@@ -423,6 +522,9 @@ class ImageIndexDB:
                     ('love', 'ALTER TABLE images ADD COLUMN love INTEGER DEFAULT 0'),
                     ('bomb', 'ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0'),
                     ('reaction_updated_at', 'ALTER TABLE images ADD COLUMN reaction_updated_at REAL'),
+                    ('review_rank', 'ALTER TABLE images ADD COLUMN review_rank INTEGER DEFAULT 0'),
+                    ('review_flags', 'ALTER TABLE images ADD COLUMN review_flags INTEGER DEFAULT 0'),
+                    ('review_updated_at', 'ALTER TABLE images ADD COLUMN review_updated_at REAL'),
                 ):
                     if column_name not in columns:
                         cursor.execute(ddl)
@@ -437,6 +539,9 @@ class ImageIndexDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_rank ON images(review_rank)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_flags ON images(review_flags)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_updated_at ON images(review_updated_at)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_ordered_image_cache_image ON ordered_image_cache(cache_key, image_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
@@ -453,7 +558,7 @@ class ImageIndexDB:
                     self.conn.commit()
                 elif int(row['value']) != DB_VERSION:
                     old_version = int(row['value'])
-                    if old_version in (6, 7, 8, 9) and DB_VERSION == 10:
+                    if old_version in (6, 7, 8, 9, 10) and DB_VERSION == 11:
                         print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating incrementally...')
                         if old_version <= 6:
                             self._create_image_markings_schema(cursor)
@@ -467,9 +572,18 @@ class ImageIndexDB:
                             cursor.execute('ALTER TABLE images ADD COLUMN bomb INTEGER DEFAULT 0')
                         if 'reaction_updated_at' not in columns:
                             cursor.execute('ALTER TABLE images ADD COLUMN reaction_updated_at REAL')
+                        if 'review_rank' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN review_rank INTEGER DEFAULT 0')
+                        if 'review_flags' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN review_flags INTEGER DEFAULT 0')
+                        if 'review_updated_at' not in columns:
+                            cursor.execute('ALTER TABLE images ADD COLUMN review_updated_at REAL')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_rank ON images(review_rank)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_flags ON images(review_flags)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_updated_at ON images(review_updated_at)')
                         cursor.execute('UPDATE meta SET value = ? WHERE key = ?',
                                      (str(DB_VERSION), 'version'))
                         self.conn.commit()
@@ -498,6 +612,9 @@ class ImageIndexDB:
                                 love INTEGER DEFAULT 0,
                                 bomb INTEGER DEFAULT 0,
                                 reaction_updated_at REAL,
+                                review_rank INTEGER DEFAULT 0,
+                                review_flags INTEGER DEFAULT 0,
+                                review_updated_at REAL,
                                 indexed_at REAL,
                                 thumbnail_cached INTEGER DEFAULT 0,
                                 file_size INTEGER,
@@ -523,6 +640,9 @@ class ImageIndexDB:
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_rank ON images(review_rank)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_flags ON images(review_flags)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_updated_at ON images(review_updated_at)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
@@ -562,6 +682,18 @@ class ImageIndexDB:
                         print("Migrating DB: Adding reaction_updated_at column...")
                         cursor.execute('ALTER TABLE images ADD COLUMN reaction_updated_at REAL')
                         self.conn.commit()
+                    if 'review_rank' not in columns:
+                        print("Migrating DB: Adding review_rank column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN review_rank INTEGER DEFAULT 0')
+                        self.conn.commit()
+                    if 'review_flags' not in columns:
+                        print("Migrating DB: Adding review_flags column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN review_flags INTEGER DEFAULT 0')
+                        self.conn.commit()
+                    if 'review_updated_at' not in columns:
+                        print("Migrating DB: Adding review_updated_at column...")
+                        cursor.execute('ALTER TABLE images ADD COLUMN review_updated_at REAL')
+                        self.conn.commit()
                         
                     # Ensure indexes exist
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
@@ -571,6 +703,9 @@ class ImageIndexDB:
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_love ON images(love)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_bomb ON images(bomb)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_reaction_updated_at ON images(reaction_updated_at)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_rank ON images(review_rank)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_flags ON images(review_flags)')
+                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_updated_at ON images(review_updated_at)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_ctime ON images(ctime)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size)')
@@ -655,7 +790,8 @@ class ImageIndexDB:
             cursor.execute('''
                 SELECT width, height, is_video, video_fps, video_duration,
                        video_frame_count, mtime, thumbnail_cached, rating,
-                       love, bomb, reaction_updated_at
+                       love, bomb, reaction_updated_at,
+                       review_rank, review_flags, review_updated_at
                 FROM images
                 WHERE file_name = ?
             ''', (file_name,))
@@ -679,6 +815,12 @@ class ImageIndexDB:
                     float(row['reaction_updated_at'])
                     if row['reaction_updated_at'] is not None else None
                 ),
+                'review_rank': int(row['review_rank'] or 0),
+                'review_flags': int(row['review_flags'] or 0),
+                'review_updated_at': (
+                    float(row['review_updated_at'])
+                    if row['review_updated_at'] is not None else None
+                ),
             }
 
             if row['is_video']:
@@ -697,7 +839,9 @@ class ImageIndexDB:
     def save_info(self, file_name: str, width: int, height: int,
                   is_video: bool, mtime: float, video_metadata: Optional[dict] = None,
                   rating: float = 0.0, file_size: int = None, file_type: str = None,
-                  ctime: float = None, reaction_updated_at: float | None = None):
+                  ctime: float = None, reaction_updated_at: float | None = None,
+                  review_rank: int = 0, review_flags: int = 0,
+                  review_updated_at: float | None = None):
         """
         Save image info to cache.
 
@@ -728,6 +872,8 @@ class ImageIndexDB:
         # Calculate aspect ratio
         aspect_ratio = width / height if height > 0 else 1.0
         indexed_at = time.time()
+        review_rank, review_flags = normalize_review_state(review_rank, review_flags)
+        review_updated_at = normalize_sidecar_timestamp(review_updated_at)
         
         # For inserts we still want a usable ctime fallback, but updates must
         # not rewrite an existing stable ctime just because the caller omitted
@@ -744,8 +890,8 @@ class ImageIndexDB:
                     INSERT INTO images
                     (file_name, width, height, aspect_ratio, is_video, video_fps,
                      video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
-                     file_size, file_type, ctime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     file_size, file_type, ctime, review_rank, review_flags, review_updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_name) DO UPDATE SET
                         width = excluded.width,
                         height = excluded.height,
@@ -761,6 +907,39 @@ class ImageIndexDB:
                             ELSE images.rating
                         END,
                         reaction_updated_at = COALESCE(images.reaction_updated_at, excluded.reaction_updated_at),
+                        review_rank = CASE
+                            WHEN excluded.review_updated_at IS NOT NULL
+                                 AND (
+                                     images.review_updated_at IS NULL
+                                     OR excluded.review_updated_at >= images.review_updated_at
+                                 )
+                            THEN excluded.review_rank
+                            WHEN COALESCE(images.review_rank, 0) <= 0
+                                 AND COALESCE(excluded.review_rank, 0) > 0
+                            THEN excluded.review_rank
+                            ELSE images.review_rank
+                        END,
+                        review_flags = CASE
+                            WHEN excluded.review_updated_at IS NOT NULL
+                                 AND (
+                                     images.review_updated_at IS NULL
+                                     OR excluded.review_updated_at >= images.review_updated_at
+                                 )
+                            THEN excluded.review_flags
+                            WHEN COALESCE(images.review_flags, 0) = 0
+                                 AND COALESCE(excluded.review_flags, 0) != 0
+                            THEN excluded.review_flags
+                            ELSE images.review_flags
+                        END,
+                        review_updated_at = CASE
+                            WHEN excluded.review_updated_at IS NOT NULL
+                                 AND (
+                                     images.review_updated_at IS NULL
+                                     OR excluded.review_updated_at >= images.review_updated_at
+                                 )
+                            THEN excluded.review_updated_at
+                            ELSE images.review_updated_at
+                        END,
                         indexed_at = excluded.indexed_at,
                         file_size = COALESCE(excluded.file_size, images.file_size),
                         file_type = COALESCE(NULLIF(excluded.file_type, ''), images.file_type),
@@ -771,7 +950,7 @@ class ImageIndexDB:
                         -- thumbnail_cached intentionally NOT updated (preserve existing value)
                 ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
                       video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
-                      file_size, file_type, insert_ctime))
+                      file_size, file_type, insert_ctime, review_rank, review_flags, review_updated_at))
                 return  # Success
 
             except sqlite3.OperationalError as e:
@@ -1724,6 +1903,206 @@ class ImageIndexDB:
 
         return migrated_total, scanned_sidecars, done
 
+    def import_sidecar_review_state(
+        self,
+        updates: List[tuple[int, int, float | None, int]],
+    ) -> int:
+        """Apply sidecar-derived review state to DB rows in one batch."""
+        if not self.enabled or not self.conn or not updates:
+            return 0
+
+        normalized_updates: list[tuple[int, int, float | None, int]] = []
+        for review_rank, review_flags, review_updated_at, image_id in updates:
+            try:
+                row_id = int(image_id)
+            except Exception:
+                continue
+            if row_id <= 0:
+                continue
+            normalized_rank, normalized_flags = normalize_review_state(
+                review_rank,
+                review_flags,
+            )
+            normalized_updates.append(
+                (
+                    int(normalized_rank),
+                    int(normalized_flags),
+                    normalize_sidecar_timestamp(review_updated_at),
+                    row_id,
+                )
+            )
+
+        if not normalized_updates:
+            return 0
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.executemany(
+                    '''
+                    UPDATE images
+                    SET review_rank = ?, review_flags = ?, review_updated_at = ?
+                    WHERE id = ?
+                    ''',
+                    normalized_updates,
+                )
+                self.conn.commit()
+                return len(normalized_updates)
+        except sqlite3.Error as e:
+            print(f'Database review import error: {e}')
+            return 0
+
+    def migrate_review_state_from_sidecars(
+        self,
+        directory_path: Path,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 2.5,
+    ) -> tuple[int, int, bool]:
+        """
+        Incrementally restore structured review state from JSON sidecars.
+
+        Returns:
+            (migrated_count, scanned_sidecars_count, done)
+        """
+        if not self.enabled or not self.conn:
+            return 0, 0, True
+
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 2.5
+
+        start_ts = time.monotonic()
+        migrated_total = 0
+        scanned_sidecars = 0
+        done = False
+        last_id = 0
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.SIDECAR_REVIEW_MIGRATION_DONE_KEY,),
+                )
+                row = cursor.fetchone()
+                if row is not None and str(row[0]) == '1':
+                    return 0, 0, True
+
+                cursor.execute(
+                    'SELECT value FROM meta WHERE key = ?',
+                    (self.SIDECAR_REVIEW_MIGRATION_LAST_ID_KEY,),
+                )
+                last_row = cursor.fetchone()
+                if last_row is not None:
+                    try:
+                        last_id = int(last_row[0])
+                    except Exception:
+                        last_id = 0
+        except sqlite3.Error:
+            return 0, 0, True
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT id, file_name, review_rank, review_flags, review_updated_at
+                        FROM images
+                        WHERE id > ?
+                        ORDER BY id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                done = True
+                break
+
+            updates: list[tuple[int, int, float | None, int]] = []
+            for row in rows:
+                try:
+                    row_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                except Exception:
+                    continue
+
+                if row_id > last_id:
+                    last_id = row_id
+
+                json_path = (directory_path / rel_path).with_suffix('.json')
+                if not json_path.exists():
+                    continue
+                try:
+                    if json_path.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+
+                scanned_sidecars += 1
+                try:
+                    with json_path.open(encoding='UTF-8') as fp:
+                        meta = json.load(fp)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+                merged_state = build_sidecar_review_recovery(row, meta)
+                if not merged_state:
+                    continue
+
+                updates.append(
+                    (
+                        int(merged_state.get('review_rank', 0) or 0),
+                        int(merged_state.get('review_flags', 0) or 0),
+                        merged_state.get('review_updated_at'),
+                        row_id,
+                    )
+                )
+
+            migrated_total += int(self.import_sidecar_review_state(updates) or 0)
+
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.SIDECAR_REVIEW_MIGRATION_LAST_ID_KEY, str(int(last_id))),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                break
+
+            if len(rows) < batch_size:
+                done = True
+                break
+
+        if done:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        INSERT INTO meta (key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        ''',
+                        (self.SIDECAR_REVIEW_MIGRATION_DONE_KEY, '1'),
+                    )
+                    self.conn.commit()
+            except sqlite3.Error:
+                pass
+
+        return migrated_total, scanned_sidecars, done
+
     def migrate_markings_from_sidecars(
         self,
         directory_path: Path,
@@ -2351,6 +2730,7 @@ class ImageIndexDB:
                             SELECT i.id, i.file_name, i.width, i.height, i.aspect_ratio, i.is_video,
                                    i.video_fps, i.video_duration, i.video_frame_count, i.mtime, i.rating,
                                    i.love, i.bomb, i.reaction_updated_at,
+                                   i.review_rank, i.review_flags, i.review_updated_at,
                                    i.file_size, i.file_type, i.ctime
                             FROM ordered_image_cache c
                             JOIN images i ON i.id = c.image_id
@@ -2383,6 +2763,7 @@ class ImageIndexDB:
                     SELECT id, file_name, width, height, aspect_ratio, is_video,
                            video_fps, video_duration, video_frame_count, mtime, rating,
                            love, bomb, reaction_updated_at,
+                           review_rank, review_flags, review_updated_at,
                            file_size, file_type, ctime
                     FROM images
                 '''
@@ -2454,6 +2835,7 @@ class ImageIndexDB:
                 SELECT id, file_name, width, height, aspect_ratio, is_video,
                        video_fps, video_duration, video_frame_count, mtime, rating,
                        love, bomb, reaction_updated_at,
+                       review_rank, review_flags, review_updated_at,
                        file_size, file_type, ctime
                 FROM images WHERE id = ?
             ''', (image_id,))
@@ -2480,7 +2862,8 @@ class ImageIndexDB:
                 cursor.execute(f'''
                     SELECT id, file_name, width, height, aspect_ratio, is_video,
                            video_fps, video_duration, video_frame_count, mtime, rating,
-                           love, bomb
+                           love, bomb, reaction_updated_at,
+                           review_rank, review_flags, review_updated_at
                     FROM images WHERE id IN ({placeholders})
                 ''', batch)
                 result.extend([dict(row) for row in cursor.fetchall()])
@@ -3216,6 +3599,43 @@ class ImageIndexDB:
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f'Database reaction write error: {e}')
+
+    def set_review_state(
+        self,
+        image_id: int,
+        review_rank: int,
+        review_flags: int,
+        review_updated_at: float | None = None,
+    ):
+        """Persist structured review state for one image."""
+        if not self.enabled or not self.conn:
+            return
+
+        normalized_rank, normalized_flags = normalize_review_state(
+            review_rank,
+            review_flags,
+        )
+        normalized_review_updated_at = normalize_sidecar_timestamp(review_updated_at)
+
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    '''
+                    UPDATE images
+                    SET review_rank = ?, review_flags = ?, review_updated_at = ?
+                    WHERE id = ?
+                    ''',
+                    (
+                        int(normalized_rank),
+                        int(normalized_flags),
+                        normalized_review_updated_at,
+                        image_id,
+                    ),
+                )
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f'Database review write error: {e}')
 
     def mark_thumbnail_cached(self, file_name: str, cached: bool = True):
         """Mark thumbnail as cached/uncached for an image (thread-safe)."""

@@ -30,6 +30,7 @@ from utils.big_widgets import BigPushButton
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
+from utils.review_marks import ReviewFlag, normalize_review_state
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
 from utils.utils import get_resource_path, pluralize
@@ -44,6 +45,7 @@ from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
+from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
 from widgets.fullscreen_viewer_window import FullscreenViewerWindow
 from widgets.media_comparison_widget import MediaComparisonWidget
 from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
@@ -445,6 +447,7 @@ class MainWindow(QMainWindow):
         self._fullscreen_window = None
         self._fullscreen_restore_state = None
         self._sync_coordinator: VideoSyncCoordinator | None = None
+        self._selection_wall_sync_token = 0
         self._exclusive_video_controls_visibility = True
         self._video_controls_perf_profile = 'single'
         self._video_controls_pending_updates = {}
@@ -501,6 +504,7 @@ class MainWindow(QMainWindow):
         self.rating_widget = self.toolbar_manager.rating_widget
         self.love_button = self.toolbar_manager.love_button
         self.bomb_button = self.toolbar_manager.bomb_button
+        self.review_controls_widget = self.toolbar_manager.review_controls_widget
 
         self.image_list = ImageList(self.proxy_image_list_model,
                                     tag_separator, image_list_image_width)
@@ -893,6 +897,97 @@ class MainWindow(QMainWindow):
                         return True
             except Exception:
                 pass
+            try:
+                if (
+                    not event.isAutoRepeat()
+                    and not self._focus_widget_accepts_text()
+                    and event.modifiers() in (
+                        Qt.KeyboardModifier.NoModifier,
+                        Qt.KeyboardModifier.KeypadModifier,
+                    )
+                    and event.key() in (
+                        Qt.Key.Key_1,
+                        Qt.Key.Key_2,
+                        Qt.Key.Key_3,
+                        Qt.Key.Key_4,
+                        Qt.Key.Key_5,
+                    )
+                ):
+                    if event.type() == event.Type.ShortcutOverride:
+                        event.accept()
+                        return True
+                    if self._toggle_current_review_rank(int(event.text() or '0')):
+                        event.accept()
+                        return True
+            except Exception:
+                pass
+            try:
+                review_flag_name = None
+                modifiers = event.modifiers()
+                if event.key() == Qt.Key.Key_X and modifiers == Qt.KeyboardModifier.NoModifier:
+                    review_flag_name = 'reject'
+                elif (
+                    event.key() in (Qt.Key.Key_1, Qt.Key.Key_Exclam)
+                    and modifiers == Qt.KeyboardModifier.ShiftModifier
+                ):
+                    review_flag_name = 'warning'
+                elif (
+                    event.key() == Qt.Key.Key_Apostrophe
+                    and modifiers in (
+                        Qt.KeyboardModifier.NoModifier,
+                        Qt.KeyboardModifier.ShiftModifier,
+                    )
+                ):
+                    review_flag_name = 'warning'
+                elif (
+                    event.key() in (Qt.Key.Key_8, Qt.Key.Key_Asterisk)
+                    and modifiers in (
+                        Qt.KeyboardModifier.NoModifier,
+                        Qt.KeyboardModifier.ShiftModifier,
+                    )
+                ):
+                    review_flag_name = 'idea'
+                elif event.key() == Qt.Key.Key_W and modifiers == Qt.KeyboardModifier.NoModifier:
+                    review_flag_name = 'warning'
+                elif event.key() == Qt.Key.Key_I and modifiers == Qt.KeyboardModifier.NoModifier:
+                    review_flag_name = 'idea'
+                is_question_shortcut = (
+                    event.key() == Qt.Key.Key_Slash
+                    and modifiers in (
+                        Qt.KeyboardModifier.NoModifier,
+                        Qt.KeyboardModifier.ShiftModifier,
+                    )
+                )
+                if is_question_shortcut:
+                    review_flag_name = 'question'
+                if (
+                    review_flag_name is not None
+                    and not event.isAutoRepeat()
+                    and not self._focus_widget_accepts_text()
+                    and (
+                        (review_flag_name == 'question' and event.modifiers() in (
+                            Qt.KeyboardModifier.NoModifier,
+                            Qt.KeyboardModifier.ShiftModifier,
+                        ))
+                        or (review_flag_name == 'idea' and modifiers in (
+                            Qt.KeyboardModifier.NoModifier,
+                            Qt.KeyboardModifier.ShiftModifier,
+                        ))
+                        or (review_flag_name == 'warning' and modifiers in (
+                            Qt.KeyboardModifier.NoModifier,
+                            Qt.KeyboardModifier.ShiftModifier,
+                        ))
+                        or (review_flag_name == 'reject' and modifiers == Qt.KeyboardModifier.NoModifier)
+                    )
+                ):
+                    if event.type() == event.Type.ShortcutOverride:
+                        event.accept()
+                        return True
+                    if self._toggle_current_review_flag(review_flag_name):
+                        event.accept()
+                        return True
+            except Exception:
+                pass
 
         if event_type in (event.Type.MouseButtonPress, event.Type.MouseButtonRelease):
             try:
@@ -1257,6 +1352,52 @@ class MainWindow(QMainWindow):
         else:
             return False
 
+        return True
+
+    def _toggle_current_review_rank(self, rank: int) -> bool:
+        """Toggle one numeric review rank for the current review target."""
+        if self._focus_widget_accepts_text():
+            return False
+        targets = self._review_target_images()
+        if not targets:
+            return False
+
+        normalized_rank, _ = normalize_review_state(rank, 0)
+        if normalized_rank <= 0:
+            return False
+
+        all_same_rank = all(
+            int(getattr(image, 'review_rank', 0) or 0) == int(normalized_rank)
+            and (int(getattr(image, 'review_flags', 0) or 0) & int(ReviewFlag.REJECT)) == 0
+            for image in targets
+        )
+        self.set_review_rank(0 if all_same_rank else int(normalized_rank), interactive=True)
+        return True
+
+    def _toggle_current_review_flag(self, flag_name: str) -> bool:
+        """Toggle one structured review flag for the current review target."""
+        if self._focus_widget_accepts_text():
+            return False
+
+        flag_map = {
+            'idea': ReviewFlag.IDEA,
+            'warning': ReviewFlag.WARNING,
+            'question': ReviewFlag.QUESTION,
+            'reject': ReviewFlag.REJECT,
+        }
+        flag = flag_map.get(str(flag_name or '').strip().lower())
+        if flag is None:
+            return False
+
+        targets = self._review_target_images()
+        if not targets:
+            return False
+
+        next_enabled = not all(
+            int(getattr(image, 'review_flags', 0) or 0) & int(flag)
+            for image in targets
+        )
+        self.set_review_flag_state(flag, next_enabled, interactive=True)
         return True
 
     def set_floating_hold_mode(self, enabled: bool):
@@ -2327,6 +2468,25 @@ class MainWindow(QMainWindow):
         image = self._current_viewer_image()
         return [image] if image is not None else []
 
+    def _review_target_images(self) -> list[Image]:
+        active_viewer = self.get_active_viewer()
+        if bool(getattr(active_viewer, '_selection_masonry_wall_viewer', False)):
+            image = self._current_viewer_image(active_viewer)
+            return [image] if image is not None else []
+        return self._rating_reaction_target_images()
+
+    def _apply_review_rank_from_viewer(self, viewer: ImageViewer | None, rank: int):
+        if viewer is None:
+            return
+        self.set_active_viewer(viewer)
+        self._toggle_current_review_rank(rank)
+
+    def _apply_review_flag_from_viewer(self, viewer: ImageViewer | None, flag_name: str):
+        if viewer is None:
+            return
+        self.set_active_viewer(viewer)
+        self._toggle_current_review_flag(flag_name)
+
     def _set_rating_controls_value(self, rating: float, *, mixed: bool = False):
         self.rating = float(rating or 0.0)
         stars = self.rating * 5.0
@@ -2370,6 +2530,11 @@ class MainWindow(QMainWindow):
         _update_button(getattr(overlay, 'love_button', None), bool(love), bool(love_mixed))
         _update_button(getattr(overlay, 'bomb_button', None), bool(bomb), bool(bomb_mixed))
 
+    def _set_review_controls_value(self, review_rank: int, review_flags: int, *, mixed: bool = False):
+        widget = getattr(self, 'review_controls_widget', None)
+        if widget is not None:
+            widget.set_state(int(review_rank or 0), int(review_flags or 0), mixed=bool(mixed))
+
     def _emit_image_rows_changed(self, images: list[Image]):
         source_model = self.image_list_model
         if source_model is None:
@@ -2394,6 +2559,81 @@ class MainWindow(QMainWindow):
             source_model.index(changed_rows[0]),
             source_model.index(changed_rows[-1]),
         )
+        proxy_model = getattr(self, 'proxy_image_list_model', None)
+        updated_proxy_rects = []
+        if proxy_model is not None and hasattr(proxy_model, 'mapFromSource'):
+            for row in changed_rows:
+                try:
+                    source_index = source_model.index(int(row), 0)
+                    proxy_index = proxy_model.mapFromSource(source_index)
+                    if proxy_index.isValid():
+                        proxy_model.dataChanged.emit(proxy_index, proxy_index)
+                        updated_proxy_rects.append(proxy_index)
+                except Exception:
+                    continue
+        try:
+            list_view = self.image_list.list_view
+            try:
+                list_view._last_masonry_window_signature = None
+            except Exception:
+                pass
+            delegate = getattr(list_view, 'delegate', None)
+            if delegate is not None and hasattr(delegate, 'clear_labels'):
+                try:
+                    delegate.clear_labels()
+                except Exception:
+                    pass
+            viewport = list_view.viewport()
+            for proxy_index in updated_proxy_rects:
+                rect = list_view.visualRect(proxy_index)
+                if rect.isValid():
+                    viewport.update(rect)
+                    viewport.repaint(rect)
+            viewport.update()
+            viewport.repaint()
+            recalc = getattr(list_view, '_recalculate_masonry_if_needed', None)
+            if callable(recalc):
+                try:
+                    recalc("review_changed")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _refresh_review_ui_for_images(self, images: list[Image]):
+        changed_paths = {
+            str(getattr(image, 'path', '') or '')
+            for image in images
+            if image is not None
+        }
+        if not changed_paths:
+            return
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                viewer = getattr(window, 'viewer', None)
+                image = self._current_viewer_image(viewer)
+                if image is None:
+                    continue
+                if str(getattr(image, 'path', '') or '') not in changed_paths:
+                    continue
+                refresh_overlay = getattr(window, 'refresh_review_slots_overlay', None)
+                if callable(refresh_overlay):
+                    refresh_overlay()
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        try:
+            list_view = self.image_list.list_view
+            delegate = getattr(list_view, 'delegate', None)
+            if delegate is not None and hasattr(delegate, 'clear_labels'):
+                delegate.clear_labels()
+            source_model = self.image_list_model
+            if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
+                source_model.thumbnail_updates_ready.emit()
+        except Exception:
+            pass
+        self._sync_review_controls_from_context()
 
     def _sync_rating_controls_from_context(self, *_args):
         selected_images = self._selected_list_images()
@@ -2418,6 +2658,7 @@ class MainWindow(QMainWindow):
                 love_mixed=love_mixed,
                 bomb_mixed=bomb_mixed,
             )
+            self._sync_review_controls_from_context()
             return
 
         image = None
@@ -2434,18 +2675,21 @@ class MainWindow(QMainWindow):
         if image is None:
             self._set_rating_controls_value(0.0, mixed=False)
             self._set_reaction_controls_value(False, False)
+            self._set_review_controls_value(0, 0, mixed=False)
             return
         self._set_rating_controls_value(float(getattr(image, 'rating', 0.0) or 0.0), mixed=False)
         self._set_reaction_controls_value(
             bool(getattr(image, 'love', False)),
             bool(getattr(image, 'bomb', False)),
         )
+        self._sync_review_controls_from_context()
 
     def _sync_rating_controls_from_viewer(self, viewer: ImageViewer | None = None):
         image = self._current_viewer_image(viewer)
         if image is None:
             self._set_rating_controls_value(0.0, mixed=False)
             self._set_reaction_controls_value(False, False)
+            self._set_review_controls_value(0, 0, mixed=False)
             return
         self._set_rating_controls_value(
             float(getattr(image, 'rating', 0.0) or 0.0),
@@ -2454,6 +2698,37 @@ class MainWindow(QMainWindow):
         self._set_reaction_controls_value(
             bool(getattr(image, 'love', False)),
             bool(getattr(image, 'bomb', False)),
+        )
+        self._set_review_controls_value(
+            int(getattr(image, 'review_rank', 0) or 0),
+            int(getattr(image, 'review_flags', 0) or 0),
+            mixed=False,
+        )
+
+    def _sync_review_controls_from_context(self, *_args):
+        widget = getattr(self, 'review_controls_widget', None)
+        if widget is None:
+            return
+
+        targets = self._review_target_images()
+        if not targets:
+            self._set_review_controls_value(0, 0, mixed=False)
+            return
+
+        if len(targets) > 1:
+            rank_values = {int(getattr(image, 'review_rank', 0) or 0) for image in targets}
+            flag_values = {int(getattr(image, 'review_flags', 0) or 0) for image in targets}
+            mixed = len(rank_values) > 1 or len(flag_values) > 1
+            rank_value = next(iter(rank_values)) if len(rank_values) == 1 else 0
+            flag_value = next(iter(flag_values)) if len(flag_values) == 1 else 0
+            self._set_review_controls_value(rank_value, flag_value, mixed=mixed)
+            return
+
+        image = targets[0]
+        self._set_review_controls_value(
+            int(getattr(image, 'review_rank', 0) or 0),
+            int(getattr(image, 'review_flags', 0) or 0),
+            mixed=False,
         )
 
     def _connect_floating_viewer(self, viewer: ImageViewer):
@@ -3651,7 +3926,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def sync_video_playback(self):
         """Synchronize loaded videos using a strict startup+loop barrier coordinator."""
-        # Stop any previous coordinator first.
+        self._start_video_sync_for_viewers(self._iter_manual_sync_viewers())
+
+    def _start_video_sync_for_viewers(self, viewers: list[ImageViewer]) -> list[ImageViewer]:
+        """Start the global sync coordinator for a specific viewer subset."""
         if self._sync_coordinator is not None:
             try:
                 self._sync_coordinator.stop()
@@ -3660,7 +3938,7 @@ class MainWindow(QMainWindow):
             self._sync_coordinator = None
 
         loaded_video_viewers = []
-        for viewer in self._iter_manual_sync_viewers():
+        for viewer in viewers or []:
             try:
                 if getattr(viewer, '_is_video_loaded', False) and getattr(viewer.video_player, 'video_path', None):
                     loaded_video_viewers.append(viewer)
@@ -3668,7 +3946,7 @@ class MainWindow(QMainWindow):
                 continue
 
         if not loaded_video_viewers:
-            return
+            return []
 
         # Apply loop state so each player's loop markers are current.
         for viewer in loaded_video_viewers:
@@ -3679,17 +3957,19 @@ class MainWindow(QMainWindow):
 
         self._sync_coordinator = VideoSyncCoordinator(loaded_video_viewers, parent=self)
         self._sync_coordinator.start()
+        return loaded_video_viewers
 
-    def spawn_floating_viewer_at(
+    def _create_floating_viewer_payload(
         self,
         target_index=None,
-        spawn_global_pos: QPoint | None = None,
+        *,
         initial_size_fraction: float | None = None,
-        clamp_to_screen: bool = False,
-    ):
-        """Create a floating viewer for a specific index and optional global position."""
+        aspect_ratio_override: float | None = None,
+    ) -> dict | None:
+        """Build one floating viewer/window pair without placing or showing it yet."""
         if self._viewer_is_fullscreen(self.image_viewer):
             return None
+
         source_viewer = self.get_active_viewer()
         source_video_state = self._capture_viewer_video_state(source_viewer)
 
@@ -3717,25 +3997,93 @@ class MainWindow(QMainWindow):
         window.compare_drag_released.connect(self._on_compare_drag_window_released)
         window.compare_drag_canceled.connect(self._on_compare_drag_window_canceled)
         window.compare_exit_requested.connect(self._on_compare_exit_requested)
+        window.review_rank_requested.connect(
+            lambda rank, current_viewer=viewer: self._apply_review_rank_from_viewer(current_viewer, rank)
+        )
+        window.review_flag_requested.connect(
+            lambda flag_name, current_viewer=viewer: self._apply_review_flag_from_viewer(current_viewer, flag_name)
+        )
 
         self._floating_viewers.append(window)
 
         target_row = target_proxy_index.row() if target_proxy_index.isValid() else -1
         target_col = target_proxy_index.column() if target_proxy_index.isValid() else 0
-
         spawn_w, spawn_h = self._get_initial_floating_size(
             target_proxy_index,
-            aspect_ratio_override=None,
+            aspect_ratio_override=aspect_ratio_override,
             size_fraction=initial_size_fraction,
         )
         window.resize(spawn_w, spawn_h)
 
-        if spawn_global_pos is not None:
-            target_top_left = spawn_global_pos - QPoint(spawn_w // 2, spawn_h // 2)
+        return {
+            'window': window,
+            'viewer': viewer,
+            'target_row': int(target_row),
+            'target_col': int(target_col),
+            'target_proxy_index': QPersistentModelIndex(target_proxy_index),
+            'source_video_state': source_video_state,
+        }
+
+    def _deferred_load_floating_viewer_payload(self, payload: dict):
+        """Load media into a spawned floating viewer after its window exists."""
+        viewer = payload.get('viewer')
+        target_row = int(payload.get('target_row', -1) or -1)
+        target_col = int(payload.get('target_col', 0) or 0)
+        source_video_state = payload.get('source_video_state')
+        target_proxy_index = payload.get('target_proxy_index', QPersistentModelIndex())
+
+        try:
+            if target_row < 0:
+                return
+
+            live_target = self._normalize_spawn_proxy_index(target_proxy_index)
+            if not live_target.isValid():
+                live_target = self._normalize_spawn_proxy_index(
+                    self.proxy_image_list_model.index(target_row, target_col)
+                )
+            if not live_target.isValid():
+                return
+
+            viewer.load_image(live_target)
+            self._apply_inherited_video_state(viewer, source_video_state)
+        except RuntimeError:
+            return
+        except Exception as e:
+            print(f"[VIEWER] Deferred spawn-load warning: {e}")
+        finally:
+            self.refresh_video_controls_performance_profile()
+
+    def spawn_floating_viewer_at(
+        self,
+        target_index=None,
+        spawn_global_pos: QPoint | None = None,
+        initial_size_fraction: float | None = None,
+        clamp_to_screen: bool = False,
+        geometry_override: QRect | None = None,
+        raise_window: bool = True,
+        activate_window: bool = True,
+        set_active: bool = True,
+        load_before_show: bool = False,
+    ):
+        """Create a floating viewer for a specific index and optional global position."""
+        payload = self._create_floating_viewer_payload(
+            target_index,
+            initial_size_fraction=initial_size_fraction,
+        )
+        if not payload:
+            return None
+
+        window = payload['window']
+        viewer = payload['viewer']
+
+        if isinstance(geometry_override, QRect) and geometry_override.isValid():
+            window.setGeometry(geometry_override)
+        elif spawn_global_pos is not None:
+            target_top_left = spawn_global_pos - QPoint(window.width() // 2, window.height() // 2)
             if bool(clamp_to_screen):
                 target_top_left = self._clamp_spawn_top_left_to_screen(
                     target_top_left,
-                    QSize(spawn_w, spawn_h),
+                    window.size(),
                     anchor_global_pos=spawn_global_pos,
                 )
             window.move(target_top_left)
@@ -3744,35 +4092,246 @@ class MainWindow(QMainWindow):
             top_left = self.mapToGlobal(self.rect().topLeft())
             window.move(top_left + QPoint(120 + offset, 90 + offset))
 
-        window.show()
-        window.raise_()
-        window.activateWindow()
-        self.set_active_viewer(viewer)
-
-        def _deferred_load():
+        if bool(load_before_show):
             try:
-                if target_row < 0:
-                    return
-                live_target = self._normalize_spawn_proxy_index(
-                    self.proxy_image_list_model.index(target_row, target_col)
-                )
-                if not live_target.isValid():
-                    return
-                viewer.load_image(live_target)
-                self._apply_inherited_video_state(viewer, source_video_state)
-            except RuntimeError:
-                return
-            except Exception as e:
-                print(f"[VIEWER] Deferred spawn-load warning: {e}")
-            finally:
-                self.refresh_video_controls_performance_profile()
+                window.ensurePolished()
+            except Exception:
+                pass
+            self._deferred_load_floating_viewer_payload(payload)
 
-        QTimer.singleShot(0, _deferred_load)
+        window.show()
+        if bool(raise_window):
+            window.raise_()
+        if bool(activate_window):
+            window.activateWindow()
+        if bool(set_active):
+            self.set_active_viewer(viewer)
+
+        if not bool(load_before_show):
+            QTimer.singleShot(
+                0,
+                lambda current_payload=payload: self._deferred_load_floating_viewer_payload(current_payload),
+            )
+        return window
 
     @Slot()
     def spawn_floating_viewer(self):
         """Create a new floating viewer for the current list selection."""
         self.spawn_floating_viewer_at()
+
+    def _resolve_selection_masonry_wall_screen(
+        self,
+        anchor_global_pos: QPoint | None = None,
+    ):
+        """Pick the screen that should host a spawned masonry wall."""
+        screen = None
+        if isinstance(anchor_global_pos, QPoint):
+            try:
+                screen = QApplication.screenAt(anchor_global_pos)
+            except Exception:
+                screen = None
+
+        if screen is None:
+            try:
+                viewport = self.image_list.list_view.viewport()
+                if viewport is not None:
+                    screen = QApplication.screenAt(
+                        viewport.mapToGlobal(viewport.rect().center())
+                    )
+            except Exception:
+                screen = None
+
+        if screen is None:
+            try:
+                screen = self.screen() or QApplication.primaryScreen()
+            except Exception:
+                screen = QApplication.primaryScreen()
+        return screen
+
+    def _bootstrap_selection_wall_video_sync(
+        self,
+        viewer_infos: list[dict],
+        *,
+        token: int,
+        attempt: int = 0,
+    ):
+        """Start sync/playback once the spawned wall videos finish loading."""
+        if token != int(getattr(self, '_selection_wall_sync_token', 0) or 0):
+            return
+
+        live_infos = []
+        loaded_video_viewers = []
+        pending_video = False
+
+        for info in viewer_infos:
+            viewer = info.get('viewer')
+            window = info.get('window')
+            try:
+                if viewer is None or window is None:
+                    continue
+                if not window.isVisible():
+                    continue
+            except RuntimeError:
+                continue
+
+            live_infos.append(info)
+            if not bool(info.get('is_video', False)):
+                continue
+
+            try:
+                if getattr(viewer, '_is_video_loaded', False) and getattr(viewer.video_player, 'video_path', None):
+                    loaded_video_viewers.append(viewer)
+                else:
+                    pending_video = True
+            except RuntimeError:
+                continue
+
+        if pending_video and attempt < 40:
+            QTimer.singleShot(
+                150,
+                lambda infos=list(live_infos), current_token=token, next_attempt=attempt + 1: (
+                    self._bootstrap_selection_wall_video_sync(
+                        infos,
+                        token=current_token,
+                        attempt=next_attempt,
+                    )
+                ),
+            )
+            return
+
+        if len(loaded_video_viewers) >= 2:
+            self._start_video_sync_for_viewers(loaded_video_viewers)
+            return
+
+        if len(loaded_video_viewers) == 1:
+            try:
+                loaded_video_viewers[0].video_player.play()
+            except Exception:
+                pass
+
+    @Slot()
+    def open_selection_masonry_wall(
+        self,
+        selected_indices=None,
+        *,
+        anchor_global_pos: QPoint | None = None,
+    ):
+        """Open the current selection as a masonry wall of floating viewers."""
+        proxy_indices = []
+        seen_rows = set()
+
+        candidates = selected_indices
+        if candidates is None:
+            selector = getattr(self.image_list.list_view, 'get_selected_proxy_indices', None)
+            if callable(selector):
+                try:
+                    candidates = selector()
+                except Exception:
+                    candidates = None
+        if candidates is None:
+            candidates = []
+
+        for index_like in candidates:
+            proxy_index = self._normalize_spawn_proxy_index(index_like)
+            if not proxy_index.isValid():
+                continue
+            row = int(proxy_index.row())
+            if row in seen_rows:
+                continue
+            seen_rows.add(row)
+            proxy_indices.append(proxy_index)
+
+        if not proxy_indices:
+            return []
+        if len(proxy_indices) == 1:
+            single_window = self.spawn_floating_viewer_at(
+                target_index=proxy_indices[0],
+                spawn_global_pos=anchor_global_pos,
+                clamp_to_screen=True,
+            )
+            return [single_window] if single_window is not None else []
+
+        screen = self._resolve_selection_masonry_wall_screen(anchor_global_pos)
+        available_geometry = (
+            screen.availableGeometry()
+            if screen is not None else QRect(80, 80, max(640, self.width()), max(480, self.height()))
+        )
+        layout_rect = available_geometry.adjusted(16, 16, -16, -16)
+        if not layout_rect.isValid():
+            layout_rect = QRect(80, 80, max(640, self.width()), max(480, self.height()))
+
+        min_item_width = 220 if len(proxy_indices) <= 8 else 170
+        rects = calculate_floating_viewer_wall_layout(
+            [self._get_image_aspect_ratio_for_index(index) or 1.0 for index in proxy_indices],
+            layout_rect,
+            spacing=6,
+            min_item_width=min_item_width,
+            min_item_height=120,
+        )
+
+        spawned_infos = []
+        current_index = self._normalize_spawn_proxy_index(
+            getattr(self.image_list_selection_model, 'currentIndex', lambda: QModelIndex())()
+        )
+        focus_window = None
+
+        for proxy_index, window_rect in zip(proxy_indices, rects):
+            image = proxy_index.data(Qt.ItemDataRole.UserRole)
+            window = self.spawn_floating_viewer_at(
+                target_index=proxy_index,
+                geometry_override=window_rect,
+                raise_window=False,
+                activate_window=False,
+                set_active=False,
+                load_before_show=True,
+            )
+            if window is None:
+                continue
+            try:
+                window._selection_masonry_wall_window = True
+                window.viewer._selection_masonry_wall_viewer = True
+                if hasattr(window, 'set_review_slots_enabled'):
+                    window.set_review_slots_enabled(True)
+            except Exception:
+                pass
+
+            info = {
+                'window': window,
+                'viewer': window.viewer,
+                'is_video': bool(getattr(image, 'is_video', False)),
+                'row': int(proxy_index.row()),
+            }
+            spawned_infos.append(info)
+            if focus_window is None and current_index.isValid() and int(current_index.row()) == int(proxy_index.row()):
+                focus_window = window
+
+        if not spawned_infos:
+            return []
+
+        if focus_window is None:
+            focus_window = spawned_infos[0]['window']
+
+        try:
+            focus_window.raise_()
+            focus_window.activateWindow()
+            self.set_active_viewer(focus_window.viewer)
+        except Exception:
+            pass
+
+        self._selection_wall_sync_token = int(getattr(self, '_selection_wall_sync_token', 0) or 0) + 1
+        if any(bool(info.get('is_video', False)) for info in spawned_infos):
+            QTimer.singleShot(
+                120,
+                lambda infos=list(spawned_infos), token=self._selection_wall_sync_token: (
+                    self._bootstrap_selection_wall_video_sync(
+                        infos,
+                        token=token,
+                        attempt=0,
+                    )
+                ),
+            )
+
+        return [info['window'] for info in spawned_infos]
 
     def spawn_media_comparison_from_indices(
         self,
@@ -3858,16 +4417,31 @@ class MainWindow(QMainWindow):
     @Slot()
     def close_all_floating_viewers(self):
         """Close all spawned floating viewers."""
+        self._bulk_closing_floating_viewers = True
+        if self._sync_coordinator is not None:
+            try:
+                self._sync_coordinator.stop()
+            except Exception:
+                pass
+            self._sync_coordinator = None
         for window in list(getattr(self, '_floating_viewers', [])):
             try:
+                window.hide()
                 window.close()
             except RuntimeError:
                 pass
         for window in list(getattr(self, '_comparison_windows', [])):
             try:
+                window.hide()
                 window.close()
             except RuntimeError:
                 pass
+        self._bulk_closing_floating_viewers = False
+        try:
+            self.set_active_viewer(self.image_viewer)
+        except Exception:
+            pass
+        self.refresh_video_controls_performance_profile()
 
     def _on_floating_viewer_closed(self, viewer: ImageViewer):
         """Cleanup when one floating viewer is closed."""
@@ -3886,7 +4460,7 @@ class MainWindow(QMainWindow):
             self.cancel_compare_drag()
 
         # Stop any active sync coordinator — its player list is now stale.
-        if self._sync_coordinator is not None:
+        if self._sync_coordinator is not None and not bool(getattr(self, '_bulk_closing_floating_viewers', False)):
             try:
                 self._sync_coordinator.stop()
             except Exception:
@@ -3901,9 +4475,13 @@ class MainWindow(QMainWindow):
         self._video_controls_last_dispatch_at.pop(viewer, None)
         self._hud_playback_last_frame_ts.pop(viewer, None)
 
-        if getattr(self, '_active_viewer', None) is viewer:
+        if (
+            getattr(self, '_active_viewer', None) is viewer
+            and not bool(getattr(self, '_bulk_closing_floating_viewers', False))
+        ):
             self.set_active_viewer(self.image_viewer)
-        self.refresh_video_controls_performance_profile()
+        if not bool(getattr(self, '_bulk_closing_floating_viewers', False)):
+            self.refresh_video_controls_performance_profile()
 
     @Slot()
     def zoom(self, factor):
@@ -5073,6 +5651,129 @@ class MainWindow(QMainWindow):
         )
         self._sync_rating_controls_from_context()
 
+    def set_review_rank(self, rank: int, interactive: bool = False):
+        """Set or clear the numeric review rank for the current review target."""
+        normalized_rank, _ = normalize_review_state(rank, 0)
+        if not interactive:
+            return
+
+        targets = self._review_target_images()
+        if not targets:
+            return
+
+        changed_states: list[tuple[Image, int, int]] = []
+        for image in targets:
+            current_rank, current_flags = normalize_review_state(
+                getattr(image, 'review_rank', 0),
+                getattr(image, 'review_flags', 0),
+            )
+            next_rank = int(normalized_rank)
+            next_flags = int(current_flags)
+            if next_rank > 0:
+                next_flags &= ~int(ReviewFlag.REJECT)
+            next_rank, next_flags = normalize_review_state(next_rank, next_flags)
+            if current_rank != next_rank or current_flags != next_flags:
+                changed_states.append((image, int(next_rank), int(next_flags)))
+
+        if not changed_states:
+            return
+
+        changed_images = [image for image, _, _ in changed_states]
+        if len(changed_images) == 1:
+            self.image_list_model.add_image_to_undo_stack(
+                changed_images[0],
+                action_name='Change review rank',
+                should_ask_for_confirmation=False,
+            )
+        else:
+            self.image_list_model.add_images_to_undo_stack(
+                changed_images,
+                action_name='Change review rank',
+                should_ask_for_confirmation=False,
+            )
+
+        review_updated_at = time.time()
+        for image, next_rank, next_flags in changed_states:
+            image.review_rank = int(next_rank)
+            image.review_flags = int(next_flags)
+            image.review_updated_at = review_updated_at
+            QTimer.singleShot(
+                0,
+                lambda img=image, model=self.image_list_model: model.persist_review_state(img),
+            )
+
+        self._emit_image_rows_changed(changed_images)
+        self._refresh_review_ui_for_images(changed_images)
+        if self._filter_uses_review(self.proxy_image_list_model.filter):
+            self._arm_masonry_refresh_anchor()
+            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+
+    def set_review_flag_state(
+        self,
+        flag: ReviewFlag,
+        enabled: bool,
+        interactive: bool = False,
+    ):
+        """Toggle one structured review flag on the current review target."""
+        if not interactive:
+            return
+
+        targets = self._review_target_images()
+        if not targets:
+            return
+
+        changed_states: list[tuple[Image, int, int]] = []
+        flag_value = int(flag)
+        for image in targets:
+            current_rank, current_flags = normalize_review_state(
+                getattr(image, 'review_rank', 0),
+                getattr(image, 'review_flags', 0),
+            )
+            next_flags = int(current_flags)
+            if enabled:
+                next_flags |= flag_value
+            else:
+                next_flags &= ~flag_value
+            next_rank = int(current_rank)
+            if flag == ReviewFlag.REJECT and enabled:
+                next_rank = 0
+            next_rank, next_flags = normalize_review_state(next_rank, next_flags)
+            if current_rank != next_rank or current_flags != next_flags:
+                changed_states.append((image, int(next_rank), int(next_flags)))
+
+        if not changed_states:
+            return
+
+        changed_images = [image for image, _, _ in changed_states]
+        if len(changed_images) == 1:
+            self.image_list_model.add_image_to_undo_stack(
+                changed_images[0],
+                action_name='Change review mark',
+                should_ask_for_confirmation=False,
+            )
+        else:
+            self.image_list_model.add_images_to_undo_stack(
+                changed_images,
+                action_name='Change review mark',
+                should_ask_for_confirmation=False,
+            )
+
+        review_updated_at = time.time()
+        for image, next_rank, next_flags in changed_states:
+            image.review_rank = int(next_rank)
+            image.review_flags = int(next_flags)
+            image.review_updated_at = review_updated_at
+            QTimer.singleShot(
+                0,
+                lambda img=image, model=self.image_list_model: model.persist_review_state(img),
+            )
+
+        self._emit_image_rows_changed(changed_images)
+        self._refresh_review_ui_for_images(changed_images)
+        if self._filter_uses_review(self.proxy_image_list_model.filter):
+            self._arm_masonry_refresh_anchor()
+            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+
     def _arm_masonry_refresh_anchor(self):
         """Keep selected masonry item stable across filter-triggered relayout."""
         view = self.image_list.list_view if hasattr(self, "image_list") else None
@@ -5189,6 +5890,10 @@ class MainWindow(QMainWindow):
     def _filter_uses_reactions(self, filter_node) -> bool:
         """Return True if a filter tree contains `love` or `bomb` predicates."""
         return self._filter_uses_predicates(filter_node, 'love', 'bomb')
+
+    def _filter_uses_review(self, filter_node) -> bool:
+        """Return True if a filter tree contains review predicates."""
+        return self._filter_uses_predicates(filter_node, 'review', 'review_rank')
 
     def _filter_uses_predicates(self, filter_node, *predicates: str) -> bool:
         """Return True if a filter tree contains any named predicate."""

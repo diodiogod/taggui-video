@@ -29,6 +29,10 @@ _MAX_BARRIER_MS = 800
 # Extra ms added to longest duration for the stall watchdog.
 _STALL_TIMEOUT_MS = 1500
 _SYNC_DEBUG = False
+_HEAVY_WARMUP_THRESHOLD = 8
+_HEAVY_WARMUP_BATCH_SIZE = 2
+_HEAVY_WARMUP_STEP_MS = 45
+_WARMUP_SETTLE_MS = 220
 
 _SYNC_ICON_STYLE = """
     QLabel {
@@ -90,19 +94,34 @@ class _PlayerEntry:
         self.end_ms = self.duration_ms
         self.cycle_duration_ms = max(0.0, self.end_ms - self.start_ms)
 
-    def ensure_vlc_ready(self):
-        """Pre-warm VLC so fire_play() has no setup overhead."""
+    def ensure_backend_ready(self):
+        """Pre-warm heavy playback backends before the sync barrier."""
         player = self.player
-        if player.vlc_player is None or player._vlc_needs_reload:
-            player.is_playing = False
-            try:
-                player.play()
-            except Exception:
-                pass
-            try:
-                player.pause()
-            except Exception:
-                pass
+        try:
+            prime = getattr(player, 'prime_for_sync_startup', None)
+            if callable(prime):
+                prime()
+        except Exception:
+            pass
+
+        try:
+            using_vlc = bool(
+                hasattr(player, '_is_using_vlc_backend')
+                and callable(player._is_using_vlc_backend)
+                and player._is_using_vlc_backend()
+            )
+            if using_vlc and not bool(getattr(player, 'is_playing', False)):
+                player.is_playing = False
+                try:
+                    player.play()
+                except Exception:
+                    pass
+                try:
+                    player.pause()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def disable_loop(self):
         """Turn off per-player looping so playback_finished is emitted at end."""
@@ -278,6 +297,9 @@ class VideoSyncCoordinator(QObject):
         self._play_started_monotonic = 0.0
         self._longest_duration_ms = 0.0
         self._finished_count = 0
+        self._warmup_index = 0
+        self._warmup_batch_size = 0
+        self._warmup_step_ms = 0
 
         # Barrier poll timer — only active during barrier phase.
         self._poll_timer = QTimer(self)
@@ -322,12 +344,15 @@ class VideoSyncCoordinator(QObject):
             except Exception:
                 pass
 
-        # Pre-warm VLC before the barrier.
-        for entry in self._entries:
-            entry.ensure_vlc_ready()
-
         self._state = self._STATE_WARMING
-        QTimer.singleShot(250, self._on_warming_done)
+        self._warmup_index = 0
+        if len(self._entries) >= _HEAVY_WARMUP_THRESHOLD:
+            self._warmup_batch_size = _HEAVY_WARMUP_BATCH_SIZE
+            self._warmup_step_ms = _HEAVY_WARMUP_STEP_MS
+        else:
+            self._warmup_batch_size = max(1, len(self._entries))
+            self._warmup_step_ms = 0
+        self._run_warmup_batch()
 
     def stop(self):
         self._poll_timer.stop()
@@ -344,6 +369,21 @@ class VideoSyncCoordinator(QObject):
     # ------------------------------------------------------------------
     # Warming
     # ------------------------------------------------------------------
+
+    def _run_warmup_batch(self):
+        if self._state != self._STATE_WARMING:
+            return
+
+        batch_end = min(len(self._entries), self._warmup_index + max(1, self._warmup_batch_size))
+        for entry in self._entries[self._warmup_index:batch_end]:
+            entry.ensure_backend_ready()
+        self._warmup_index = batch_end
+
+        if self._warmup_index < len(self._entries):
+            QTimer.singleShot(max(0, int(self._warmup_step_ms)), self._run_warmup_batch)
+            return
+
+        QTimer.singleShot(_WARMUP_SETTLE_MS, self._on_warming_done)
 
     def _on_warming_done(self):
         if self._state != self._STATE_WARMING:

@@ -28,9 +28,16 @@ from utils.image import Image, ImageMarking, Marking
 from utils.image_index_db import (
     ImageIndexDB,
     build_sidecar_reaction_recovery,
+    build_sidecar_review_recovery,
     extract_sidecar_reaction_state,
+    extract_sidecar_review_state,
 )
 from utils.jxlutil import get_jxl_size
+from utils.review_marks import (
+    normalize_review_state,
+    parse_review_flag_token,
+    serialize_review_flags,
+)
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.thumbnail_cache import get_thumbnail_cache
@@ -725,6 +732,20 @@ class ImageListModel(QAbstractListModel):
             if reaction_updated_at is not None:
                 image.reaction_updated_at = reaction_updated_at
 
+        sidecar_review_state = extract_sidecar_review_state(meta)
+        if sidecar_review_state is not None:
+            review_rank = sidecar_review_state.get('review_rank')
+            review_flags = sidecar_review_state.get('review_flags')
+            review_updated_at = sidecar_review_state.get('review_updated_at')
+            next_rank, next_flags = normalize_review_state(
+                review_rank if review_rank is not None else getattr(image, 'review_rank', 0),
+                review_flags if review_flags is not None else getattr(image, 'review_flags', 0),
+            )
+            image.review_rank = int(next_rank)
+            image.review_flags = int(next_flags)
+            if review_updated_at is not None:
+                image.review_updated_at = review_updated_at
+
         markings = meta.get('markings')
         if isinstance(markings, list):
             for marking_data in markings:
@@ -1163,6 +1184,7 @@ class ImageListModel(QAbstractListModel):
     background_validation_applied = Signal(dict)  # applied background index refresh metadata
     new_media_refresh_finished = Signal(dict)  # Async additions-only refresh result
     sidecar_reaction_migration_applied = Signal(int)  # imported curator-state count
+    sidecar_review_migration_applied = Signal(int)  # imported review-state count
     sidecar_tag_migration_applied = Signal(int)  # reconciled txt-sidecar tag count
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
@@ -1402,6 +1424,7 @@ class ImageListModel(QAbstractListModel):
         self.stale_index_paths_detected.connect(self._on_stale_index_paths_detected)
         self.background_validation_progress.connect(self._on_background_validation_progress)
         self.sidecar_tag_migration_applied.connect(self._on_sidecar_tag_migration_applied)
+        self.sidecar_review_migration_applied.connect(self._on_sidecar_review_migration_applied)
         self._flow_log_last: dict[str, float] = {}
         self._dimensions_update_timer = QTimer(self)
         self._dimensions_update_timer.setSingleShot(True)
@@ -1945,6 +1968,7 @@ class ImageListModel(QAbstractListModel):
         images = []
         missing_rel_paths: list[str] = []
         sidecar_reaction_updates: list[tuple[float, bool, bool, float | None, int]] = []
+        sidecar_review_updates: list[tuple[int, int, float | None, int]] = []
         image_ids = [row['id'] for row in rows]
         tags_map = active_db.get_tags_for_images(image_ids)
 
@@ -1969,6 +1993,9 @@ class ImageListModel(QAbstractListModel):
                 love=bool(row.get('love', 0)),
                 bomb=bool(row.get('bomb', 0)),
                 reaction_updated_at=row.get('reaction_updated_at'),
+                review_rank=int(row.get('review_rank', 0) or 0),
+                review_flags=int(row.get('review_flags', 0) or 0),
+                review_updated_at=row.get('review_updated_at'),
             )
 
             # Populate metadata
@@ -2005,6 +2032,16 @@ class ImageListModel(QAbstractListModel):
                                     int(img_id),
                                 )
                             )
+                        merged_review_state = build_sidecar_review_recovery(row, meta)
+                        if merged_review_state:
+                            sidecar_review_updates.append(
+                                (
+                                    int(merged_review_state.get('review_rank', 0) or 0),
+                                    int(merged_review_state.get('review_flags', 0) or 0),
+                                    merged_review_state.get('review_updated_at'),
+                                    int(img_id),
+                                )
+                            )
 
             images.append(image)
 
@@ -2013,6 +2050,13 @@ class ImageListModel(QAbstractListModel):
                 imported = int(active_db.import_sidecar_reactions(sidecar_reaction_updates) or 0)
                 if imported > 0:
                     self.sidecar_reaction_migration_applied.emit(imported)
+            except Exception:
+                pass
+        if sidecar_review_updates and hasattr(active_db, 'import_sidecar_review_state'):
+            try:
+                imported = int(active_db.import_sidecar_review_state(sidecar_review_updates) or 0)
+                if imported > 0:
+                    self.sidecar_review_migration_applied.emit(imported)
             except Exception:
                 pass
 
@@ -2146,6 +2190,13 @@ class ImageListModel(QAbstractListModel):
                         except Exception:
                             return "", ()
                         return "(COALESCE(width, 0) * COALESCE(height, 0)) " + cmp_sql + " ?", (area_value,)
+                    if key == 'review_rank':
+                        try:
+                            review_rank_value = int(float(value_raw))
+                        except Exception:
+                            return "", ()
+                        review_rank_value = max(0, min(5, review_rank_value))
+                        return "COALESCE(review_rank, 0) " + cmp_sql + " ?", (review_rank_value,)
                 
             # Handle infix notation [A, 'AND', B] or prefix ['tag', 'val']
             # Determine type by inspection
@@ -2218,6 +2269,22 @@ class ImageListModel(QAbstractListModel):
                         "WHERE image_id=images.id AND type = ?)",
                         (val,)
                     )
+                if op == 'review':
+                    normalized = str(val).strip().lower()
+                    if normalized in {'1', '2', '3', '4', '5'}:
+                        return "COALESCE(review_rank, 0) = ?", (int(normalized),)
+                    if normalized in {'0', 'none', 'false', 'no', 'off'}:
+                        return "(COALESCE(review_rank, 0) = 0 AND COALESCE(review_flags, 0) = 0)", ()
+                    if normalized in {'true', 'yes', 'on', 'any'}:
+                        return "(COALESCE(review_rank, 0) > 0 OR COALESCE(review_flags, 0) != 0)", ()
+                    if normalized == 'ranked':
+                        return "COALESCE(review_rank, 0) > 0", ()
+                    if normalized == 'flagged':
+                        return "COALESCE(review_flags, 0) != 0", ()
+                    review_flag = parse_review_flag_token(normalized)
+                    if review_flag is not None:
+                        return "(COALESCE(review_flags, 0) & ?) != 0", (int(review_flag),)
+                    return "", ()
                 if op in ('love', 'bomb'):
                     normalized = str(val).strip().lower()
                     if normalized in {'1', 'true', 'yes', 'on'}:
@@ -5174,6 +5241,9 @@ class ImageListModel(QAbstractListModel):
                 love=bool((cached or {}).get('love', False)),
                 bomb=bool((cached or {}).get('bomb', False)),
                 reaction_updated_at=(cached or {}).get('reaction_updated_at'),
+                review_rank=int((cached or {}).get('review_rank', 0) or 0),
+                review_flags=int((cached or {}).get('review_flags', 0) or 0),
+                review_updated_at=(cached or {}).get('review_updated_at'),
             )
             # Store DB cached info (including thumbnail_cached flag) for fast cache checks
             image._db_cached_info = cached if cached else {}
@@ -5363,9 +5433,11 @@ class ImageListModel(QAbstractListModel):
                 loaded_tag_updates = 0
                 incremental_tag_updates = 0
                 migrated_total = 0
+                review_migrated_total = 0
                 deadline = time.monotonic() + 20.0
                 tag_done = False
                 reaction_done = False
+                review_done = False
                 while time.monotonic() < deadline and not tag_done:
                     migrated_tags, scanned_tag_sidecars, tag_done = db_bg.migrate_tags_from_sidecars(
                         directory_path,
@@ -5420,11 +5492,24 @@ class ImageListModel(QAbstractListModel):
                         print(f"[DB] Reaction migration: restored {migrated} curated item(s) from {scanned} candidate sidecar(s).")
                     elif not reaction_done and scanned > 0:
                         print(f"[DB] Reaction migration: scanned {scanned} candidate sidecar(s) (no new curator data yet).")
+                while time.monotonic() < deadline and not review_done:
+                    migrated, scanned, review_done = db_bg.migrate_review_state_from_sidecars(
+                        directory_path,
+                        batch_size=8000,
+                        max_seconds=1.5,
+                    )
+                    review_migrated_total += int(migrated or 0)
+                    if migrated > 0:
+                        print(f"[DB] Review migration: restored {migrated} reviewed item(s) from {scanned} candidate sidecar(s).")
+                    elif not review_done and scanned > 0:
+                        print(f"[DB] Review migration: scanned {scanned} candidate sidecar(s) (no new review data yet).")
                 total_tag_updates = int(tag_migrated_total + loaded_tag_updates + incremental_tag_updates)
                 if total_tag_updates > 0 and directory_path == self._directory_path:
                     self.sidecar_tag_migration_applied.emit(total_tag_updates)
                 if migrated_total > 0:
                     self.sidecar_reaction_migration_applied.emit(int(migrated_total))
+                if review_migrated_total > 0:
+                    self.sidecar_review_migration_applied.emit(int(review_migrated_total))
                 db_bg.close()
             except Exception as e:
                 print(f"[DB] Background maintenance error: {e}")
@@ -5705,6 +5790,9 @@ class ImageListModel(QAbstractListModel):
                  'love': bool(getattr(image, 'love', False)),
                  'bomb': bool(getattr(image, 'bomb', False)),
                  'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
+                 'review_rank': int(getattr(image, 'review_rank', 0) or 0),
+                 'review_flags': int(getattr(image, 'review_flags', 0) or 0),
+                 'review_updated_at': getattr(image, 'review_updated_at', None),
                  'crop': QRect(image.crop) if image.crop is not None else None,
                  'markings': image.markings.copy(),
                  'loop_start_frame': image.loop_start_frame,
@@ -5721,6 +5809,9 @@ class ImageListModel(QAbstractListModel):
             'love': bool(getattr(image, 'love', False)),
             'bomb': bool(getattr(image, 'bomb', False)),
             'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
+            'review_rank': int(getattr(image, 'review_rank', 0) or 0),
+            'review_flags': int(getattr(image, 'review_flags', 0) or 0),
+            'review_updated_at': getattr(image, 'review_updated_at', None),
             'crop': QRect(image.crop) if image.crop is not None else None,
             'markings': image.markings.copy(),
             'loop_start_frame': image.loop_start_frame,
@@ -5813,6 +5904,9 @@ class ImageListModel(QAbstractListModel):
         image.love = bool(state.get('love', False))
         image.bomb = bool(state.get('bomb', False))
         image.reaction_updated_at = state.get('reaction_updated_at')
+        image.review_rank = int(state.get('review_rank', 0) or 0)
+        image.review_flags = int(state.get('review_flags', 0) or 0)
+        image.review_updated_at = state.get('review_updated_at')
         image.crop = state['crop']
         image.markings = state['markings']
         image.loop_start_frame = state.get('loop_start_frame')
@@ -5931,6 +6025,9 @@ class ImageListModel(QAbstractListModel):
                      mtime=stat.st_mtime,
                      rating=image.rating,
                      reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+                     review_rank=int(getattr(image, 'review_rank', 0) or 0),
+                     review_flags=int(getattr(image, 'review_flags', 0) or 0),
+                     review_updated_at=getattr(image, 'review_updated_at', None),
                  )
                  # Retry get ID
                  image_id = self._db.get_image_id(rel_path)
@@ -5987,6 +6084,9 @@ class ImageListModel(QAbstractListModel):
                     mtime=stat.st_mtime,
                     rating=float(getattr(image, 'rating', 0.0) or 0.0),
                     reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+                    review_rank=int(getattr(image, 'review_rank', 0) or 0),
+                    review_flags=int(getattr(image, 'review_flags', 0) or 0),
+                    review_updated_at=getattr(image, 'review_updated_at', None),
                 )
                 image_id = self._db.get_image_id(rel_path)
             except Exception:
@@ -6029,6 +6129,10 @@ class ImageListModel(QAbstractListModel):
                     is_video=is_video,
                     mtime=stat.st_mtime,
                     rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                    reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+                    review_rank=int(getattr(image, 'review_rank', 0) or 0),
+                    review_flags=int(getattr(image, 'review_flags', 0) or 0),
+                    review_updated_at=getattr(image, 'review_updated_at', None),
                 )
                 image_id = self._db.get_image_id(rel_path)
             except Exception:
@@ -6068,6 +6172,9 @@ class ImageListModel(QAbstractListModel):
                     mtime=stat.st_mtime,
                     rating=float(getattr(image, 'rating', 0.0) or 0.0),
                     reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+                    review_rank=int(getattr(image, 'review_rank', 0) or 0),
+                    review_flags=int(getattr(image, 'review_flags', 0) or 0),
+                    review_updated_at=getattr(image, 'review_updated_at', None),
                 )
                 image_id = self._db.get_image_id(rel_path)
             except Exception:
@@ -6088,19 +6195,80 @@ class ImageListModel(QAbstractListModel):
         self.save_reactions_to_db(image)
         self.write_meta_to_disk(image)
 
+    def save_review_state_to_db(self, image: Image):
+        """Persist structured review marks for one image to the DB cache."""
+        if not self._db or not image or not getattr(image, "path", None):
+            return
+        if not self._directory_path:
+            return
+
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+
+        image_id = self._db.get_image_id(rel_path)
+        if not image_id:
+            try:
+                stat = image.path.stat()
+                width = image.dimensions[0] if image.dimensions and image.dimensions[0] else 512
+                height = image.dimensions[1] if image.dimensions and image.dimensions[1] else 512
+                is_video = image.path.suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
+                self._db.save_info(
+                    file_name=rel_path,
+                    width=width,
+                    height=height,
+                    is_video=is_video,
+                    mtime=stat.st_mtime,
+                    rating=float(getattr(image, 'rating', 0.0) or 0.0),
+                    reaction_updated_at=getattr(image, 'reaction_updated_at', None),
+                    review_rank=int(getattr(image, 'review_rank', 0) or 0),
+                    review_flags=int(getattr(image, 'review_flags', 0) or 0),
+                    review_updated_at=getattr(image, 'review_updated_at', None),
+                )
+                image_id = self._db.get_image_id(rel_path)
+            except Exception:
+                image_id = None
+
+        if image_id:
+            self._db.set_review_state(
+                image_id,
+                int(getattr(image, 'review_rank', 0) or 0),
+                int(getattr(image, 'review_flags', 0) or 0),
+                review_updated_at=getattr(image, 'review_updated_at', None),
+            )
+
+    def persist_review_state(self, image: Image):
+        """Persist review state to both DB and JSON sidecar."""
+        if image is None:
+            return
+        self.write_meta_to_disk(image)
+
     def write_meta_to_disk(self, image: Image):
         # Keep DB rating synchronized even when only metadata changes.
         self._save_rating_to_db(image)
+        self.save_review_state_to_db(image)
         does_exist = image.path.with_suffix('.json').exists()
+        review_rank, review_flags = normalize_review_state(
+            getattr(image, 'review_rank', 0),
+            getattr(image, 'review_flags', 0),
+        )
+        image.review_rank = int(review_rank)
+        image.review_flags = int(review_flags)
         meta: dict[str, Any] = {
             'version': 1,
             'rating': float(getattr(image, 'rating', 0.0) or 0.0),
             'love': bool(getattr(image, 'love', False)),
             'bomb': bool(getattr(image, 'bomb', False)),
+            'review_rank': int(review_rank),
+            'review_flags': serialize_review_flags(review_flags),
         }
         reaction_updated_at = getattr(image, 'reaction_updated_at', None)
         if isinstance(reaction_updated_at, (int, float)):
             meta['reaction_updated_at'] = float(reaction_updated_at)
+        review_updated_at = getattr(image, 'review_updated_at', None)
+        if isinstance(review_updated_at, (int, float)):
+            meta['review_updated_at'] = float(review_updated_at)
         if image.crop is not None:
             meta['crop'] = image.crop.getRect()
         meta['markings'] = [{'label': marking.label,
@@ -6197,6 +6365,9 @@ class ImageListModel(QAbstractListModel):
                  'love': bool(getattr(image, 'love', False)),
                  'bomb': bool(getattr(image, 'bomb', False)),
                  'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
+                 'review_rank': int(getattr(image, 'review_rank', 0) or 0),
+                 'review_flags': int(getattr(image, 'review_flags', 0) or 0),
+                 'review_updated_at': getattr(image, 'review_updated_at', None),
                  'crop': QRect(image.crop) if image.crop is not None else None,
                  'markings': image.markings.copy(),
                  'loop_start_frame': image.loop_start_frame,
@@ -6212,6 +6383,9 @@ class ImageListModel(QAbstractListModel):
                 bool(getattr(image, 'love', False)) == bool(history_image_tags.get('love', False)) and
                 bool(getattr(image, 'bomb', False)) == bool(history_image_tags.get('bomb', False)) and
                 getattr(image, 'reaction_updated_at', None) == history_image_tags.get('reaction_updated_at') and
+                int(getattr(image, 'review_rank', 0) or 0) == int(history_image_tags.get('review_rank', 0) or 0) and
+                int(getattr(image, 'review_flags', 0) or 0) == int(history_image_tags.get('review_flags', 0) or 0) and
+                getattr(image, 'review_updated_at', None) == history_image_tags.get('review_updated_at') and
                 image.crop == history_image_tags['crop'] and
                 image.markings == history_image_tags['markings'] and
                 image.loop_start_frame == history_image_tags.get('loop_start_frame') and
@@ -6223,6 +6397,9 @@ class ImageListModel(QAbstractListModel):
             image.love = bool(history_image_tags.get('love', False))
             image.bomb = bool(history_image_tags.get('bomb', False))
             image.reaction_updated_at = history_image_tags.get('reaction_updated_at')
+            image.review_rank = int(history_image_tags.get('review_rank', 0) or 0)
+            image.review_flags = int(history_image_tags.get('review_flags', 0) or 0)
+            image.review_updated_at = history_image_tags.get('review_updated_at')
             image.crop = history_image_tags['crop']
             image.markings = history_image_tags['markings']
             image.loop_start_frame = history_image_tags.get('loop_start_frame')
@@ -6419,6 +6596,21 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode:
             return
         self._reload_loaded_pages_after_paginated_tag_change()
+
+    @Slot(int)
+    def _on_sidecar_review_migration_applied(self, _count: int):
+        """Refresh paginated views after background DB review migration."""
+        if not self._paginated_mode or not self._db:
+            return
+        try:
+            self._total_count = self._db.count(
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+            )
+        except Exception:
+            pass
+        self._reload_loaded_pages_after_paginated_tag_change()
+        self.total_count_changed.emit(int(getattr(self, '_total_count', 0) or 0))
 
     def _sync_paginated_db_tags_for_rel_path(
         self,
@@ -7305,6 +7497,9 @@ class ImageListModel(QAbstractListModel):
             love=bool(cached_info.get('love', False)),
             bomb=bool(cached_info.get('bomb', False)),
             reaction_updated_at=cached_info.get('reaction_updated_at'),
+            review_rank=int(cached_info.get('review_rank', 0) or 0),
+            review_flags=int(cached_info.get('review_flags', 0) or 0),
+            review_updated_at=cached_info.get('review_updated_at'),
         )
 
         json_file_path = image_path.with_suffix('.json')

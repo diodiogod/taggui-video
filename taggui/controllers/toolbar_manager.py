@@ -24,6 +24,7 @@ from utils.settings import (
 )
 from widgets.main_viewer_controls_widget import MainViewerControlsWidget
 from widgets.reaction_controls_widget import ReactionControlsWidget
+from widgets.review_controls_widget import ReviewControlsWidget
 
 
 class ToolbarManager:
@@ -36,6 +37,7 @@ class ToolbarManager:
         'video_edit',
         'video_fix',
         'rating',
+        'review',
     )
 
     def __init__(self, main_window):
@@ -86,6 +88,7 @@ class ToolbarManager:
         self.bomb_button = None
         self.delete_marked_btn = None
         self.delete_marked_menu = None
+        self.review_controls_widget = None
 
     def create_toolbar(self):
         """Create and setup grouped toolbars for native Qt reordering."""
@@ -95,6 +98,7 @@ class ToolbarManager:
         video_edit_toolbar = self._create_toolbar_group('Video edit toolbar', key='video_edit')
         video_fix_toolbar = self._create_toolbar_group('Video tools toolbar', key='video_fix')
         rating_toolbar = self._create_toolbar_group('Rating toolbar', key='rating')
+        review_toolbar = self._create_toolbar_group('Review toolbar', key='review')
 
         self.toolbar = viewer_toolbar
 
@@ -104,6 +108,7 @@ class ToolbarManager:
         self._create_video_edit_controls(video_edit_toolbar)
         self._create_video_fix_controls(video_fix_toolbar)
         self._create_rating_stars(rating_toolbar)
+        self._create_review_controls(review_toolbar)
 
         return viewer_toolbar
 
@@ -733,6 +738,17 @@ class ToolbarManager:
             )
 
         toolbar.addWidget(self.reaction_controls_widget)
+
+    def _create_review_controls(self, toolbar: QToolBar):
+        """Create detachable toolbar for review marks."""
+        self.review_controls_widget = ReviewControlsWidget(self.main_window)
+        self.review_controls_widget.rank_requested.connect(
+            lambda rank: self.main_window._toggle_current_review_rank(int(rank))
+        )
+        self.review_controls_widget.flag_requested.connect(
+            lambda flag_name: self.main_window._toggle_current_review_flag(str(flag_name))
+        )
+        toolbar.addWidget(self.review_controls_widget)
 
     def _create_delete_marked_button(self):
         """Create delete marked images dropdown button."""

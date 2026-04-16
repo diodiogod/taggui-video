@@ -2572,6 +2572,50 @@ class VideoPlayerWidget(QWidget):
 
         return True
 
+    def prime_for_sync_startup(self) -> bool:
+        """Pre-initialize forward playback state without starting visible playback."""
+        self._refresh_backend_selection()
+        if not self.video_path:
+            return False
+        if self.playback_speed < 0:
+            return False
+
+        target_ms = (self.current_frame / self.fps * 1000.0) if self.fps > 0 else 0.0
+
+        try:
+            if self._is_using_mpv_backend():
+                if self.mpv_player is None or self._mpv_needs_reload:
+                    if not self._setup_mpv_for_current_video():
+                        return False
+                self._seek_mpv_position_ms(target_ms)
+                self._cancel_mpv_reveal()
+                self._set_mpv_visible(False)
+                try:
+                    if self.pixmap_item:
+                        self.pixmap_item.show()
+                except RuntimeError:
+                    pass
+                return True
+
+            if self._is_using_vlc_backend():
+                if self.vlc_player is None or self._vlc_needs_reload:
+                    if not self._setup_vlc_for_current_video():
+                        return False
+                self._seek_vlc_position_ms(target_ms)
+                self._cancel_vlc_reveal()
+                self._set_vlc_visible(False)
+                self._hide_vlc_cover_overlay()
+                try:
+                    if self.pixmap_item:
+                        self.pixmap_item.show()
+                except RuntimeError:
+                    pass
+                return True
+
+            return bool(self._load_qt_media_source_for_current_video())
+        except Exception:
+            return False
+
     def play(self):
         """Start playback using QMediaPlayer (or OpenCV for negative speeds)."""
         self._refresh_backend_selection()

@@ -3,6 +3,50 @@ import os
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewFileOpsMixin:
+    def get_selected_proxy_indices(self) -> list[QModelIndex]:
+        """Return unique selected proxy indices in visual row order."""
+        selected_indices = []
+        seen_rows = set()
+        for proxy_index in sorted(
+            self.selectedIndexes(),
+            key=lambda idx: (idx.row(), idx.column()),
+        ):
+            try:
+                if not proxy_index.isValid():
+                    continue
+                row = int(proxy_index.row())
+            except Exception:
+                continue
+            if row in seen_rows:
+                continue
+            seen_rows.add(row)
+            selected_indices.append(self.proxy_image_list_model.index(row, 0))
+        return selected_indices
+
+    @Slot()
+    def open_selected_items_in_masonry_wall(self):
+        """Open the current selection in a floating masonry review wall."""
+        main_window = self.window()
+        opener = getattr(main_window, 'open_selection_masonry_wall', None)
+        if not callable(opener):
+            return
+
+        selected_indices = self.get_selected_proxy_indices()
+        if not selected_indices:
+            return
+
+        anchor_global_pos = QCursor.pos()
+        try:
+            viewport = self.viewport()
+            if viewport is not None:
+                local_cursor = viewport.mapFromGlobal(anchor_global_pos)
+                if not viewport.rect().contains(local_cursor):
+                    anchor_global_pos = viewport.mapToGlobal(viewport.rect().center())
+        except Exception:
+            pass
+
+        opener(selected_indices, anchor_global_pos=anchor_global_pos)
+
     def _open_in_system_default_app(self, file_path: Path) -> bool:
         """Open a file with the OS default application."""
         import sys
@@ -448,6 +492,9 @@ class ImageListViewFileOpsMixin:
     @Slot()
     def update_context_menu_actions(self):
         selected_image_count = len(self.selectedIndexes())
+        open_selection_wall_action_name = (
+            f'Open {selected_image_count} Selected {pluralize("Item", selected_image_count)} in Masonry Wall'
+        )
         copy_file_names_action_name = (
             f'Copy File {pluralize("Name", selected_image_count)}')
         copy_paths_action_name = (f'Copy '
@@ -460,12 +507,16 @@ class ImageListViewFileOpsMixin:
             f'Duplicate {pluralize("Image", selected_image_count)}')
         delete_images_action_name = (
             f'Delete {pluralize("Image", selected_image_count)}')
+        self.open_selection_masonry_wall_action.setText(
+            open_selection_wall_action_name
+        )
         self.copy_file_names_action.setText(copy_file_names_action_name)
         self.copy_paths_action.setText(copy_paths_action_name)
         self.move_images_action.setText(move_images_action_name)
         self.copy_images_action.setText(copy_images_action_name)
         self.duplicate_images_action.setText(duplicate_images_action_name)
         self.delete_images_action.setText(delete_images_action_name)
+        self.open_selection_masonry_wall_action.setVisible(selected_image_count >= 2)
         self.open_image_action.setVisible(selected_image_count == 1)
         self.open_folder_action.setVisible(selected_image_count >= 1)
 

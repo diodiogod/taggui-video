@@ -2,10 +2,310 @@
 
 import math
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QEvent, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen
+from PySide6.QtCore import QPoint, QPointF, QRect, QSize, QEvent, Qt, Signal, QTimer, QEasingCurve, QPropertyAnimation
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QHelpEvent
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsView, QMenu,
-                               QPushButton, QSizeGrip, QVBoxLayout, QWidget)
+                               QPushButton, QSizeGrip, QVBoxLayout, QWidget, QGraphicsOpacityEffect, QToolTip)
+
+from utils.review_marks import ReviewFlag
+
+
+class FloatingReviewSlotsOverlay(QWidget):
+    """Hover-only review-slot grid for masonry-wall floating viewers."""
+
+    rank_requested = Signal(int)
+    flag_requested = Signal(str)
+
+    _RANK_COLORS = {
+        1: QColor(255, 193, 7),
+        2: QColor(59, 130, 246),
+        3: QColor(34, 197, 94),
+        4: QColor(168, 85, 247),
+        5: QColor(249, 115, 22),
+    }
+    _FLAG_DEFS = (
+        ('idea', '*', ReviewFlag.IDEA, QColor(20, 184, 166)),
+        ('warning', '!', ReviewFlag.WARNING, QColor(245, 158, 11)),
+        ('question', '?', ReviewFlag.QUESTION, QColor(99, 102, 241)),
+        ('reject', 'X', ReviewFlag.REJECT, QColor(239, 68, 68)),
+    )
+
+    def __init__(self, viewer: QWidget, parent=None):
+        super().__init__(parent)
+        self._viewer = viewer
+        self._enabled = False
+        self._hover_active = False
+        self._hovered_slot_key = None
+        self._slot_size = 23
+        self._slot_gap = 6
+        self._panel_padding = 8
+        self._slot_items = (
+            ('rank', 1, '1', self._RANK_COLORS[1]),
+            ('rank', 2, '2', self._RANK_COLORS[2]),
+            ('rank', 3, '3', self._RANK_COLORS[3]),
+            ('rank', 4, '4', self._RANK_COLORS[4]),
+            ('rank', 5, '5', self._RANK_COLORS[5]),
+            ('flag', 'reject', 'X', self._FLAG_DEFS[3][3]),
+            ('flag', 'idea', 'I', self._FLAG_DEFS[0][3]),
+            ('flag', 'warning', '!', self._FLAG_DEFS[1][3]),
+            ('flag', 'question', '?', self._FLAG_DEFS[2][3]),
+        )
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
+        self.setMouseTracking(True)
+        self.hide()
+
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._fade_animation = QPropertyAnimation(self._opacity_effect, b'opacity', self)
+        self._fade_animation.setDuration(140)
+        self._fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_animation.finished.connect(self._on_fade_finished)
+
+    def sizeHint(self) -> QSize:
+        cols = 3
+        rows = 3
+        panel_w = (cols * self._slot_size) + ((cols - 1) * self._slot_gap) + (2 * self._panel_padding)
+        panel_h = (rows * self._slot_size) + ((rows - 1) * self._slot_gap) + (2 * self._panel_padding)
+        return QSize(panel_w, panel_h)
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = bool(enabled)
+        if not self._enabled:
+            self._fade_animation.stop()
+            self._opacity_effect.setOpacity(0.0)
+            self._hovered_slot_key = None
+            self.hide()
+        self.update()
+
+    def set_hover_active(self, active: bool):
+        self._hover_active = bool(active)
+        should_show = bool(self._enabled and (self._hover_active or self._has_active_badges()))
+        try:
+            host = self.parentWidget()
+            if host is not None and hasattr(host, "_reposition_overlay_controls"):
+                host._reposition_overlay_controls()
+        except Exception:
+            pass
+        self._fade_animation.stop()
+        if should_show:
+            self.show()
+            self.raise_()
+            start_opacity = float(self._opacity_effect.opacity())
+            self._fade_animation.setStartValue(start_opacity)
+            self._fade_animation.setEndValue(1.0 if self._hover_active else 0.96)
+            self._fade_animation.start()
+            self.update()
+            return
+
+        if not self.isVisible():
+            return
+        start_opacity = float(self._opacity_effect.opacity())
+        if start_opacity <= 0.01:
+            self._opacity_effect.setOpacity(0.0)
+            self.hide()
+            return
+        self._fade_animation.setStartValue(start_opacity)
+        self._fade_animation.setEndValue(0.0)
+        self._fade_animation.start()
+
+    def refresh_state(self):
+        try:
+            host = self.parentWidget()
+            if host is not None and hasattr(host, "_reposition_overlay_controls"):
+                host._reposition_overlay_controls()
+        except Exception:
+            pass
+        self.set_hover_active(self._hover_active)
+        self.update()
+
+    def _on_fade_finished(self):
+        if float(self._opacity_effect.opacity()) <= 0.01:
+            self.hide()
+            self._hovered_slot_key = None
+
+    def _current_review_state(self) -> tuple[int, int]:
+        try:
+            index = getattr(self._viewer, 'proxy_image_index', None)
+            if index is None or not index.isValid():
+                return 0, 0
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image is None:
+                return 0, 0
+            review_rank = int(getattr(image, 'review_rank', 0) or 0)
+            review_flags = int(getattr(image, 'review_flags', 0) or 0)
+            return review_rank, review_flags
+        except Exception:
+            return 0, 0
+
+    def _slot_rect(self, item_index: int) -> QRect:
+        cols = 3
+        row = item_index // cols
+        col = item_index % cols
+        x = self._panel_padding + (col * (self._slot_size + self._slot_gap))
+        y = self._panel_padding + (row * (self._slot_size + self._slot_gap))
+        return QRect(x, y, self._slot_size, self._slot_size)
+
+    def _hit_test_slot(self, pos: QPoint):
+        for item_index, item in self._display_items():
+            if self._slot_rect(item_index).contains(pos):
+                return item
+        return None
+
+    def _active_badge_items(self, review_rank: int, review_flags: int):
+        return [
+            item for item in self._slot_items
+            if self._slot_is_active(item[0], item[1], review_rank, review_flags)
+        ]
+
+    def _has_active_badges(self) -> bool:
+        review_rank, review_flags = self._current_review_state()
+        return bool(review_rank or review_flags)
+
+    def _display_items(self):
+        review_rank, review_flags = self._current_review_state()
+        if self._hover_active:
+            return list(enumerate(self._slot_items))
+        return [
+            (item_index, item)
+            for item_index, item in enumerate(self._slot_items)
+            if self._slot_is_active(item[0], item[1], review_rank, review_flags)
+        ]
+
+    def _slot_is_active(self, item_kind, item_value, review_rank: int, review_flags: int) -> bool:
+        if item_kind == 'rank':
+            return int(review_rank) == int(item_value) and (int(review_flags) & int(ReviewFlag.REJECT)) == 0
+        if item_kind == 'flag':
+            flag_name = str(item_value)
+            flag_map = {
+                'idea': ReviewFlag.IDEA,
+                'warning': ReviewFlag.WARNING,
+                'question': ReviewFlag.QUESTION,
+                'reject': ReviewFlag.REJECT,
+            }
+            target_flag = flag_map.get(flag_name, ReviewFlag.NONE)
+            return bool(int(review_flags) & int(target_flag))
+        return False
+
+    def mouseMoveEvent(self, event):
+        hit = self._hit_test_slot(event.position().toPoint())
+        slot_key = (hit[0], hit[1]) if hit is not None else None
+        if slot_key != self._hovered_slot_key:
+            self._hovered_slot_key = slot_key
+            self.update()
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if hit is not None else
+            Qt.CursorShape.ArrowCursor
+        )
+        event.accept()
+        super().mouseMoveEvent(event)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            help_event = event if isinstance(event, QHelpEvent) else None
+            pos = help_event.pos() if help_event is not None else QPoint()
+            hit = self._hit_test_slot(pos)
+            if hit is None:
+                QToolTip.hideText()
+                event.ignore()
+                return True
+            QToolTip.showText(help_event.globalPos(), "Add badge to image", self)
+            return True
+        return super().event(event)
+
+    def leaveEvent(self, event):
+        self._hovered_slot_key = None
+        self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mouseReleaseEvent(event)
+        hit = self._hit_test_slot(event.position().toPoint())
+        if hit is not None:
+            item_kind, item_value, _label, _color = hit
+            if item_kind == 'rank':
+                self.rank_requested.emit(int(item_value))
+            else:
+                self.flag_requested.emit(str(item_value))
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event):
+        if not self._enabled:
+            return
+
+        review_rank, review_flags = self._current_review_state()
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        if self._hover_active:
+            panel_rect = self.rect().adjusted(1, 1, -1, -1)
+            painter.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
+            painter.setBrush(QColor(10, 14, 22, 116))
+            painter.drawRoundedRect(panel_rect, 14, 14)
+
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSizeF(max(8.0, font.pointSizeF() if font.pointSizeF() > 0 else 9.0))
+        painter.setFont(font)
+
+        display_items = self._display_items()
+        if not display_items:
+            return
+
+        for item_index, item in display_items:
+            item_kind, item_value, item_label, item_color = item
+            slot_rect = self._slot_rect(item_index)
+            is_active = self._slot_is_active(item_kind, item_value, review_rank, review_flags)
+            is_hovered = self._hovered_slot_key == (item_kind, item_value)
+            base_color = QColor(item_color)
+
+            shadow_rect = slot_rect.translated(0, 1)
+            shadow_alpha = 82 if (is_active or is_hovered) else 42
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, shadow_alpha))
+            painter.drawRoundedRect(shadow_rect, 8, 8)
+
+            outline_color = QColor(base_color)
+            outline_color.setAlpha(240 if is_active else (210 if is_hovered else 150))
+            fill_color = QColor(base_color)
+            fill_color.setAlpha(232 if is_active else (58 if is_hovered else 24))
+
+            if is_hovered and not is_active:
+                glow_color = QColor(base_color)
+                glow_color.setAlpha(48)
+                painter.setBrush(glow_color)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(slot_rect.adjusted(-2, -2, 2, 2), 10, 10)
+
+            painter.setBrush(fill_color)
+            painter.setPen(QPen(outline_color, 1.3))
+            painter.drawRoundedRect(slot_rect, 8, 8)
+
+            inner_rect = slot_rect.adjusted(3, 3, -3, -3)
+            if not is_active:
+                inner_outline = QColor(base_color)
+                inner_outline.setAlpha(125 if is_hovered else 86)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(inner_outline, 1.0))
+                painter.drawRoundedRect(inner_rect, 6, 6)
+
+            text_color = QColor(255, 255, 255, 248 if is_active else (232 if is_hovered else 188))
+            painter.setPen(text_color)
+            painter.drawText(slot_rect, Qt.AlignmentFlag.AlignCenter, item_label)
 
 
 class ShiftResizeCornerCue(QWidget):
@@ -184,6 +484,8 @@ class FloatingViewerWindow(QWidget):
     compare_drag_released = Signal(object, QPoint)
     compare_drag_canceled = Signal(object)
     compare_exit_requested = Signal(object)
+    review_rank_requested = Signal(int)
+    review_flag_requested = Signal(str)
 
     def __init__(self, viewer: QWidget, title: str, parent=None):
         super().__init__(
@@ -235,6 +537,12 @@ class FloatingViewerWindow(QWidget):
         self._shift_resize_corner_cue = ShiftResizeCornerCue(self)
         self._shift_resize_corner_cue.hide()
         self._shift_resize_corner_cue.raise_()
+        self._review_slots_enabled = False
+        self._review_slots_overlay = FloatingReviewSlotsOverlay(self.viewer, self)
+        self._review_slots_overlay.rank_requested.connect(self._handle_review_rank_requested)
+        self._review_slots_overlay.flag_requested.connect(self._handle_review_flag_requested)
+        self._review_slots_overlay.hide()
+        self._review_slots_overlay.raise_()
         self._shift_resize_glow_timer = QTimer(self)
         self._shift_resize_glow_timer.setInterval(40)
         self._shift_resize_glow_timer.timeout.connect(self._tick_shift_resize_glow)
@@ -686,6 +994,29 @@ class FloatingViewerWindow(QWidget):
     def _emit_activated(self):
         self.activated.emit(self.viewer)
 
+    def _handle_review_rank_requested(self, rank: int):
+        self._emit_activated()
+        self.review_rank_requested.emit(int(rank))
+        self._review_slots_overlay.set_hover_active(True)
+        self.refresh_review_slots_overlay()
+
+    def _handle_review_flag_requested(self, flag_name: str):
+        self._emit_activated()
+        self.review_flag_requested.emit(str(flag_name))
+        self._review_slots_overlay.set_hover_active(True)
+        self.refresh_review_slots_overlay()
+
+    def set_review_slots_enabled(self, enabled: bool):
+        self._review_slots_enabled = bool(enabled)
+        self._review_slots_overlay.set_enabled(self._review_slots_enabled)
+        self._reposition_overlay_controls()
+        if not self._review_slots_enabled:
+            self._review_slots_overlay.set_hover_active(False)
+
+    def refresh_review_slots_overlay(self):
+        if self._review_slots_overlay is not None:
+            self._review_slots_overlay.refresh_state()
+
     def _set_widget_tree_mouse_passthrough(self, enabled: bool):
         widgets = [self]
         widgets.extend(self.findChildren(QWidget))
@@ -976,6 +1307,26 @@ class FloatingViewerWindow(QWidget):
             corner_size,
         )
         self._close_button.raise_()
+        overlay = getattr(self, "_review_slots_overlay", None)
+        if overlay is not None:
+            overlay_hint = overlay.sizeHint()
+            overlay_w = int(overlay_hint.width())
+            overlay_h = int(overlay_hint.height())
+            show_overlay_geometry = (
+                self._review_slots_enabled
+                and self.width() >= overlay_w + (margin * 2)
+                and self.height() >= overlay_h + self._close_button.height() + (margin * 2)
+            )
+            if show_overlay_geometry:
+                overlay_x = max(margin, self.width() - overlay_w - margin - 1)
+                overlay_y = min(
+                    max(margin, close_y + self._close_button.height() + 8),
+                    max(margin, self.height() - overlay_h - margin),
+                )
+                overlay.setGeometry(overlay_x, overlay_y, overlay_w, overlay_h)
+                overlay.raise_()
+            else:
+                overlay.set_hover_active(False)
 
     def _show_close_button(self, visible: bool):
         if visible:
@@ -1057,6 +1408,7 @@ class FloatingViewerWindow(QWidget):
         local_pos = self.mapFromGlobal(global_pos)
         self._show_close_button(self._is_in_close_hover_zone(local_pos))
         self._update_shift_resize_visuals(global_pos)
+        self._update_review_slots_hover(local_pos)
         if not self._uses_handle_only_window_drag():
             self._hide_all_drag_handles()
             return
@@ -1067,6 +1419,26 @@ class FloatingViewerWindow(QWidget):
                 or (name in hovered_handles)
             )
             self._show_drag_handle(name, should_show)
+
+    def _update_review_slots_hover(self, local_pos: QPoint):
+        overlay = getattr(self, "_review_slots_overlay", None)
+        if overlay is None:
+            return
+        should_show = (
+            self._review_slots_enabled
+            and local_pos.x() >= 0
+            and local_pos.y() >= 0
+            and local_pos.x() < self.width()
+            and local_pos.y() < self.height()
+            and not self._window_drag_active
+            and not self._resize_active
+            and not self._frozen_passthrough_mode
+            and overlay.width() > 0
+            and overlay.height() > 0
+        )
+        overlay.set_hover_active(bool(should_show))
+        if should_show:
+            overlay.refresh_state()
 
     def _show_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
@@ -1372,6 +1744,13 @@ class FloatingViewerWindow(QWidget):
 
     def eventFilter(self, watched, event):
         self._refresh_video_surface_event_filters()
+        overlay = getattr(self, "_review_slots_overlay", None)
+        if overlay is not None:
+            try:
+                if watched is overlay or overlay.isAncestorOf(watched):
+                    return False
+            except Exception:
+                pass
         drag_sources = [self, self.viewer]
         if hasattr(self.viewer, "view"):
             drag_sources.append(self.viewer.view)
@@ -1644,6 +2023,8 @@ class FloatingViewerWindow(QWidget):
         self._show_close_button(False)
         if not self._window_drag_active:
             self._hide_all_drag_handles()
+        if self._review_slots_overlay is not None:
+            self._review_slots_overlay.set_hover_active(False)
         self._update_shift_resize_visuals(QPoint(-1, -1))
         super().leaveEvent(event)
 

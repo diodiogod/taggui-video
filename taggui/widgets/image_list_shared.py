@@ -22,6 +22,7 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Combine, Group, OpAssoc
 from models.proxy_image_list_model import ProxyImageListModel
 from models.image_list_model import natural_sort_key
 from utils.image import Image
+from utils.review_marks import REVIEW_FLAG_LABELS, ReviewFlag, iter_review_flags
 from utils.settings import settings
 from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
@@ -53,6 +54,9 @@ FILTER_TEMPLATE_SPECS = [
     ('Stars', 'Filter by star rating', 'stars:>={cursor}', True),
     ('Love', 'Filter loved items', 'love:true', False),
     ('Bomb', 'Filter bombed items', 'bomb:true', False),
+    ('Review', 'Filter reviewed items', 'review:true', False),
+    ('Review Rank', 'Filter by review rank', 'review_rank:>={cursor}', True),
+    ('Rejected', 'Filter rejected items', 'review:reject', False),
     ('Width', 'Filter by image width', 'width:>1024', False),
     ('Height', 'Filter by image height', 'height:>1024', False),
     ('Name', 'Filter by file name', 'name:"{cursor}"', True),
@@ -271,13 +275,13 @@ class FilterLineEdit(QLineEdit):
                                                    esc_char='\\')
                                     | Word(printables, exclude_chars='()'))
         string_filter_keys = ['tag', 'caption', 'marking', 'marking_type', 'crops', 'visible',
-                              'name', 'path', 'size', 'target', 'love', 'bomb']
+                              'name', 'path', 'size', 'target', 'love', 'bomb', 'review']
         string_filter_expressions = [Group(CaselessLiteral(key) + Suppress(':')
                                            + optionally_quoted_string)
                                      for key in string_filter_keys]
         comparison_operator = one_of('= == != < > <= >=')
         number_value = Combine(Word(nums) + Optional('.' + Word(nums)))
-        number_filter_keys = ['tags', 'chars', 'tokens', 'stars', 'width',
+        number_filter_keys = ['tags', 'chars', 'tokens', 'stars', 'review_rank', 'width',
                               'height', 'area']
         number_filter_expressions = [Group(CaselessLiteral(key) + Suppress(':')
                                            + comparison_operator + number_value)
@@ -464,6 +468,9 @@ class ImageDelegate(QStyledItemDelegate):
         self._last_hover_move_monotonic = time.monotonic()
         self._filename_tooltip_anchor_pos = None
         self._tracked_viewport = None
+        self._review_badge_margin = 5
+        self._review_badge_size = 18
+        self._review_badge_gap = 4
 
     def _event_pos(self, event):
         try:
@@ -618,6 +625,7 @@ class ImageDelegate(QStyledItemDelegate):
 
         # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)
+        self._draw_review_badges(painter, option, index)
 
         # Draw red border for images marked for deletion (thick, appears below blue border)
         try:
@@ -857,4 +865,85 @@ class ImageDelegate(QStyledItemDelegate):
 
         except Exception:
             # Silently ignore any errors in stamp drawing
+            pass
+
+    def _draw_review_badges(self, painter, option, index):
+        """Draw compact review-mark badges on the top-right corner."""
+        try:
+            if not painter or not painter.isActive():
+                return
+
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if not image:
+                return
+
+            review_rank = int(getattr(image, 'review_rank', 0) or 0)
+            review_flags = int(getattr(image, 'review_flags', 0) or 0)
+            if review_rank <= 0 and review_flags == 0:
+                return
+
+            if option.rect.width() < 32 or option.rect.height() < 26:
+                return
+
+            if not hasattr(self, '_review_badge_outline_pen'):
+                self._review_badge_outline_pen = QPen(QColor(255, 255, 255, 235), 1.2)
+                self._review_badge_shadow_pen = QPen(QColor(0, 0, 0, 55), 1.2)
+                self._review_badge_shadow_brush = QColor(0, 0, 0, 60)
+                self._review_badge_text_color = QColor(255, 255, 255, 245)
+                self._review_rank_colors = {
+                    1: QColor(255, 193, 7, 235),
+                    2: QColor(33, 150, 243, 235),
+                    3: QColor(76, 175, 80, 235),
+                    4: QColor(156, 39, 176, 235),
+                    5: QColor(255, 112, 67, 235),
+                }
+                self._review_flag_colors = {
+                    ReviewFlag.REJECT: QColor(239, 68, 68, 235),
+                    ReviewFlag.WARNING: QColor(245, 158, 11, 235),
+                    ReviewFlag.QUESTION: QColor(99, 102, 241, 235),
+                    ReviewFlag.IDEA: QColor(16, 185, 129, 235),
+                }
+
+            badges: list[tuple[str, QColor]] = []
+            if review_rank > 0:
+                badges.append((
+                    str(review_rank),
+                    self._review_rank_colors.get(review_rank, QColor(96, 125, 139, 235)),
+                ))
+            for flag in iter_review_flags(review_flags):
+                label = REVIEW_FLAG_LABELS.get(flag)
+                color = self._review_flag_colors.get(flag)
+                if label and color is not None:
+                    badges.append((label, color))
+
+            if not badges:
+                return
+
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSizeF(max(8.0, font.pointSizeF() if font.pointSizeF() > 0 else 9.0))
+            painter.setFont(font)
+
+            badge_size = self._review_badge_size
+            gap = self._review_badge_gap
+            x = option.rect.right() - self._review_badge_margin - badge_size + 1
+            y = option.rect.top() + self._review_badge_margin
+
+            for label, color in badges:
+                badge_rect = QRect(x, y, badge_size, badge_size)
+                shadow_rect = badge_rect.translated(1, 1)
+                painter.setPen(self._review_badge_shadow_pen)
+                painter.setBrush(self._review_badge_shadow_brush)
+                painter.drawRoundedRect(shadow_rect, 5, 5)
+                painter.setPen(self._review_badge_outline_pen)
+                painter.setBrush(color)
+                painter.drawRoundedRect(badge_rect, 5, 5)
+                painter.setPen(self._review_badge_text_color)
+                painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
+                x -= badge_size + gap
+
+            painter.restore()
+        except Exception:
             pass

@@ -861,7 +861,7 @@ class ImageListViewInteractionMixin:
             self._spawn_drag_poll_timer.start()
 
     def _finish_spawn_drag_active(self, *, should_spawn: bool):
-        """Disarm internal spawn-drag mode and optionally spawn one viewer."""
+        """Disarm internal spawn-drag mode and optionally spawn one viewer or wall."""
         if hasattr(self, "_spawn_drag_poll_timer"):
             self._spawn_drag_poll_timer.stop()
         hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
@@ -889,15 +889,33 @@ class ImageListViewInteractionMixin:
             except Exception:
                 live_index = QModelIndex()
             if live_index.isValid():
-                spawn_direct = getattr(self, "_spawn_floating_for_index_at_cursor", None)
-                if callable(spawn_direct):
+                selected_proxy_indices = []
+                get_selected_proxy_indices = getattr(self, "get_selected_proxy_indices", None)
+                if callable(get_selected_proxy_indices):
                     try:
-                        spawn_started = bool(
-                            spawn_direct(live_index, spawn_global_pos=self._spawn_drag_last_global_pos)
-                        )
+                        selected_proxy_indices = get_selected_proxy_indices()
                     except Exception:
-                        spawn_started = False
-        if not spawn_started and callable(hide_ghost):
+                        selected_proxy_indices = []
+
+                if len(selected_proxy_indices) >= 2:
+                    open_wall = getattr(self, "open_selected_items_in_masonry_wall", None)
+                    if callable(open_wall):
+                        try:
+                            open_wall()
+                            spawn_started = True
+                        except Exception:
+                            spawn_started = False
+
+                if not spawn_started:
+                    spawn_direct = getattr(self, "_spawn_floating_for_index_at_cursor", None)
+                    if callable(spawn_direct):
+                        try:
+                            spawn_started = bool(
+                                spawn_direct(live_index, spawn_global_pos=self._spawn_drag_last_global_pos)
+                            )
+                        except Exception:
+                            spawn_started = False
+        if callable(hide_ghost):
             hide_ghost()
         if host is not None and hasattr(host, "cancel_compare_drag"):
             try:
@@ -1052,6 +1070,7 @@ class ImageListViewInteractionMixin:
                 self._spawn_drag_index = QPersistentModelIndex(start_index)
                 self._spawn_drag_origin_global_pos = self._event_global_point(event)
                 self._suppress_selection_commit_until_release = True
+                self._preserve_multi_selection_on_drag_candidate = False
                 self._pending_click_commit_index = QPersistentModelIndex()
                 self._pending_click_commit_global = None
             else:
@@ -1059,6 +1078,7 @@ class ImageListViewInteractionMixin:
                 self._spawn_drag_index = QPersistentModelIndex()
                 self._spawn_drag_origin_global_pos = QPoint()
                 self._suppress_selection_commit_until_release = False
+                self._preserve_multi_selection_on_drag_candidate = False
                 self._pending_click_commit_index = QPersistentModelIndex()
                 self._pending_click_commit_global = None
         else:
@@ -1066,6 +1086,7 @@ class ImageListViewInteractionMixin:
             self._spawn_drag_index = QPersistentModelIndex()
             self._spawn_drag_origin_global_pos = QPoint()
             self._suppress_selection_commit_until_release = False
+            self._preserve_multi_selection_on_drag_candidate = False
             self._pending_click_commit_index = QPersistentModelIndex()
             self._pending_click_commit_global = None
     
@@ -1496,10 +1517,19 @@ class ImageListViewInteractionMixin:
                     # clearSelection()+select() during rapid layout updates.
                     sel_model = self.selectionModel()
                     if sel_model:
-                        self._suppress_masonry_auto_scroll_once = True
-                        sel_model.setCurrentIndex(
-                            index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        preserve_multi_drag = (
+                            event.button() == Qt.MouseButton.LeftButton
+                            and sel_model.isSelected(index)
+                            and len(self.selectedIndexes()) > 1
                         )
+                        self._preserve_multi_selection_on_drag_candidate = bool(preserve_multi_drag)
+                        self._suppress_masonry_auto_scroll_once = True
+                        if preserve_multi_drag:
+                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                        else:
+                            sel_model.setCurrentIndex(
+                                index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                            )
                         self.viewport().update()
 
                 QTimer.singleShot(
@@ -1753,6 +1783,26 @@ class ImageListViewInteractionMixin:
             super().mouseReleaseEvent(event)
 
         if should_commit_click_selection:
+            if bool(getattr(self, "_preserve_multi_selection_on_drag_candidate", False)):
+                commit_index = QModelIndex(
+                    getattr(self, "_pending_click_commit_index", QPersistentModelIndex())
+                )
+                if commit_index.isValid():
+                    sel_model = self.selectionModel()
+                    if sel_model is not None:
+                        try:
+                            self._suppress_masonry_auto_scroll_once = True
+                            sel_model.setCurrentIndex(
+                                commit_index,
+                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                            )
+                            self.viewport().update()
+                        except Exception:
+                            pass
+                        QTimer.singleShot(
+                            0,
+                            lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
+                        )
             host = self.window()
             if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
                 commit_index = QModelIndex()
@@ -1800,6 +1850,7 @@ class ImageListViewInteractionMixin:
         self._pending_click_commit_index = QPersistentModelIndex()
         self._pending_click_commit_global = None
         self._suppress_selection_commit_until_release = False
+        self._preserve_multi_selection_on_drag_candidate = False
 
     def leaveEvent(self, event):
         # If pointer exits during a fast drag/release, ensure no stale spawn

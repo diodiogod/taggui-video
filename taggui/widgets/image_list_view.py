@@ -349,6 +349,13 @@ class ImageListView(
         self.delete_images_action.setShortcut('Ctrl+Del')
         self.delete_images_action.triggered.connect(
             self.delete_selected_images)
+        self.open_selection_masonry_wall_action = self.addAction(
+            'Open Selection Masonry Wall'
+        )
+        self.open_selection_masonry_wall_action.setShortcut('Ctrl+Shift+Return')
+        self.open_selection_masonry_wall_action.triggered.connect(
+            self.open_selected_items_in_masonry_wall
+        )
         self.open_image_action = self.addAction('Open Image in Default App')
         self.open_image_action.setShortcut('Ctrl+O')
         self.open_image_action.triggered.connect(self.open_image)
@@ -372,6 +379,7 @@ class ImageListView(
         self.context_menu.addAction(self.copy_images_action)
         self.context_menu.addAction(self.duplicate_images_action)
         self.context_menu.addAction(self.delete_images_action)
+        self.context_menu.addAction(self.open_selection_masonry_wall_action)
         self.context_menu.addAction(self.open_image_action)
         self.context_menu.addAction(self.open_folder_action)
         self.context_menu.addSeparator()
@@ -388,6 +396,7 @@ class ImageListView(
         source_model.modelReset.connect(self._on_model_reset_complete)
         source_model.modelAboutToBeReset.connect(self._clear_selection_cache)
         source_model.modelReset.connect(self._clear_selection_cache)
+        self.update_context_menu_actions()
 
     def _reaction_feedback_anchor_rect(self, target_global: int | None = None) -> QRect:
         viewport_rect = self.viewport().rect()
