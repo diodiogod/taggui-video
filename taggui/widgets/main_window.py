@@ -1464,6 +1464,8 @@ class MainWindow(QMainWindow):
     def set_main_viewer_visible(self, visible: bool, *, save: bool = True):
         """Show/hide anchored main viewer without detaching it."""
         self._main_viewer_visible = bool(visible)
+        if not self._main_viewer_visible:
+            self._pause_viewer_without_autoplay_change(self.image_viewer)
         self._set_central_content_page()
         self._sync_main_viewer_overlay_hosts()
         action = getattr(getattr(self, 'menu_manager', None), 'toggle_main_viewer_action', None)
@@ -2123,10 +2125,11 @@ class MainWindow(QMainWindow):
             return False
         return self.toggle_viewer_play_pause(target)
 
-    def _pause_main_viewer_for_selection_wall(self):
-        """Pause the main viewer temporarily when a review wall takes over the screen."""
+    def _pause_viewer_without_autoplay_change(self, viewer: ImageViewer | None):
+        """Pause one viewer without changing the saved auto-play preference."""
+        if viewer is None:
+            return
         try:
-            viewer = self.image_viewer
             if not bool(getattr(viewer, '_is_video_loaded', False)):
                 return
             player = getattr(viewer, 'video_player', None)
@@ -2138,6 +2141,10 @@ class MainWindow(QMainWindow):
                 controls.set_playing(False, update_auto_play=False)
         except RuntimeError:
             return
+
+    def _pause_main_viewer_for_selection_wall(self):
+        """Pause the main viewer temporarily when a review wall takes over the screen."""
+        self._pause_viewer_without_autoplay_change(self.image_viewer)
 
     def _sync_viewer_surface_geometry(self, viewer: ImageViewer | None = None):
         """Refresh external video surface geometry after viewer reparent/resize."""
@@ -4130,13 +4137,57 @@ class MainWindow(QMainWindow):
 
     def _iter_manual_sync_viewers(self) -> list[ImageViewer]:
         """Return viewers controlled by manual/global sync actions."""
-        viewers = [self.image_viewer]
+        viewers = []
+        if bool(getattr(self, '_main_viewer_visible', True)):
+            viewers.append(self.image_viewer)
         for window in list(getattr(self, "_floating_viewers", [])):
             try:
                 viewers.append(window.viewer)
             except RuntimeError:
                 continue
         return viewers
+
+    def _iter_window_scoped_sync_viewers(
+        self,
+        source_window: FloatingViewerWindow | None,
+    ) -> list[ImageViewer]:
+        """Return viewers that should be synced from one floating-window action."""
+        viewers: list[ImageViewer] = []
+        if source_window is None:
+            return viewers
+
+        selection_wall_only = bool(getattr(source_window, '_selection_masonry_wall_window', False))
+        if not selection_wall_only:
+            return self._iter_manual_sync_viewers()
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                if selection_wall_only and not bool(getattr(window, '_selection_masonry_wall_window', False)):
+                    continue
+                viewers.append(window.viewer)
+            except RuntimeError:
+                continue
+        return viewers
+
+    def _pause_viewers_outside_sync_group(self, synced_viewers: list[ImageViewer]):
+        """Pause other playing viewers so sync groups do not fight background audio."""
+        synced_ids = {id(viewer) for viewer in synced_viewers if viewer is not None}
+        for viewer in self._iter_all_viewers():
+            try:
+                if id(viewer) in synced_ids:
+                    continue
+                if not bool(getattr(viewer, '_is_video_loaded', False)):
+                    continue
+                player = getattr(viewer, 'video_player', None)
+                controls = getattr(viewer, 'video_controls', None)
+                if player is None:
+                    continue
+                player.pause()
+                if controls is not None:
+                    controls.set_playing(False, update_auto_play=False)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
 
     def refresh_video_controls_performance_profile(self):
         """Apply dynamic controls-update profile based on how many videos are live."""
@@ -4206,6 +4257,15 @@ class MainWindow(QMainWindow):
         """Synchronize loaded videos using a strict startup+loop barrier coordinator."""
         self._start_video_sync_for_viewers(self._iter_manual_sync_viewers())
 
+    def sync_video_playback_from_window(self, source_window: FloatingViewerWindow | None):
+        """Synchronize videos scoped to the requesting floating window group."""
+        target_viewers = self._iter_window_scoped_sync_viewers(source_window)
+        if not target_viewers:
+            return
+        if bool(getattr(source_window, '_selection_masonry_wall_window', False)) or not bool(getattr(self, '_main_viewer_visible', True)):
+            self._pause_viewers_outside_sync_group(target_viewers)
+        self._start_video_sync_for_viewers(target_viewers)
+
     def _start_video_sync_for_viewers(self, viewers: list[ImageViewer]) -> list[ImageViewer]:
         """Start the global sync coordinator for a specific viewer subset."""
         if self._sync_coordinator is not None:
@@ -4268,7 +4328,9 @@ class MainWindow(QMainWindow):
         window.slot_id = slot_id
         window.activated.connect(self.set_active_viewer)
         window.closing.connect(self._on_floating_viewer_closed)
-        window.sync_video_requested.connect(self.sync_video_playback)
+        window.sync_video_requested.connect(
+            lambda current_window=window: self.sync_video_playback_from_window(current_window)
+        )
         window.close_all_requested.connect(self.close_all_floating_viewers)
         window.compare_drag_started.connect(self._on_compare_drag_window_started)
         window.compare_drag_moved.connect(self._on_compare_drag_window_moved)

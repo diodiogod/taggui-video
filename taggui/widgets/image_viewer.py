@@ -3412,6 +3412,15 @@ class ImageViewer(QWidget):
 
                         # Auto-play is deferred until after zoom/layout settles.
                         auto_play_after_layout = bool(self.video_controls.should_auto_play())
+                        try:
+                            top = self.window()
+                            if (
+                                self is getattr(top, 'image_viewer', None)
+                                and not bool(getattr(top, '_main_viewer_visible', True))
+                            ):
+                                auto_play_after_layout = False
+                        except Exception:
+                            pass
                     else:
                         print(f"Video loaded but no frame available: {image.path}")
                         self._show_error_placeholder("Video loaded (no frame)")

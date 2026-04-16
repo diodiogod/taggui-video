@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-04-16
+
+### Added
+
+- Stop the hidden main viewer from auto-playing videos in full masonry workspace
+- Keep masonry wall sync scoped to the wall instead of pulling in the background viewer
+- Preserve normal sync behavior for regular floating viewers when the main viewer is visible
+
+### Fixed
+
+- Fix hidden main-viewer background playback
 ## [1.2.2] - 2026-04-16
 
 ### Added
