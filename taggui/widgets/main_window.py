@@ -2603,6 +2603,7 @@ class MainWindow(QMainWindow):
         if self._filter_uses_review(self.proxy_image_list_model.filter):
             self._arm_masonry_refresh_anchor()
             self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._force_immediate_review_badge_repaint()
         return True
 
     def clear_review_marks_for_scope(self, scope: str, interactive: bool = False):
