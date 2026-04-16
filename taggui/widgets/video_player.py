@@ -3766,7 +3766,7 @@ class VideoPlayerWidget(QWidget):
         if self.vlc_player is not None:
             self._set_vlc_muted(bool(muted))
 
-    def cleanup(self):
+    def cleanup(self, *, force_gc: bool = True):
         """Release video resources."""
         self._cancel_mpv_reveal()
         self._cancel_vlc_reveal()
@@ -3829,6 +3829,7 @@ class VideoPlayerWidget(QWidget):
         # Reset video path to indicate no video is loaded
         self.video_path = None
 
-        # Force Python garbage collection to release file handles immediately
-        import gc
-        gc.collect()
+        # Force Python garbage collection to release file handles immediately.
+        if force_gc:
+            import gc
+            gc.collect()

@@ -10,12 +10,14 @@ This is the main documentation map for TagGUI Video 1M.
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
 - [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)
 
 ## Workflow Guides
 
 - [Shortcuts](SHORTCUTS.md)
 - [Compare Guide](COMPARE_GUIDE.md)
+- [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)

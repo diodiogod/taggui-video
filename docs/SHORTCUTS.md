@@ -90,6 +90,7 @@ Examples:
 ## Floating Viewers
 
 - Spawn floating viewer: `Ctrl` + `Shift` + `N`
+- Open selection masonry wall: `Ctrl` + `Shift` + `Enter`
 - Close all spawned viewers: `Ctrl` + `Shift` + `W`
 - Toggle hold for existing spawned viewers: `H`
 - Toggle hold for existing spawned viewers with the mouse: middle-click in the main window or image list area
@@ -108,6 +109,20 @@ Hold mode freezes existing spawned viewers as dimmed, gray, click-through overla
 - Exit compare mode: `Esc`
 - Open compare mode: drag a thumbnail onto a target viewer, hold for about 1 second, then release
 - Expand or update an active compare view: drag another source onto the same compare target and hold again
+
+## Review Badges
+
+- Apply numeric review badges: `1` to `5`
+- Apply `*` badge: `8` or `Shift` + `8`
+- Apply question badge: `?`
+- Apply reject badge: `X`
+- Apply warning badge: apostrophe/quote key
+- Click badge buttons in the detachable `Review toolbar`
+- Hover a masonry wall viewer and click the 3x3 badge slots
+- Clear selected review badges: `Review toolbar -> Clear -> Clear Selected`
+- Clear folder review badges: `Review toolbar -> Clear -> Clear Current Folder`
+
+Badge shortcuts can be customized in `Settings -> Badges`.
 
 ## Contextual Video Surface Controls
 
@@ -132,10 +147,12 @@ Floating viewers do not have their own fullscreen mode.
 
 - Floating viewer double-click zoom is adaptive, not a fixed single-step zoom.
 - Detailed floating viewer behavior is documented in [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md).
+- Masonry review wall and badge workflow are documented in [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md).
 - Detailed contextual video hover controls are documented in [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md).
 
 ## Continue Reading
 
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)

@@ -22,7 +22,15 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Combine, Group, OpAssoc
 from models.proxy_image_list_model import ProxyImageListModel
 from models.image_list_model import natural_sort_key
 from utils.image import Image
-from utils.review_marks import REVIEW_FLAG_LABELS, ReviewFlag, iter_review_flags
+from utils.review_marks import (
+    ReviewFlag,
+    get_review_badge_corner_radius,
+    get_review_badge_font_size,
+    get_review_badge_spec_for_flag,
+    get_review_badge_spec_for_rank,
+    get_review_badge_text_color,
+    iter_review_flags,
+)
 from utils.settings import settings
 from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
@@ -889,7 +897,6 @@ class ImageDelegate(QStyledItemDelegate):
                 self._review_badge_outline_pen = QPen(QColor(255, 255, 255, 235), 1.2)
                 self._review_badge_shadow_pen = QPen(QColor(0, 0, 0, 55), 1.2)
                 self._review_badge_shadow_brush = QColor(0, 0, 0, 60)
-                self._review_badge_text_color = QColor(255, 255, 255, 245)
                 self._review_rank_colors = {
                     1: QColor(255, 193, 7, 235),
                     2: QColor(33, 150, 243, 235),
@@ -897,24 +904,15 @@ class ImageDelegate(QStyledItemDelegate):
                     4: QColor(156, 39, 176, 235),
                     5: QColor(255, 112, 67, 235),
                 }
-                self._review_flag_colors = {
-                    ReviewFlag.REJECT: QColor(239, 68, 68, 235),
-                    ReviewFlag.WARNING: QColor(245, 158, 11, 235),
-                    ReviewFlag.QUESTION: QColor(99, 102, 241, 235),
-                    ReviewFlag.IDEA: QColor(16, 185, 129, 235),
-                }
-
             badges: list[tuple[str, QColor]] = []
             if review_rank > 0:
-                badges.append((
-                    str(review_rank),
-                    self._review_rank_colors.get(review_rank, QColor(96, 125, 139, 235)),
-                ))
+                spec = get_review_badge_spec_for_rank(review_rank)
+                if spec is not None:
+                    badges.append((str(spec.label), QColor(spec.color)))
             for flag in iter_review_flags(review_flags):
-                label = REVIEW_FLAG_LABELS.get(flag)
-                color = self._review_flag_colors.get(flag)
-                if label and color is not None:
-                    badges.append((label, color))
+                spec = get_review_badge_spec_for_flag(flag)
+                if spec is not None:
+                    badges.append((str(spec.label), QColor(spec.color)))
 
             if not badges:
                 return
@@ -923,8 +921,11 @@ class ImageDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             font = painter.font()
             font.setBold(True)
-            font.setPointSizeF(max(8.0, font.pointSizeF() if font.pointSizeF() > 0 else 9.0))
+            font.setPointSizeF(float(get_review_badge_font_size()))
             painter.setFont(font)
+            text_color = QColor(get_review_badge_text_color())
+            text_color.setAlpha(245)
+            radius = float(get_review_badge_corner_radius())
 
             badge_size = self._review_badge_size
             gap = self._review_badge_gap
@@ -936,11 +937,11 @@ class ImageDelegate(QStyledItemDelegate):
                 shadow_rect = badge_rect.translated(1, 1)
                 painter.setPen(self._review_badge_shadow_pen)
                 painter.setBrush(self._review_badge_shadow_brush)
-                painter.drawRoundedRect(shadow_rect, 5, 5)
+                painter.drawRoundedRect(shadow_rect, radius, radius)
                 painter.setPen(self._review_badge_outline_pen)
                 painter.setBrush(color)
-                painter.drawRoundedRect(badge_rect, 5, 5)
-                painter.setPen(self._review_badge_text_color)
+                painter.drawRoundedRect(badge_rect, radius, radius)
+                painter.setPen(text_color)
                 painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
                 x -= badge_size + gap
 

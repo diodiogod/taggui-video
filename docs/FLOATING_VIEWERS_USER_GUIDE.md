@@ -105,6 +105,7 @@ How to exit compare mode:
 ## Related Docs
 
 - [Compare Guide](COMPARE_GUIDE.md)
+- [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
 - [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)

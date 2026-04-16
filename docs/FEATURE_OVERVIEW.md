@@ -11,6 +11,7 @@ High-level capabilities of TagGUI Video 1M.
 - Video playback and frame tools
 - Main viewer hover controls for zoom, previous/next media, and fullscreen, with toolbar fallback when detached or when the main viewer is hidden
 - Floating/spawned viewers for multi-view workflows
+- Selection masonry review wall with persistent review badges
 - Custom skin system for player controls
 
 ## Viewer Experience
@@ -38,5 +39,6 @@ High-level capabilities of TagGUI Video 1M.
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
+- [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)
 - [Skin README](../taggui/skins/README.md)

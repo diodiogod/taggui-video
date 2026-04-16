@@ -7,7 +7,13 @@ from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QHelpEvent
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsView, QMenu,
                                QPushButton, QSizeGrip, QVBoxLayout, QWidget, QGraphicsOpacityEffect, QToolTip)
 
-from utils.review_marks import ReviewFlag
+from utils.review_marks import (
+    ReviewFlag,
+    get_review_badge_corner_radius,
+    get_review_badge_font_size,
+    get_review_badge_specs,
+    get_review_badge_text_color,
+)
 
 
 class FloatingReviewSlotsOverlay(QWidget):
@@ -15,20 +21,6 @@ class FloatingReviewSlotsOverlay(QWidget):
 
     rank_requested = Signal(int)
     flag_requested = Signal(str)
-
-    _RANK_COLORS = {
-        1: QColor(255, 193, 7),
-        2: QColor(59, 130, 246),
-        3: QColor(34, 197, 94),
-        4: QColor(168, 85, 247),
-        5: QColor(249, 115, 22),
-    }
-    _FLAG_DEFS = (
-        ('idea', '*', ReviewFlag.IDEA, QColor(20, 184, 166)),
-        ('warning', '!', ReviewFlag.WARNING, QColor(245, 158, 11)),
-        ('question', '?', ReviewFlag.QUESTION, QColor(99, 102, 241)),
-        ('reject', 'X', ReviewFlag.REJECT, QColor(239, 68, 68)),
-    )
 
     def __init__(self, viewer: QWidget, parent=None):
         super().__init__(parent)
@@ -39,17 +31,6 @@ class FloatingReviewSlotsOverlay(QWidget):
         self._slot_size = 23
         self._slot_gap = 6
         self._panel_padding = 8
-        self._slot_items = (
-            ('rank', 1, '1', self._RANK_COLORS[1]),
-            ('rank', 2, '2', self._RANK_COLORS[2]),
-            ('rank', 3, '3', self._RANK_COLORS[3]),
-            ('rank', 4, '4', self._RANK_COLORS[4]),
-            ('rank', 5, '5', self._RANK_COLORS[5]),
-            ('flag', 'reject', 'X', self._FLAG_DEFS[3][3]),
-            ('flag', 'idea', 'I', self._FLAG_DEFS[0][3]),
-            ('flag', 'warning', '!', self._FLAG_DEFS[1][3]),
-            ('flag', 'question', '?', self._FLAG_DEFS[2][3]),
-        )
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
@@ -154,10 +135,13 @@ class FloatingReviewSlotsOverlay(QWidget):
                 return item
         return None
 
+    def _slot_items(self):
+        return get_review_badge_specs()
+
     def _active_badge_items(self, review_rank: int, review_flags: int):
         return [
-            item for item in self._slot_items
-            if self._slot_is_active(item[0], item[1], review_rank, review_flags)
+            item for item in self._slot_items()
+            if self._slot_is_active(item, review_rank, review_flags)
         ]
 
     def _has_active_badges(self) -> bool:
@@ -167,31 +151,23 @@ class FloatingReviewSlotsOverlay(QWidget):
     def _display_items(self):
         review_rank, review_flags = self._current_review_state()
         if self._hover_active:
-            return list(enumerate(self._slot_items))
+            return list(enumerate(self._slot_items()))
         return [
             (item_index, item)
-            for item_index, item in enumerate(self._slot_items)
-            if self._slot_is_active(item[0], item[1], review_rank, review_flags)
+            for item_index, item in enumerate(self._slot_items())
+            if self._slot_is_active(item, review_rank, review_flags)
         ]
 
-    def _slot_is_active(self, item_kind, item_value, review_rank: int, review_flags: int) -> bool:
-        if item_kind == 'rank':
-            return int(review_rank) == int(item_value) and (int(review_flags) & int(ReviewFlag.REJECT)) == 0
-        if item_kind == 'flag':
-            flag_name = str(item_value)
-            flag_map = {
-                'idea': ReviewFlag.IDEA,
-                'warning': ReviewFlag.WARNING,
-                'question': ReviewFlag.QUESTION,
-                'reject': ReviewFlag.REJECT,
-            }
-            target_flag = flag_map.get(flag_name, ReviewFlag.NONE)
-            return bool(int(review_flags) & int(target_flag))
+    def _slot_is_active(self, spec, review_rank: int, review_flags: int) -> bool:
+        if spec.kind == 'rank':
+            return int(review_rank) == int(spec.rank or 0) and (int(review_flags) & int(ReviewFlag.REJECT)) == 0
+        if spec.kind == 'flag':
+            return bool(int(review_flags) & int(spec.flag))
         return False
 
     def mouseMoveEvent(self, event):
         hit = self._hit_test_slot(event.position().toPoint())
-        slot_key = (hit[0], hit[1]) if hit is not None else None
+        slot_key = str(getattr(hit, 'badge_id', '') or '') if hit is not None else None
         if slot_key != self._hovered_slot_key:
             self._hovered_slot_key = slot_key
             self.update()
@@ -212,7 +188,7 @@ class FloatingReviewSlotsOverlay(QWidget):
                 QToolTip.hideText()
                 event.ignore()
                 return True
-            QToolTip.showText(help_event.globalPos(), "Add badge to image", self)
+            QToolTip.showText(help_event.globalPos(), str(hit.title or "Add badge to image"), self)
             return True
         return super().event(event)
 
@@ -233,11 +209,10 @@ class FloatingReviewSlotsOverlay(QWidget):
             return super().mouseReleaseEvent(event)
         hit = self._hit_test_slot(event.position().toPoint())
         if hit is not None:
-            item_kind, item_value, _label, _color = hit
-            if item_kind == 'rank':
-                self.rank_requested.emit(int(item_value))
+            if hit.kind == 'rank':
+                self.rank_requested.emit(int(hit.rank or 0))
             else:
-                self.flag_requested.emit(str(item_value))
+                self.flag_requested.emit(str(hit.flag_name or ''))
         self.update()
         event.accept()
 
@@ -259,25 +234,28 @@ class FloatingReviewSlotsOverlay(QWidget):
 
         font = painter.font()
         font.setBold(True)
-        font.setPointSizeF(max(8.0, font.pointSizeF() if font.pointSizeF() > 0 else 9.0))
+        font.setPointSizeF(float(get_review_badge_font_size()))
         painter.setFont(font)
+        radius = float(get_review_badge_corner_radius())
+        inner_radius = max(2.0, radius - 2.0)
+        glow_radius = min(14.0, radius + 2.0)
+        text_base_color = QColor(get_review_badge_text_color())
 
         display_items = self._display_items()
         if not display_items:
             return
 
         for item_index, item in display_items:
-            item_kind, item_value, item_label, item_color = item
             slot_rect = self._slot_rect(item_index)
-            is_active = self._slot_is_active(item_kind, item_value, review_rank, review_flags)
-            is_hovered = self._hovered_slot_key == (item_kind, item_value)
-            base_color = QColor(item_color)
+            is_active = self._slot_is_active(item, review_rank, review_flags)
+            is_hovered = self._hovered_slot_key == str(item.badge_id)
+            base_color = QColor(item.color)
 
             shadow_rect = slot_rect.translated(0, 1)
             shadow_alpha = 82 if (is_active or is_hovered) else 42
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(0, 0, 0, shadow_alpha))
-            painter.drawRoundedRect(shadow_rect, 8, 8)
+            painter.drawRoundedRect(shadow_rect, radius, radius)
 
             outline_color = QColor(base_color)
             outline_color.setAlpha(240 if is_active else (210 if is_hovered else 150))
@@ -289,11 +267,11 @@ class FloatingReviewSlotsOverlay(QWidget):
                 glow_color.setAlpha(48)
                 painter.setBrush(glow_color)
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawRoundedRect(slot_rect.adjusted(-2, -2, 2, 2), 10, 10)
+                painter.drawRoundedRect(slot_rect.adjusted(-2, -2, 2, 2), glow_radius, glow_radius)
 
             painter.setBrush(fill_color)
             painter.setPen(QPen(outline_color, 1.3))
-            painter.drawRoundedRect(slot_rect, 8, 8)
+            painter.drawRoundedRect(slot_rect, radius, radius)
 
             inner_rect = slot_rect.adjusted(3, 3, -3, -3)
             if not is_active:
@@ -301,11 +279,12 @@ class FloatingReviewSlotsOverlay(QWidget):
                 inner_outline.setAlpha(125 if is_hovered else 86)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(inner_outline, 1.0))
-                painter.drawRoundedRect(inner_rect, 6, 6)
+                painter.drawRoundedRect(inner_rect, inner_radius, inner_radius)
 
-            text_color = QColor(255, 255, 255, 248 if is_active else (232 if is_hovered else 188))
+            text_color = QColor(text_base_color)
+            text_color.setAlpha(248 if is_active else (232 if is_hovered else 188))
             painter.setPen(text_color)
-            painter.drawText(slot_rect, Qt.AlignmentFlag.AlignCenter, item_label)
+            painter.drawText(slot_rect, Qt.AlignmentFlag.AlignCenter, str(item.label))
 
 
 class ShiftResizeCornerCue(QWidget):

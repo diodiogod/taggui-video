@@ -1,3 +1,5 @@
+import json
+import gc
 import time
 import hashlib
 from collections import deque
@@ -30,10 +32,20 @@ from utils.big_widgets import BigPushButton
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
-from utils.review_marks import ReviewFlag, normalize_review_state
+from utils.review_marks import (
+    REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
+    REVIEW_BADGE_SCHEMA_SETTINGS_KEY,
+    REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
+    REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
+    ReviewFlag,
+    get_review_shortcut_action,
+    normalize_review_state,
+    serialize_review_flags,
+)
+from utils.image_index_db import ImageIndexDB
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
-from utils.utils import get_resource_path, pluralize
+from utils.utils import get_confirmation_dialog_reply, get_resource_path, pluralize
 try:
     from version import APP_NAME, __version__
 except ImportError:
@@ -430,6 +442,13 @@ class MainWindow(QMainWindow):
         self.image_viewer.video_controls.set_loop_persistence_scope('main')
         self._floating_viewers = []
         self._comparison_windows = []
+        self._bulk_closing_floating_viewers = False
+        self._bulk_close_gc_pending = False
+        self._bulk_close_pending_windows = deque()
+        self._bulk_close_timer = QTimer(self)
+        self._bulk_close_timer.setSingleShot(False)
+        self._bulk_close_timer.setInterval(0)
+        self._bulk_close_timer.timeout.connect(self._drain_bulk_close_queue)
         self._floating_viewer_spawn_count = 0
         self._compare_drag_coordinator = CompareDragCoordinator(
             hold_seconds=1.0,
@@ -898,92 +917,21 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             try:
-                if (
-                    not event.isAutoRepeat()
-                    and not self._focus_widget_accepts_text()
-                    and event.modifiers() in (
-                        Qt.KeyboardModifier.NoModifier,
-                        Qt.KeyboardModifier.KeypadModifier,
-                    )
-                    and event.key() in (
-                        Qt.Key.Key_1,
-                        Qt.Key.Key_2,
-                        Qt.Key.Key_3,
-                        Qt.Key.Key_4,
-                        Qt.Key.Key_5,
-                    )
-                ):
-                    if event.type() == event.Type.ShortcutOverride:
-                        event.accept()
-                        return True
-                    if self._toggle_current_review_rank(int(event.text() or '0')):
-                        event.accept()
-                        return True
-            except Exception:
-                pass
-            try:
-                review_flag_name = None
-                modifiers = event.modifiers()
-                if event.key() == Qt.Key.Key_X and modifiers == Qt.KeyboardModifier.NoModifier:
-                    review_flag_name = 'reject'
-                elif (
-                    event.key() in (Qt.Key.Key_1, Qt.Key.Key_Exclam)
-                    and modifiers == Qt.KeyboardModifier.ShiftModifier
-                ):
-                    review_flag_name = 'warning'
-                elif (
-                    event.key() == Qt.Key.Key_Apostrophe
-                    and modifiers in (
-                        Qt.KeyboardModifier.NoModifier,
-                        Qt.KeyboardModifier.ShiftModifier,
-                    )
-                ):
-                    review_flag_name = 'warning'
-                elif (
-                    event.key() in (Qt.Key.Key_8, Qt.Key.Key_Asterisk)
-                    and modifiers in (
-                        Qt.KeyboardModifier.NoModifier,
-                        Qt.KeyboardModifier.ShiftModifier,
-                    )
-                ):
-                    review_flag_name = 'idea'
-                elif event.key() == Qt.Key.Key_W and modifiers == Qt.KeyboardModifier.NoModifier:
-                    review_flag_name = 'warning'
-                elif event.key() == Qt.Key.Key_I and modifiers == Qt.KeyboardModifier.NoModifier:
-                    review_flag_name = 'idea'
-                is_question_shortcut = (
-                    event.key() == Qt.Key.Key_Slash
-                    and modifiers in (
-                        Qt.KeyboardModifier.NoModifier,
-                        Qt.KeyboardModifier.ShiftModifier,
-                    )
+                review_shortcut_action = (
+                    None
+                    if event.isAutoRepeat() or self._focus_widget_accepts_text()
+                    else self._resolve_review_shortcut_action(event)
                 )
-                if is_question_shortcut:
-                    review_flag_name = 'question'
-                if (
-                    review_flag_name is not None
-                    and not event.isAutoRepeat()
-                    and not self._focus_widget_accepts_text()
-                    and (
-                        (review_flag_name == 'question' and event.modifiers() in (
-                            Qt.KeyboardModifier.NoModifier,
-                            Qt.KeyboardModifier.ShiftModifier,
-                        ))
-                        or (review_flag_name == 'idea' and modifiers in (
-                            Qt.KeyboardModifier.NoModifier,
-                            Qt.KeyboardModifier.ShiftModifier,
-                        ))
-                        or (review_flag_name == 'warning' and modifiers in (
-                            Qt.KeyboardModifier.NoModifier,
-                            Qt.KeyboardModifier.ShiftModifier,
-                        ))
-                        or (review_flag_name == 'reject' and modifiers == Qt.KeyboardModifier.NoModifier)
-                    )
-                ):
+                if review_shortcut_action is not None:
                     if event.type() == event.Type.ShortcutOverride:
                         event.accept()
                         return True
-                    if self._toggle_current_review_flag(review_flag_name):
+                    action_kind, action_value = review_shortcut_action
+                    if action_kind == 'rank':
+                        handled = self._toggle_current_review_rank(int(action_value or 0))
+                    else:
+                        handled = self._toggle_current_review_flag(str(action_value or ''))
+                    if handled:
                         event.accept()
                         return True
             except Exception:
@@ -1262,6 +1210,15 @@ class MainWindow(QMainWindow):
     @Slot(str, object)
     def _on_setting_changed(self, key: str, _value):
         """Apply selected settings live without requiring restart."""
+        if key in (
+            REVIEW_BADGE_SCHEMA_SETTINGS_KEY,
+            REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
+            REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
+            REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
+        ):
+            self._refresh_review_badge_config()
+            return
+
         if key == 'masonry_list_switch_threshold':
             list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
             if list_view is None:
@@ -1353,6 +1310,79 @@ class MainWindow(QMainWindow):
             return False
 
         return True
+
+    def _review_shortcut_candidates(self, event) -> list[str]:
+        candidates: list[str] = []
+        seen = set()
+
+        def _add(candidate):
+            text = str(candidate or '').strip()
+            if not text:
+                return
+            lowered = text.casefold()
+            if lowered in seen:
+                return
+            seen.add(lowered)
+            candidates.append(text)
+
+        try:
+            combo_text = QKeySequence(event.keyCombination()).toString(QKeySequence.SequenceFormat.PortableText)
+            _add(combo_text)
+        except Exception:
+            pass
+
+        try:
+            event_text = str(event.text() or '').strip()
+        except Exception:
+            event_text = ''
+        if event_text:
+            _add(event_text)
+            if len(event_text) == 1 and event_text.isalpha():
+                _add(event_text.upper())
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        digit_map = {
+            Qt.Key.Key_0: '0',
+            Qt.Key.Key_1: '1',
+            Qt.Key.Key_2: '2',
+            Qt.Key.Key_3: '3',
+            Qt.Key.Key_4: '4',
+            Qt.Key.Key_5: '5',
+            Qt.Key.Key_6: '6',
+            Qt.Key.Key_7: '7',
+            Qt.Key.Key_8: '8',
+            Qt.Key.Key_9: '9',
+        }
+        digit = digit_map.get(key)
+        if digit is not None:
+            _add(digit)
+            if modifiers == Qt.KeyboardModifier.ShiftModifier:
+                _add(f'Shift+{digit}')
+
+        special_candidates = {
+            Qt.Key.Key_Exclam: ('!', 'Shift+1'),
+            Qt.Key.Key_Asterisk: ('*', 'Shift+8'),
+            Qt.Key.Key_Question: ('?', 'Shift+/'),
+            Qt.Key.Key_Slash: ('/',),
+            Qt.Key.Key_Apostrophe: ("'",),
+            Qt.Key.Key_QuoteDbl: ('"',),
+            Qt.Key.Key_X: ('X',),
+            Qt.Key.Key_W: ('W',),
+            Qt.Key.Key_I: ('I',),
+        }
+        for candidate in special_candidates.get(key, ()):
+            _add(candidate)
+
+        return candidates
+
+    def _resolve_review_shortcut_action(self, event):
+        for candidate in self._review_shortcut_candidates(event):
+            action = get_review_shortcut_action(candidate)
+            if action is not None:
+                return action
+        return None
 
     def _toggle_current_review_rank(self, rank: int) -> bool:
         """Toggle one numeric review rank for the current review target."""
@@ -2535,6 +2565,193 @@ class MainWindow(QMainWindow):
         if widget is not None:
             widget.set_state(int(review_rank or 0), int(review_flags or 0), mixed=bool(mixed))
 
+    def _commit_review_state_changes(
+        self,
+        changed_states: list[tuple[Image, int, int]],
+        *,
+        action_name: str,
+    ) -> bool:
+        if not changed_states:
+            return False
+
+        changed_images = [image for image, _, _ in changed_states]
+        if len(changed_images) == 1:
+            self.image_list_model.add_image_to_undo_stack(
+                changed_images[0],
+                action_name=action_name,
+                should_ask_for_confirmation=False,
+            )
+        else:
+            self.image_list_model.add_images_to_undo_stack(
+                changed_images,
+                action_name=action_name,
+                should_ask_for_confirmation=False,
+            )
+
+        review_updated_at = time.time()
+        for image, next_rank, next_flags in changed_states:
+            image.review_rank = int(next_rank)
+            image.review_flags = int(next_flags)
+            image.review_updated_at = review_updated_at
+            QTimer.singleShot(
+                0,
+                lambda img=image, model=self.image_list_model: model.persist_review_state(img),
+            )
+
+        self._emit_image_rows_changed(changed_images)
+        self._refresh_review_ui_for_images(changed_images)
+        if self._filter_uses_review(self.proxy_image_list_model.filter):
+            self._arm_masonry_refresh_anchor()
+            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        return True
+
+    def clear_review_marks_for_scope(self, scope: str, interactive: bool = False):
+        if not interactive:
+            return
+
+        normalized_scope = str(scope or '').strip().lower()
+        if normalized_scope == 'folder':
+            action_name = 'Clear folder review marks'
+            directory_path = getattr(self.image_list_model, '_directory_path', None)
+            if directory_path is None:
+                return
+            reply = get_confirmation_dialog_reply(
+                title='Clear Folder Badges',
+                question=(
+                    'Clear all review badges from the current folder?\n\n'
+                    'This will remove review badges from every image and video in this folder.'
+                ),
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            review_updated_at = time.time()
+
+            loaded_by_rel_path: dict[str, Image] = {}
+            loaded_images = []
+            try:
+                loaded_images.extend(
+                    image for image in self.image_list_model.iter_all_images()
+                    if image is not None
+                )
+            except Exception:
+                pass
+            if bool(getattr(self.image_list_model, '_paginated_mode', False)):
+                for page_images in getattr(self.image_list_model, '_pages', {}).values():
+                    for image in page_images or []:
+                        if image is not None:
+                            loaded_images.append(image)
+
+            seen_loaded_ids = set()
+            for image in loaded_images:
+                try:
+                    key = id(image)
+                    if key in seen_loaded_ids:
+                        continue
+                    seen_loaded_ids.add(key)
+                except Exception:
+                    pass
+                if image is None or not getattr(image, 'path', None):
+                    continue
+                try:
+                    rel_path = str(image.path.relative_to(directory_path))
+                except Exception:
+                    rel_path = image.path.name
+                loaded_by_rel_path[rel_path] = image
+
+            changed_states: list[tuple[Image, int, int]] = []
+            for image in loaded_by_rel_path.values():
+                current_rank, current_flags = normalize_review_state(
+                    getattr(image, 'review_rank', 0),
+                    getattr(image, 'review_flags', 0),
+                )
+                if current_rank or current_flags:
+                    changed_states.append((image, 0, 0))
+
+            rel_paths = []
+            db = None
+            try:
+                db = ImageIndexDB(directory_path)
+                rel_paths = list(db.get_all_paths() or [])
+                db.clear_all_review_state(review_updated_at=review_updated_at)
+            except Exception:
+                rel_paths = []
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+
+            for rel_path in rel_paths:
+                if rel_path in loaded_by_rel_path:
+                    continue
+                json_path = (directory_path / rel_path).with_suffix('.json')
+                if not json_path.exists():
+                    continue
+                try:
+                    with json_path.open(encoding='UTF-8') as source:
+                        meta = json.load(source)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if not isinstance(meta, dict):
+                    continue
+                meta['review_rank'] = 0
+                meta['review_flags'] = serialize_review_flags(0)
+                meta['review_updated_at'] = float(review_updated_at)
+                try:
+                    with json_path.open('w', encoding='UTF-8') as meta_file:
+                        json.dump(meta, meta_file)
+                except OSError:
+                    continue
+
+            self._commit_review_state_changes(
+                changed_states,
+                action_name=action_name,
+            )
+            self._refresh_review_badge_config()
+            self._force_immediate_review_badge_repaint()
+            return
+        else:
+            targets = self._review_target_images()
+            action_name = 'Clear review marks'
+
+        changed_states: list[tuple[Image, int, int]] = []
+        for image in targets:
+            current_rank, current_flags = normalize_review_state(
+                getattr(image, 'review_rank', 0),
+                getattr(image, 'review_flags', 0),
+            )
+            if current_rank or current_flags:
+                changed_states.append((image, 0, 0))
+
+        self._commit_review_state_changes(
+            changed_states,
+            action_name=action_name,
+        )
+
+    def _force_immediate_review_badge_repaint(self):
+        """Force an immediate masonry/list repaint after bulk badge changes."""
+        source_model = getattr(self, 'image_list_model', None)
+        if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
+            try:
+                source_model.thumbnail_updates_ready.emit()
+            except Exception:
+                pass
+        if bool(getattr(source_model, '_paginated_mode', False)) and hasattr(source_model, '_emit_pages_updated'):
+            try:
+                source_model._emit_pages_updated()
+            except Exception:
+                pass
+        try:
+            list_view = self.image_list.list_view
+            list_view._last_masonry_window_signature = None
+            viewport = list_view.viewport()
+            viewport.update()
+            viewport.repaint()
+        except Exception:
+            pass
+
     def _emit_image_rows_changed(self, images: list[Image]):
         source_model = self.image_list_model
         if source_model is None:
@@ -2633,6 +2850,50 @@ class MainWindow(QMainWindow):
                 source_model.thumbnail_updates_ready.emit()
         except Exception:
             pass
+        self._sync_review_controls_from_context()
+
+    def _refresh_review_badge_config(self):
+        widget = getattr(self, 'review_controls_widget', None)
+        if widget is not None and hasattr(widget, 'refresh_badge_specs'):
+            try:
+                widget.refresh_badge_specs()
+            except Exception:
+                pass
+
+        list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if list_view is not None:
+            try:
+                delegate = getattr(list_view, 'delegate', None)
+                if delegate is not None and hasattr(delegate, 'clear_labels'):
+                    delegate.clear_labels()
+            except Exception:
+                pass
+            try:
+                list_view._last_masonry_window_signature = None
+            except Exception:
+                pass
+            try:
+                list_view.viewport().update()
+            except Exception:
+                pass
+
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                refresh_overlay = getattr(window, 'refresh_review_slots_overlay', None)
+                if callable(refresh_overlay):
+                    refresh_overlay()
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        source_model = getattr(self, 'image_list_model', None)
+        if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
+            try:
+                source_model.thumbnail_updates_ready.emit()
+            except Exception:
+                pass
+
         self._sync_review_controls_from_context()
 
     def _sync_rating_controls_from_context(self, *_args):
@@ -4412,36 +4673,94 @@ class MainWindow(QMainWindow):
             self._video_controls_last_dispatch_at.pop(viewer, None)
             self._hud_playback_last_frame_ts.pop(viewer, None)
 
-        self.refresh_video_controls_performance_profile()
+        if not bool(getattr(self, '_bulk_closing_floating_viewers', False)):
+            self.refresh_video_controls_performance_profile()
 
     @Slot()
     def close_all_floating_viewers(self):
         """Close all spawned floating viewers."""
+        windows_to_close = []
+        seen_ids = set()
+
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                key = id(window)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                windows_to_close.append(window)
+            except RuntimeError:
+                continue
+        for window in list(getattr(self, '_comparison_windows', [])):
+            try:
+                key = id(window)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                windows_to_close.append(window)
+            except RuntimeError:
+                continue
+
+        if not windows_to_close:
+            try:
+                self.set_active_viewer(self.image_viewer)
+            except Exception:
+                pass
+            self.refresh_video_controls_performance_profile()
+            return
+
         self._bulk_closing_floating_viewers = True
+        self.cancel_compare_drag()
         if self._sync_coordinator is not None:
             try:
                 self._sync_coordinator.stop()
             except Exception:
                 pass
             self._sync_coordinator = None
-        for window in list(getattr(self, '_floating_viewers', [])):
+        self._floating_viewers = []
+        self._comparison_windows = []
+
+        for window in windows_to_close:
+            try:
+                window.setProperty('_bulk_close_mode', True)
+            except Exception:
+                pass
             try:
                 window.hide()
-                window.close()
             except RuntimeError:
-                pass
-        for window in list(getattr(self, '_comparison_windows', [])):
-            try:
-                window.hide()
-                window.close()
-            except RuntimeError:
-                pass
-        self._bulk_closing_floating_viewers = False
+                continue
+            self._bulk_close_pending_windows.append(window)
+
+        self._bulk_close_gc_pending = True
         try:
             self.set_active_viewer(self.image_viewer)
         except Exception:
             pass
         self.refresh_video_controls_performance_profile()
+        if not self._bulk_close_timer.isActive():
+            self._bulk_close_timer.start()
+
+    def _drain_bulk_close_queue(self):
+        processed = 0
+        while self._bulk_close_pending_windows and processed < 2:
+            window = self._bulk_close_pending_windows.popleft()
+            processed += 1
+            try:
+                window.close()
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        if self._bulk_close_pending_windows:
+            return
+
+        self._bulk_close_timer.stop()
+        self._bulk_closing_floating_viewers = False
+        self.refresh_video_controls_performance_profile()
+        if self._bulk_close_gc_pending:
+            self._bulk_close_gc_pending = False
+            QTimer.singleShot(0, gc.collect)
 
     def _on_floating_viewer_closed(self, viewer: ImageViewer):
         """Cleanup when one floating viewer is closed."""
@@ -4468,7 +4787,9 @@ class MainWindow(QMainWindow):
             self._sync_coordinator = None
 
         try:
-            viewer.video_player.cleanup()
+            viewer.video_player.cleanup(
+                force_gc=not bool(getattr(self, '_bulk_closing_floating_viewers', False))
+            )
         except Exception as e:
             print(f"[VIEWER] Floating viewer cleanup warning: {e}")
         self._video_controls_pending_updates.pop(viewer, None)
@@ -5674,39 +5995,10 @@ class MainWindow(QMainWindow):
             next_rank, next_flags = normalize_review_state(next_rank, next_flags)
             if current_rank != next_rank or current_flags != next_flags:
                 changed_states.append((image, int(next_rank), int(next_flags)))
-
-        if not changed_states:
-            return
-
-        changed_images = [image for image, _, _ in changed_states]
-        if len(changed_images) == 1:
-            self.image_list_model.add_image_to_undo_stack(
-                changed_images[0],
-                action_name='Change review rank',
-                should_ask_for_confirmation=False,
-            )
-        else:
-            self.image_list_model.add_images_to_undo_stack(
-                changed_images,
-                action_name='Change review rank',
-                should_ask_for_confirmation=False,
-            )
-
-        review_updated_at = time.time()
-        for image, next_rank, next_flags in changed_states:
-            image.review_rank = int(next_rank)
-            image.review_flags = int(next_flags)
-            image.review_updated_at = review_updated_at
-            QTimer.singleShot(
-                0,
-                lambda img=image, model=self.image_list_model: model.persist_review_state(img),
-            )
-
-        self._emit_image_rows_changed(changed_images)
-        self._refresh_review_ui_for_images(changed_images)
-        if self._filter_uses_review(self.proxy_image_list_model.filter):
-            self._arm_masonry_refresh_anchor()
-            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._commit_review_state_changes(
+            changed_states,
+            action_name='Change review rank',
+        )
 
     def set_review_flag_state(
         self,
@@ -5740,39 +6032,10 @@ class MainWindow(QMainWindow):
             next_rank, next_flags = normalize_review_state(next_rank, next_flags)
             if current_rank != next_rank or current_flags != next_flags:
                 changed_states.append((image, int(next_rank), int(next_flags)))
-
-        if not changed_states:
-            return
-
-        changed_images = [image for image, _, _ in changed_states]
-        if len(changed_images) == 1:
-            self.image_list_model.add_image_to_undo_stack(
-                changed_images[0],
-                action_name='Change review mark',
-                should_ask_for_confirmation=False,
-            )
-        else:
-            self.image_list_model.add_images_to_undo_stack(
-                changed_images,
-                action_name='Change review mark',
-                should_ask_for_confirmation=False,
-            )
-
-        review_updated_at = time.time()
-        for image, next_rank, next_flags in changed_states:
-            image.review_rank = int(next_rank)
-            image.review_flags = int(next_flags)
-            image.review_updated_at = review_updated_at
-            QTimer.singleShot(
-                0,
-                lambda img=image, model=self.image_list_model: model.persist_review_state(img),
-            )
-
-        self._emit_image_rows_changed(changed_images)
-        self._refresh_review_ui_for_images(changed_images)
-        if self._filter_uses_review(self.proxy_image_list_model.filter):
-            self._arm_masonry_refresh_anchor()
-            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        self._commit_review_state_changes(
+            changed_states,
+            action_name='Change review mark',
+        )
 
     def _arm_masonry_refresh_anchor(self):
         """Keep selected masonry item stable across filter-triggered relayout."""

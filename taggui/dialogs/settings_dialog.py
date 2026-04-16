@@ -2,7 +2,8 @@ from PySide6.QtCore import Qt, Slot, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
-                               QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout)
+                               QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
+                               QApplication)
 
 from pathlib import Path
 import sys
@@ -25,6 +26,7 @@ from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox)
 from utils.grammar_checker import GrammarCheckMode
 from utils.image_index_db import ImageIndexDB
+from utils.review_marks import get_review_badge_specs, reset_review_badge_schema, save_review_badge_schema
 from utils.thumbnail_cache import get_thumbnail_cache
 
 
@@ -44,6 +46,7 @@ class SettingsDialog(QDialog):
 
         # Create tabs
         tab_widget.addTab(self._create_general_tab(), 'General')
+        tab_widget.addTab(self._create_badges_tab(), 'Badges')
         tab_widget.addTab(self._create_models_tab(), 'Models')
         tab_widget.addTab(self._create_cache_tab(), 'Cache')
         tab_widget.addTab(self._create_spell_check_tab(), 'Spell Check')
@@ -67,9 +70,42 @@ class SettingsDialog(QDialog):
         self.warning_label.setStyleSheet('color: red;')
         main_layout.addWidget(self.warning_label)
 
-        # Fix the size of the dialog to its size when the warning label is shown.
-        self.setFixedSize(self.sizeHint())
+        # Keep the dialog resizable and clamp its initial size to the current screen.
+        # Each tab already lives inside a scroll area, so smaller screens should scroll
+        # instead of clipping the whole settings window off-screen.
+        self._apply_initial_dialog_size()
         self.warning_label.hide()
+
+    def _settings_screen(self):
+        parent = self.parentWidget()
+        if parent is not None:
+            window_handle = parent.windowHandle()
+            if window_handle is not None and window_handle.screen() is not None:
+                return window_handle.screen()
+            if parent.screen() is not None:
+                return parent.screen()
+        if self.screen() is not None:
+            return self.screen()
+        return QApplication.primaryScreen()
+
+    def _apply_initial_dialog_size(self):
+        size_hint = self.sizeHint()
+        screen = self._settings_screen()
+        if screen is None:
+            self.resize(size_hint)
+            return
+
+        available = screen.availableGeometry()
+        max_width = min(available.width(), max(420, int(available.width() * 0.92)))
+        max_height = min(available.height(), max(360, int(available.height() * 0.9)))
+        min_width = min(max_width, 720)
+        min_height = min(max_height, 520)
+
+        self.setMinimumSize(min_width, min_height)
+        self.resize(
+            min(max(size_hint.width(), min_width), max_width),
+            min(max(size_hint.height(), min_height), max_height),
+        )
 
     def _create_general_tab(self):
         """Create General settings tab."""
@@ -242,6 +278,203 @@ class SettingsDialog(QDialog):
 
         scroll_area.setWidget(widget)
         return scroll_area
+
+    def _create_badges_tab(self):
+        """Create review badge customization tab."""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        intro_label = QLabel(
+            'Customize the review badge symbols, optional hover titles, colors, and shortcut list.\n'
+            'Shortcuts accept portable text such as "1", "Shift+8", "X", or comma-separated aliases.'
+        )
+        intro_label.setWordWrap(True)
+        layout.addWidget(intro_label)
+
+        appearance_grid = QGridLayout()
+        appearance_grid.setHorizontalSpacing(10)
+        appearance_grid.addWidget(QLabel('Text color'), 0, 0, Qt.AlignmentFlag.AlignRight)
+        self.review_badge_text_color_button = QPushButton()
+        self._review_badge_text_color = settings.value('review_badge_text_color', '#FFFFFF', type=str)
+        self._apply_badge_color_button_style(self.review_badge_text_color_button, self._review_badge_text_color)
+        self.review_badge_text_color_button.clicked.connect(self._pick_review_badge_text_color)
+        appearance_grid.addWidget(self.review_badge_text_color_button, 0, 1, Qt.AlignmentFlag.AlignLeft)
+
+        appearance_grid.addWidget(QLabel('Font size'), 0, 2, Qt.AlignmentFlag.AlignRight)
+        self.review_badge_font_size_combo = SettingsComboBox(
+            key='review_badge_font_size',
+            default='9',
+        )
+        self.review_badge_font_size_combo.addItems([str(size) for size in range(8, 17)])
+        self.review_badge_font_size_combo.currentTextChanged.connect(self._save_review_badge_appearance_settings)
+        appearance_grid.addWidget(self.review_badge_font_size_combo, 0, 3, Qt.AlignmentFlag.AlignLeft)
+
+        appearance_grid.addWidget(QLabel('Corner roundness'), 0, 4, Qt.AlignmentFlag.AlignRight)
+        self.review_badge_corner_radius_combo = SettingsComboBox(
+            key='review_badge_corner_radius',
+            default='5',
+        )
+        self.review_badge_corner_radius_combo.addItems([str(size) for size in range(2, 15)])
+        self.review_badge_corner_radius_combo.currentTextChanged.connect(self._save_review_badge_appearance_settings)
+        appearance_grid.addWidget(self.review_badge_corner_radius_combo, 0, 5, Qt.AlignmentFlag.AlignLeft)
+        layout.addLayout(appearance_grid)
+
+        header = QGridLayout()
+        header.setHorizontalSpacing(10)
+        header.addWidget(QLabel('Slot'), 0, 0)
+        header.addWidget(QLabel('Label'), 0, 1)
+        header.addWidget(QLabel('Tooltip'), 0, 2)
+        header.addWidget(QLabel('Color'), 0, 3)
+        header.addWidget(QLabel('Shortcut(s)'), 0, 4)
+        layout.addLayout(header)
+
+        self._review_badge_editors = []
+        rows_layout = QGridLayout()
+        rows_layout.setHorizontalSpacing(10)
+        rows_layout.setVerticalSpacing(8)
+
+        for row_index, spec in enumerate(get_review_badge_specs(), start=1):
+            slot_label = QLabel(self._badge_slot_title(spec))
+            symbol_edit = QLineEdit(spec.label)
+            symbol_edit.setMaxLength(4)
+            symbol_edit.setMaximumWidth(60)
+
+            tooltip_edit = QLineEdit(spec.title)
+            tooltip_edit.setPlaceholderText('Optional hover title')
+            tooltip_edit.setMinimumWidth(200)
+
+            color_button = QPushButton(spec.color)
+            color_button.setMaximumWidth(96)
+            self._apply_badge_color_button_style(color_button, spec.color)
+
+            shortcuts_edit = QLineEdit(', '.join(spec.shortcuts))
+            shortcuts_edit.setPlaceholderText('Comma-separated shortcuts')
+            shortcuts_edit.setMinimumWidth(220)
+
+            rows_layout.addWidget(slot_label, row_index, 0)
+            rows_layout.addWidget(symbol_edit, row_index, 1)
+            rows_layout.addWidget(tooltip_edit, row_index, 2)
+            rows_layout.addWidget(color_button, row_index, 3)
+            rows_layout.addWidget(shortcuts_edit, row_index, 4)
+
+            entry = {
+                'badge_id': spec.badge_id,
+                'symbol_edit': symbol_edit,
+                'tooltip_edit': tooltip_edit,
+                'color_button': color_button,
+                'shortcuts_edit': shortcuts_edit,
+                'color': spec.color,
+            }
+            self._review_badge_editors.append(entry)
+
+            symbol_edit.textChanged.connect(self._save_review_badge_schema_settings)
+            tooltip_edit.textChanged.connect(self._save_review_badge_schema_settings)
+            shortcuts_edit.textChanged.connect(self._save_review_badge_schema_settings)
+            color_button.clicked.connect(
+                lambda _checked=False, current_entry=entry: self._pick_review_badge_color(current_entry)
+            )
+
+        layout.addLayout(rows_layout)
+
+        reset_button = QPushButton('Reset Badge Defaults')
+        reset_button.clicked.connect(self._reset_review_badge_schema_settings)
+        layout.addWidget(reset_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
+
+        scroll_area.setWidget(widget)
+        return scroll_area
+
+    @staticmethod
+    def _badge_slot_title(spec) -> str:
+        if spec.kind == 'rank':
+            return f'Rank {int(spec.rank or 0)}'
+        return str(spec.flag_name or spec.badge_id).replace('_', ' ').title()
+
+    @staticmethod
+    def _apply_badge_color_button_style(button: QPushButton, color_hex: str):
+        button.setText(color_hex)
+        button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {color_hex};
+                color: #111827;
+                border: 1px solid rgba(15, 23, 42, 0.28);
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-weight: 700;
+            }}
+            """
+        )
+
+    def _pick_review_badge_color(self, entry: dict):
+        selected_color = QColorDialog.getColor(parent=self)
+        if not selected_color.isValid():
+            return
+        color_hex = selected_color.name().upper()
+        entry['color'] = color_hex
+        self._apply_badge_color_button_style(entry['color_button'], color_hex)
+        self._save_review_badge_schema_settings()
+
+    def _collect_review_badge_schema_rows(self) -> list[dict]:
+        rows = []
+        for entry in getattr(self, '_review_badge_editors', []):
+            rows.append(
+                {
+                    'badge_id': entry['badge_id'],
+                    'label': entry['symbol_edit'].text(),
+                    'title': entry['tooltip_edit'].text(),
+                    'color': entry.get('color', ''),
+                    'shortcuts': entry['shortcuts_edit'].text(),
+                }
+            )
+        return rows
+
+    def _save_review_badge_schema_settings(self, *_args):
+        save_review_badge_schema(self._collect_review_badge_schema_rows())
+
+    def _pick_review_badge_text_color(self):
+        selected_color = QColorDialog.getColor(parent=self)
+        if not selected_color.isValid():
+            return
+        self._review_badge_text_color = selected_color.name().upper()
+        self._apply_badge_color_button_style(
+            self.review_badge_text_color_button,
+            self._review_badge_text_color,
+        )
+        self._save_review_badge_appearance_settings()
+
+    def _save_review_badge_appearance_settings(self, *_args):
+        settings.setValue('review_badge_text_color', self._review_badge_text_color)
+        settings.setValue('review_badge_font_size', self.review_badge_font_size_combo.currentText())
+        settings.setValue('review_badge_corner_radius', self.review_badge_corner_radius_combo.currentText())
+
+    def _reset_review_badge_schema_settings(self):
+        reset_review_badge_schema()
+        self._review_badge_text_color = '#FFFFFF'
+        self._apply_badge_color_button_style(
+            self.review_badge_text_color_button,
+            self._review_badge_text_color,
+        )
+        self.review_badge_font_size_combo.setCurrentText('9')
+        self.review_badge_corner_radius_combo.setCurrentText('5')
+        self._save_review_badge_appearance_settings()
+        specs = get_review_badge_specs()
+        spec_map = {spec.badge_id: spec for spec in specs}
+        for entry in getattr(self, '_review_badge_editors', []):
+            spec = spec_map.get(entry['badge_id'])
+            if spec is None:
+                continue
+            entry['symbol_edit'].setText(spec.label)
+            entry['tooltip_edit'].setText(spec.title)
+            entry['shortcuts_edit'].setText(', '.join(spec.shortcuts))
+            entry['color'] = spec.color
+            self._apply_badge_color_button_style(entry['color_button'], spec.color)
 
     def _create_models_tab(self):
         """Create Models settings tab."""

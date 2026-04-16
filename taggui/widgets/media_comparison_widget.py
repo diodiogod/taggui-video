@@ -2000,6 +2000,7 @@ class MediaComparisonWidget(QWidget):
             super().closeEvent(event)
             return
         self._closed = True
+        bulk_close_mode = bool(self.property("_bulk_close_mode"))
         self._refresh_filter_timer.stop()
         self._sync_bootstrap_timer.stop()
         try:
@@ -2017,7 +2018,7 @@ class MediaComparisonWidget(QWidget):
             try:
                 player = getattr(viewer, "video_player", None)
                 if player is not None:
-                    player.cleanup()
+                    player.cleanup(force_gc=not bulk_close_mode)
             except Exception:
                 pass
 

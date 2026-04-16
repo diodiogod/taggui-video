@@ -3637,6 +3637,31 @@ class ImageIndexDB:
             except sqlite3.Error as e:
                 print(f'Database review write error: {e}')
 
+    def clear_all_review_state(self, review_updated_at: float | None = None) -> int:
+        """Clear structured review state for every cached image in the folder DB."""
+        if not self.enabled or not self.conn:
+            return 0
+
+        normalized_review_updated_at = normalize_sidecar_timestamp(review_updated_at)
+
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    '''
+                    UPDATE images
+                    SET review_rank = 0, review_flags = 0, review_updated_at = ?
+                    WHERE COALESCE(review_rank, 0) != 0 OR COALESCE(review_flags, 0) != 0
+                    ''',
+                    (normalized_review_updated_at,),
+                )
+                affected = int(cursor.rowcount or 0)
+                self.conn.commit()
+                return affected
+            except sqlite3.Error as e:
+                print(f'Database review clear error: {e}')
+                return 0
+
     def mark_thumbnail_cached(self, file_name: str, cached: bool = True):
         """Mark thumbnail as cached/uncached for an image (thread-safe)."""
         if not self.enabled or not self.conn:
