@@ -1,7 +1,7 @@
 """Compact toolbar widget for structured review marks."""
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QMenu, QToolButton
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QMenu, QToolButton
 
 from utils.review_marks import (
     get_review_badge_corner_radius,
@@ -18,6 +18,7 @@ class ReviewControlsWidget(QFrame):
     rank_requested = Signal(int)
     flag_requested = Signal(str)
     clear_requested = Signal(str)
+    filter_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,6 +82,16 @@ class ReviewControlsWidget(QFrame):
     def _emit_badge_requested(self, badge_id: str):
         spec = get_review_badge_spec_for_id(badge_id)
         if spec is None:
+            return
+        modifiers = QApplication.keyboardModifiers()
+        if (modifiers & Qt.KeyboardModifier.ControlModifier) == Qt.KeyboardModifier.ControlModifier:
+            filter_text = ''
+            if spec.kind == 'rank':
+                filter_text = f'review:{int(spec.rank or 0)}'
+            elif spec.kind == 'flag':
+                filter_text = f'review:{str(spec.flag_name or "").strip()}'
+            if filter_text:
+                self.filter_requested.emit(filter_text)
             return
         if spec.kind == 'rank':
             self.rank_requested.emit(int(spec.rank or 0))

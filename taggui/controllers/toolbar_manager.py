@@ -748,6 +748,9 @@ class ToolbarManager:
         self.review_controls_widget.flag_requested.connect(
             lambda flag_name: self.main_window._toggle_current_review_flag(str(flag_name))
         )
+        self.review_controls_widget.filter_requested.connect(
+            lambda filter_text: self.main_window.apply_review_filter(str(filter_text))
+        )
         self.review_controls_widget.clear_requested.connect(
             lambda scope: self.main_window.clear_review_marks_for_scope(str(scope), interactive=True)
         )

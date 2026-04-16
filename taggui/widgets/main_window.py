@@ -2123,6 +2123,22 @@ class MainWindow(QMainWindow):
             return False
         return self.toggle_viewer_play_pause(target)
 
+    def _pause_main_viewer_for_selection_wall(self):
+        """Pause the main viewer temporarily when a review wall takes over the screen."""
+        try:
+            viewer = self.image_viewer
+            if not bool(getattr(viewer, '_is_video_loaded', False)):
+                return
+            player = getattr(viewer, 'video_player', None)
+            controls = getattr(viewer, 'video_controls', None)
+            if player is None:
+                return
+            player.pause()
+            if controls is not None:
+                controls.set_playing(False, update_auto_play=False)
+        except RuntimeError:
+            return
+
     def _sync_viewer_surface_geometry(self, viewer: ImageViewer | None = None):
         """Refresh external video surface geometry after viewer reparent/resize."""
         target = viewer or self.get_active_viewer()
@@ -4515,6 +4531,8 @@ class MainWindow(QMainWindow):
             )
             return [single_window] if single_window is not None else []
 
+        self._pause_main_viewer_for_selection_wall()
+
         screen = self._resolve_selection_masonry_wall_screen(anchor_global_pos)
         available_geometry = (
             screen.availableGeometry()
@@ -5891,6 +5909,14 @@ class MainWindow(QMainWindow):
         if reaction_name not in {'love', 'bomb'}:
             return
         self.image_list.filter_line_edit.setText(f'{reaction_name}:true')
+
+    @Slot(str)
+    def apply_review_filter(self, filter_text: str):
+        """Apply a filter that targets one review badge."""
+        normalized = str(filter_text or '').strip()
+        if not normalized:
+            return
+        self.image_list.filter_line_edit.setText(normalized)
 
     def set_reactions(
         self,

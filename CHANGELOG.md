@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-04-16
+
+### Added
+
+- Add Ctrl-click filtering for review badges
+- Ctrl-click review toolbar badges to add matching filters to the image list
+- Keep normal click behavior for applying or removing review badges
+- Make review badge filtering match the existing rating and reaction toolbar workflow
 ## [1.2.1] - 2026-04-16
 
 ### Added
