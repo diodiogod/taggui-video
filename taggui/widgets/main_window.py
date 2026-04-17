@@ -466,6 +466,8 @@ class MainWindow(QMainWindow):
         self._fullscreen_window = None
         self._fullscreen_restore_state = None
         self._sync_coordinator: VideoSyncCoordinator | None = None
+        self._sync_scope = 'manual'
+        self._sync_viewer_ids: set[int] = set()
         self._selection_wall_sync_token = 0
         self._exclusive_video_controls_visibility = True
         self._video_controls_perf_profile = 'single'
@@ -3033,10 +3035,27 @@ class MainWindow(QMainWindow):
         video_controls = viewer.video_controls
 
         def on_play_pause_requested():
-            self.toggle_viewer_play_pause(viewer)
+            toggled = self.toggle_viewer_play_pause(viewer)
+            if not toggled:
+                return
+            if (
+                self._sync_scope == 'selection_wall'
+                and bool(getattr(viewer, '_selection_masonry_wall_viewer', False))
+                and not bool(getattr(video_player, 'is_playing', False))
+            ):
+                self._remove_viewer_from_selection_wall_sync(viewer)
 
         video_controls.play_pause_requested.connect(on_play_pause_requested)
-        video_controls.stop_requested.connect(video_player.stop)
+
+        def on_stop_requested():
+            video_player.stop()
+            if (
+                self._sync_scope == 'selection_wall'
+                and bool(getattr(viewer, '_selection_masonry_wall_viewer', False))
+            ):
+                self._remove_viewer_from_selection_wall_sync(viewer)
+
+        video_controls.stop_requested.connect(on_stop_requested)
         video_controls.frame_changed.connect(video_player.seek_to_frame)
         video_controls.timeline_slider.scrub_started.connect(video_player.begin_timeline_scrub)
         video_controls.timeline_slider.sliderReleased.connect(video_player.end_timeline_scrub)
@@ -4255,25 +4274,60 @@ class MainWindow(QMainWindow):
     @Slot()
     def sync_video_playback(self):
         """Synchronize loaded videos using a strict startup+loop barrier coordinator."""
-        self._start_video_sync_for_viewers(self._iter_manual_sync_viewers())
+        self._start_video_sync_for_viewers(self._iter_manual_sync_viewers(), scope='manual')
 
     def sync_video_playback_from_window(self, source_window: FloatingViewerWindow | None):
         """Synchronize videos scoped to the requesting floating window group."""
         target_viewers = self._iter_window_scoped_sync_viewers(source_window)
         if not target_viewers:
             return
-        if bool(getattr(source_window, '_selection_masonry_wall_window', False)) or not bool(getattr(self, '_main_viewer_visible', True)):
+        selection_wall_only = bool(getattr(source_window, '_selection_masonry_wall_window', False))
+        if selection_wall_only or not bool(getattr(self, '_main_viewer_visible', True)):
             self._pause_viewers_outside_sync_group(target_viewers)
-        self._start_video_sync_for_viewers(target_viewers)
+        self._start_video_sync_for_viewers(
+            target_viewers,
+            scope='selection_wall' if selection_wall_only else 'manual',
+        )
 
-    def _start_video_sync_for_viewers(self, viewers: list[ImageViewer]) -> list[ImageViewer]:
-        """Start the global sync coordinator for a specific viewer subset."""
+    def _clear_active_sync_state(self):
+        """Forget the current sync coordinator scope and membership."""
+        self._sync_scope = 'manual'
+        self._sync_viewer_ids.clear()
+
+    def _stop_active_sync_coordinator(self):
+        """Stop the active sync coordinator and clear its tracked membership."""
         if self._sync_coordinator is not None:
             try:
                 self._sync_coordinator.stop()
             except Exception:
                 pass
             self._sync_coordinator = None
+        self._clear_active_sync_state()
+
+    def _remove_viewer_from_selection_wall_sync(self, viewer: ImageViewer | None):
+        """Remove one wall viewer from active sync without resetting survivors."""
+        if self._sync_scope != 'selection_wall':
+            return
+        if viewer is None:
+            return
+        viewer_id = id(viewer)
+        if viewer_id not in self._sync_viewer_ids:
+            return
+
+        coordinator = self._sync_coordinator
+        if coordinator is None:
+            self._sync_viewer_ids.discard(viewer_id)
+            return
+
+        remaining = coordinator.remove_viewer(viewer)
+        self._sync_viewer_ids.discard(viewer_id)
+        if remaining >= 2:
+            return
+        self._stop_active_sync_coordinator()
+
+    def _start_video_sync_for_viewers(self, viewers: list[ImageViewer], *, scope: str = 'manual') -> list[ImageViewer]:
+        """Start the global sync coordinator for a specific viewer subset."""
+        self._stop_active_sync_coordinator()
 
         loaded_video_viewers = []
         for viewer in viewers or []:
@@ -4294,6 +4348,8 @@ class MainWindow(QMainWindow):
                 print(f"[SYNC] Loop state apply warning: {e}")
 
         self._sync_coordinator = VideoSyncCoordinator(loaded_video_viewers, parent=self)
+        self._sync_scope = str(scope or 'manual')
+        self._sync_viewer_ids = {id(viewer) for viewer in loaded_video_viewers}
         self._sync_coordinator.start()
         return loaded_video_viewers
 
@@ -4542,7 +4598,7 @@ class MainWindow(QMainWindow):
             return
 
         if len(loaded_video_viewers) >= 2:
-            self._start_video_sync_for_viewers(loaded_video_viewers)
+            self._start_video_sync_for_viewers(loaded_video_viewers, scope='selection_wall')
             return
 
         if len(loaded_video_viewers) == 1:
@@ -4794,12 +4850,7 @@ class MainWindow(QMainWindow):
 
         self._bulk_closing_floating_viewers = True
         self.cancel_compare_drag()
-        if self._sync_coordinator is not None:
-            try:
-                self._sync_coordinator.stop()
-            except Exception:
-                pass
-            self._sync_coordinator = None
+        self._stop_active_sync_coordinator()
         self._floating_viewers = []
         self._comparison_windows = []
 
@@ -4861,13 +4912,14 @@ class MainWindow(QMainWindow):
         if source.get("viewer") is viewer or target.get("viewer") is viewer:
             self.cancel_compare_drag()
 
-        # Stop any active sync coordinator — its player list is now stale.
         if self._sync_coordinator is not None and not bool(getattr(self, '_bulk_closing_floating_viewers', False)):
-            try:
-                self._sync_coordinator.stop()
-            except Exception:
-                pass
-            self._sync_coordinator = None
+            if (
+                self._sync_scope == 'selection_wall'
+                and bool(getattr(viewer, '_selection_masonry_wall_viewer', False))
+            ):
+                self._remove_viewer_from_selection_wall_sync(viewer)
+            else:
+                self._stop_active_sync_coordinator()
 
         try:
             viewer.video_player.cleanup(

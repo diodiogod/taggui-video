@@ -366,6 +366,50 @@ class VideoSyncCoordinator(QObject):
                 pass
             entry.hide_sync_icon()
 
+    def remove_viewer(self, viewer) -> int:
+        """Remove one viewer from the active sync set without resetting survivors."""
+        remove_index = -1
+        removed_entry = None
+        for idx, entry in enumerate(self._entries):
+            if entry.viewer is viewer:
+                remove_index = idx
+                removed_entry = entry
+                break
+
+        if remove_index < 0 or removed_entry is None:
+            return len(self._entries)
+
+        try:
+            removed_entry.player.playback_finished.disconnect(self._on_player_finished)
+        except Exception:
+            pass
+        removed_entry.hide_sync_icon()
+
+        removed_was_finished = bool(removed_entry.finished)
+        del self._entries[remove_index]
+        self._longest_duration_ms = max(
+            (e.cycle_duration_ms for e in self._entries), default=0.0
+        )
+
+        remaining = len(self._entries)
+        if remaining < 2:
+            self.stop()
+            return remaining
+
+        if self._state == self._STATE_RUNNING:
+            if removed_was_finished and self._finished_count > 0:
+                self._finished_count = max(0, self._finished_count - 1)
+            if self._finished_count >= remaining:
+                self._watchdog_timer.stop()
+                self._state = self._STATE_BARRIER
+                self._begin_barrier()
+                return remaining
+            watchdog_ms = int(self._longest_duration_ms + _STALL_TIMEOUT_MS)
+            if watchdog_ms > 0:
+                self._watchdog_timer.start(watchdog_ms)
+
+        return remaining
+
     # ------------------------------------------------------------------
     # Warming
     # ------------------------------------------------------------------
