@@ -857,6 +857,24 @@ class MainWindow(QMainWindow):
 
         if event_type in (event.Type.ShortcutOverride, event.Type.KeyPress):
             try:
+                if (
+                    not event.isAutoRepeat()
+                    and event.key() == Qt.Key.Key_Escape
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                ):
+                    list_view = getattr(getattr(self, "image_list", None), "list_view", None)
+                    cancel_spawn_drag = getattr(list_view, "cancel_spawn_drag_gesture", None)
+                    if callable(cancel_spawn_drag):
+                        if event_type == event.Type.ShortcutOverride:
+                            if bool(getattr(list_view, "_spawn_drag_active", False)):
+                                event.accept()
+                                return True
+                        elif cancel_spawn_drag():
+                            event.accept()
+                            return True
+            except Exception:
+                pass
+            try:
                 if self._handle_global_video_key(event, event_type):
                     return True
             except Exception:

@@ -923,6 +923,22 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
 
+    def _cancel_spawn_drag_active(self):
+        """Cancel an armed spawn drag without spawning viewers on release."""
+        if not bool(getattr(self, "_spawn_drag_active", False)):
+            return False
+        self._finish_spawn_drag_active(should_spawn=False)
+        self._clear_spawn_drag_tracking()
+        self._pending_click_commit_index = QPersistentModelIndex()
+        self._pending_click_commit_global = None
+        self._suppress_selection_commit_until_release = False
+        self._preserve_multi_selection_on_drag_candidate = False
+        return True
+
+    def cancel_spawn_drag_gesture(self):
+        """Public wrapper so higher-level hosts can cancel an armed spawn drag."""
+        return bool(self._cancel_spawn_drag_active())
+
     def _poll_spawn_drag_release(self):
         """Release detector for ultra-fast drags that miss widget release events."""
         if not bool(getattr(self, "_spawn_drag_active", False)):
@@ -1875,6 +1891,13 @@ class ImageListViewInteractionMixin:
         """Handle keyboard events in the image list."""
         # Clear click-selection freeze so keyboard nav propagates normally.
         self._user_click_selection_frozen_until = 0.0
+        if (
+            event.key() == Qt.Key.Key_Escape
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._cancel_spawn_drag_active()
+        ):
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Delete:
             # Toggle deletion marking for selected images
             selected_indices = self.selectedIndexes()

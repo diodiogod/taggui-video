@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.6] - 2026-04-17
+
+### Added
+
+- Press Escape to cancel a thumbnail drag before it opens a floating viewer or masonry wall
+- Make dense multi-viewer layouts more reliable, especially with compact classic-style controls
+
+### Changed
+
+- Improve floating video controls and drag cancellation
+- Improve recovery when floating viewers keep moving or resizing after mouse release
+
+### Fixed
+
+- Fix small floating video players sometimes ignoring play or stop clicks
 ## [1.2.5] - 2026-04-16
 
 ### Added

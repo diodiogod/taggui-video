@@ -2,7 +2,7 @@ import time
 
 from PySide6.QtCore import Qt, Signal, Slot, QPointF, QRectF
 from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton,
                                QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider,
                                QSizePolicy)
 from utils.settings import settings, DEFAULT_SETTINGS
@@ -2152,11 +2152,16 @@ class VideoControlsWidget(QWidget):
         # Handle global mouse release to catch releases outside widget during resize/drag
         if obj == self.parent() and event.type() == event.Type.MouseButtonRelease:
             if (self._resizing or self._dragging) and event.button() == Qt.MouseButton.LeftButton:
-                # Mouse released outside widget during resize/drag - clean up
-                self._resizing = False
-                self._dragging = False
-                self._restart_parent_hide_timer()
+                self._finish_drag_resize_interaction()
                 return False  # Let parent handle the event too
+        if (
+            obj == self.parent()
+            and event.type() in (event.Type.MouseMove, event.Type.Leave, event.Type.Hide)
+            and (self._resizing or self._dragging)
+            and not self._left_mouse_button_down()
+        ):
+            self._finish_drag_resize_interaction()
+            return False
 
         if obj == self.speed_slider:
             from PySide6.QtCore import QEvent, QPoint
@@ -3190,6 +3195,54 @@ class VideoControlsWidget(QWidget):
             # Use parent's method to show controls and restart timer
             parent._show_controls_temporarily()
 
+    def _left_mouse_button_down(self) -> bool:
+        """Best-effort global button-state check for lost-release recovery."""
+        try:
+            return bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+        except Exception:
+            return False
+
+    def _finish_drag_resize_interaction(self) -> bool:
+        """Clear drag/resize state and finalize deferred resize work once."""
+        was_resizing = self._resizing
+        was_dragging = self._dragging
+        drag_moved = bool(self._drag_has_moved)
+        if not (was_resizing or was_dragging):
+            return False
+
+        current_width = self.width()
+
+        self._dragging = False
+        self._resizing = False
+        self._drag_has_moved = False
+        self.unsetCursor()
+        self._restart_parent_hide_timer()
+
+        if was_resizing:
+            self._apply_scaling()
+            self.adjustSize()
+            self.resize(current_width, self.sizeHint().height())
+            self.layout().invalidate()
+            self.layout().activate()
+            self.timeline_slider.update()
+            self.update()
+
+        if was_resizing or drag_moved:
+            if self.parent():
+                parent_width = self.parent().width()
+                parent_height = self.parent().height()
+                if parent_width > 0 and parent_height > 0:
+                    x_percent = self.x() / parent_width
+                    y_percent = self.y() / parent_height
+                    width_percent = self.width() / parent_width
+                    settings.setValue('video_controls_x_percent', x_percent)
+                    settings.setValue('video_controls_y_percent', y_percent)
+                    settings.setValue('video_controls_width_percent', width_percent)
+                    self._pre_fit_geometry_percent = (x_percent, y_percent, width_percent)
+                    self._fit_mode_active = False
+
+        return True
+
     def mousePressEvent(self, event):
         """Start dragging or resizing the controls widget."""
         if event.button() == Qt.MouseButton.LeftButton:
@@ -3262,6 +3315,11 @@ class VideoControlsWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         """Drag or resize the controls widget, and update cursor."""
+        if (self._resizing or self._dragging) and not self._left_mouse_button_down():
+            self._finish_drag_resize_interaction()
+            event.accept()
+            return
+
         pos = event.pos()
 
         # Update cursor based on position (also during resize to maintain visual feedback)
@@ -3320,50 +3378,10 @@ class VideoControlsWidget(QWidget):
     def mouseReleaseEvent(self, event):
         """Stop dragging or resizing the controls widget."""
         if event.button() == Qt.MouseButton.LeftButton:
-            was_resizing = self._resizing
-            was_dragging = self._dragging
-            drag_moved = bool(self._drag_has_moved)
-            current_width = self.width()  # Save width before changing flags
-
-            # Always clear states first
-            self._dragging = False
-            self._resizing = False
-            self._drag_has_moved = False
-
-            # Restart parent hide timer after drag/resize ends
-            if was_resizing or was_dragging:
-                self._restart_parent_hide_timer()
-
-            # Trigger scaling update after resize is done
-            if was_resizing:
-                # Apply scaling to internal elements without changing widget width
-                self._apply_scaling()
-                # Adjust height to fit content, keeping width the same
-                self.adjustSize()
-                self.resize(current_width, self.sizeHint().height())
-                # Force complete layout recalculation
-                self.layout().invalidate()
-                self.layout().activate()
-                # Force slider to recalculate its internal geometry
-                self.timeline_slider.update()
-                # Repaint everything
-                self.update()
-
-            # Save position and width as percentage of parent dimensions
-            if was_resizing or drag_moved:
-                if self.parent():
-                    parent_width = self.parent().width()
-                    parent_height = self.parent().height()
-                    if parent_width > 0 and parent_height > 0:
-                        x_percent = self.x() / parent_width
-                        y_percent = self.y() / parent_height
-                        width_percent = self.width() / parent_width
-                        settings.setValue('video_controls_x_percent', x_percent)
-                        settings.setValue('video_controls_y_percent', y_percent)
-                        settings.setValue('video_controls_width_percent', width_percent)
-                        self._pre_fit_geometry_percent = (x_percent, y_percent, width_percent)
-                        self._fit_mode_active = False
-            event.accept()
+            if self._finish_drag_resize_interaction():
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """Double-click empty bar background to fit width to viewer."""

@@ -905,6 +905,32 @@ class FloatingViewerWindow(QWidget):
         except Exception:
             return False
 
+    def _window_drag_button_still_down(self) -> bool:
+        """Best-effort global button-state check for lost-release recovery."""
+        if not self._window_drag_active or self._window_drag_button == Qt.MouseButton.NoButton:
+            return False
+        try:
+            return bool(QApplication.mouseButtons() & self._window_drag_button)
+        except Exception:
+            return False
+
+    def _finish_window_drag(self, release_global: QPoint | None = None):
+        """Clear active window-drag state exactly once."""
+        if not self._window_drag_active:
+            return
+        if release_global is None:
+            try:
+                release_global = QCursor.pos()
+            except Exception:
+                release_global = self.mapToGlobal(self.rect().center())
+        self._window_drag_active = False
+        self._window_drag_button = Qt.MouseButton.NoButton
+        self._active_drag_handle = None
+        self._update_overlay_hover_from_global_pos(release_global)
+        if self._compare_drag_signal_active:
+            self._compare_drag_signal_active = False
+            self.compare_drag_released.emit(self, release_global)
+
     def _create_drag_handles(self):
         """Create draggable edge handles used to move the floating window."""
         for name in ("top", "right", "bottom", "left"):
@@ -1348,6 +1374,20 @@ class FloatingViewerWindow(QWidget):
         else:
             zone.hide()
 
+    def _controls_hit_interactive_child(self, event) -> bool:
+        """Treat real child controls as higher priority than window-border resize."""
+        controls = getattr(self, "_video_controls_widget", None)
+        if controls is None or not hasattr(event, "position"):
+            return False
+        try:
+            child = controls.childAt(event.position().toPoint())
+        except Exception:
+            return False
+        if child is None or child is controls:
+            return False
+        background = getattr(controls, "background_surface", None)
+        return child is not background
+
     def _hide_all_drag_handles(self):
         for zone in self._drag_handle_widgets.values():
             zone.hide()
@@ -1723,6 +1763,19 @@ class FloatingViewerWindow(QWidget):
 
     def eventFilter(self, watched, event):
         self._refresh_video_surface_event_filters()
+        event_type = event.type()
+        if event_type in (
+            QEvent.Type.MouseMove,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.Leave,
+            QEvent.Type.Hide,
+            QEvent.Type.WindowDeactivate,
+        ):
+            if self._resize_active and not bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+                self._end_window_resize()
+            if self._window_drag_active and not self._window_drag_button_still_down():
+                self._finish_window_drag()
         overlay = getattr(self, "_review_slots_overlay", None)
         if overlay is not None:
             try:
@@ -1802,14 +1855,7 @@ class FloatingViewerWindow(QWidget):
                 and self._window_drag_active
                 and event.button() == self._window_drag_button
             ):
-                release_global = self._event_global_pos(event)
-                self._window_drag_active = False
-                self._window_drag_button = Qt.MouseButton.NoButton
-                self._active_drag_handle = None
-                self._update_overlay_hover_from_global_pos(release_global)
-                if self._compare_drag_signal_active:
-                    self._compare_drag_signal_active = False
-                    self.compare_drag_released.emit(self, release_global)
+                self._finish_window_drag(self._event_global_pos(event))
                 return True
             if event.type() == QEvent.Type.Enter:
                 self._show_drag_handle(handle_name, True)
@@ -1824,6 +1870,9 @@ class FloatingViewerWindow(QWidget):
             ):
                 self._update_overlay_hover_from_global_pos(QCursor.pos())
             elif event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                if self._controls_hit_interactive_child(event):
+                    self._emit_activated()
+                    return False
                 local_pos = self.mapFromGlobal(self._event_global_pos(event))
                 zone_name = self._resize_zone_from_local_pos(local_pos)
                 if zone_name is not None:
@@ -1837,9 +1886,11 @@ class FloatingViewerWindow(QWidget):
                     return True
                 event_global = self._event_global_pos(event)
                 try:
-                    local_pos = self.mapFromGlobal(event_global)
-                    zone_name = self._resize_zone_from_local_pos(local_pos)
-                    resize_cursor = self._cursor_for_resize_zone(zone_name)
+                    resize_cursor = None
+                    if not self._controls_hit_interactive_child(event):
+                        local_pos = self.mapFromGlobal(event_global)
+                        zone_name = self._resize_zone_from_local_pos(local_pos)
+                        resize_cursor = self._cursor_for_resize_zone(zone_name)
                     if resize_cursor is not None:
                         watched.setCursor(resize_cursor)
                         self._update_overlay_hover_from_global_pos(event_global)
@@ -1970,14 +2021,7 @@ class FloatingViewerWindow(QWidget):
                         pass
                     return True
                 if self._window_drag_active and event.button() == self._window_drag_button:
-                    release_global = self._event_global_pos(event)
-                    self._window_drag_active = False
-                    self._window_drag_button = Qt.MouseButton.NoButton
-                    self._active_drag_handle = None
-                    self._update_overlay_hover_from_global_pos(release_global)
-                    if self._compare_drag_signal_active:
-                        self._compare_drag_signal_active = False
-                        self.compare_drag_released.emit(self, release_global)
+                    self._finish_window_drag(self._event_global_pos(event))
                     return True
             elif event.type() == QEvent.Type.FocusIn:
                 self._emit_activated()
