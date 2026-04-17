@@ -52,6 +52,7 @@ DEFAULT_SETTINGS = {
     'image_list_double_click_action': 'spawn viewer',  # spawn viewer, system default app
     'compare_fit_mode': 'preserve',  # preserve, fill, stretch (image compare overlay mode)
     'video_compare_fit_mode': 'preserve',  # preserve, fill, stretch (video compare window mode)
+    'video_compare_audio_mode': 'ambient_mix',  # dominant, ambient_mix
     'video_multi_compare_experimental': True,  # Allow adding 3rd/4th video layers in compare window
     'video_playback_backend': 'mpv_experimental',  # qt_hybrid, mpv_experimental, vlc_experimental
     'auto_marking_merge_overlaps': False,

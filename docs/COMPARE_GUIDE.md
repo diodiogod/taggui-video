@@ -76,6 +76,8 @@ Supported workflows include:
 - 4-video compare
 
 Video compare automatically runs sync logic for the compared videos when the compare window opens.
+By default, video compare keeps the dominant video at full volume and leaves the other visible videos audible at a lower ambient level.
+If you want strict single-source audio, use the compare window right-click menu and switch `Compare Audio Mode` to `Dominant video only`.
 
 ## Compare from Floating Viewers
 

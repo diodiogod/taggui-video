@@ -74,6 +74,7 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - `video + video`: opens a dedicated A/B comparison window.
 - Mixed media pairs (`image + video`) are rejected with blocked feedback.
 - Video A/B compare auto-runs sync logic for the two compared videos (no sync button shown in that window).
+- Video compare defaults to ambient mixed audio, with the dominant visible video louder than the others.
 - Hold time is fixed at about 1 second.
 - The target's current media becomes the left side (A), and the dropped/merged media becomes the right side (B).
 - The vertical divider follows mouse X while compare mode is active.

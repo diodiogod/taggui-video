@@ -3766,6 +3766,28 @@ class VideoPlayerWidget(QWidget):
         if self.vlc_player is not None:
             self._set_vlc_muted(bool(muted))
 
+    def set_volume(self, volume: float):
+        """Set audio volume using a normalized 0.0-1.0 scale across backends."""
+        try:
+            normalized = max(0.0, min(1.0, float(volume)))
+        except Exception:
+            normalized = 0.0
+        if self.audio_output:
+            try:
+                self.audio_output.setVolume(normalized)
+            except Exception:
+                pass
+        if self.mpv_player is not None:
+            try:
+                self._mpv_set_property('volume', float(normalized * 100.0))
+            except Exception:
+                pass
+        if self.vlc_player is not None:
+            try:
+                self.vlc_player.audio_set_volume(int(round(normalized * 100.0)))
+            except Exception:
+                pass
+
     def cleanup(self, *, force_gc: bool = True):
         """Release video resources."""
         self._cancel_mpv_reveal()

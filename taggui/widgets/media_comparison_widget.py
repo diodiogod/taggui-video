@@ -30,6 +30,15 @@ class MediaComparisonWidget(QWidget):
     """Frameless comparison window for video media (2-way with optional 3rd/4th layers)."""
 
     closing = Signal()
+    AUDIO_MODE_DOMINANT = "dominant"
+    AUDIO_MODE_AMBIENT_MIX = "ambient_mix"
+    AUDIO_MODE_OPTIONS = (
+        (AUDIO_MODE_DOMINANT, "Dominant video only"),
+        (AUDIO_MODE_AMBIENT_MIX, "Dominant + ambient others"),
+    )
+    AMBIENT_SECONDARY_MIN = 0.35
+    AMBIENT_SECONDARY_MAX = 0.55
+    AMBIENT_VISIBLE_AREA_FLOOR = 0.02
 
     def __init__(self, model_a, model_b, proxy_image_list_model, parent=None, model_c=None, model_d=None):
         super().__init__(
@@ -73,6 +82,17 @@ class MediaComparisonWidget(QWidget):
         if video_compare_fit_mode not in {COMPARE_FIT_MODE_PRESERVE, COMPARE_FIT_MODE_FILL, COMPARE_FIT_MODE_STRETCH}:
             video_compare_fit_mode = COMPARE_FIT_MODE_PRESERVE
         self._video_compare_fit_mode = video_compare_fit_mode
+        video_compare_audio_mode = str(
+            settings.value(
+                'video_compare_audio_mode',
+                defaultValue=DEFAULT_SETTINGS.get('video_compare_audio_mode', self.AUDIO_MODE_DOMINANT),
+                type=str,
+            )
+            or self.AUDIO_MODE_DOMINANT
+        ).strip().lower()
+        if video_compare_audio_mode not in {self.AUDIO_MODE_DOMINANT, self.AUDIO_MODE_AMBIENT_MIX}:
+            video_compare_audio_mode = self.AUDIO_MODE_DOMINANT
+        self._video_compare_audio_mode = video_compare_audio_mode
         self._video_multi_compare_enabled = bool(
             settings.value(
                 'video_multi_compare_experimental',
@@ -306,6 +326,26 @@ class MediaComparisonWidget(QWidget):
 
     def get_video_compare_fit_mode_options(self):
         return tuple(COMPARE_FIT_MODE_OPTIONS)
+
+    def get_video_compare_audio_mode(self) -> str:
+        mode = str(getattr(self, "_video_compare_audio_mode", self.AUDIO_MODE_DOMINANT) or self.AUDIO_MODE_DOMINANT).strip().lower()
+        if mode not in {self.AUDIO_MODE_DOMINANT, self.AUDIO_MODE_AMBIENT_MIX}:
+            return self.AUDIO_MODE_DOMINANT
+        return mode
+
+    def get_video_compare_audio_mode_options(self):
+        return tuple(self.AUDIO_MODE_OPTIONS)
+
+    def set_video_compare_audio_mode(self, mode: str, *, persist: bool = True) -> bool:
+        mode = str(mode or self.AUDIO_MODE_DOMINANT).strip().lower()
+        if mode not in {self.AUDIO_MODE_DOMINANT, self.AUDIO_MODE_AMBIENT_MIX}:
+            return False
+        changed = mode != self.get_video_compare_audio_mode()
+        self._video_compare_audio_mode = mode
+        if persist:
+            settings.setValue('video_compare_audio_mode', mode)
+        self._apply_audio_focus_from_split()
+        return changed
 
     def set_video_compare_fit_mode(self, mode: str, *, persist: bool = True) -> bool:
         mode = str(mode or COMPARE_FIT_MODE_PRESERVE).strip().lower()
@@ -593,6 +633,7 @@ class MediaComparisonWidget(QWidget):
     def _show_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
         fit_mode_map = {}
+        audio_mode_map = {}
         close_action = menu.addAction("Close comparison")
         resync_action = None
         multi_compare_action = menu.addAction("Experimental: Allow 3/4-video compare")
@@ -600,6 +641,13 @@ class MediaComparisonWidget(QWidget):
         multi_compare_action.setChecked(self.get_video_multi_compare_enabled())
         if self._both_videos_ready():
             menu.addSeparator()
+            audio_mode_menu = menu.addMenu("Compare Audio Mode")
+            current_audio_mode = self.get_video_compare_audio_mode()
+            for mode, label in self.get_video_compare_audio_mode_options():
+                action = audio_mode_menu.addAction(str(label))
+                action.setCheckable(True)
+                action.setChecked(str(mode) == str(current_audio_mode))
+                audio_mode_map[action] = str(mode)
             fit_mode_menu = menu.addMenu("Compare Fit Mode")
             current_mode = self.get_video_compare_fit_mode()
             for mode, label in self.get_video_compare_fit_mode_options():
@@ -622,6 +670,8 @@ class MediaComparisonWidget(QWidget):
             self.close()
         elif selected is multi_compare_action:
             self.set_video_multi_compare_enabled(not self.get_video_multi_compare_enabled(), persist=True)
+        elif selected in audio_mode_map:
+            self.set_video_compare_audio_mode(audio_mode_map[selected], persist=True)
         elif selected in fit_mode_map:
             self.set_video_compare_fit_mode(fit_mode_map[selected], persist=True)
         elif selected is resync_action:
@@ -1448,42 +1498,55 @@ class MediaComparisonWidget(QWidget):
         self._apply_audio_focus_from_split()
 
     def _resolve_audio_focus_viewer(self) -> tuple[str, ImageViewer]:
+        side = self._resolve_audio_focus_side()
+        if side == "b":
+            return ("b", self.viewer_b)
+        if side == "c":
+            return ("c", self.viewer_c)
+        if side == "d":
+            return ("d", self.viewer_d)
+        return ("a", self.viewer_a)
+
+    def _current_visible_audio_areas(self) -> dict[str, float]:
         split_x = max(0.0, min(1.0, float(self.split_position)))
         if not self._has_third_layer():
-            if split_x > 0.5:
-                return ("a", self.viewer_a)
-            if split_x < 0.5:
-                return ("b", self.viewer_b)
-            if self._audio_focus_side == "b":
-                return ("b", self.viewer_b)
-            return ("a", self.viewer_a)
+            return {
+                "a": split_x,
+                "b": (1.0 - split_x),
+            }
 
         split_y = max(0.0, min(1.0, float(self.split_position_y)))
         if not self._has_fourth_layer():
-            areas = {
+            return {
                 "a": split_x * split_y,
                 "b": (1.0 - split_x) * split_y,
                 "c": (1.0 - split_y),
             }
-        else:
-            areas = {
-                "a": split_x * split_y,
-                "b": (1.0 - split_x) * split_y,
-                "c": split_x * (1.0 - split_y),
-                "d": (1.0 - split_x) * (1.0 - split_y),
-            }
+        return {
+            "a": split_x * split_y,
+            "b": (1.0 - split_x) * split_y,
+            "c": split_x * (1.0 - split_y),
+            "d": (1.0 - split_x) * (1.0 - split_y),
+        }
+
+    def _resolve_audio_focus_side(self) -> str:
+        split_x = max(0.0, min(1.0, float(self.split_position)))
+        if not self._has_third_layer():
+            if split_x > 0.5:
+                return "a"
+            if split_x < 0.5:
+                return "b"
+            if self._audio_focus_side == "b":
+                return "b"
+            return "a"
+
+        areas = self._current_visible_audio_areas()
         best_side = max(areas, key=areas.get)
         top_two = sorted(areas.values(), reverse=True)
         if len(top_two) >= 2 and abs(top_two[0] - top_two[1]) < 1e-6:
             if self._audio_focus_side in {"a", "b", "c", "d"}:
                 best_side = str(self._audio_focus_side)
-        if best_side == "b":
-            return ("b", self.viewer_b)
-        if best_side == "c":
-            return ("c", self.viewer_c)
-        if best_side == "d":
-            return ("d", self.viewer_d)
-        return ("a", self.viewer_a)
+        return best_side
 
     def _apply_audio_side(self, side: str):
         side = str(side or "a").lower()
@@ -1494,6 +1557,31 @@ class MediaComparisonWidget(QWidget):
                 continue
             try:
                 viewer.video_player.set_muted(key != side)
+                viewer.video_player.set_volume(1.0 if key == side else 0.0)
+            except Exception:
+                continue
+
+    def _apply_audio_mix_levels(self, focus_side: str):
+        areas = self._current_visible_audio_areas()
+        dominant_area = max(1e-6, float(areas.get(focus_side, 0.0)))
+        for key, viewer in (("a", self.viewer_a), ("b", self.viewer_b), ("c", self.viewer_c), ("d", self.viewer_d)):
+            if key == "c" and not self._has_third_layer():
+                continue
+            if key == "d" and not self._has_fourth_layer():
+                continue
+            target_volume = 0.0
+            if key == focus_side:
+                target_volume = 1.0
+            else:
+                area = max(0.0, float(areas.get(key, 0.0)))
+                if area >= float(self.AMBIENT_VISIBLE_AREA_FLOOR):
+                    ratio = max(0.0, min(1.0, area / dominant_area))
+                    target_volume = float(self.AMBIENT_SECONDARY_MIN) + (
+                        float(self.AMBIENT_SECONDARY_MAX - self.AMBIENT_SECONDARY_MIN) * ratio
+                    )
+            try:
+                viewer.video_player.set_muted(target_volume <= 0.0)
+                viewer.video_player.set_volume(target_volume)
             except Exception:
                 continue
 
@@ -1519,7 +1607,10 @@ class MediaComparisonWidget(QWidget):
         # Audio focus follows the dominant side of the split.
         # 2-way: A/B by dominant width. 3/4-way: dominant quadrant/region area.
         side, _viewer = self._resolve_audio_focus_viewer()
-        self._apply_audio_side(side)
+        if self.get_video_compare_audio_mode() == self.AUDIO_MODE_AMBIENT_MIX:
+            self._apply_audio_mix_levels(side)
+        else:
+            self._apply_audio_side(side)
         self._audio_focus_side = side
 
     def _event_targets_shared_controls(self, watched) -> bool:
