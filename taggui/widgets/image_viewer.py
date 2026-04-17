@@ -392,6 +392,7 @@ class ImageViewer(QWidget):
         self.current_video_item = None
         self.current_image_item = None
         self._compare_mode_active = False
+        self._compare_controls_suppressed = False
         self._compare_base_index = QPersistentModelIndex()
         self._compare_overlay_indices: list[QPersistentModelIndex] = []
         self._compare_split_ratio_x = 0.5
@@ -472,6 +473,7 @@ class ImageViewer(QWidget):
         self._video_temp_speed_hold_active = False
         self._video_temp_speed_hold_original_speed = 1.0
         self._video_temp_speed_hold_current_speed = 2.0
+        self._contextual_video_seek_ui_suppressed = False
         self._controls_visible = False
         self._controls_hover_inside = False
         self._main_controls_overlay = None
@@ -1337,6 +1339,7 @@ class ImageViewer(QWidget):
         self._set_compare_viewport_update_mode(False)
         self._clear_compare_scene_items()
         self._compare_mode_active = False
+        self._compare_controls_suppressed = False
         self._compare_base_index = QPersistentModelIndex()
         self._compare_last_viewer_pos = None
         if self._compare_divider_overlay is not None:
@@ -1348,6 +1351,12 @@ class ImageViewer(QWidget):
             self._compare_split_ratio_x = 0.5
             self._compare_split_ratio_y = 0.5
         self._apply_static_image_quality_for_scale(MarkingItem.zoom_factor)
+        if self.video_controls_never_show:
+            self._hide_controls_immediately()
+        elif self.video_controls_auto_hide:
+            self._show_controls_temporarily()
+        else:
+            self._show_controls_permanent()
         return had_compare
 
     def enter_compare_mode(
@@ -1414,8 +1423,24 @@ class ImageViewer(QWidget):
         self._set_compare_viewport_update_mode(True)
         self._update_compare_overlay_geometry()
         self._set_compare_cursor_sync_enabled(True)
+        self._set_compare_controls_suppressed(True)
         self._compare_reveal_timer.start()
         return True
+
+    def _set_compare_controls_suppressed(self, suppressed: bool):
+        suppressed = bool(suppressed)
+        if bool(self._compare_controls_suppressed) == suppressed:
+            return
+        self._compare_controls_suppressed = suppressed
+        if suppressed:
+            self._hide_controls_immediately()
+            return
+        if self.video_controls_never_show:
+            self._hide_controls_immediately()
+        elif self.video_controls_auto_hide:
+            self._show_controls_temporarily()
+        else:
+            self._show_controls_permanent()
 
     def add_compare_layer(self, incoming_index) -> bool:
         incoming_proxy = self._normalize_proxy_index(incoming_index)
@@ -2183,6 +2208,8 @@ class ImageViewer(QWidget):
         return max(0.5, min(1.0, 0.5 + (0.5 * ((speed - 2.0) / 4.0))))
 
     def _should_show_contextual_video_seek_ui(self) -> bool:
+        if bool(getattr(self, "_contextual_video_seek_ui_suppressed", False)):
+            return False
         try:
             controls_visible = bool(self._controls_visible and self.video_controls.isVisible())
         except Exception:
@@ -2216,11 +2243,11 @@ class ImageViewer(QWidget):
             return None
         return max(0.0, min(float(total_frames - 1) / fps, float(progress) * float(total_frames - 1) / fps))
 
-    def _video_seek_zone_at(self, viewer_pos: QPoint | None) -> str | None:
+    def _video_seek_zone_at(self, viewer_pos: QPoint | None, *, ignore_visibility: bool = False) -> str | None:
         if (
             not self._is_video_loaded
             or viewer_pos is None
-            or not self._should_show_contextual_video_seek_ui()
+            or (not ignore_visibility and not self._should_show_contextual_video_seek_ui())
         ):
             return None
         point = self._normalize_viewport_point(viewer_pos)
@@ -2261,10 +2288,10 @@ class ImageViewer(QWidget):
 
         QTimer.singleShot(max(80, int(duration_ms)), _clear_scrub_feedback)
 
-    def _video_surface_zone_at(self, viewer_pos: QPoint | None) -> str | None:
-        if not self._should_show_contextual_video_seek_ui():
+    def _video_surface_zone_at(self, viewer_pos: QPoint | None, *, ignore_visibility: bool = False) -> str | None:
+        if not ignore_visibility and not self._should_show_contextual_video_seek_ui():
             return None
-        seek_zone = self._video_seek_zone_at(viewer_pos)
+        seek_zone = self._video_seek_zone_at(viewer_pos, ignore_visibility=ignore_visibility)
         if seek_zone:
             return seek_zone
         point = self._normalize_viewport_point(viewer_pos)
@@ -2613,24 +2640,27 @@ class ImageViewer(QWidget):
         self._show_video_playback_feedback("play" if is_playing else "pause", duration_ms=1000)
         return True
 
-    def _handle_video_seek_zone_double_click(self, view_anchor_pos=None) -> bool:
-        zone = self._video_surface_zone_at(view_anchor_pos)
+    def _handle_video_seek_zone_double_click(self, view_anchor_pos=None, *, ignore_visibility: bool = False) -> bool:
+        zone = self._video_surface_zone_at(view_anchor_pos, ignore_visibility=ignore_visibility)
         if zone == "scrub":
             self._toggle_video_play_pause_from_scrub_zone()
             return True
         if zone in {"backward", "forward"}:
-            return self.handle_video_seek_zone_click_accumulate(view_anchor_pos)
+            return self.handle_video_seek_zone_click_accumulate(
+                view_anchor_pos,
+                ignore_visibility=ignore_visibility,
+            )
         return False
 
-    def handle_video_seek_zone_click_accumulate(self, view_anchor_pos=None) -> bool:
+    def handle_video_seek_zone_click_accumulate(self, view_anchor_pos=None, *, ignore_visibility: bool = False) -> bool:
         """Start or extend the seek burst with a single click in the seek zone."""
-        direction = self._video_seek_zone_at(view_anchor_pos)
+        direction = self._video_seek_zone_at(view_anchor_pos, ignore_visibility=ignore_visibility)
         if not direction:
             return False
         return self._accumulate_video_seek_direction(direction)
 
-    def handle_video_surface_zone_press(self, view_anchor_pos=None) -> bool:
-        zone = self._video_surface_zone_at(view_anchor_pos)
+    def handle_video_surface_zone_press(self, view_anchor_pos=None, *, ignore_visibility: bool = False) -> bool:
+        zone = self._video_surface_zone_at(view_anchor_pos, ignore_visibility=ignore_visibility)
         if zone is None:
             return False
         self._video_zone_press_kind = zone
@@ -2656,14 +2686,14 @@ class ImageViewer(QWidget):
         self._video_scrub_overlay.raise_()
         return True
 
-    def handle_video_surface_zone_move(self, view_anchor_pos=None) -> bool:
+    def handle_video_surface_zone_move(self, view_anchor_pos=None, *, ignore_visibility: bool = False) -> bool:
         if self._video_zone_press_kind is None:
             return False
         viewport_pos = self._normalize_viewport_point(view_anchor_pos)
         if viewport_pos is not None:
             self._video_zone_last_viewport_pos = viewport_pos
         if self._video_zone_press_kind in {"backward", "forward"}:
-            current_zone = self._video_seek_zone_at(view_anchor_pos)
+            current_zone = self._video_seek_zone_at(view_anchor_pos, ignore_visibility=ignore_visibility)
             if current_zone != self._video_zone_press_kind:
                 self._video_seek_hold_timer.stop()
             elif not self._video_seek_hold_timer.isActive():
@@ -2694,7 +2724,7 @@ class ImageViewer(QWidget):
             self._video_scrub_overlay.show()
         return True
 
-    def handle_video_surface_zone_release(self, view_anchor_pos=None) -> bool:
+    def handle_video_surface_zone_release(self, view_anchor_pos=None, *, ignore_visibility: bool = False) -> bool:
         if self._video_zone_press_kind is None:
             return False
         zone_kind = self._video_zone_press_kind
@@ -2720,6 +2750,11 @@ class ImageViewer(QWidget):
             cursor_viewer_pos = view_anchor_pos
         self._update_video_seek_overlays(cursor_viewer_pos)
         return True
+
+    def set_contextual_video_seek_ui_suppressed(self, suppressed: bool):
+        self._contextual_video_seek_ui_suppressed = bool(suppressed)
+        if self._contextual_video_seek_ui_suppressed:
+            self._hide_video_seek_overlays()
 
     def handle_video_controls_skip_button_step(self, direction: str) -> bool:
         if not self._is_video_loaded:
@@ -3085,7 +3120,7 @@ class ImageViewer(QWidget):
 
     def _process_controls_hover(self, viewer_pos):
         """Apply control ownership/show-hide behavior from one hover position."""
-        if viewer_pos is None or not self._is_video_loaded:
+        if viewer_pos is None or not self._is_video_loaded or self._compare_controls_suppressed:
             return
         in_controls_zone = self._controls_detection_rect().contains(viewer_pos)
 
@@ -3182,7 +3217,7 @@ class ImageViewer(QWidget):
 
     def _show_controls_temporarily(self):
         """Show controls and start hide timer."""
-        if self.video_controls_never_show:
+        if self.video_controls_never_show or self._compare_controls_suppressed:
             return
         try:
             _ = self.video_controls.isVisible()
@@ -3219,7 +3254,7 @@ class ImageViewer(QWidget):
 
     def _show_controls_permanent(self):
         """Show controls permanently (not auto-hide)."""
-        if self.video_controls_never_show:
+        if self.video_controls_never_show or self._compare_controls_suppressed:
             return
         self._controls_hide_timer.stop()
         self.video_controls.setVisible(True)
@@ -3247,6 +3282,8 @@ class ImageViewer(QWidget):
         self.video_controls_never_show = effective_mode == VIDEO_CONTROLS_VISIBILITY_OFF
 
         if not self._is_video_loaded:
+            return
+        if self._compare_controls_suppressed:
             return
         if self.video_controls_never_show:
             self._hide_controls_immediately()

@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.8] - 2026-04-17
+
+### Added
+
+- Add a compact hold-to-adjust volume slider with saved volume and mute state
+- Make compare looping honor in and out markers more reliably, including after resync
+- Keep compare controls near the same saved position used by the main viewer
+
+### Changed
+
+- Improve video compare controls and volume UX
+
+### Fixed
+
+- Fix compare fallback bottom controls so they behave like shared compare controls instead of flickering per video
+- Fix stuck play and pause feedback when double-clicking the compare scrub zone
 ## [1.2.7] - 2026-04-17
 
 ### Added

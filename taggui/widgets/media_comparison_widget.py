@@ -4,13 +4,16 @@ from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPoint, Q
 from PySide6.QtGui import QCursor, QResizeEvent
 from PySide6.QtWidgets import QMenu, QPushButton, QWidget
 
-from utils.settings import DEFAULT_SETTINGS, settings
+from utils.settings import DEFAULT_SETTINGS, settings, VIDEO_CONTROLS_VISIBILITY_OFF
 from widgets.image_viewer import (
     COMPARE_FIT_MODE_FILL,
     COMPARE_FIT_MODE_OPTIONS,
     COMPARE_FIT_MODE_PRESERVE,
     COMPARE_FIT_MODE_STRETCH,
     ImageViewer,
+    _VideoPlaybackFeedbackOverlay,
+    _VideoScrubZoneOverlay,
+    _VideoSeekZoneOverlay,
 )
 from widgets.compare_divider_utils import (
     COMPARE_DIVIDER_COLOR,
@@ -65,6 +68,9 @@ class MediaComparisonWidget(QWidget):
         self._resize_margin_px = 12
         self._pan_sync_active = False
         self._pan_sync_source: ImageViewer | None = None
+        self._compare_zone_press_kind = None
+        self._compare_zone_press_start_local_pos = QPoint()
+        self._compare_zone_last_local_pos = QPoint()
         self._close_button_margin_px = 8
         self._close_hover_zone_px = 56
         self._video_fit_transform_stamp: dict[int, tuple] = {}
@@ -143,12 +149,32 @@ class MediaComparisonWidget(QWidget):
         self.viewer_d.view.setBackgroundBrush(Qt.GlobalColor.black)
         self._viewer_d_clip.hide()
 
+        self._suppress_local_viewer_controls(self.viewer_a)
+        self._suppress_local_viewer_controls(self.viewer_b)
+        self._suppress_local_viewer_controls(self.viewer_c)
+        self._suppress_local_viewer_controls(self.viewer_d)
+
         self._divider_widget = QWidget(self)
         self._divider_widget.setStyleSheet(f"background-color: {self._divider_color};")
         self._divider_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._divider_widget_h = QWidget(self)
         self._divider_widget_h.setStyleSheet(f"background-color: {self._divider_color};")
         self._divider_widget_h.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        self._compare_seek_back_overlay = _VideoSeekZoneOverlay("backward", self)
+        self._compare_seek_forward_overlay = _VideoSeekZoneOverlay("forward", self)
+        self._compare_scrub_overlay = _VideoScrubZoneOverlay(self)
+        self._compare_playback_feedback_overlay = _VideoPlaybackFeedbackOverlay(self)
+        self._compare_playback_feedback_timer = QTimer(self)
+        self._compare_playback_feedback_timer.setSingleShot(True)
+        self._compare_playback_feedback_timer.timeout.connect(
+            lambda: self._compare_playback_feedback_overlay.hide()
+        )
+        self._compare_seek_hold_initial_delay_ms = 220
+        self._compare_seek_hold_repeat_interval_ms = 160
+        self._compare_seek_hold_timer = QTimer(self)
+        self._compare_seek_hold_timer.setSingleShot(True)
+        self._compare_seek_hold_timer.timeout.connect(self._on_compare_seek_hold_timeout)
 
         self._close_button = QPushButton("X", self)
         self._close_button.setObjectName("floatingViewerClose")
@@ -460,17 +486,29 @@ class MediaComparisonWidget(QWidget):
                 return None
         return controls
 
+    def _suppress_local_viewer_controls(self, viewer: ImageViewer):
+        try:
+            viewer.set_video_controls_visibility_mode(
+                VIDEO_CONTROLS_VISIBILITY_OFF,
+                show_auto_temporarily=False,
+            )
+            setter = getattr(viewer, "set_contextual_video_seek_ui_suppressed", None)
+            if callable(setter):
+                setter(True)
+            controls = getattr(viewer, "video_controls", None)
+            if controls is not None:
+                controls.hide()
+        except Exception:
+            pass
+
     def _configure_shared_controls_ui(self):
         controls = self._shared_controls_widget()
         if controls is None:
             return
-        # Keep compare control compact and focused on playback/seek.
+        # Keep compare control compact but still allow marker editing on the active
+        # master video. Local viewer controls are suppressed separately.
+        controls.fixed_marker_size = 0
         for attr in (
-            "loop_start_btn",
-            "loop_end_btn",
-            "loop_checkbox",
-            "loop_reset_btn",
-            "marker_range_label",
             "sar_warning_label",
         ):
             widget = getattr(controls, attr, None)
@@ -501,8 +539,13 @@ class MediaComparisonWidget(QWidget):
         c.marker_preview_requested.connect(self._on_shared_seek_frame)
         c.skip_backward_requested.connect(lambda: self._on_shared_skip_requested(backward=True))
         c.skip_forward_requested.connect(lambda: self._on_shared_skip_requested(backward=False))
+        c.loop_toggled.connect(lambda _enabled: self._apply_shared_loop_state())
+        c.loop_start_set.connect(self._apply_shared_loop_state)
+        c.loop_end_set.connect(self._apply_shared_loop_state)
+        c.loop_reset.connect(self._apply_shared_loop_state)
         c.speed_changed.connect(self._on_shared_speed_changed)
         c.mute_toggled.connect(self._on_shared_mute_toggled)
+        c.volume_changed.connect(self._on_shared_volume_changed)
 
     def _deferred_load(self):
         try:
@@ -783,7 +826,15 @@ class MediaComparisonWidget(QWidget):
     def _update_overlay_hover_from_global_pos(self, global_pos: QPoint):
         local_pos = self.mapFromGlobal(global_pos)
         self._show_close_button(self._is_in_close_hover_zone(local_pos))
+        if self._compare_contextual_seek_ui_enabled():
+            self._position_compare_video_seek_overlays()
+            compare_zone = self._compare_seek_zone_at(local_pos)
+            if compare_zone is not None:
+                self._hide_shared_controls(force=True)
+                self._update_compare_video_seek_overlays(local_pos)
+                return
         self._update_shared_controls_hover_from_global_pos(global_pos)
+        self._update_compare_video_seek_overlays(local_pos)
 
     def _resize_zone_from_local_pos(self, local_pos: QPoint):
         if not self.rect().contains(local_pos):
@@ -946,16 +997,33 @@ class MediaComparisonWidget(QWidget):
             return QRect()
         width = max(1, int(self.width()))
         height = max(1, int(self.height()))
+        controls_height = max(1, int(controls.sizeHint().height()))
         target_width = max(460, min(1100, int(width * 0.74)))
         try:
             target_width = max(target_width, int(controls.minimum_runtime_width()))
         except Exception:
             pass
         target_width = max(1, min(width, int(target_width)))
-        target_height = max(100, int(controls.sizeHint().height()))
-        target_height = max(1, min(height, int(target_height)))
-        x_pos = max(0, (width - target_width) // 2)
-        y_pos = min(10, max(0, height - target_height))
+        target_height = max(1, min(height, controls_height))
+
+        saved_x_percent = settings.value('video_controls_x_percent', type=float)
+        saved_y_percent = settings.value('video_controls_y_percent', type=float)
+        saved_width_percent = settings.value('video_controls_width_percent', type=float)
+
+        if saved_x_percent is None or saved_y_percent is None:
+            x_pos = max(0, (width - target_width) // 2)
+            y_pos = max(0, height - target_height)
+            return QRect(x_pos, y_pos, target_width, target_height)
+
+        if saved_width_percent is not None:
+            target_width = max(
+                int(controls.minimum_runtime_width()),
+                min(int(saved_width_percent * width), width),
+            )
+        x_pos = int(saved_x_percent * width)
+        y_pos = int(saved_y_percent * height)
+        x_pos = max(0, min(x_pos, width - target_width))
+        y_pos = max(0, min(y_pos, height - target_height))
         return QRect(x_pos, y_pos, target_width, target_height)
 
     def _shared_controls_detection_rect(self) -> QRect:
@@ -1249,8 +1317,8 @@ class MediaComparisonWidget(QWidget):
                 "frame_count": frame_count,
                 "duration": duration_s,
             },
-            image=None,
-            proxy_model=None,
+            image=getattr(master, "current_image", None),
+            proxy_model=getattr(master, "proxy_image_list_model", None),
         )
         resolver = getattr(player, "resolve_exact_frame_for_marker", None)
         if hasattr(controls, "set_exact_frame_resolver"):
@@ -1355,6 +1423,7 @@ class MediaComparisonWidget(QWidget):
 
         if self._sync_coordinator is not None and not force_restart:
             return True
+        was_playing = self._any_video_playing()
         self._stop_video_sync()
 
         try:
@@ -1365,6 +1434,9 @@ class MediaComparisonWidget(QWidget):
             )
             self._sync_coordinator.start()
             self._manual_seek_active = False
+            self._apply_shared_loop_state()
+            if force_restart:
+                self._restart_sync_from_shared_loop_start(was_playing=was_playing)
             return True
         except Exception:
             self._sync_coordinator = None
@@ -1426,6 +1498,91 @@ class MediaComparisonWidget(QWidget):
         except Exception:
             pass
 
+    def _apply_shared_loop_state(self):
+        controls = self._shared_controls_widget()
+        if controls is None or self._master_viewer is None:
+            return
+        try:
+            loop_state = controls.get_loop_state()
+        except Exception:
+            return
+
+        enabled = bool(loop_state.get("enabled"))
+        start_frame = loop_state.get("start_frame")
+        end_frame = loop_state.get("end_frame")
+
+        if not enabled:
+            for viewer in self._active_viewers():
+                try:
+                    viewer.video_player.set_loop(False, None, None)
+                except Exception:
+                    continue
+            return
+
+        has_range = isinstance(start_frame, int) and isinstance(end_frame, int)
+        if not has_range:
+            for viewer in self._active_viewers():
+                try:
+                    viewer.video_player.set_loop(True, None, None)
+                except Exception:
+                    continue
+            return
+
+        start_ratio = self._ratio_from_master_frame(int(start_frame))
+        end_ratio = self._ratio_from_master_frame(int(end_frame))
+        if end_ratio < start_ratio:
+            start_ratio, end_ratio = end_ratio, start_ratio
+
+        for viewer in self._active_viewers():
+            try:
+                target_start = self._frame_for_ratio(viewer, start_ratio)
+                target_end = self._frame_for_ratio(viewer, end_ratio)
+                if target_end < target_start:
+                    target_start, target_end = target_end, target_start
+                viewer.video_player.set_loop(True, int(target_start), int(target_end))
+            except Exception:
+                continue
+
+    def _restart_sync_from_shared_loop_start(self, *, was_playing: bool):
+        controls = self._shared_controls_widget()
+        if controls is None or self._master_viewer is None:
+            return
+        try:
+            loop_state = controls.get_loop_state()
+        except Exception:
+            return
+        if not bool(loop_state.get("enabled")):
+            return
+        start_frame = loop_state.get("start_frame")
+        end_frame = loop_state.get("end_frame")
+        if not isinstance(start_frame, int) or not isinstance(end_frame, int):
+            return
+        ratio = self._ratio_from_master_frame(int(start_frame))
+        for viewer in self._active_viewers():
+            try:
+                target = self._frame_for_ratio(viewer, ratio)
+                viewer.video_player.seek_to_frame(target)
+            except Exception:
+                continue
+        try:
+            master_player = self._master_viewer.video_player
+            fps = float(master_player.get_fps() or 0.0)
+            if fps > 0.0:
+                time_ms = (float(start_frame) / fps) * 1000.0
+            else:
+                time_ms = float(start_frame)
+            controls.update_position(int(start_frame), float(time_ms))
+            controls.set_playing(False, update_auto_play=True)
+        except Exception:
+            pass
+        self._manual_seek_active = False
+        if was_playing:
+            self._play_both_players()
+            try:
+                controls.set_playing(True, update_auto_play=True)
+            except Exception:
+                pass
+
     def _on_shared_skip_requested(self, *, backward: bool):
         if self._master_viewer is None:
             return
@@ -1465,6 +1622,223 @@ class MediaComparisonWidget(QWidget):
             self._play_both_players()
             controls.set_playing(True, update_auto_play=True)
 
+    def _compare_contextual_seek_ui_enabled(self) -> bool:
+        if not self._both_videos_ready():
+            return False
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return False
+        try:
+            return not bool(controls.isVisible())
+        except Exception:
+            return False
+
+    def _position_compare_video_seek_overlays(self):
+        overlay_w = max(72, min(116, int(self.width() * 0.12)))
+        overlay_h = 62
+        margin_x = max(12, int(self.width() * 0.025))
+        margin_bottom = max(12, int(self.height() * 0.04))
+        y = max(0, self.height() - overlay_h - margin_bottom)
+        self._compare_seek_back_overlay.setGeometry(margin_x, y, overlay_w, overlay_h)
+        self._compare_seek_forward_overlay.setGeometry(
+            max(0, self.width() - margin_x - overlay_w),
+            y,
+            overlay_w,
+            overlay_h,
+        )
+        self._compare_seek_back_overlay.raise_()
+        self._compare_seek_forward_overlay.raise_()
+
+        scrub_w = max(160, min(340, int(self.width() * 0.32)))
+        scrub_h = 40
+        scrub_x = max(0, (self.width() - scrub_w) // 2)
+        scrub_y = max(0, self.height() - scrub_h - max(14, int(self.height() * 0.03)))
+        self._compare_scrub_overlay.setGeometry(scrub_x, scrub_y, scrub_w, scrub_h)
+        self._compare_scrub_overlay.raise_()
+
+        feedback_size = max(48, min(68, int(min(self.width(), self.height()) * 0.12)))
+        feedback_x = max(0, scrub_x + ((scrub_w - feedback_size) // 2))
+        feedback_y = max(0, scrub_y - feedback_size - 8)
+        self._compare_playback_feedback_overlay.setGeometry(feedback_x, feedback_y, feedback_size, feedback_size)
+        if self._compare_playback_feedback_overlay.isVisible():
+            self._compare_playback_feedback_overlay.raise_()
+
+    def _hide_compare_video_seek_overlays(self):
+        self._compare_seek_back_overlay.hide()
+        self._compare_seek_forward_overlay.hide()
+        self._compare_scrub_overlay.hide()
+        self._compare_seek_back_overlay.clear_feedback()
+        self._compare_seek_forward_overlay.clear_feedback()
+        self._compare_seek_back_overlay.set_active(False)
+        self._compare_seek_forward_overlay.set_active(False)
+        self._compare_scrub_overlay.set_state(active=False, progress=None, speed_hold=False, scrub_seconds=None, speed_value=None)
+
+    def _compare_seek_zone_at(self, local_pos: QPoint | None) -> str | None:
+        if not self._compare_contextual_seek_ui_enabled() or local_pos is None or not self.rect().contains(local_pos):
+            return None
+        if self._compare_seek_back_overlay.geometry().adjusted(-10, -8, 10, 8).contains(local_pos):
+            return "backward"
+        if self._compare_seek_forward_overlay.geometry().adjusted(-10, -8, 10, 8).contains(local_pos):
+            return "forward"
+        if self._compare_scrub_overlay.geometry().contains(local_pos):
+            return "scrub"
+        return None
+
+    def _compare_current_progress(self) -> float | None:
+        if self._master_viewer is None:
+            return None
+        try:
+            player = self._master_viewer.video_player
+            total_frames = int(player.get_total_frames() or 0)
+            if total_frames <= 1:
+                return None
+            current_frame = int(player.get_current_frame_number() or 0)
+            return max(0.0, min(1.0, float(current_frame) / float(total_frames - 1)))
+        except Exception:
+            return None
+
+    def _compare_progress_from_local_pos(self, local_pos: QPoint | None) -> float | None:
+        if local_pos is None:
+            return None
+        rect = QRect(self._compare_scrub_overlay.geometry())
+        if rect.width() <= 1 or not rect.contains(local_pos):
+            return None
+        return max(0.0, min(1.0, float(local_pos.x() - rect.left()) / float(rect.width())))
+
+    def _compare_seconds_from_progress(self, progress: float | None) -> float | None:
+        if progress is None or self._master_viewer is None:
+            return None
+        try:
+            player = self._master_viewer.video_player
+            fps = float(player.get_fps() or 0.0)
+            total_frames = int(player.get_total_frames() or 0)
+            if fps <= 0.0 or total_frames <= 0:
+                return None
+            return max(0.0, min(float(total_frames - 1) / fps, float(progress) * float(total_frames - 1) / fps))
+        except Exception:
+            return None
+
+    def _update_compare_video_seek_overlays(self, local_pos: QPoint | None):
+        if not self._compare_contextual_seek_ui_enabled():
+            self._hide_compare_video_seek_overlays()
+            return
+        self._position_compare_video_seek_overlays()
+        if local_pos is None or not self.rect().contains(local_pos):
+            self._hide_compare_video_seek_overlays()
+            return
+        active_zone = self._compare_seek_zone_at(local_pos)
+        if active_zone == "backward":
+            self._compare_seek_back_overlay.set_active(True)
+            self._compare_seek_forward_overlay.set_active(False)
+            self._compare_seek_back_overlay.show()
+            self._compare_seek_forward_overlay.hide()
+            self._compare_scrub_overlay.hide()
+            return
+        if active_zone == "forward":
+            self._compare_seek_back_overlay.set_active(False)
+            self._compare_seek_forward_overlay.set_active(True)
+            self._compare_seek_forward_overlay.show()
+            self._compare_seek_back_overlay.hide()
+            self._compare_scrub_overlay.hide()
+            return
+        if active_zone == "scrub":
+            progress = self._compare_progress_from_local_pos(local_pos)
+            if progress is None:
+                progress = self._compare_current_progress()
+            self._compare_seek_back_overlay.hide()
+            self._compare_seek_forward_overlay.hide()
+            self._compare_scrub_overlay.set_state(
+                active=True,
+                progress=progress,
+                speed_hold=False,
+                scrub_seconds=self._compare_seconds_from_progress(progress),
+                speed_value=None,
+            )
+            self._compare_scrub_overlay.show()
+            return
+        self._hide_compare_video_seek_overlays()
+
+    def _on_compare_seek_hold_timeout(self):
+        zone = str(self._compare_zone_press_kind or "")
+        if zone == "backward":
+            self._on_shared_skip_requested(backward=True)
+            self._compare_seek_hold_timer.start(self._compare_seek_hold_repeat_interval_ms)
+        elif zone == "forward":
+            self._on_shared_skip_requested(backward=False)
+            self._compare_seek_hold_timer.start(self._compare_seek_hold_repeat_interval_ms)
+
+    def _handle_compare_contextual_press(self, local_pos: QPoint) -> bool:
+        zone = self._compare_seek_zone_at(local_pos)
+        if zone is None:
+            return False
+        self._compare_zone_press_kind = zone
+        self._compare_zone_press_start_local_pos = QPoint(local_pos)
+        self._compare_zone_last_local_pos = QPoint(local_pos)
+        if zone == "backward":
+            self._on_shared_skip_requested(backward=True)
+            self._compare_seek_hold_timer.start(self._compare_seek_hold_initial_delay_ms)
+            return True
+        if zone == "forward":
+            self._on_shared_skip_requested(backward=False)
+            self._compare_seek_hold_timer.start(self._compare_seek_hold_initial_delay_ms)
+            return True
+        progress = self._compare_progress_from_local_pos(local_pos)
+        if progress is not None:
+            self._on_shared_seek_frame(int(round(progress * float(self._master_max_frame()))))
+        return True
+
+    def _handle_compare_contextual_move(self, local_pos: QPoint) -> bool:
+        if self._compare_zone_press_kind is None:
+            return False
+        self._compare_zone_last_local_pos = QPoint(local_pos)
+        if self._compare_zone_press_kind in {"backward", "forward"}:
+            current_zone = self._compare_seek_zone_at(local_pos)
+            if current_zone != self._compare_zone_press_kind:
+                self._compare_seek_hold_timer.stop()
+            elif not self._compare_seek_hold_timer.isActive():
+                self._compare_seek_hold_timer.start(self._compare_seek_hold_repeat_interval_ms)
+            return True
+        progress = self._compare_progress_from_local_pos(local_pos)
+        if progress is not None:
+            self._on_shared_seek_frame(int(round(progress * float(self._master_max_frame()))))
+        return True
+
+    def _handle_compare_contextual_release(self, local_pos: QPoint) -> bool:
+        if self._compare_zone_press_kind is None:
+            return False
+        self._compare_seek_hold_timer.stop()
+        if self._compare_zone_press_kind == "scrub":
+            progress = self._compare_progress_from_local_pos(local_pos)
+            if progress is not None:
+                self._on_shared_seek_frame(int(round(progress * float(self._master_max_frame()))))
+        self._compare_zone_press_kind = None
+        self._compare_zone_last_local_pos = QPoint()
+        self._update_compare_video_seek_overlays(local_pos)
+        return True
+
+    def _handle_compare_contextual_double_click(self, local_pos: QPoint) -> bool:
+        zone = self._compare_seek_zone_at(local_pos)
+        if zone == "scrub":
+            self._on_shared_play_pause_requested()
+            self._show_compare_playback_feedback(
+                "play" if self._any_video_playing() else "pause",
+                duration_ms=1000,
+            )
+            return True
+        if zone == "backward":
+            self._on_shared_skip_requested(backward=True)
+            return True
+        if zone == "forward":
+            self._on_shared_skip_requested(backward=False)
+            return True
+        return False
+
+    def _show_compare_playback_feedback(self, kind: str, duration_ms: int = 1000):
+        self._position_compare_video_seek_overlays()
+        self._compare_playback_feedback_overlay.show_feedback(kind)
+        self._compare_playback_feedback_timer.stop()
+        self._compare_playback_feedback_timer.start(max(200, int(duration_ms)))
+
     def _on_shared_stop_requested(self):
         self._stop_video_sync()
         self._manual_seek_active = False
@@ -1494,6 +1868,21 @@ class MediaComparisonWidget(QWidget):
                     viewer.video_player.set_muted(True)
                 except Exception:
                     continue
+            return
+        self._apply_audio_focus_from_split()
+
+    def _shared_audio_volume(self) -> float:
+        controls = self._shared_controls_widget()
+        if controls is None:
+            return 1.0
+        try:
+            volume = float(getattr(controls, 'volume_level', 1.0))
+        except (TypeError, ValueError):
+            volume = 1.0
+        return max(0.0, min(1.0, volume))
+
+    def _on_shared_volume_changed(self, _volume: float):
+        if not self._both_videos_ready():
             return
         self._apply_audio_focus_from_split()
 
@@ -1550,20 +1939,23 @@ class MediaComparisonWidget(QWidget):
 
     def _apply_audio_side(self, side: str):
         side = str(side or "a").lower()
+        shared_volume = self._shared_audio_volume()
         for key, viewer in (("a", self.viewer_a), ("b", self.viewer_b), ("c", self.viewer_c), ("d", self.viewer_d)):
             if key == "c" and not self._has_third_layer():
                 continue
             if key == "d" and not self._has_fourth_layer():
                 continue
             try:
-                viewer.video_player.set_muted(key != side)
-                viewer.video_player.set_volume(1.0 if key == side else 0.0)
+                target_volume = shared_volume if key == side else 0.0
+                viewer.video_player.set_muted(target_volume <= 0.0)
+                viewer.video_player.set_volume(target_volume)
             except Exception:
                 continue
 
     def _apply_audio_mix_levels(self, focus_side: str):
         areas = self._current_visible_audio_areas()
         dominant_area = max(1e-6, float(areas.get(focus_side, 0.0)))
+        shared_volume = self._shared_audio_volume()
         for key, viewer in (("a", self.viewer_a), ("b", self.viewer_b), ("c", self.viewer_c), ("d", self.viewer_d)):
             if key == "c" and not self._has_third_layer():
                 continue
@@ -1579,6 +1971,7 @@ class MediaComparisonWidget(QWidget):
                     target_volume = float(self.AMBIENT_SECONDARY_MIN) + (
                         float(self.AMBIENT_SECONDARY_MAX - self.AMBIENT_SECONDARY_MIN) * ratio
                     )
+            target_volume *= shared_volume
             try:
                 viewer.video_player.set_muted(target_volume <= 0.0)
                 viewer.video_player.set_volume(target_volume)
@@ -1596,9 +1989,11 @@ class MediaComparisonWidget(QWidget):
         except Exception:
             is_muted = True
         if is_muted:
+            shared_volume = self._shared_audio_volume()
             for viewer in self._active_viewers():
                 try:
                     viewer.video_player.set_muted(True)
+                    viewer.video_player.set_volume(shared_volume)
                 except Exception:
                     continue
             self._audio_focus_side = None
@@ -1607,6 +2002,16 @@ class MediaComparisonWidget(QWidget):
         # Audio focus follows the dominant side of the split.
         # 2-way: A/B by dominant width. 3/4-way: dominant quadrant/region area.
         side, _viewer = self._resolve_audio_focus_viewer()
+        if self._shared_audio_volume() <= 0.0:
+            shared_volume = self._shared_audio_volume()
+            for viewer in self._active_viewers():
+                try:
+                    viewer.video_player.set_muted(True)
+                    viewer.video_player.set_volume(shared_volume)
+                except Exception:
+                    continue
+            self._audio_focus_side = None
+            return
         if self.get_video_compare_audio_mode() == self.AUDIO_MODE_AMBIENT_MIX:
             self._apply_audio_mix_levels(side)
         else:
@@ -1833,6 +2238,14 @@ class MediaComparisonWidget(QWidget):
             return super().eventFilter(watched, event)
 
         if event_type == QEvent.Type.MouseButtonDblClick:
+            try:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    compare_local_pos = self._event_local_pos(event, watched if isinstance(watched, QWidget) else None)
+                    if self._handle_compare_contextual_double_click(compare_local_pos):
+                        event.accept()
+                        return True
+            except Exception:
+                pass
             source_viewer = self._event_source_viewer(watched)
             if source_viewer is not None:
                 try:
@@ -1877,6 +2290,11 @@ class MediaComparisonWidget(QWidget):
         if event_type == QEvent.Type.MouseButtonPress:
             try:
                 if event.button() == Qt.MouseButton.LeftButton:
+                    compare_local_pos = self._event_local_pos(event, watched if isinstance(watched, QWidget) else None)
+                    if self._handle_compare_contextual_press(compare_local_pos):
+                        event.accept()
+                        return True
+                    source_viewer = self._event_source_viewer(watched)
                     local_pos = self._event_local_pos(event, watched if isinstance(watched, QWidget) else None)
                     if self._close_button.isVisible() and self._close_button.geometry().contains(local_pos):
                         return super().eventFilter(watched, event)
@@ -1904,6 +2322,13 @@ class MediaComparisonWidget(QWidget):
             except Exception:
                 pass
         elif event_type == QEvent.Type.MouseMove:
+            compare_local_pos = self._event_local_pos(event, watched if isinstance(watched, QWidget) else None)
+            if self._handle_compare_contextual_move(compare_local_pos):
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return True
             if self._resize_active:
                 self._apply_window_resize(self._event_global_pos(event, watched if isinstance(watched, QWidget) else None))
                 try:
@@ -1947,6 +2372,10 @@ class MediaComparisonWidget(QWidget):
         elif event_type == QEvent.Type.MouseButtonRelease:
             try:
                 if event.button() == Qt.MouseButton.LeftButton:
+                    compare_local_pos = self._event_local_pos(event, watched if isinstance(watched, QWidget) else None)
+                    if self._handle_compare_contextual_release(compare_local_pos):
+                        event.accept()
+                        return True
                     if self._resize_active:
                         self._end_window_resize()
                         self._update_split_from_global_cursor()
@@ -2096,6 +2525,10 @@ class MediaComparisonWidget(QWidget):
         self._sync_bootstrap_timer.stop()
         try:
             self._shared_controls_hide_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._compare_playback_feedback_timer.stop()
         except Exception:
             pass
         try:

@@ -1,10 +1,10 @@
 import time
 
-from PySide6.QtCore import Qt, Signal, Slot, QPointF, QRectF
+from PySide6.QtCore import Qt, Signal, Slot, QEvent, QTimer, QPointF, QRectF
 from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider,
-                               QSizePolicy)
+                               QSizePolicy, QGraphicsDropShadowEffect)
 from utils.settings import settings, DEFAULT_SETTINGS
 from skins.engine import SkinManager
 
@@ -311,6 +311,161 @@ class _BurstSkipButton(QPushButton):
         super().mouseReleaseEvent(event)
 
 
+class _HoldableMuteButton(QPushButton):
+    """Mute button that distinguishes click from press-and-hold."""
+
+    hold_requested = Signal()
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(label, parent)
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(260)
+        self._hold_timer.timeout.connect(self._emit_hold_requested)
+        self._hold_active = False
+        self._press_active = False
+
+    def _emit_hold_requested(self):
+        if not self._press_active:
+            return
+        if not bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            return
+        self._hold_active = True
+        self.hold_requested.emit()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_active = True
+            self._hold_active = False
+            self._hold_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_active = False
+            self._hold_timer.stop()
+            if self._hold_active:
+                self._hold_active = False
+                self.setDown(False)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+
+class _VolumePopup(QFrame):
+    """Compact popup with a vertical volume slider."""
+
+    volume_changed = Signal(float)
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("videoVolumePopup")
+        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        self.volume_slider = QSlider(Qt.Orientation.Vertical)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setSingleStep(1)
+        self.volume_slider.setPageStep(10)
+        self.volume_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.volume_slider.setInvertedAppearance(False)
+        self.volume_slider.setFixedSize(22, 92)
+        self.volume_slider.valueChanged.connect(self._on_slider_changed)
+
+        self.value_label = QLabel("100%")
+        self.value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.value_label.setStyleSheet("""
+            QLabel {
+                color: #F2FFF6;
+                background-color: rgba(76, 175, 80, 42);
+                border: 1px solid rgba(76, 175, 80, 120);
+                border-radius: 6px;
+                font-size: 9px;
+                font-weight: 700;
+                padding: 1px 5px;
+            }
+        """)
+
+        layout.addWidget(self.volume_slider)
+        layout.addWidget(self.value_label)
+
+        self.setStyleSheet("""
+            QFrame#videoVolumePopup {
+                background-color: rgba(22, 24, 28, 220);
+                border: 1px solid rgba(160, 190, 255, 85);
+                border-radius: 9px;
+            }
+            QSlider::groove:vertical {
+                background: rgba(255, 255, 255, 26);
+                width: 5px;
+                border-radius: 2px;
+            }
+            QSlider::handle:vertical {
+                background: #F2F7FF;
+                border: 1px solid rgba(84, 194, 106, 180);
+                height: 12px;
+                margin: 0 -4px;
+                border-radius: 6px;
+            }
+            QSlider::handle:vertical:hover {
+                background: #FFFFFF;
+                border-color: rgba(111, 214, 125, 220);
+            }
+        """)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(0, 0, 0, 130))
+        self.setGraphicsEffect(shadow)
+
+        self.setFixedSize(34, 118)
+
+    def _on_slider_changed(self, value: int):
+        clamped = max(0, min(100, int(value)))
+        self.value_label.setText(f"{clamped}%")
+        self.volume_changed.emit(clamped / 100.0)
+
+    def set_volume(self, volume: float):
+        normalized = max(0.0, min(1.0, float(volume)))
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(int(round(normalized * 100.0)))
+        self.volume_slider.blockSignals(False)
+        self.value_label.setText(f"{int(round(normalized * 100.0))}%")
+
+    def show_near(self, anchor_widget: QWidget, volume: float):
+        self.set_volume(volume)
+        global_anchor = anchor_widget.mapToGlobal(anchor_widget.rect().center())
+        popup_size = self.size()
+        x = global_anchor.x() - (popup_size.width() // 2)
+        y = anchor_widget.mapToGlobal(anchor_widget.rect().topLeft()).y() - popup_size.height() - 6
+        screen = QApplication.screenAt(global_anchor) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = max(available.left() + 4, min(x, available.right() - popup_size.width() - 4))
+            if y < available.top() + 4:
+                y = anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()).y() + 6
+                if y + popup_size.height() > available.bottom() - 4:
+                    y = max(available.top() + 4, available.bottom() - popup_size.height() - 4)
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.closed.emit()
+
+
 class SpeedSlider(QSlider):
     """Custom speed slider with colored zones and visual dividers."""
 
@@ -371,6 +526,7 @@ class VideoControlsWidget(QWidget):
     loop_toggled = Signal(bool)
     speed_changed = Signal(float)  # Playback speed multiplier
     mute_toggled = Signal(bool)  # Mute state (True = muted)
+    volume_changed = Signal(float)  # Normalized volume (0.0 - 1.0)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -408,6 +564,7 @@ class VideoControlsWidget(QWidget):
         self._overlay_reposition_retry_count = 0
         self._temp_speed_visual_active = False
         self._temp_speed_visual_value = None
+        self._volume_popup = None
 
         # Double-click fit/restore state
         self._fit_mode_active = False
@@ -418,7 +575,7 @@ class VideoControlsWidget(QWidget):
         self._last_time_display = None
         self._perf_profile = 'single'
         self._last_playing_visual_state = None
-        self._last_mute_visual_state = None
+        self._last_audio_visual_state = None
         self._timeline_scrubbing = False
         self._exact_frame_resolver = None
         self._skip_feedback_style = (
@@ -470,7 +627,7 @@ class VideoControlsWidget(QWidget):
         self.stop_btn.setMaximumWidth(40)
         self.stop_btn.clicked.connect(self.stop_requested.emit)
 
-        self.mute_btn = QPushButton('🔇')
+        self.mute_btn = _HoldableMuteButton('🔇')
         self.mute_btn.setToolTip('Toggle Mute/Unmute')
         self.mute_btn.setMaximumWidth(40)
         self.mute_btn.setStyleSheet("""
@@ -485,6 +642,7 @@ class VideoControlsWidget(QWidget):
                 border-color: #666;
             }
         """)
+        self.mute_btn.hold_requested.connect(self._show_volume_popup)
         self.mute_btn.clicked.connect(self._toggle_mute)
 
         # Frame navigation with icons
@@ -821,7 +979,10 @@ class VideoControlsWidget(QWidget):
         self.auto_play_enabled = settings.value('video_auto_play', defaultValue=False, type=bool)
 
         # Mute state (persists across video changes and reboots)
-        self.is_muted = settings.value('video_muted', defaultValue=True, type=bool)
+        self.is_muted = settings.value('video_muted', defaultValue=DEFAULT_SETTINGS['video_muted'], type=bool)
+        self.volume_level = self._clamp_volume(
+            settings.value('video_volume', defaultValue=DEFAULT_SETTINGS['video_volume'], type=float)
+        )
 
         # Video metadata for speed preview calculations
         self._current_fps = 0
@@ -1280,6 +1441,82 @@ class VideoControlsWidget(QWidget):
         self.loop_checkbox.blockSignals(False)
         # Set internal state (signal will be emitted when video loads)
         self.is_looping = loop_enabled
+
+    def _clamp_volume(self, volume) -> float:
+        try:
+            parsed = float(volume)
+        except (TypeError, ValueError):
+            parsed = 1.0
+        return max(0.0, min(1.0, parsed))
+
+    def _audio_visual_state(self) -> tuple[bool, int]:
+        return (bool(self.is_muted or self.volume_level <= 0.0), int(round(self.volume_level * 100.0)))
+
+    def _sync_volume_popup(self):
+        popup = self._volume_popup
+        if popup is None:
+            return
+        try:
+            popup.set_volume(self.volume_level)
+        except Exception:
+            pass
+
+    def _show_volume_popup(self):
+        if self._volume_popup is None:
+            self._volume_popup = _VolumePopup(self)
+            self._volume_popup.volume_changed.connect(self.set_volume_value)
+            self._volume_popup.closed.connect(self._on_volume_popup_closed)
+        self._stop_parent_hide_timer()
+        self._volume_popup.show_near(self.mute_btn, self.volume_level)
+
+    def _hide_volume_popup(self):
+        popup = self._volume_popup
+        if popup is None:
+            return
+        try:
+            popup.hide()
+        except Exception:
+            pass
+
+    def _on_volume_popup_closed(self):
+        self._restart_parent_hide_timer()
+
+    def _set_muted_state(self, muted: bool, *, emit_signal: bool = True, persist: bool = True):
+        muted = bool(muted)
+        if self.is_muted == muted and emit_signal is False:
+            return
+        self.is_muted = muted
+        if persist:
+            settings.setValue('video_muted', self.is_muted)
+        if emit_signal:
+            self.mute_toggled.emit(self.is_muted)
+        self._update_mute_button()
+
+    def get_volume_value(self) -> float:
+        """Return current normalized volume value."""
+        return float(self.volume_level)
+
+    def set_volume_value(self, volume: float, emit_signal: bool = True, sync_mute: bool = True):
+        """Set normalized volume and keep the UI/backend synchronized."""
+        normalized = self._clamp_volume(volume)
+        if normalized == self.volume_level and not sync_mute and not emit_signal:
+            self._sync_volume_popup()
+            self._update_mute_button()
+            return
+
+        self.volume_level = normalized
+        settings.setValue('video_volume', self.volume_level)
+        self._sync_volume_popup()
+
+        if sync_mute:
+            if self.volume_level <= 0.0 and not self.is_muted:
+                self._set_muted_state(True, emit_signal=emit_signal, persist=True)
+            elif self.volume_level > 0.0 and self.is_muted:
+                self._set_muted_state(False, emit_signal=emit_signal, persist=True)
+
+        if emit_signal:
+            self.volume_changed.emit(self.volume_level)
+        self._update_mute_button()
 
     def set_loop_persistence_scope(self, scope: str | None):
         """Set metadata scope key used for loop marker persistence."""
@@ -2513,19 +2750,20 @@ class VideoControlsWidget(QWidget):
     @Slot()
     def _toggle_mute(self):
         """Toggle mute/unmute state."""
-        self.is_muted = not self.is_muted
-        # Save to settings for persistence across reboots
-        settings.setValue('video_muted', self.is_muted)
-        self.mute_toggled.emit(self.is_muted)
-        self._update_mute_button()
+        self._set_muted_state(not self.is_muted, emit_signal=True, persist=True)
 
     def _update_mute_button(self):
         """Update mute button appearance based on state."""
-        if self._last_mute_visual_state is not None and self._last_mute_visual_state == self.is_muted:
+        current_visual_state = self._audio_visual_state()
+        if self._last_audio_visual_state is not None and self._last_audio_visual_state == current_visual_state:
             return
-        if self.is_muted:
+        effective_muted, volume_percent = current_visual_state
+        if effective_muted:
             self.mute_btn.setText('🔇')
-            self.mute_btn.setToolTip('Unmute Audio')
+            if self.volume_level <= 0.0:
+                self.mute_btn.setToolTip('Volume is at 0%. Hold to adjust volume.')
+            else:
+                self.mute_btn.setToolTip(f'Muted. Hold to adjust volume ({volume_percent}%).')
             # Normal state when muted
             self.mute_btn.setStyleSheet("""
                 QPushButton {
@@ -2541,7 +2779,7 @@ class VideoControlsWidget(QWidget):
             """)
         else:
             self.mute_btn.setText('🔊')
-            self.mute_btn.setToolTip('Mute Audio')
+            self.mute_btn.setToolTip(f'Mute Audio. Hold for volume ({volume_percent}%).')
             # Green glow when unmuted
             self.mute_btn.setStyleSheet("""
                 QPushButton {
@@ -2555,7 +2793,7 @@ class VideoControlsWidget(QWidget):
                     border-color: #5FBF60;
                 }
             """)
-        self._last_mute_visual_state = self.is_muted
+        self._last_audio_visual_state = current_visual_state
 
     @Slot(dict)
     def set_video_info(self, metadata: dict, image=None, proxy_model=None):
@@ -2656,6 +2894,7 @@ class VideoControlsWidget(QWidget):
                 self.frame_changed.emit(start_frame)
 
         # Restore mute state after video loads (emit to sync with video player)
+        self.volume_changed.emit(self.volume_level)
         self.mute_toggled.emit(self.is_muted)
 
         # Update speed preview with new video metadata
@@ -3185,15 +3424,30 @@ class VideoControlsWidget(QWidget):
     def _stop_parent_hide_timer(self):
         """Stop parent's auto-hide timer during drag/resize operations."""
         parent = self.parent()
-        if parent and hasattr(parent, '_controls_hide_timer'):
-            parent._controls_hide_timer.stop()
+        if not parent:
+            return
+        timer = getattr(parent, '_controls_hide_timer', None)
+        if timer is None:
+            timer = getattr(parent, '_shared_controls_hide_timer', None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
 
     def _restart_parent_hide_timer(self):
         """Restart parent's auto-hide timer after drag/resize ends."""
         parent = self.parent()
-        if parent and hasattr(parent, '_show_controls_temporarily'):
-            # Use parent's method to show controls and restart timer
+        if not parent:
+            return
+        if hasattr(parent, '_show_controls_temporarily'):
             parent._show_controls_temporarily()
+            return
+        if hasattr(parent, '_show_shared_controls_temporarily'):
+            if getattr(parent, '_shared_controls_auto_hide', True):
+                parent._show_shared_controls_temporarily()
+            elif hasattr(parent, '_show_shared_controls_permanent'):
+                parent._show_shared_controls_permanent()
 
     def _left_mouse_button_down(self) -> bool:
         """Best-effort global button-state check for lost-release recovery."""

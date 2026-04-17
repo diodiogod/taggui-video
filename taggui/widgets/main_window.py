@@ -3110,6 +3110,7 @@ class MainWindow(QMainWindow):
         )
         video_controls.speed_changed.connect(video_player.set_playback_speed)
         video_controls.mute_toggled.connect(video_player.set_muted)
+        video_controls.volume_changed.connect(video_player.set_volume)
         video_controls.screenshot_requested.connect(
             lambda: self.video_editing_controller.capture_current_video_frame(viewer=viewer)
         )

@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Qt, Slot, QModelIndex
 from widgets.image_viewer import ImageMarking
+from utils.settings import settings
 
 class SignalManager:
     """Manages signal connections for main window."""
@@ -427,6 +428,8 @@ class SignalManager:
         # Connect mute control
         video_controls.mute_toggled.connect(
             lambda muted: video_player.set_muted(muted))
+        video_controls.volume_changed.connect(
+            lambda volume: video_player.set_volume(volume))
 
         # Connect toolbar video editing controls
         toolbar_manager.fixed_marker_size_spinbox.valueChanged.connect(
