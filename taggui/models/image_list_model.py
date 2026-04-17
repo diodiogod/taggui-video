@@ -768,6 +768,46 @@ class ImageListModel(QAbstractListModel):
 
         self._apply_loop_metadata_from_meta(image, meta)
 
+    def _read_cached_sidecar_meta(self, json_file_path: Path) -> dict | None:
+        """Read a JSON sidecar once per path/mtime/size tuple within this session."""
+        try:
+            stat = json_file_path.stat()
+        except OSError:
+            return None
+
+        if stat.st_size <= 0:
+            return None
+
+        cache_key = str(json_file_path)
+        with self._sidecar_meta_cache_lock:
+            cached = self._sidecar_meta_cache.get(cache_key)
+            if cached and cached[0] == float(stat.st_mtime) and cached[1] == int(stat.st_size):
+                return cached[2]
+
+        meta: dict | None
+        try:
+            with json_file_path.open(encoding='UTF-8') as source:
+                loaded = json.load(source)
+                meta = loaded if isinstance(loaded, dict) else None
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            meta = None
+
+        with self._sidecar_meta_cache_lock:
+            self._sidecar_meta_cache[cache_key] = (
+                float(stat.st_mtime),
+                int(stat.st_size),
+                meta,
+            )
+            if len(self._sidecar_meta_cache) > self._sidecar_meta_cache_limit:
+                try:
+                    oldest_key = next(iter(self._sidecar_meta_cache))
+                except StopIteration:
+                    oldest_key = None
+                if oldest_key is not None:
+                    self._sidecar_meta_cache.pop(oldest_key, None)
+
+        return meta
+
     def _restore_rel_path_candidates(self, path: Path) -> list[str]:
         """Build normalized DB lookup candidates for a file path."""
         rel_candidates = []
@@ -1299,6 +1339,9 @@ class ImageListModel(QAbstractListModel):
         self._pending_path_validation_result = None
         self._path_validation_lock = threading.Lock()
         self._background_validation_dialog = None
+        self._sidecar_meta_cache: dict[str, tuple[float, int, dict | None]] = {}
+        self._sidecar_meta_cache_lock = threading.Lock()
+        self._sidecar_meta_cache_limit = 2048
         self._paginated_maintenance_lock = threading.Lock()
         self._paginated_maintenance_running = False
         self._new_media_refresh_running = False
@@ -2013,35 +2056,30 @@ class ImageListModel(QAbstractListModel):
 
             # In paginated mode we still need sidecar loop metadata for playback loop markers.
             json_file_path = file_path.with_suffix('.json')
-            if json_file_path.exists() and json_file_path.stat().st_size > 0:
-                with json_file_path.open(encoding='UTF-8') as source:
-                    try:
-                        meta = json.load(source)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        pass
-                    else:
-                        self._apply_image_metadata_from_meta(image, meta)
-                        merged_state = build_sidecar_reaction_recovery(row, meta)
-                        if merged_state:
-                            sidecar_reaction_updates.append(
-                                (
-                                    float(merged_state.get('rating', 0.0) or 0.0),
-                                    bool(merged_state.get('love', False)),
-                                    bool(merged_state.get('bomb', False)),
-                                    merged_state.get('reaction_updated_at'),
-                                    int(img_id),
-                                )
-                            )
-                        merged_review_state = build_sidecar_review_recovery(row, meta)
-                        if merged_review_state:
-                            sidecar_review_updates.append(
-                                (
-                                    int(merged_review_state.get('review_rank', 0) or 0),
-                                    int(merged_review_state.get('review_flags', 0) or 0),
-                                    merged_review_state.get('review_updated_at'),
-                                    int(img_id),
-                                )
-                            )
+            meta = self._read_cached_sidecar_meta(json_file_path)
+            if meta is not None:
+                self._apply_image_metadata_from_meta(image, meta)
+                merged_state = build_sidecar_reaction_recovery(row, meta)
+                if merged_state:
+                    sidecar_reaction_updates.append(
+                        (
+                            float(merged_state.get('rating', 0.0) or 0.0),
+                            bool(merged_state.get('love', False)),
+                            bool(merged_state.get('bomb', False)),
+                            merged_state.get('reaction_updated_at'),
+                            int(img_id),
+                        )
+                    )
+                merged_review_state = build_sidecar_review_recovery(row, meta)
+                if merged_review_state:
+                    sidecar_review_updates.append(
+                        (
+                            int(merged_review_state.get('review_rank', 0) or 0),
+                            int(merged_review_state.get('review_flags', 0) or 0),
+                            merged_review_state.get('review_updated_at'),
+                            int(img_id),
+                        )
+                    )
 
             images.append(image)
 
@@ -4861,6 +4899,8 @@ class ImageListModel(QAbstractListModel):
         error_messages: list[str] = []
         new_images = []  # Build new image list without clearing old one
         self._directory_path = directory_path
+        with self._sidecar_meta_cache_lock:
+            self._sidecar_meta_cache.clear()
         self._path_validation_generation += 1
         load_generation = self._path_validation_generation
         with self._path_validation_lock:
@@ -5248,18 +5288,9 @@ class ImageListModel(QAbstractListModel):
             # Store DB cached info (including thumbnail_cached flag) for fast cache checks
             image._db_cached_info = cached if cached else {}
             json_file_path = image_path.with_suffix('.json')
-            if (str(json_file_path) in json_file_path_strings and
-                json_file_path.stat().st_size > 0):
-                with json_file_path.open(encoding='UTF-8') as source:
-                    try:
-                        meta = json.load(source)
-                    except json.JSONDecodeError as e:
-                        # Silently skip invalid JSON files
-                        pass
-                    except UnicodeDecodeError as e:
-                        # Silently skip files with invalid unicode
-                        pass
-
+            if str(json_file_path) in json_file_path_strings:
+                meta = self._read_cached_sidecar_meta(json_file_path)
+                if meta is not None:
                     self._apply_image_metadata_from_meta(image, meta)
                     # Silently ignore unsupported JSON versions (like ComfyUI workflow files)
             new_images.append(image)
@@ -5563,6 +5594,8 @@ class ImageListModel(QAbstractListModel):
 
         # Initialize database
         self._directory_path = directory_path
+        with self._sidecar_meta_cache_lock:
+            self._sidecar_meta_cache.clear()
         # Reset enrichment/session state for a fresh paginated load. Without
         # this, a previous folder session can leave stale "page already done"
         # or pending dimension-update state behind, which suppresses repair on
@@ -7503,14 +7536,9 @@ class ImageListModel(QAbstractListModel):
         )
 
         json_file_path = image_path.with_suffix('.json')
-        if json_file_path.exists() and json_file_path.stat().st_size > 0:
-            with json_file_path.open(encoding='UTF-8') as source:
-                try:
-                    meta = json.load(source)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    pass  # Ignore JSON errors for duplicates
-                else:
-                    self._apply_image_metadata_from_meta(image, meta)
+        meta = self._read_cached_sidecar_meta(json_file_path)
+        if meta is not None:
+            self._apply_image_metadata_from_meta(image, meta)
 
         # Insert the image in the correct sorted position
         # Use natural sort key for insertion

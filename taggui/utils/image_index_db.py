@@ -343,8 +343,8 @@ class ImageIndexDB:
         self.conn = None
         self._order_cache_signature = None
 
-        # Lock for thread-safe DB access (multiple worker threads)
-        self._db_lock = threading.Lock()
+        # Re-entrant so write helpers can safely call commit() while locked.
+        self._db_lock = threading.RLock()
 
         if self.enabled:
             self._init_db()
@@ -884,73 +884,74 @@ class ImageIndexDB:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                cursor = self.conn.cursor()
-                # Use INSERT ... ON CONFLICT to preserve thumbnail_cached flag
-                cursor.execute('''
-                    INSERT INTO images
-                    (file_name, width, height, aspect_ratio, is_video, video_fps,
-                     video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
-                     file_size, file_type, ctime, review_rank, review_flags, review_updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(file_name) DO UPDATE SET
-                        width = excluded.width,
-                        height = excluded.height,
-                        aspect_ratio = excluded.aspect_ratio,
-                        is_video = excluded.is_video,
-                        video_fps = excluded.video_fps,
-                        video_duration = excluded.video_duration,
-                        video_frame_count = excluded.video_frame_count,
-                        mtime = excluded.mtime,
-                        rating = CASE
-                            WHEN ABS(COALESCE(excluded.rating, 0.0)) > 0.000001
-                                THEN excluded.rating
-                            ELSE images.rating
-                        END,
-                        reaction_updated_at = COALESCE(images.reaction_updated_at, excluded.reaction_updated_at),
-                        review_rank = CASE
-                            WHEN excluded.review_updated_at IS NOT NULL
-                                 AND (
-                                     images.review_updated_at IS NULL
-                                     OR excluded.review_updated_at >= images.review_updated_at
-                                 )
-                            THEN excluded.review_rank
-                            WHEN COALESCE(images.review_rank, 0) <= 0
-                                 AND COALESCE(excluded.review_rank, 0) > 0
-                            THEN excluded.review_rank
-                            ELSE images.review_rank
-                        END,
-                        review_flags = CASE
-                            WHEN excluded.review_updated_at IS NOT NULL
-                                 AND (
-                                     images.review_updated_at IS NULL
-                                     OR excluded.review_updated_at >= images.review_updated_at
-                                 )
-                            THEN excluded.review_flags
-                            WHEN COALESCE(images.review_flags, 0) = 0
-                                 AND COALESCE(excluded.review_flags, 0) != 0
-                            THEN excluded.review_flags
-                            ELSE images.review_flags
-                        END,
-                        review_updated_at = CASE
-                            WHEN excluded.review_updated_at IS NOT NULL
-                                 AND (
-                                     images.review_updated_at IS NULL
-                                     OR excluded.review_updated_at >= images.review_updated_at
-                                 )
-                            THEN excluded.review_updated_at
-                            ELSE images.review_updated_at
-                        END,
-                        indexed_at = excluded.indexed_at,
-                        file_size = COALESCE(excluded.file_size, images.file_size),
-                        file_type = COALESCE(NULLIF(excluded.file_type, ''), images.file_type),
-                        ctime = CASE
-                            WHEN images.ctime IS NOT NULL THEN images.ctime
-                            ELSE excluded.ctime
-                        END
-                        -- thumbnail_cached intentionally NOT updated (preserve existing value)
-                ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
-                      video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
-                      file_size, file_type, insert_ctime, review_rank, review_flags, review_updated_at))
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    # Use INSERT ... ON CONFLICT to preserve thumbnail_cached flag
+                    cursor.execute('''
+                        INSERT INTO images
+                        (file_name, width, height, aspect_ratio, is_video, video_fps,
+                         video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
+                         file_size, file_type, ctime, review_rank, review_flags, review_updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(file_name) DO UPDATE SET
+                            width = excluded.width,
+                            height = excluded.height,
+                            aspect_ratio = excluded.aspect_ratio,
+                            is_video = excluded.is_video,
+                            video_fps = excluded.video_fps,
+                            video_duration = excluded.video_duration,
+                            video_frame_count = excluded.video_frame_count,
+                            mtime = excluded.mtime,
+                            rating = CASE
+                                WHEN ABS(COALESCE(excluded.rating, 0.0)) > 0.000001
+                                    THEN excluded.rating
+                                ELSE images.rating
+                            END,
+                            reaction_updated_at = COALESCE(images.reaction_updated_at, excluded.reaction_updated_at),
+                            review_rank = CASE
+                                WHEN excluded.review_updated_at IS NOT NULL
+                                     AND (
+                                         images.review_updated_at IS NULL
+                                         OR excluded.review_updated_at >= images.review_updated_at
+                                     )
+                                THEN excluded.review_rank
+                                WHEN COALESCE(images.review_rank, 0) <= 0
+                                     AND COALESCE(excluded.review_rank, 0) > 0
+                                THEN excluded.review_rank
+                                ELSE images.review_rank
+                            END,
+                            review_flags = CASE
+                                WHEN excluded.review_updated_at IS NOT NULL
+                                     AND (
+                                         images.review_updated_at IS NULL
+                                         OR excluded.review_updated_at >= images.review_updated_at
+                                     )
+                                THEN excluded.review_flags
+                                WHEN COALESCE(images.review_flags, 0) = 0
+                                     AND COALESCE(excluded.review_flags, 0) != 0
+                                THEN excluded.review_flags
+                                ELSE images.review_flags
+                            END,
+                            review_updated_at = CASE
+                                WHEN excluded.review_updated_at IS NOT NULL
+                                     AND (
+                                         images.review_updated_at IS NULL
+                                         OR excluded.review_updated_at >= images.review_updated_at
+                                     )
+                                THEN excluded.review_updated_at
+                                ELSE images.review_updated_at
+                            END,
+                            indexed_at = excluded.indexed_at,
+                            file_size = COALESCE(excluded.file_size, images.file_size),
+                            file_type = COALESCE(NULLIF(excluded.file_type, ''), images.file_type),
+                            ctime = CASE
+                                WHEN images.ctime IS NOT NULL THEN images.ctime
+                                ELSE excluded.ctime
+                            END
+                            -- thumbnail_cached intentionally NOT updated (preserve existing value)
+                    ''', (file_name, width, height, aspect_ratio, int(is_video), video_fps,
+                          video_duration, video_frame_count, mtime, rating, reaction_updated_at, indexed_at,
+                          file_size, file_type, insert_ctime, review_rank, review_flags, review_updated_at))
                 return  # Success
 
             except sqlite3.OperationalError as e:
@@ -2357,7 +2358,8 @@ class ImageIndexDB:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                self.conn.commit()
+                with self._db_lock:
+                    self.conn.commit()
                 return  # Success
 
             except sqlite3.OperationalError as e:
@@ -3028,16 +3030,17 @@ class ImageIndexDB:
             return
 
         try:
-            cursor = self.conn.cursor()
-            # Delete existing tags
-            cursor.execute('DELETE FROM image_tags WHERE image_id = ?', (image_id,))
-            # Insert new tags (deduplicated to prevent UNIQUE constraint errors)
-            if tags:
-                unique_tags = list(dict.fromkeys(tags))  # Preserve order, remove duplicates
-                cursor.executemany(
-                    'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
-                    [(image_id, tag) for tag in unique_tags]
-                )
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                # Delete existing tags
+                cursor.execute('DELETE FROM image_tags WHERE image_id = ?', (image_id,))
+                # Insert new tags (deduplicated to prevent UNIQUE constraint errors)
+                if tags:
+                    unique_tags = list(dict.fromkeys(tags))  # Preserve order, remove duplicates
+                    cursor.executemany(
+                        'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
+                        [(image_id, tag) for tag in unique_tags]
+                    )
             self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
@@ -3048,11 +3051,12 @@ class ImageIndexDB:
             return
 
         try:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                'INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
-                (image_id, tag)
-            )
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'INSERT OR IGNORE INTO image_tags (image_id, tag) VALUES (?, ?)',
+                    (image_id, tag)
+                )
             self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
@@ -3063,11 +3067,12 @@ class ImageIndexDB:
             return
 
         try:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
-                (txt_sidecar_mtime, image_id)
-            )
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'UPDATE images SET txt_sidecar_mtime = ? WHERE id = ?',
+                    (txt_sidecar_mtime, image_id)
+                )
             self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
