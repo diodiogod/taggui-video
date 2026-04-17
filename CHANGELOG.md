@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.7] - 2026-04-17
+
+### Added
+
+- Keep diagnostic logs bounded so long sessions do not accumulate excessive log data
+
+### Changed
+
+- Improve folder-load stability and runtime diagnostics
+- Reduce repeated sidecar JSON parsing to improve reload and pagination responsiveness
+
+### Fixed
+
+- Fix a folder-load crash caused by concurrent background database work
 ## [1.2.6] - 2026-04-17
 
 ### Added
