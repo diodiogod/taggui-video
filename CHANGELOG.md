@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-04-16
+
+### Added
+
+- Video compare now keeps non-dominant clips audible instead of hard-switching all audio to a single source
+- Right-click compare windows to switch between ambient mixed audio and dominant-only audio
+- Ambient mixed audio is now the default for new compare windows
+
+### Changed
+
+- Improve video compare audio behavior
 ## [1.2.3] - 2026-04-16
 
 ### Added
