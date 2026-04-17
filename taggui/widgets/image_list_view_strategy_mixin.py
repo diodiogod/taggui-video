@@ -1,7 +1,7 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_strict_domain_service import StrictScrollDomainService
 from widgets.image_list_masonry_incremental_service import MasonryIncrementalService
-from utils.diagnostic_logging import diagnostic_print, should_emit_trace_log
+from utils.diagnostic_logging import append_text_log, diagnostic_print, should_emit_trace_log
 
 class ImageListViewStrategyMixin:
     def _get_live_restore_target_page(self, *, last_page: int | None = None) -> int | None:
@@ -855,12 +855,17 @@ class ImageListViewStrategyMixin:
                 return
             self._flow_log_last[throttle_key] = now
         ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
-        line = f"[{ts}][TRACE][{component}][{level}] {message}"
+        date_prefix = time.strftime("%Y-%m-%d", time.localtime(now))
+        line = f"{date_prefix} {ts} [TRACE][{component}][{level}] {message}"
         print(line)
         # Persist runtime trace for post-mortem without requiring console capture.
         try:
-            with open("taggui_runtime_trace.log", "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+            append_text_log(
+                "taggui_runtime_trace.log",
+                line + "\n",
+                max_bytes=1024 * 1024,
+                retain_days=2,
+            )
         except Exception:
             pass
 

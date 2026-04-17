@@ -41,18 +41,41 @@ try:
     from PySide6.QtCore import Qt, qInstallMessageHandler
 
     from utils.settings import settings
+    from utils.diagnostic_logging import append_text_log
     from widgets.main_window import MainWindow
 except Exception as e:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     import_details = str(e) + "\n" + traceback.format_exc()
-    with open(IMPORT_CRASH_LOG_PATH, 'w', encoding='utf-8') as f:
-        f.write(import_details)
-    with open(CRASH_LOG_PATH, 'a', encoding='utf-8') as f:
-        f.write("\n" + "=" * 80 + "\n")
-        f.write(f"{ts} | IMPORT EXCEPTION\n")
-        f.write("=" * 80 + "\n")
-        f.write(import_details)
-        f.write("\n")
+    try:
+        with open(IMPORT_CRASH_LOG_PATH, 'w', encoding='utf-8') as f:
+            f.write(import_details)
+    except Exception:
+        pass
+    append_log = globals().get('append_text_log')
+    if append_log is not None:
+        try:
+            append_log(
+                CRASH_LOG_PATH,
+                "\n" + "=" * 80 + "\n"
+                + f"{ts} | IMPORT EXCEPTION\n"
+                + "=" * 80 + "\n"
+                + import_details
+                + "\n",
+                max_bytes=512 * 1024,
+                retain_days=2,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            with open(CRASH_LOG_PATH, 'a', encoding='utf-8') as f:
+                f.write("\n" + "=" * 80 + "\n")
+                f.write(f"{ts} | IMPORT EXCEPTION\n")
+                f.write("=" * 80 + "\n")
+                f.write(import_details)
+                f.write("\n")
+        except Exception:
+            pass
     sys.exit(1)
 
 
@@ -68,21 +91,28 @@ qInstallMessageHandler(qt_message_handler)
 
 _fatal_log_handle = None
 ENABLE_FATAL_CRASH_DUMPS = os.getenv('TAGGUI_ENABLE_FAULTHANDLER', '0') == '1'
+CRASH_LOG_MAX_BYTES = 512 * 1024
+FATAL_LOG_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _append_crash_log(title: str, exc_info=None):
     """Append a timestamped crash entry to the crash log."""
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     try:
-        with open(CRASH_LOG_PATH, 'a', encoding='utf-8') as f:
-            f.write("\n" + "=" * 80 + "\n")
-            f.write(f"{ts} | {title}\n")
-            f.write("=" * 80 + "\n")
-            if exc_info is None:
-                f.write(traceback.format_exc())
-            else:
-                f.writelines(traceback.format_exception(*exc_info))
-            f.write("\n")
+        if exc_info is None:
+            body = traceback.format_exc()
+        else:
+            body = "".join(traceback.format_exception(*exc_info))
+        append_text_log(
+            CRASH_LOG_PATH,
+            "\n" + "=" * 80 + "\n"
+            + f"{ts} | {title}\n"
+            + "=" * 80 + "\n"
+            + body
+            + "\n",
+            max_bytes=CRASH_LOG_MAX_BYTES,
+            retain_days=2,
+        )
     except Exception as log_error:
         print(f"[CRASH] Failed to write crash log: {log_error}")
     print(f"[CRASH] Details written to: {CRASH_LOG_PATH}")
@@ -111,6 +141,12 @@ def install_crash_handlers():
     # Optional: capture fatal/native crashes (C-extension aborts) with stack dumps.
     if ENABLE_FATAL_CRASH_DUMPS:
         try:
+            append_text_log(
+                FATAL_LOG_PATH,
+                "",
+                max_bytes=FATAL_LOG_MAX_BYTES,
+                retain_days=2,
+            )
             _fatal_log_handle = open(FATAL_LOG_PATH, 'a', encoding='utf-8', buffering=1)
             _fatal_log_handle.write(
                 "\n" + "=" * 80 + "\n"
