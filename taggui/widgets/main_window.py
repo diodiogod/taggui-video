@@ -448,6 +448,7 @@ class MainWindow(QMainWindow):
         self._comparison_windows = []
         self._bulk_closing_floating_viewers = False
         self._bulk_close_gc_pending = False
+        self._deferred_viewer_gc_pending = False
         self._bulk_close_pending_windows = deque()
         self._bulk_close_timer = QTimer(self)
         self._bulk_close_timer.setSingleShot(False)
@@ -4830,6 +4831,7 @@ class MainWindow(QMainWindow):
             closed_viewers = list(comp_widget.viewers())
         except Exception:
             closed_viewers = []
+        had_video_resource = False
 
         remaining = []
         for window in list(getattr(self, "_comparison_windows", [])):
@@ -4842,11 +4844,17 @@ class MainWindow(QMainWindow):
         self._comparison_windows = remaining
 
         for viewer in closed_viewers:
+            try:
+                had_video_resource = had_video_resource or bool(getattr(viewer, '_is_video_loaded', False))
+            except RuntimeError:
+                pass
             self._video_controls_pending_updates.pop(viewer, None)
             self._video_controls_last_dispatch_at.pop(viewer, None)
             self._hud_playback_last_frame_ts.pop(viewer, None)
 
         if not bool(getattr(self, '_bulk_closing_floating_viewers', False)):
+            if had_video_resource:
+                self._schedule_deferred_viewer_gc()
             self.refresh_video_controls_performance_profile()
 
     @Slot()
@@ -4930,6 +4938,24 @@ class MainWindow(QMainWindow):
             self._bulk_close_gc_pending = False
             QTimer.singleShot(0, gc.collect)
 
+    def _schedule_deferred_viewer_gc(self, delay_ms: int = 500):
+        """Coalesce non-urgent viewer GC so close events stay responsive."""
+        if self._deferred_viewer_gc_pending:
+            return
+        self._deferred_viewer_gc_pending = True
+
+        def _collect():
+            self._deferred_viewer_gc_pending = False
+            if bool(getattr(self, '_bulk_closing_floating_viewers', False)):
+                self._bulk_close_gc_pending = True
+                return
+            try:
+                gc.collect()
+            except Exception:
+                pass
+
+        QTimer.singleShot(max(0, int(delay_ms)), _collect)
+
     def _on_floating_viewer_closed(self, viewer: ImageViewer):
         """Cleanup when one floating viewer is closed."""
         remaining = []
@@ -4955,22 +4981,31 @@ class MainWindow(QMainWindow):
             else:
                 self._stop_active_sync_coordinator()
 
+        bulk_close_mode = bool(getattr(self, '_bulk_closing_floating_viewers', False))
+        had_video_resource = False
         try:
-            viewer.video_player.cleanup(
-                force_gc=not bool(getattr(self, '_bulk_closing_floating_viewers', False))
+            player = getattr(viewer, 'video_player', None)
+            had_video_resource = bool(
+                getattr(viewer, '_is_video_loaded', False)
+                or (player is not None and getattr(player, 'video_path', None))
             )
+            if player is not None:
+                player.cleanup(force_gc=False)
         except Exception as e:
             print(f"[VIEWER] Floating viewer cleanup warning: {e}")
         self._video_controls_pending_updates.pop(viewer, None)
         self._video_controls_last_dispatch_at.pop(viewer, None)
         self._hud_playback_last_frame_ts.pop(viewer, None)
 
+        if had_video_resource and not bulk_close_mode:
+            self._schedule_deferred_viewer_gc()
+
         if (
             getattr(self, '_active_viewer', None) is viewer
-            and not bool(getattr(self, '_bulk_closing_floating_viewers', False))
+            and not bulk_close_mode
         ):
             self.set_active_viewer(self.image_viewer)
-        if not bool(getattr(self, '_bulk_closing_floating_viewers', False)):
+        if not bulk_close_mode:
             self.refresh_video_controls_performance_profile()
 
     @Slot()

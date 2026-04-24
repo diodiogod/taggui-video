@@ -2542,7 +2542,7 @@ class MediaComparisonWidget(QWidget):
             try:
                 player = getattr(viewer, "video_player", None)
                 if player is not None:
-                    player.cleanup(force_gc=not bulk_close_mode)
+                    player.cleanup(force_gc=False)
             except Exception:
                 pass
 
