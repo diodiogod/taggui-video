@@ -443,7 +443,7 @@ class MainWindow(QMainWindow):
         self.setPalette(self.app.style().standardPalette())
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=False)
-        self.image_viewer.video_controls.set_loop_persistence_scope('main')
+        self.image_viewer.set_video_loop_persistence_scope('main')
         self._floating_viewers = []
         self._comparison_windows = []
         self._bulk_closing_floating_viewers = False
@@ -3059,14 +3059,21 @@ class MainWindow(QMainWindow):
         viewer.reaction_flags_changed.connect(lambda *_args, current_viewer=viewer: self._sync_rating_controls_from_viewer(current_viewer))
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
         viewer.directory_reload_requested.connect(self.reload_directory)
-        viewer.video_player.playback_started.connect(self._freeze_list_view)
-        viewer.video_player.playback_paused.connect(self._unfreeze_list_view)
+        viewer.video_components_ready.connect(self._connect_viewer_video_controls)
         self._connect_viewer_video_controls(viewer)
 
     def _connect_viewer_video_controls(self, viewer: ImageViewer):
         """Connect one viewer's controls to its own video player."""
-        video_player = viewer.video_player
-        video_controls = viewer.video_controls
+        if bool(getattr(viewer, '_video_components_connected', False)):
+            return
+        video_player = getattr(viewer, 'video_player', None)
+        video_controls = getattr(viewer, 'video_controls', None)
+        if video_player is None or video_controls is None:
+            return
+        viewer._video_components_connected = True
+
+        video_player.playback_started.connect(self._freeze_list_view)
+        video_player.playback_paused.connect(self._unfreeze_list_view)
 
         def on_play_pause_requested():
             toggled = self.toggle_viewer_play_pause(viewer)
@@ -4413,7 +4420,7 @@ class MainWindow(QMainWindow):
 
         slot_id = self._next_floating_slot_id()
         self._floating_viewer_spawn_count += 1
-        viewer.video_controls.set_loop_persistence_scope(f"floating_{slot_id}")
+        viewer.set_video_loop_persistence_scope(f"floating_{slot_id}")
         title = f"Viewer {slot_id}"
         window = FloatingViewerWindow(viewer, title, parent=self)
         window.slot_id = slot_id
@@ -4464,6 +4471,7 @@ class MainWindow(QMainWindow):
         target_col = 0 if target_col_raw is None else int(target_col_raw)
         source_video_state = payload.get('source_video_state')
         target_proxy_index = payload.get('target_proxy_index', QPersistentModelIndex())
+        defer_performance_refresh = bool(payload.get('defer_performance_refresh', False))
 
         try:
             if target_row < 0:
@@ -4484,7 +4492,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[VIEWER] Deferred spawn-load warning: {e}")
         finally:
-            self.refresh_video_controls_performance_profile()
+            if not defer_performance_refresh:
+                self.refresh_video_controls_performance_profile()
 
     def spawn_floating_viewer_at(
         self,
@@ -4497,6 +4506,7 @@ class MainWindow(QMainWindow):
         activate_window: bool = True,
         set_active: bool = True,
         load_before_show: bool = False,
+        defer_performance_refresh: bool = False,
     ):
         """Create a floating viewer for a specific index and optional global position."""
         payload = self._create_floating_viewer_payload(
@@ -4508,6 +4518,7 @@ class MainWindow(QMainWindow):
 
         window = payload['window']
         viewer = payload['viewer']
+        payload['defer_performance_refresh'] = bool(defer_performance_refresh)
 
         if isinstance(geometry_override, QRect) and geometry_override.isValid():
             window.setGeometry(geometry_override)
@@ -4718,7 +4729,8 @@ class MainWindow(QMainWindow):
                 raise_window=False,
                 activate_window=False,
                 set_active=False,
-                load_before_show=(item_index != 0),
+                load_before_show=False,
+                defer_performance_refresh=True,
             )
             if window is None:
                 continue
@@ -4765,6 +4777,8 @@ class MainWindow(QMainWindow):
                     )
                 ),
             )
+
+        QTimer.singleShot(0, self.refresh_video_controls_performance_profile)
 
         return [info['window'] for info in spawned_infos]
 

@@ -349,6 +349,7 @@ class ImageViewer(QWidget):
     reaction_flags_changed = Signal(bool, bool, name='reactionFlagsChanged')
     directory_reload_requested = Signal(name='directoryReloadRequested')
     activated = Signal(name='viewerActivated')
+    video_components_ready = Signal(object, name='videoComponentsReady')
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel, *, is_spawned_viewer: bool = False):
         super().__init__()
@@ -383,12 +384,13 @@ class ImageViewer(QWidget):
 
         self.view.wheelEvent = self.wheelEvent
 
-        # Video player and controls
-        self.video_player = VideoPlayerWidget()
-        # Pre-warm the MPV GL widget so its GL context is initialized during
-        # startup (while the window is still loading) rather than on first play,
-        # which would cause a ~1s full-window flash.
-        QTimer.singleShot(0, lambda: self.video_player.prewarm_gl_widget(self.view))
+        # Spawned static-image viewers lazily create video widgets only if a
+        # video is loaded. The main viewer remains eager to preserve startup
+        # playback behavior and MPV prewarm.
+        self.video_player = None
+        self.video_controls = None
+        self._video_components_connected = False
+        self._video_loop_persistence_scope = None
         self.current_video_item = None
         self.current_image_item = None
         self._compare_mode_active = False
@@ -436,13 +438,10 @@ class ImageViewer(QWidget):
         self._compare_cursor_sync_timer = QTimer(self)
         self._compare_cursor_sync_timer.setInterval(16)
         self._compare_cursor_sync_timer.timeout.connect(self._poll_compare_cursor_sync)
-        self.video_controls = VideoControlsWidget(self)
-        self.video_controls._is_spawned_owner = self.is_spawned_viewer
-        self.video_controls.setVisible(False)
-        self._video_seek_back_overlay = _VideoSeekZoneOverlay("backward", self.view.viewport())
-        self._video_seek_forward_overlay = _VideoSeekZoneOverlay("forward", self.view.viewport())
-        self._video_scrub_overlay = _VideoScrubZoneOverlay(self.view.viewport())
-        self._video_playback_feedback_overlay = _VideoPlaybackFeedbackOverlay(self.view.viewport())
+        self._video_seek_back_overlay = None
+        self._video_seek_forward_overlay = None
+        self._video_scrub_overlay = None
+        self._video_playback_feedback_overlay = None
         initial_controls_mode = normalize_video_controls_visibility_mode(
             load_video_controls_visibility_mode()
         )
@@ -514,7 +513,10 @@ class ImageViewer(QWidget):
         self._video_playback_feedback_timer = QTimer(self)
         self._video_playback_feedback_timer.setSingleShot(True)
         self._video_playback_feedback_timer.timeout.connect(
-            lambda: self._video_playback_feedback_overlay.hide()
+            lambda: (
+                self._video_playback_feedback_overlay.hide()
+                if self._video_playback_feedback_overlay is not None else None
+            )
         )
         self._main_controls_overlay_poll_timer = QTimer(self)
         self._main_controls_overlay_poll_timer.setInterval(50)
@@ -524,37 +526,78 @@ class ImageViewer(QWidget):
         self.proxy_image_list_model.modelAboutToBeReset.connect(self._on_proxy_model_about_to_reset)
         self.proxy_image_list_model.modelReset.connect(self._on_proxy_model_reset)
 
-        # Position controls (will restore saved position if exists)
-        self._position_video_controls()
-
-        # Restore saved X,Y position and width percentages if exists
-        saved_x_percent = settings.value('video_controls_x_percent', type=float)
-        saved_y_percent = settings.value('video_controls_y_percent', type=float)
-        saved_width_percent = settings.value('video_controls_width_percent', type=float)
-        if saved_x_percent is not None and saved_y_percent is not None and self.width() > 0 and self.height() > 0:
-            controls_height = self.video_controls.sizeHint().height()
-            # Use saved width if available, otherwise use sizeHint
-            if saved_width_percent is not None:
-                controls_width = int(saved_width_percent * self.width())
-                min_w = self.video_controls.minimum_runtime_width()
-                controls_width = max(min_w, min(controls_width, self.width()))  # Clamp
-            else:
-                controls_width = self.video_controls.sizeHint().width()
-            x_pos = int(saved_x_percent * self.width())
-            y_pos = int(saved_y_percent * self.height())
-            # Clamp to valid range
-            x_pos = max(0, min(x_pos, self.width() - controls_width))
-            y_pos = max(0, min(y_pos, self.height() - controls_height))
-            self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
-
         # Enable mouse tracking for auto-hide
         self.setMouseTracking(True)
         self.view.setMouseTracking(True)
         self.view.viewport().setMouseTracking(True)
-        self.video_controls.installEventFilter(self)
         self.view.installEventFilter(self)
         self.view.viewport().installEventFilter(self)
+        if not self.is_spawned_viewer:
+            self._ensure_video_components()
+
+    def set_video_loop_persistence_scope(self, scope: str):
+        """Store/apply the loop persistence scope for lazily-created controls."""
+        self._video_loop_persistence_scope = str(scope)
+        if self.video_controls is not None:
+            self.video_controls.set_loop_persistence_scope(self._video_loop_persistence_scope)
+
+    def _restore_video_controls_geometry(self):
+        if self.video_controls is None:
+            return
+        self._position_video_controls()
+
+        saved_x_percent = settings.value('video_controls_x_percent', type=float)
+        saved_y_percent = settings.value('video_controls_y_percent', type=float)
+        saved_width_percent = settings.value('video_controls_width_percent', type=float)
+        if saved_x_percent is None or saved_y_percent is None or self.width() <= 0 or self.height() <= 0:
+            return
+
+        controls_height = self.video_controls.sizeHint().height()
+        if saved_width_percent is not None:
+            controls_width = int(saved_width_percent * self.width())
+            min_w = self.video_controls.minimum_runtime_width()
+            controls_width = max(min_w, min(controls_width, self.width()))
+        else:
+            controls_width = self.video_controls.sizeHint().width()
+        x_pos = int(saved_x_percent * self.width())
+        y_pos = int(saved_y_percent * self.height())
+        x_pos = max(0, min(x_pos, self.width() - controls_width))
+        y_pos = max(0, min(y_pos, self.height() - controls_height))
+        self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
+
+    def _ensure_video_components(self):
+        """Create video-only widgets on demand for spawned static-image viewers."""
+        if self.video_player is not None and self.video_controls is not None:
+            return
+
+        if self.video_player is None:
+            self.video_player = VideoPlayerWidget()
+            QTimer.singleShot(0, lambda: (
+                self.video_player.prewarm_gl_widget(self.view)
+                if self.video_player is not None else None
+            ))
+
+        if self.video_controls is None:
+            self.video_controls = VideoControlsWidget(self)
+            self.video_controls._is_spawned_owner = self.is_spawned_viewer
+            self.video_controls.setVisible(False)
+            if self._video_loop_persistence_scope:
+                self.video_controls.set_loop_persistence_scope(self._video_loop_persistence_scope)
+            self.video_controls.installEventFilter(self)
+            self._restore_video_controls_geometry()
+
+        viewport = self.view.viewport()
+        if self._video_seek_back_overlay is None:
+            self._video_seek_back_overlay = _VideoSeekZoneOverlay("backward", viewport)
+        if self._video_seek_forward_overlay is None:
+            self._video_seek_forward_overlay = _VideoSeekZoneOverlay("forward", viewport)
+        if self._video_scrub_overlay is None:
+            self._video_scrub_overlay = _VideoScrubZoneOverlay(viewport)
+        if self._video_playback_feedback_overlay is None:
+            self._video_playback_feedback_overlay = _VideoPlaybackFeedbackOverlay(viewport)
+
         self._refresh_video_surface_event_filters()
+        self.video_components_ready.emit(self)
 
     def _iter_video_surface_widgets(self):
         """Yield live native video surface widgets used by backend renderers."""
@@ -2129,6 +2172,13 @@ class ImageViewer(QWidget):
         self.video_controls.raise_()
 
     def _position_video_seek_overlays(self):
+        if (
+            self._video_seek_back_overlay is None
+            or self._video_seek_forward_overlay is None
+            or self._video_scrub_overlay is None
+            or self._video_playback_feedback_overlay is None
+        ):
+            return
         viewport = self.view.viewport()
         overlay_w = max(72, min(116, int(viewport.width() * 0.16)))
         overlay_h = 62
@@ -2163,6 +2213,8 @@ class ImageViewer(QWidget):
             self._video_playback_feedback_overlay.raise_()
 
     def _set_video_seek_overlay_active(self, direction: str | None):
+        if self._video_seek_back_overlay is None or self._video_seek_forward_overlay is None:
+            return
         mapping = {
             "backward": self._video_seek_back_overlay,
             "forward": self._video_seek_forward_overlay,
@@ -2171,6 +2223,12 @@ class ImageViewer(QWidget):
             overlay.set_active(name == direction)
 
     def _hide_video_seek_overlays(self):
+        if (
+            self._video_seek_back_overlay is None
+            or self._video_seek_forward_overlay is None
+            or self._video_scrub_overlay is None
+        ):
+            return
         self._video_seek_back_overlay.hide()
         self._video_seek_forward_overlay.hide()
         self._video_scrub_overlay.hide()
@@ -2199,6 +2257,8 @@ class ImageViewer(QWidget):
         return mapped
 
     def _video_scrub_zone_rect(self) -> QRect:
+        if self._video_scrub_overlay is None:
+            return QRect()
         return QRect(self._video_scrub_overlay.geometry())
 
     def _video_temp_speed_progress_from_speed(self, speed: float) -> float:
@@ -2782,14 +2842,14 @@ class ImageViewer(QWidget):
         """Reposition controls when viewer is resized."""
         super().resizeEvent(event)
         # Store visibility state
-        was_visible = self.video_controls.isVisible()
+        was_visible = bool(self.video_controls is not None and self.video_controls.isVisible())
         self._position_video_controls()
         self._position_video_seek_overlays()
         self._position_main_controls_overlay()
         self._position_reaction_controls_overlay()
         self._position_reaction_feedback_overlay()
         # Restore visibility after resize (force controls to update)
-        if was_visible:
+        if was_visible and self.video_controls is not None:
             self.video_controls.setVisible(True)
             self.video_controls.raise_()
         overlay = getattr(self, "_reaction_feedback_overlay", None)
@@ -3217,6 +3277,8 @@ class ImageViewer(QWidget):
 
     def _show_controls_temporarily(self):
         """Show controls and start hide timer."""
+        if self.video_controls is None:
+            return
         if self.video_controls_never_show or self._compare_controls_suppressed:
             return
         try:
@@ -3238,6 +3300,8 @@ class ImageViewer(QWidget):
 
     def _hide_controls(self):
         """Hide controls after timeout, but only if mouse is not over them and not resizing."""
+        if self.video_controls is None:
+            return
         if self.video_controls_auto_hide and self._is_video_loaded:
             # Don't hide if actively resizing or dragging
             if hasattr(self.video_controls, '_resizing') and self.video_controls._resizing:
@@ -3254,6 +3318,8 @@ class ImageViewer(QWidget):
 
     def _show_controls_permanent(self):
         """Show controls permanently (not auto-hide)."""
+        if self.video_controls is None:
+            return
         if self.video_controls_never_show or self._compare_controls_suppressed:
             return
         self._controls_hide_timer.stop()
@@ -3267,6 +3333,10 @@ class ImageViewer(QWidget):
 
     def _hide_controls_immediately(self):
         self._controls_hide_timer.stop()
+        if self.video_controls is None:
+            self._controls_visible = False
+            self._controls_hover_inside = False
+            return
         self.video_controls.setVisible(False)
         self._controls_visible = False
         self._controls_hover_inside = False
@@ -3393,6 +3463,7 @@ class ImageViewer(QWidget):
 
             # Check if this is a video
             if image.is_video:
+                self._ensure_video_components()
                 self._clear_static_image_render_cache()
                 self._set_fast_pan_visual_mode(False)
                 try:
@@ -3477,13 +3548,15 @@ class ImageViewer(QWidget):
                 # Hide video controls for static images
                 self._is_video_loaded = False
                 self._controls_hide_timer.stop()
-                self.video_controls.setVisible(False)
+                if self.video_controls is not None:
+                    self.video_controls.setVisible(False)
                 self._controls_visible = False
                 self._hide_video_seek_overlays()
 
                 # Suspend video playback quickly when switching to still image.
                 # This avoids expensive frame-reset work on backend transitions.
-                self.video_player.suspend_for_media_switch()
+                if self.video_player is not None:
+                    self.video_player.suspend_for_media_switch()
                 try:
                     top = self.window()
                     if top and hasattr(top, 'refresh_video_controls_performance_profile'):
@@ -3570,7 +3643,9 @@ class ImageViewer(QWidget):
             self.hud_item = ResizeHintHUD(MarkingItem.image_size)
             self.scene.addItem(self.hud_item)
             if auto_play_after_layout:
-                QTimer.singleShot(0, self.video_player.play)
+                player = self.video_player
+                if player is not None:
+                    QTimer.singleShot(0, player.play)
         else:
             for item in self.marking_items:
                 self.scene.removeItem(item)
