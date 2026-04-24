@@ -63,6 +63,8 @@ from widgets.media_comparison_widget import MediaComparisonWidget
 from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
 from widgets.compare_drop_feedback_overlay import CompareDropFeedbackOverlay
 from widgets.video_sync_coordinator import VideoSyncCoordinator
+from widgets.secondary_browser import SecondaryBrowser
+from widgets.context_switch_manager import ContextSwitchManager
 
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
 
@@ -393,6 +395,8 @@ class MainWindow(QMainWindow):
         self.post_deletion_index = None  # Track index to focus after deletion
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
         self._restore_in_progress = False
+        self._secondary_browser: SecondaryBrowser | None = None
+        self._context_switch_manager: ContextSwitchManager | None = None
         self._restore_target_global_rank = -1
         self._preserve_restored_dock_layout_until = 0.0
         self._workspace_apply_pending_id = None
@@ -626,6 +630,13 @@ class MainWindow(QMainWindow):
         self.signal_manager.connect_all_signals()
         self.sync_zoom_follow_mode_button(self.image_viewer)
         self.app.installEventFilter(self)
+
+        # Context switch manager (secondary browser support)
+        self._context_switch_manager = ContextSwitchManager(self)
+        # When user clicks back in primary image list, restore primary context
+        self.image_list_selection_model.currentChanged.connect(
+            self._on_primary_selection_changed
+        )
 
         # TEMP: Disable status bar to test if it fixes gray space
         # status_bar = self.statusBar()
@@ -1653,6 +1664,10 @@ class MainWindow(QMainWindow):
 
     def _handle_external_drop_event(self, event_type, event) -> bool:
         """Handle external folder/media drag events anywhere in the main app."""
+        # Ignore internal drags (e.g., from ImageListView)
+        if hasattr(event, 'source') and event.source() is not None:
+            return False
+
         mime_data = event.mimeData() if hasattr(event, 'mimeData') else None
         drop_target = self._resolve_external_drop_target(mime_data)
         if drop_target is None:
@@ -5357,6 +5372,60 @@ class MainWindow(QMainWindow):
     def _log_new_media_refresh_message(self, message: str):
         """Emit refresh diagnostics without creating UI chrome."""
         print(f"[REFRESH_NEW_UI] {message}")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Secondary Browser
+    # ─────────────────────────────────────────────────────────────────
+
+    def _on_primary_selection_changed(self, current, previous):
+        """Restore primary context whenever the user clicks the primary image list."""
+        if self._context_switch_manager is None:
+            return
+        if self._context_switch_manager.active_context == 'primary':
+            return
+        self._context_switch_manager.restore_primary()
+
+    @Slot()
+    def open_secondary_browser(self):
+        """Create (or show) the secondary browser dock and optionally open a folder."""
+        if self._secondary_browser is None:
+            self._secondary_browser = SecondaryBrowser(
+                image_width=int(settings.value(
+                    'image_list_image_width',
+                    defaultValue=DEFAULT_SETTINGS['image_list_image_width'],
+                    type=int,
+                )),
+                tag_separator=get_tag_separator(),
+                tokenizer=getattr(self, '_shared_tokenizer', None),
+                parent=self,
+            )
+            self._secondary_browser.context_activated.connect(
+                self._on_secondary_context_activated
+            )
+            # Add the inner ImageList dock to the main window
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._secondary_browser.dock)
+            self.tabifyDockWidget(self.image_list, self._secondary_browser.dock)
+        self._secondary_browser.dock.show()
+        self._secondary_browser.dock.raise_()
+        # If a folder was previously opened, reload it; otherwise prompt
+        saved = settings.value('secondary_browser_directory_path', '', type=str)
+        if saved and Path(saved).exists():
+            self._secondary_browser.load_directory(Path(saved))
+        else:
+            self._secondary_browser._on_open_folder_clicked()
+
+    @Slot()
+    def close_secondary_browser(self):
+        """Hide the secondary browser and restore primary context."""
+        if self._secondary_browser is not None:
+            self._secondary_browser.dock.hide()
+        if self._context_switch_manager is not None:
+            self._context_switch_manager.restore_primary()
+
+    def _on_secondary_context_activated(self, ctx: dict):
+        """Route secondary browser clicks to the context switch manager."""
+        if self._context_switch_manager is not None:
+            self._context_switch_manager.switch_to_context(ctx)
 
     @Slot()
     def select_and_load_directory(self):
