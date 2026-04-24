@@ -10,8 +10,9 @@ from PySide6.QtWidgets import (
     QStyleOptionComboBox,
     QStylePainter,
     QTabBar,
+    QToolButton,
 )
-from utils.settings import DEFAULT_SETTINGS
+from utils.settings import DEFAULT_SETTINGS, settings
 
 RANDOM_SEED_MAX = 999_999
 RANDOM_SEED_GENERATED_MIN = 100_000
@@ -27,6 +28,193 @@ class ClickableLabel(QLabel):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class ControlsToggleStrip(QFrame):
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip('Click to show or hide image list controls')
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self._press_pos = None
+        self._dragging = False
+        self._floating_mode = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 0, 2, 0)
+        layout.setSpacing(2)
+        self.title_label = QLabel()
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(self.title_label)
+        self.close_button = QToolButton()
+        self.close_button.setAutoRaise(True)
+        self.close_button.setText('x')
+        self.close_button.setToolTip('Close this panel')
+        layout.addWidget(self.close_button)
+        self.setStyleSheet(
+            """
+            QFrame {
+                border: none;
+                border-top: 1px dotted palette(mid);
+                border-bottom: 1px dotted palette(mid);
+                background: palette(window);
+            }
+            QLabel {
+                color: palette(mid);
+                font-size: 8px;
+            }
+            QToolButton {
+                border: none;
+                color: palette(mid);
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton:hover {
+                color: palette(text);
+            }
+            QFrame:hover {
+                background: palette(alternate-base);
+            }
+            """
+        )
+        self.set_strip_height(settings.value(
+            'image_list_title_strip_height',
+            defaultValue=DEFAULT_SETTINGS['image_list_title_strip_height'],
+            type=int,
+        ))
+        self.set_floating_mode(False)
+
+    def set_title(self, title: str):
+        self.title_label.setText(str(title or 'Images'))
+
+    def _dock_widget(self):
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, QDockWidget):
+            widget = widget.parentWidget()
+        return widget
+
+    def set_strip_height(self, height: int):
+        height = max(4, min(32, int(height or DEFAULT_SETTINGS['image_list_title_strip_height'])))
+        if self._floating_mode:
+            return
+        self.setFixedHeight(height)
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        button_size = max(4, min(24, height - 1))
+        self.close_button.setFixedSize(button_size, button_size)
+
+    def set_floating_mode(self, floating: bool):
+        self._floating_mode = bool(floating)
+        if self._floating_mode:
+            height = 32
+            self.setFixedHeight(height)
+            self.setMinimumHeight(height)
+            self.setMaximumHeight(height)
+            self.close_button.setFixedSize(28, 28)
+            self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.setToolTip('Drag to dock or move this panel')
+            self.setStyleSheet(
+                """
+                QFrame {
+                    border: none;
+                    background: palette(window);
+                }
+                QLabel {
+                    color: palette(text);
+                    font-size: 16px;
+                }
+                QToolButton {
+                    border: none;
+                    color: palette(mid);
+                    padding: 0px;
+                    margin: 0px;
+                    font-size: 18px;
+                }
+                QToolButton:hover {
+                    color: palette(text);
+                    background: palette(alternate-base);
+                }
+                """
+            )
+            return
+
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setToolTip('Click to show or hide image list controls')
+        self.setStyleSheet(
+            """
+            QFrame {
+                border: none;
+                border-top: 1px dotted palette(mid);
+                border-bottom: 1px dotted palette(mid);
+                background: palette(window);
+            }
+            QLabel {
+                color: palette(mid);
+                font-size: 8px;
+            }
+            QToolButton {
+                border: none;
+                color: palette(mid);
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton:hover {
+                color: palette(text);
+            }
+            QFrame:hover {
+                background: palette(alternate-base);
+            }
+            """
+        )
+        self.set_strip_height(settings.value(
+            'image_list_title_strip_height',
+            defaultValue=DEFAULT_SETTINGS['image_list_title_strip_height'],
+            type=int,
+        ))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+            self._dragging = False
+            # Let QDockWidget also see the press so native dock dragging,
+            # previews, and re-docking behavior stay intact.
+            event.ignore()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+        if (pos - self._press_pos).manhattanLength() < QApplication.startDragDistance():
+            event.ignore()
+            return
+        self._dragging = True
+        event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._dragging:
+                self.clicked.emit()
+            self._press_pos = None
+            self._dragging = False
+            # Press/move are passed through to QDockWidget for native dragging;
+            # release must pass through too so Qt does not keep a stale drag.
+            event.ignore()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class MediaTypeTabBar(QTabBar):
@@ -180,9 +368,15 @@ class ImageList(QDockWidget):
         )
         self.filter_line_edit.setPlaceholderText('Filter images')
 
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(4, 2, 4, 2)
-        header_layout.setSpacing(6)
+        self.controls_container = QWidget()
+        self.controls_container.setMinimumWidth(0)
+        self.controls_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.controls_layout = QHBoxLayout(self.controls_container)
+        self.controls_layout.setContentsMargins(4, 2, 4, 2)
+        self.controls_layout.setSpacing(6)
         sort_label = QLabel('Sort')
         sort_label.setSizePolicy(
             QSizePolicy.Policy.Maximum,
@@ -228,10 +422,21 @@ class ImageList(QDockWidget):
             """
         )
 
-        header_layout.addWidget(self.filter_line_edit, stretch=5)
-        header_layout.addWidget(sort_label)
-        header_layout.addWidget(self.sort_combo_box, stretch=2)
-        header_layout.addWidget(self.media_type_combo_box)
+        self.controls_layout.addWidget(self.filter_line_edit, stretch=5)
+        self.controls_layout.addWidget(sort_label)
+        self.controls_layout.addWidget(self.sort_combo_box, stretch=2)
+        self.controls_layout.addWidget(self.media_type_combo_box)
+
+        self.controls_toggle_strip = ControlsToggleStrip()
+        self.controls_toggle_strip.set_title(self.windowTitle())
+        self.windowTitleChanged.connect(self.controls_toggle_strip.set_title)
+        self.setTitleBarWidget(self.controls_toggle_strip)
+        self.controls_toggle_strip.close_button.clicked.connect(self.close)
+        self.controls_toggle_strip.clicked.connect(
+            self.toggle_controls_collapsed
+        )
+        self.topLevelChanged.connect(self._sync_title_bar_widget_for_float_state)
+        self._controls_collapsed = False
 
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)
@@ -304,7 +509,7 @@ class ImageList(QDockWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
         layout.setSpacing(0)  # Remove spacing between widgets
-        layout.addLayout(header_layout)
+        layout.addWidget(self.controls_container)
         self.list_view.setMinimumWidth(0)
         self.list_view.setSizePolicy(
             QSizePolicy.Policy.Ignored,
@@ -313,6 +518,7 @@ class ImageList(QDockWidget):
         layout.addWidget(self.list_view)
         layout.addLayout(status_layout)
         self.setWidget(container)
+        self.restore_controls_collapsed_state()
 
         initial_sort = str(self.sort_combo_box.currentText() or 'Default')
         self._active_sort_by = initial_sort
@@ -343,6 +549,51 @@ class ImageList(QDockWidget):
         #     # Trigger initial update
         #     QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
         self.update_thumbnail_size_controls()
+
+    def set_title_strip_height(self, height: int):
+        self.controls_toggle_strip.set_strip_height(height)
+
+    def setObjectName(self, name: str):
+        super().setObjectName(name)
+        if hasattr(self, 'controls_container'):
+            self.restore_controls_collapsed_state()
+
+    def _controls_collapsed_settings_key(self) -> str:
+        object_name = str(self.objectName() or 'image_list')
+        return f'{object_name}_controls_collapsed'
+
+    def restore_controls_collapsed_state(self):
+        collapsed = settings.value(
+            self._controls_collapsed_settings_key(),
+            False,
+            type=bool,
+        )
+        self.set_controls_collapsed(bool(collapsed), persist=False)
+
+    def _sync_title_bar_widget_for_float_state(self, floating: bool):
+        self.controls_toggle_strip.set_floating_mode(bool(floating))
+        self.setTitleBarWidget(self.controls_toggle_strip)
+
+    def add_controls_widget(self, widget: QWidget, stretch: int = 0):
+        """Add a widget to the existing image-list controls row."""
+        self.controls_layout.addWidget(widget, stretch)
+
+    @Slot()
+    def toggle_controls_collapsed(self):
+        self.set_controls_collapsed(not self._controls_collapsed)
+
+    def set_controls_collapsed(self, collapsed: bool, *, persist: bool = True):
+        self._controls_collapsed = bool(collapsed)
+        self.controls_container.setVisible(not self._controls_collapsed)
+        if persist:
+            settings.setValue(
+                self._controls_collapsed_settings_key(),
+                self._controls_collapsed,
+            )
+        state = 'show' if self._controls_collapsed else 'hide'
+        self.controls_toggle_strip.setToolTip(
+            f'Click to {state} image list controls'
+        )
 
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()

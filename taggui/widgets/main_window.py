@@ -1153,6 +1153,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
+        self._main_window_closing = True
         self.cancel_compare_drag()
         self.close_all_floating_viewers()
         self._save_image_list_dock_width()
@@ -1180,6 +1181,23 @@ class MainWindow(QMainWindow):
 
     def _save_main_window_layout_settings(self):
         """Persist main-window geometry, dock state, and window mode flags."""
+        secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        saved_secondary_dir = settings.value('secondary_browser_directory_path', '', type=str)
+        secondary_restore = bool(
+            secondary_dock is not None
+            and not secondary_dock.isHidden()
+            and str(saved_secondary_dir or '').strip()
+        )
+        settings.setValue('secondary_browser_visible', secondary_restore)
+        settings.setValue('secondary_browser_restore_on_startup', secondary_restore)
+        diagnostic_print(
+            "[RESTORE][Browser2] save "
+            f"exists={secondary_dock is not None} "
+            f"hidden={secondary_dock.isHidden() if secondary_dock is not None else 'n/a'} "
+            f"visible={secondary_dock.isVisible() if secondary_dock is not None else 'n/a'} "
+            f"folder='{saved_secondary_dir}' restore={secondary_restore}",
+            detail="verbose",
+        )
         settings.setValue('geometry', self.saveGeometry())
         settings.setValue('window_state', self.saveState())
         settings.setValue('main_window_is_fullscreen', self.isFullScreen())
@@ -1263,6 +1281,19 @@ class MainWindow(QMainWindow):
             list_view.column_switch_threshold = threshold
             list_view._update_view_mode()
             print(f"[MASONRY] Live list auto-switch threshold: {threshold}px")
+            return
+
+        if key == 'image_list_title_strip_height':
+            try:
+                height = int(_value)
+            except (TypeError, ValueError):
+                height = DEFAULT_SETTINGS['image_list_title_strip_height']
+            for dock in (
+                getattr(self, 'image_list', None),
+                getattr(getattr(self, '_secondary_browser', None), 'dock', None),
+            ):
+                if dock is not None and hasattr(dock, 'set_title_strip_height'):
+                    dock.set_title_strip_height(height)
             return
 
         if key not in ('max_pages_in_memory', 'thumbnail_eviction_pages'):
@@ -5435,27 +5466,17 @@ class MainWindow(QMainWindow):
         self._context_switch_manager.restore_primary()
 
     @Slot()
-    def open_secondary_browser(self):
+    def open_secondary_browser(self, placement: str = 'split_right'):
         """Create (or show) the secondary browser dock and optionally open a folder."""
-        if self._secondary_browser is None:
-            self._secondary_browser = SecondaryBrowser(
-                image_width=int(settings.value(
-                    'image_list_image_width',
-                    defaultValue=DEFAULT_SETTINGS['image_list_image_width'],
-                    type=int,
-                )),
-                tag_separator=get_tag_separator(),
-                tokenizer=getattr(self, '_shared_tokenizer', None),
-                parent=self,
-            )
-            self._secondary_browser.context_activated.connect(
-                self._on_secondary_context_activated
-            )
-            # Add the inner ImageList dock to the main window
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._secondary_browser.dock)
-            self.tabifyDockWidget(self.image_list, self._secondary_browser.dock)
+        if not isinstance(placement, str):
+            placement = 'split_right'
+        self._ensure_secondary_browser()
+        self._place_secondary_browser(placement)
         self._secondary_browser.dock.show()
         self._secondary_browser.dock.raise_()
+        settings.setValue('secondary_browser_visible', True)
+        settings.setValue('secondary_browser_restore_on_startup', True)
+        diagnostic_print(f"[RESTORE][Browser2] open placement={placement}", detail="verbose")
         # If a folder was previously opened, reload it; otherwise prompt
         saved = settings.value('secondary_browser_directory_path', '', type=str)
         if saved and Path(saved).exists():
@@ -5463,9 +5484,178 @@ class MainWindow(QMainWindow):
         else:
             self._secondary_browser._on_open_folder_clicked()
 
+    def _ensure_secondary_browser(self) -> bool:
+        if self._secondary_browser is not None:
+            diagnostic_print("[RESTORE][Browser2] ensure skipped; already exists", detail="verbose")
+            return False
+        diagnostic_print("[RESTORE][Browser2] ensure creating dock", detail="verbose")
+        self._secondary_browser = SecondaryBrowser(
+            image_width=int(settings.value(
+                'image_list_image_width',
+                defaultValue=DEFAULT_SETTINGS['image_list_image_width'],
+                type=int,
+            )),
+            tag_separator=get_tag_separator(),
+            tokenizer=getattr(self, '_shared_tokenizer', None),
+            parent=self,
+        )
+        self._secondary_browser.context_activated.connect(
+            self._on_secondary_context_activated
+        )
+        self._secondary_browser.dock.visibilityChanged.connect(
+            self._on_secondary_browser_visibility_changed
+        )
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._secondary_browser.dock)
+        restoring = bool(getattr(self, '_secondary_browser_restore_in_progress', False))
+        if not restoring:
+            self._secondary_browser.dock.hide()
+        diagnostic_print(f"[RESTORE][Browser2] ensure done restoring={restoring}", detail="verbose")
+        return True
+
+    def open_secondary_browser_bottom(self):
+        self.open_secondary_browser('split_bottom')
+
+    def open_secondary_browser_tabbed(self):
+        self.open_secondary_browser('tabbed')
+
+    def _place_secondary_browser(self, placement: str):
+        if self._secondary_browser is None:
+            return
+        secondary_dock = self._secondary_browser.dock
+        primary_dock = getattr(self, 'image_list', None)
+        if primary_dock is None or not primary_dock.isVisible():
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, secondary_dock)
+            return
+        if secondary_dock.isFloating():
+            secondary_dock.setFloating(False)
+
+        if placement == 'tabbed':
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, secondary_dock)
+            self.tabifyDockWidget(primary_dock, secondary_dock)
+            return
+
+        orientation = (
+            Qt.Orientation.Vertical
+            if placement == 'split_bottom'
+            else Qt.Orientation.Horizontal
+        )
+        self.splitDockWidget(primary_dock, secondary_dock, orientation)
+        base_size = primary_dock.height() if orientation == Qt.Orientation.Vertical else primary_dock.width()
+        target_size = max(180, int((base_size or 360) / 2))
+        self.resizeDocks(
+            [primary_dock, secondary_dock],
+            [target_size, target_size],
+            orientation,
+        )
+
+    def _split_image_browser_docks_for_masonry_snap(self, dock):
+        secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        docks = [
+            d for d in (getattr(self, 'image_list', None), secondary_dock)
+            if d is not None
+        ]
+        if dock not in docks or len(docks) < 2:
+            return []
+        try:
+            area = self.dockWidgetArea(dock)
+        except Exception:
+            return []
+        result = []
+        for candidate in docks:
+            try:
+                if candidate.isFloating() or not candidate.isVisible():
+                    continue
+                if self.dockWidgetArea(candidate) != area:
+                    continue
+                if candidate is not dock and candidate in self.tabifiedDockWidgets(dock):
+                    continue
+                result.append(candidate)
+            except Exception:
+                continue
+        if len(result) < 2:
+            return []
+
+        return result
+
+    def _request_coordinated_image_browser_masonry_snap(self, view, dock, target_width: int) -> bool:
+        docks = self._split_image_browser_docks_for_masonry_snap(dock)
+        if not docks:
+            return False
+        now = time.time()
+        if now < float(getattr(self, '_coordinated_masonry_snap_applying_until', 0.0) or 0.0):
+            return True
+
+        pending = getattr(self, '_coordinated_masonry_snap_pending', None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._coordinated_masonry_snap_pending = pending
+        current_width = max(1, int(dock.width() or 1))
+        requested_width = max(1, int(target_width or 1))
+        pending[dock] = {
+            'target_width': requested_width,
+            'current_width': current_width,
+            'slack': max(0, current_width - requested_width),
+            'requested_at': now,
+        }
+
+        timer = getattr(self, '_coordinated_masonry_snap_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._apply_coordinated_image_browser_masonry_snap)
+            self._coordinated_masonry_snap_timer = timer
+        timer.stop()
+        timer.start(90)
+        return True
+
+    def _apply_coordinated_image_browser_masonry_snap(self):
+        pending = getattr(self, '_coordinated_masonry_snap_pending', None)
+        if not isinstance(pending, dict) or not pending:
+            return
+        dock = next(iter(pending.keys()))
+        docks = self._split_image_browser_docks_for_masonry_snap(dock)
+        if not docks:
+            pending.clear()
+            return
+
+        candidates = []
+        for candidate, data in pending.items():
+            if candidate not in docks or not isinstance(data, dict):
+                continue
+            current = max(1, int(candidate.width() or data.get('current_width') or 1))
+            requested = max(1, int(data.get('target_width') or current))
+            target = max(max(1, int(candidate.minimumWidth() or 1)), min(current, requested))
+            slack = max(0, current - target)
+            if slack <= 2:
+                continue
+            candidates.append((
+                slack,
+                float(data.get('requested_at') or 0.0),
+                candidate,
+                target,
+            ))
+
+        for candidate in docks:
+            list_view = getattr(candidate, 'list_view', None)
+            if list_view is not None:
+                setattr(list_view, '_masonry_splitter_snapping', True)
+
+        pending.clear()
+        if not candidates:
+            return
+        # Pick one browser for this drag cycle. Usually this is the browser
+        # that was expanded and now owns the dead masonry space; the other
+        # browser is left alone even if it could also report slack later.
+        _, _, target_dock, target_width = max(candidates, key=lambda item: (item[0], item[1]))
+        self._coordinated_masonry_snap_applying_until = time.time() + 0.45
+        self.resizeDocks([target_dock], [target_width], Qt.Orientation.Horizontal)
+
     @Slot()
     def close_secondary_browser(self):
         """Hide the secondary browser and restore primary context."""
+        settings.setValue('secondary_browser_visible', False)
+        settings.setValue('secondary_browser_restore_on_startup', False)
+        diagnostic_print("[RESTORE][Browser2] close requested; restore disabled", detail="verbose")
         if self._secondary_browser is not None:
             self._secondary_browser.dock.hide()
         if self._context_switch_manager is not None:
@@ -5475,6 +5665,26 @@ class MainWindow(QMainWindow):
         """Route secondary browser clicks to the context switch manager."""
         if self._context_switch_manager is not None:
             self._context_switch_manager.switch_to_context(ctx)
+
+    def _on_secondary_browser_visibility_changed(self, visible: bool):
+        if (
+            not bool(getattr(self, '_secondary_browser_restore_in_progress', False))
+            and not bool(getattr(self, '_main_window_closing', False))
+        ):
+            settings.setValue('secondary_browser_visible', bool(visible))
+            settings.setValue('secondary_browser_restore_on_startup', bool(visible))
+            diagnostic_print(f"[RESTORE][Browser2] visibility changed visible={visible}", detail="verbose")
+        else:
+            diagnostic_print(
+                "[RESTORE][Browser2] visibility ignored "
+                f"visible={visible} restoring={bool(getattr(self, '_secondary_browser_restore_in_progress', False))} "
+                f"closing={bool(getattr(self, '_main_window_closing', False))}",
+                detail="verbose",
+            )
+        if visible:
+            return
+        if self._context_switch_manager is not None:
+            self._context_switch_manager.restore_primary()
 
     @Slot()
     def select_and_load_directory(self):
@@ -6550,8 +6760,53 @@ class MainWindow(QMainWindow):
             else:
                 self.showMaximized()
 
+        restore_secondary_flag = settings.value('secondary_browser_restore_on_startup', False, type=bool)
+        legacy_visible_flag = settings.value('secondary_browser_visible', False, type=bool)
+        saved_secondary_dir = settings.value('secondary_browser_directory_path', '', type=str)
+        saved_secondary_exists = bool(saved_secondary_dir and Path(saved_secondary_dir).exists())
+        restore_secondary = bool(restore_secondary_flag or legacy_visible_flag or saved_secondary_exists)
+        diagnostic_print(
+            "[RESTORE][Browser2] startup "
+            f"restore_flag={restore_secondary_flag} legacy_visible={legacy_visible_flag} "
+            f"folder='{saved_secondary_dir}' folder_exists={saved_secondary_exists} "
+            f"restore={restore_secondary} has_window_state={window_state_bytes is not None}",
+            detail="verbose",
+        )
+        if restore_secondary:
+            self._secondary_browser_restore_in_progress = True
+            try:
+                self._ensure_secondary_browser()
+            finally:
+                self._secondary_browser_restore_in_progress = False
+
         if window_state_bytes:
-            self.restoreState(window_state_bytes)
+            restored = self.restoreState(window_state_bytes)
+            diagnostic_print(f"[RESTORE][Browser2] restoreState result={restored}", detail="verbose")
+
+        if restore_secondary and self._secondary_browser is not None:
+            self._secondary_browser.dock.show()
+            settings.setValue('secondary_browser_visible', True)
+            settings.setValue('secondary_browser_restore_on_startup', True)
+            diagnostic_print(
+                "[RESTORE][Browser2] dock show "
+                f"hidden={self._secondary_browser.dock.isHidden()} "
+                f"visible={self._secondary_browser.dock.isVisible()} "
+                f"floating={self._secondary_browser.dock.isFloating()}",
+                detail="verbose",
+            )
+            if saved_secondary_dir and Path(saved_secondary_dir).exists():
+                def _restore_secondary_directory():
+                    try:
+                        diagnostic_print(f"[RESTORE][Browser2] loading folder '{saved_secondary_dir}'", detail="verbose")
+                        self._secondary_browser.load_directory(Path(saved_secondary_dir))
+                    except Exception as e:
+                        diagnostic_print(
+                            f"[RESTORE][Browser2] failed loading folder '{saved_secondary_dir}': {e}",
+                            detail="verbose",
+                        )
+                QTimer.singleShot(0, _restore_secondary_directory)
+            else:
+                diagnostic_print("[RESTORE][Browser2] no valid saved folder to load", detail="verbose")
 
         def _apply_saved_window_mode():
             try:

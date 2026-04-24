@@ -19,7 +19,7 @@ from PySide6.QtCore import (
     Qt, Signal, Slot, QModelIndex, QItemSelectionModel, QObject, QTimer,
 )
 from PySide6.QtWidgets import (
-    QDockWidget, QFileDialog, QPushButton, QSizePolicy,
+    QDockWidget, QFileDialog, QPushButton,
 )
 
 from models.image_list_model import ImageListModel
@@ -136,13 +136,7 @@ class SecondaryBrowser(QObject):
 
     def _inject_open_folder_button(self):
         try:
-            dock_widget = self.dock.widget()
-            if dock_widget is None:
-                return
-            outer_layout = dock_widget.layout()
-            if outer_layout is None:
-                return
-            btn = QPushButton('📂 Open Folder…')
+            btn = QPushButton('Open...')
             btn.setToolTip('Load a folder into this browser (Ctrl+Shift+B)')
             btn.clicked.connect(self._on_open_folder_clicked)
             btn.setObjectName('secondaryBrowserOpenFolder')
@@ -152,16 +146,16 @@ class SecondaryBrowser(QObject):
                     border: 1px solid rgba(255,255,255,0.12);
                     color: #c0c8d8;
                     border-radius: 5px;
-                    padding: 3px 10px;
+                    padding: 3px 8px;
                     font-size: 11px;
-                    margin: 3px;
                 }
                 QPushButton#secondaryBrowserOpenFolder:hover {
                     background: rgba(255,255,255,0.07);
                     border-color: rgba(255,255,255,0.25);
                 }
             """)
-            outer_layout.insertWidget(0, btn)
+            if hasattr(self.dock, 'add_controls_widget'):
+                self.dock.add_controls_widget(btn)
         except Exception as exc:
             print(f'[SecondaryBrowser] inject button error: {exc}')
 

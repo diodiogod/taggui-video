@@ -728,7 +728,6 @@ class ImageListViewGeometryMixin:
             return False
         if dock.isFloating():
             return False
-
         current_dock_width = int(dock.width() or 0)
         if current_dock_width <= 0:
             return False
@@ -739,6 +738,14 @@ class ImageListViewGeometryMixin:
         target_dock_width = max(min_dock_width, target_dock_width)
         if target_dock_width >= current_dock_width - 2:
             return False
+
+        coordinated_snap = getattr(main_window, "_request_coordinated_image_browser_masonry_snap", None)
+        if callable(coordinated_snap):
+            try:
+                if coordinated_snap(self, dock, target_dock_width):
+                    return True
+            except Exception:
+                pass
 
         self._masonry_splitter_snapping = True
         main_window.resizeDocks([dock], [target_dock_width], Qt.Orientation.Horizontal)
@@ -1532,6 +1539,8 @@ class ImageListViewGeometryMixin:
             dragged_path = getattr(image, "path", None)
         except Exception:
             dragged_path = None
+        drag_path_text = str(dragged_path) if dragged_path is not None else None
+        preview_source = "none"
 
         # Use an URLs-only payload for external file drags. Some targets (notably
         # browsers) mis-handle the model's text/plain fallback as dropped text.
@@ -1541,6 +1550,11 @@ class ImageListViewGeometryMixin:
         else:
             mime_data = self.model().mimeData(indices)
         if not mime_data:
+            diagnostic_print(
+                f"[DRAG] Abort start: no mime data | external_only={int(external_only)} "
+                f"| row={model_index.row()} | path={drag_path_text}",
+                detail="essential",
+            )
             return
 
         # Build a reliable visual preview pixmap.
@@ -1549,6 +1563,8 @@ class ImageListViewGeometryMixin:
         if icon is not None:
             try:
                 source_pixmap = icon.pixmap(self.iconSize())
+                if not source_pixmap.isNull():
+                    preview_source = "icon"
             except Exception:
                 source_pixmap = QPixmap()
         if source_pixmap.isNull():
@@ -1556,12 +1572,15 @@ class ImageListViewGeometryMixin:
                 item_rect = self.visualRect(indices[0])
                 if item_rect.isValid() and item_rect.width() > 0 and item_rect.height() > 0:
                     source_pixmap = self.viewport().grab(item_rect)
+                    if not source_pixmap.isNull():
+                        preview_source = "viewport_grab"
             except Exception:
                 source_pixmap = QPixmap()
         if source_pixmap.isNull():
             fallback_side = max(48, int(self.iconSize().width() or 96))
             source_pixmap = QPixmap(fallback_side, fallback_side)
             source_pixmap.fill(Qt.GlobalColor.transparent)
+            preview_source = "transparent_fallback"
 
         # Drag pixmap is slightly translucent for ghosting.
         drag_pixmap = QPixmap(source_pixmap.size())
@@ -1574,16 +1593,65 @@ class ImageListViewGeometryMixin:
         # Ultra-fast drag/release race: if button is already up by the time we
         # reach drag start, skip QDrag.exec() and spawn immediately.
         if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            diagnostic_print(
+                f"[DRAG] Skip exec: mouse released early | external_only={int(external_only)} "
+                f"| row={model_index.row()} | path={drag_path_text} "
+                f"| preview={preview_source} {source_pixmap.width()}x{source_pixmap.height()}",
+                detail="essential",
+            )
             if not external_only:
                 live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
                 self._spawn_floating_from_drag_index(live_index, source_pixmap)
             return
 
+        model = self.model()
+        try:
+            model_row_count = int(model.rowCount()) if model is not None else -1
+        except Exception:
+            model_row_count = -1
+        source_model = model.sourceModel() if model is not None and hasattr(model, "sourceModel") else None
+        try:
+            source_row_count = int(source_model.rowCount()) if source_model is not None else -1
+        except Exception:
+            source_row_count = -1
+        try:
+            loaded_pages = len(getattr(source_model, "_pages", {})) if source_model is not None else -1
+        except Exception:
+            loaded_pages = -1
+        try:
+            current_backend = str(settings.value("video_playback_backend", "", type=str) or "")
+        except Exception:
+            current_backend = ""
+        try:
+            supported_actions_text = str(supportedActions)
+        except Exception:
+            supported_actions_text = "<unavailable>"
+        diagnostic_print(
+            f"[DRAG] Exec start | external_only={int(external_only)} "
+            f"| row={model_index.row()} valid={int(model_index.isValid())} "
+            f"| persistent_valid={int(dragged_index.isValid())} "
+            f"| path={drag_path_text} | preview={preview_source} "
+            f"{source_pixmap.width()}x{source_pixmap.height()} | proxy_rows={model_row_count} "
+            f"| source_rows={source_row_count} | loaded_pages={loaded_pages} "
+            f"| masonry={int(bool(getattr(self, 'use_masonry', False)))} "
+            f"| backend={current_backend} | actions={supported_actions_text}",
+            detail="essential",
+        )
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.setPixmap(drag_pixmap)
         drag.setHotSpot(drag_pixmap.rect().center())
         drop_action = drag.exec(supportedActions)
+        try:
+            drop_action_text = str(drop_action)
+        except Exception:
+            drop_action_text = "<unavailable>"
+        diagnostic_print(
+            f"[DRAG] Exec end | external_only={int(external_only)} "
+            f"| row={model_index.row()} | path={drag_path_text} "
+            f"| drop_action={drop_action_text}",
+            detail="essential",
+        )
 
         # If dropped onto no external target, spawn a floating viewer at cursor.
         if (

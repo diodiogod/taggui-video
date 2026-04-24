@@ -48,6 +48,7 @@ DEFAULT_SETTINGS = {
     'image_list_random_seed_history': [],
     'diagnostic_log_mode': 'essential',  # off, essential, verbose
     'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
+    'image_list_title_strip_height': 8,  # Compact image-list dock title strip height in px
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
     'image_list_double_click_action': 'spawn viewer',  # spawn viewer, system default app
     'compare_fit_mode': 'preserve',  # preserve, fill, stretch (image compare overlay mode)

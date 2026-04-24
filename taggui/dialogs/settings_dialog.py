@@ -782,8 +782,19 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(masonry_switch_threshold_spin_box, 1, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
+        grid_layout.addWidget(QLabel('Image list title strip height (px)'), 2, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        title_strip_height_spin_box = SettingsSpinBox(
+            key='image_list_title_strip_height',
+            minimum=4, maximum=32, default=8)
+        title_strip_height_spin_box.setToolTip(
+            'Controls the compact image-list dock title strip height.\n'
+            'Applied live.')
+        grid_layout.addWidget(title_strip_height_spin_box, 2, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
         # Floating viewer detail zoom fallback
-        grid_layout.addWidget(QLabel('Floating double-click detail zoom (%)'), 2, 0,
+        grid_layout.addWidget(QLabel('Floating double-click detail zoom (%)'), 3, 0,
                               Qt.AlignmentFlag.AlignRight)
         floating_detail_zoom_spin_box = SettingsSpinBox(
             key='floating_double_click_detail_zoom_percent',
@@ -793,10 +804,10 @@ class SettingsDialog(QDialog):
             'double-click cannot apply width/height auto-fill and media is not pannable.\n'
             '100 = 1x (no change), 400 = 4x.\n'
             'Applied live (no restart).')
-        grid_layout.addWidget(floating_detail_zoom_spin_box, 2, 1,
+        grid_layout.addWidget(floating_detail_zoom_spin_box, 3, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Diagnostic log mode'), 3, 0,
+        grid_layout.addWidget(QLabel('Diagnostic log mode'), 4, 0,
                               Qt.AlignmentFlag.AlignRight)
         diagnostic_log_mode_combo = SettingsComboBox(
             key='diagnostic_log_mode',
@@ -809,10 +820,10 @@ class SettingsDialog(QDialog):
             'verbose: emit the full masonry/pagination diagnostic stream.\n\n'
             'Applied live (no restart).'
         )
-        grid_layout.addWidget(diagnostic_log_mode_combo, 3, 1,
+        grid_layout.addWidget(diagnostic_log_mode_combo, 4, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Image double-click action'), 4, 0,
+        grid_layout.addWidget(QLabel('Image double-click action'), 5, 0,
                               Qt.AlignmentFlag.AlignRight)
         image_list_double_click_combo = SettingsComboBox(
             key='image_list_double_click_action',
@@ -826,10 +837,10 @@ class SettingsDialog(QDialog):
             'Alt+double-click still opens Windows Explorer.\n'
             'Applied live (no restart).'
         )
-        grid_layout.addWidget(image_list_double_click_combo, 4, 1,
+        grid_layout.addWidget(image_list_double_click_combo, 5, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=5)
+        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=6)
 
         layout.addLayout(grid_layout)
         layout.addStretch()
