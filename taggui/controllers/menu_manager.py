@@ -605,6 +605,9 @@ class MenuManager:
         # View menu
         self._create_view_menu(menu_bar)
 
+        # Browsers menu
+        self._create_browsers_menu(menu_bar)
+
         # Workspaces menu
         self._create_workspaces_menu(menu_bar)
 
@@ -840,26 +843,6 @@ class MenuManager:
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_main_viewer_action)
         view_menu.addAction(self.toggle_image_list_action)
-        open_secondary_browser_action = QAction('Open Browser 2 Split Right', parent=self.main_window)
-        open_secondary_browser_action.setShortcut(QKeySequence('Ctrl+Shift+B'))
-        open_secondary_browser_action.setToolTip('Open a second image list browser for a different folder')
-        open_secondary_browser_action.triggered.connect(
-            lambda _checked=False: self.main_window.open_secondary_browser('split_right')
-        )
-        browser_2_menu = view_menu.addMenu('Browser 2')
-        browser_2_menu.addAction(open_secondary_browser_action)
-        open_secondary_browser_bottom_action = QAction('Open Browser 2 Split Bottom', parent=self.main_window)
-        open_secondary_browser_bottom_action.setToolTip('Open Browser 2 below the main image list')
-        open_secondary_browser_bottom_action.triggered.connect(
-            lambda _checked=False: self.main_window.open_secondary_browser_bottom()
-        )
-        browser_2_menu.addAction(open_secondary_browser_bottom_action)
-        open_secondary_browser_tabbed_action = QAction('Open Browser 2 as Tab', parent=self.main_window)
-        open_secondary_browser_tabbed_action.setToolTip('Open Browser 2 tabbed with the main image list')
-        open_secondary_browser_tabbed_action.triggered.connect(
-            lambda _checked=False: self.main_window.open_secondary_browser_tabbed()
-        )
-        browser_2_menu.addAction(open_secondary_browser_tabbed_action)
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)
         auto_captioner_menu = view_menu.addMenu('Auto-Captioner')
@@ -903,6 +886,38 @@ class MenuManager:
         self._sync_auto_captioner_layout_actions(
             getattr(self.main_window.auto_captioner, 'layout_mode', load_auto_captioner_layout_mode())
         )
+
+    def _create_browsers_menu(self, menu_bar):
+        """Create Browsers menu."""
+        browsers_menu = menu_bar.addMenu('Browsers')
+
+        open_secondary_browser_action = QAction('Open Browser 2 Split Right', parent=self.main_window)
+        open_secondary_browser_action.setShortcut(QKeySequence('Ctrl+Shift+B'))
+        open_secondary_browser_action.setToolTip('Open a second image list browser for a different folder')
+        open_secondary_browser_action.triggered.connect(
+            lambda _checked=False: self.main_window.open_secondary_browser('split_right')
+        )
+        browsers_menu.addAction(open_secondary_browser_action)
+
+        open_secondary_browser_bottom_action = QAction('Open Browser 2 Split Bottom', parent=self.main_window)
+        open_secondary_browser_bottom_action.setToolTip('Open Browser 2 below the main image list')
+        open_secondary_browser_bottom_action.triggered.connect(
+            lambda _checked=False: self.main_window.open_secondary_browser_bottom()
+        )
+        browsers_menu.addAction(open_secondary_browser_bottom_action)
+
+        open_secondary_browser_tabbed_action = QAction('Open Browser 2 as Tab', parent=self.main_window)
+        open_secondary_browser_tabbed_action.setToolTip('Open Browser 2 tabbed with the main image list')
+        open_secondary_browser_tabbed_action.triggered.connect(
+            lambda _checked=False: self.main_window.open_secondary_browser_tabbed()
+        )
+        browsers_menu.addAction(open_secondary_browser_tabbed_action)
+
+        browsers_menu.addSeparator()
+
+        close_secondary_browser_action = QAction('Close Browser 2', parent=self.main_window)
+        close_secondary_browser_action.triggered.connect(self.main_window.close_secondary_browser)
+        browsers_menu.addAction(close_secondary_browser_action)
 
     def _set_auto_captioner_layout(self, layout_mode: str):
         auto_captioner = getattr(self.main_window, 'auto_captioner', None)
