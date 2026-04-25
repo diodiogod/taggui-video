@@ -411,6 +411,10 @@ class MainWindow(QMainWindow):
         self._main_viewer_controls_attached = True
         self._reaction_controls_attached = True
         self._floating_hold_mode = False
+        self._image_browser_splitter_drag_kind = None
+        self._image_browser_splitter_drag_primary_width = 0
+        self._image_browser_splitter_drag_until = 0.0
+        self._image_browser_splitter_primary_constraints = None
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
@@ -970,6 +974,10 @@ class MainWindow(QMainWindow):
                 pass
 
         if event_type in (event.Type.MouseButtonPress, event.Type.MouseButtonRelease):
+            try:
+                self._track_image_browser_splitter_mouse_event(event, event_type)
+            except Exception:
+                pass
             try:
                 if self._handle_global_media_mouse_button(event, event_type):
                     return True
@@ -5567,6 +5575,8 @@ class MainWindow(QMainWindow):
         """Create (or show) the secondary browser dock and optionally open a folder."""
         if not isinstance(placement, str):
             placement = 'split_right'
+        if placement not in {'split_right', 'split_bottom', 'tabbed'}:
+            placement = 'split_right'
         self._ensure_secondary_browser()
         self._place_secondary_browser(placement)
         self._secondary_browser.dock.show()
@@ -5615,13 +5625,59 @@ class MainWindow(QMainWindow):
     def open_secondary_browser_tabbed(self):
         self.open_secondary_browser('tabbed')
 
+    def _infer_secondary_browser_placement(self) -> str:
+        secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        primary_dock = getattr(self, 'image_list', None)
+        if secondary_dock is None or primary_dock is None:
+            return str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+        try:
+            if secondary_dock in self.tabifiedDockWidgets(primary_dock):
+                return 'tabbed'
+        except Exception:
+            pass
+        try:
+            primary_rect = primary_dock.frameGeometry()
+            secondary_rect = secondary_dock.frameGeometry()
+        except Exception:
+            return str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+        if not primary_rect.isValid() or not secondary_rect.isValid():
+            return str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+
+        horizontal_overlap = min(primary_rect.right(), secondary_rect.right()) - max(
+            primary_rect.left(),
+            secondary_rect.left(),
+        )
+        vertical_overlap = min(primary_rect.bottom(), secondary_rect.bottom()) - max(
+            primary_rect.top(),
+            secondary_rect.top(),
+        )
+        if horizontal_overlap > vertical_overlap:
+            return 'split_bottom'
+        return 'split_right'
+
+    def _saved_secondary_browser_placement(self) -> str:
+        placement = str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+        if placement not in {'split_right', 'split_bottom', 'tabbed'}:
+            return 'split_right'
+        return placement
+
+    def _remember_secondary_browser_placement(self, placement: str | None = None):
+        if placement not in {'split_right', 'split_bottom', 'tabbed'}:
+            placement = self._infer_secondary_browser_placement()
+        if placement not in {'split_right', 'split_bottom', 'tabbed'}:
+            placement = 'split_right'
+        settings.setValue('secondary_browser_placement', placement)
+
     def _place_secondary_browser(self, placement: str):
         if self._secondary_browser is None:
             return
+        if placement not in {'split_right', 'split_bottom', 'tabbed'}:
+            placement = self._saved_secondary_browser_placement()
         secondary_dock = self._secondary_browser.dock
         primary_dock = getattr(self, 'image_list', None)
         if primary_dock is None or not primary_dock.isVisible():
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, secondary_dock)
+            self._remember_secondary_browser_placement(placement)
             return
         if secondary_dock.isFloating():
             secondary_dock.setFloating(False)
@@ -5629,6 +5685,7 @@ class MainWindow(QMainWindow):
         if placement == 'tabbed':
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, secondary_dock)
             self.tabifyDockWidget(primary_dock, secondary_dock)
+            self._remember_secondary_browser_placement(placement)
             return
 
         orientation = (
@@ -5644,6 +5701,7 @@ class MainWindow(QMainWindow):
             [target_size, target_size],
             orientation,
         )
+        self._remember_secondary_browser_placement(placement)
 
     def _split_image_browser_docks_for_masonry_snap(self, dock):
         secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
@@ -5688,11 +5746,20 @@ class MainWindow(QMainWindow):
             self._coordinated_masonry_snap_pending = pending
         current_width = max(1, int(dock.width() or 1))
         requested_width = max(1, int(target_width or 1))
+        splitter_kind = self._classify_image_browser_splitter_under_cursor(docks)
+        primary_dock = getattr(self, 'image_list', None)
+        primary_width = int(primary_dock.width() or 0) if primary_dock is not None else 0
+        if splitter_kind == 'right':
+            tracked_primary_width = int(getattr(self, '_image_browser_splitter_drag_primary_width', 0) or 0)
+            if tracked_primary_width > 0:
+                primary_width = tracked_primary_width
         pending[dock] = {
             'target_width': requested_width,
             'current_width': current_width,
             'slack': max(0, current_width - requested_width),
             'requested_at': now,
+            'splitter_kind': splitter_kind,
+            'primary_width': primary_width,
         }
 
         timer = getattr(self, '_coordinated_masonry_snap_timer', None)
@@ -5703,6 +5770,175 @@ class MainWindow(QMainWindow):
             self._coordinated_masonry_snap_timer = timer
         timer.stop()
         timer.start(90)
+        return True
+
+    def _event_global_position(self, event) -> QPoint | None:
+        try:
+            position = event.globalPosition()
+            return position.toPoint()
+        except Exception:
+            pass
+        try:
+            return event.globalPos()
+        except Exception:
+            return None
+
+    def _classify_image_browser_splitter_at_position(self, global_pos: QPoint | None, docks) -> str | None:
+        if global_pos is None:
+            return None
+        primary_dock = getattr(self, 'image_list', None)
+        secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        if primary_dock not in docks or secondary_dock not in docks:
+            return None
+        try:
+            primary_rect = primary_dock.frameGeometry()
+            secondary_rect = secondary_dock.frameGeometry()
+        except Exception:
+            return None
+        if not primary_rect.isValid() or not secondary_rect.isValid():
+            return None
+
+        vertical_overlap = min(primary_rect.bottom(), secondary_rect.bottom()) - max(
+            primary_rect.top(),
+            secondary_rect.top(),
+        )
+        if vertical_overlap < 24:
+            return None
+        overlap_top = max(primary_rect.top(), secondary_rect.top())
+        overlap_bottom = min(primary_rect.bottom(), secondary_rect.bottom())
+        if global_pos.y() < overlap_top or global_pos.y() > overlap_bottom:
+            return None
+
+        if primary_rect.left() <= secondary_rect.left():
+            middle_x = (primary_rect.right() + secondary_rect.left()) / 2.0
+            outer_x = float(secondary_rect.right())
+        else:
+            middle_x = (secondary_rect.right() + primary_rect.left()) / 2.0
+            outer_x = float(secondary_rect.left())
+
+        cursor_x = float(global_pos.x())
+        middle_distance = abs(cursor_x - middle_x)
+        outer_distance = abs(cursor_x - outer_x)
+        if min(middle_distance, outer_distance) > 18:
+            return None
+        return 'right' if outer_distance < middle_distance else 'middle'
+
+    def _restore_image_browser_splitter_primary_constraints(self):
+        constraints = getattr(self, '_image_browser_splitter_primary_constraints', None)
+        if not constraints:
+            return
+        self._image_browser_splitter_primary_constraints = None
+        primary_dock, old_min, old_max = constraints
+        try:
+            primary_dock.setMinimumWidth(int(old_min))
+            primary_dock.setMaximumWidth(int(old_max))
+        except Exception:
+            pass
+
+    def _lock_primary_browser_width_for_splitter_drag(self, primary_dock):
+        if getattr(self, '_image_browser_splitter_primary_constraints', None):
+            return
+        try:
+            width = max(1, int(primary_dock.width() or primary_dock.minimumWidth() or 1))
+            self._image_browser_splitter_primary_constraints = (
+                primary_dock,
+                int(primary_dock.minimumWidth() or 0),
+                int(primary_dock.maximumWidth() or 16777215),
+            )
+            primary_dock.setMinimumWidth(width)
+            primary_dock.setMaximumWidth(width)
+        except Exception:
+            self._image_browser_splitter_primary_constraints = None
+
+    def _track_image_browser_splitter_mouse_event(self, event, event_type):
+        if event_type == event.Type.MouseButtonPress:
+            try:
+                if event.button() != Qt.MouseButton.LeftButton:
+                    return
+            except Exception:
+                return
+            self._restore_image_browser_splitter_primary_constraints()
+            self._image_browser_splitter_drag_kind = None
+            self._image_browser_splitter_drag_primary_width = 0
+            self._image_browser_splitter_drag_until = 0.0
+            primary_dock = getattr(self, 'image_list', None)
+            secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+            if primary_dock is None or secondary_dock is None:
+                return
+            docks = self._split_image_browser_docks_for_masonry_snap(primary_dock)
+            if secondary_dock not in docks:
+                return
+            splitter_kind = self._classify_image_browser_splitter_at_position(
+                self._event_global_position(event),
+                docks,
+            )
+            if splitter_kind is None:
+                return
+            self._image_browser_splitter_drag_kind = splitter_kind
+            self._image_browser_splitter_drag_primary_width = int(primary_dock.width() or 0)
+            self._image_browser_splitter_drag_until = time.time() + 3600.0
+            if splitter_kind == 'right':
+                self._lock_primary_browser_width_for_splitter_drag(primary_dock)
+            return
+
+        if event_type == event.Type.MouseButtonRelease:
+            if getattr(self, '_image_browser_splitter_drag_kind', None) is not None:
+                self._image_browser_splitter_drag_until = time.time() + 1.0
+            self._restore_image_browser_splitter_primary_constraints()
+
+    def _classify_image_browser_splitter_under_cursor(self, docks) -> str | None:
+        now = time.time()
+        tracked_kind = getattr(self, '_image_browser_splitter_drag_kind', None)
+        if tracked_kind in {'middle', 'right'} and now <= float(getattr(self, '_image_browser_splitter_drag_until', 0.0) or 0.0):
+            return tracked_kind
+        primary_dock = getattr(self, 'image_list', None)
+        secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        if primary_dock not in docks or secondary_dock not in docks:
+            return None
+        try:
+            primary_rect = primary_dock.frameGeometry()
+            secondary_rect = secondary_dock.frameGeometry()
+            cursor_x = QCursor.pos().x()
+        except Exception:
+            return None
+        if not primary_rect.isValid() or not secondary_rect.isValid():
+            return None
+
+        if primary_rect.left() <= secondary_rect.left():
+            middle_x = (primary_rect.right() + secondary_rect.left()) / 2.0
+            outer_x = float(secondary_rect.right())
+        else:
+            middle_x = (secondary_rect.right() + primary_rect.left()) / 2.0
+            outer_x = float(secondary_rect.left())
+        return 'right' if abs(cursor_x - outer_x) < abs(cursor_x - middle_x) else 'middle'
+
+    def _resize_secondary_browser_preserving_primary_width(self, secondary_dock, target_width: int):
+        primary_dock = getattr(self, 'image_list', None)
+        if primary_dock is None or secondary_dock is None:
+            return False
+        primary_width = max(1, int(primary_dock.width() or primary_dock.minimumWidth() or 1))
+        secondary_target = max(
+            max(1, int(secondary_dock.minimumWidth() or 1)),
+            int(target_width),
+        )
+        old_min = int(primary_dock.minimumWidth() or 0)
+        old_max = int(primary_dock.maximumWidth() or 16777215)
+        primary_dock.setMinimumWidth(primary_width)
+        primary_dock.setMaximumWidth(primary_width)
+        self.resizeDocks(
+            [secondary_dock],
+            [secondary_target],
+            Qt.Orientation.Horizontal,
+        )
+
+        def _restore_primary_constraints():
+            try:
+                primary_dock.setMinimumWidth(old_min)
+                primary_dock.setMaximumWidth(old_max)
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _restore_primary_constraints)
         return True
 
     def _apply_coordinated_image_browser_masonry_snap(self):
@@ -5716,9 +5952,20 @@ class MainWindow(QMainWindow):
             return
 
         candidates = []
+        splitter_kinds = set()
+        primary_widths = []
         for candidate, data in pending.items():
             if candidate not in docks or not isinstance(data, dict):
                 continue
+            splitter_kind = data.get('splitter_kind')
+            if isinstance(splitter_kind, str):
+                splitter_kinds.add(splitter_kind)
+            try:
+                primary_width = int(data.get('primary_width') or 0)
+                if primary_width > 0:
+                    primary_widths.append(primary_width)
+            except Exception:
+                pass
             current = max(1, int(candidate.width() or data.get('current_width') or 1))
             requested = max(1, int(data.get('target_width') or current))
             target = max(max(1, int(candidate.minimumWidth() or 1)), min(current, requested))
@@ -5732,19 +5979,88 @@ class MainWindow(QMainWindow):
                 target,
             ))
 
+        if not candidates:
+            pending.clear()
+            return
+        splitter_kind = self._classify_image_browser_splitter_under_cursor(docks)
+        if splitter_kind is None and 'right' in splitter_kinds:
+            splitter_kind = 'right'
+        if splitter_kind == 'right':
+            primary_dock = getattr(self, 'image_list', None)
+            secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+            if primary_dock is not None and secondary_dock is not None and primary_dock in docks and secondary_dock in docks:
+                target_primary_width = max(1, int(primary_widths[0] if primary_widths else primary_dock.width() or 1))
+                secondary_candidates = [
+                    int(target)
+                    for _, _, candidate, target in candidates
+                    if candidate is secondary_dock
+                ]
+                if secondary_candidates:
+                    secondary_width = secondary_candidates[0]
+                else:
+                    _, _, _, fallback_width = max(candidates, key=lambda item: (item[0], item[1]))
+                    secondary_width = int(fallback_width)
+                secondary_width = max(
+                    max(1, int(secondary_dock.minimumWidth() or 1)),
+                    secondary_width,
+                )
+                for candidate in docks:
+                    list_view = getattr(candidate, 'list_view', None)
+                    if list_view is not None:
+                        setattr(list_view, '_masonry_splitter_snapping', True)
+                self._coordinated_masonry_snap_applying_until = time.time() + 0.45
+                self.resizeDocks(
+                    [primary_dock, secondary_dock],
+                    [target_primary_width, secondary_width],
+                    Qt.Orientation.Horizontal,
+                )
+            pending.clear()
+            return
+
         for candidate in docks:
             list_view = getattr(candidate, 'list_view', None)
             if list_view is not None:
                 setattr(list_view, '_masonry_splitter_snapping', True)
 
         pending.clear()
-        if not candidates:
-            return
         # Pick one browser for this drag cycle. Usually this is the browser
         # that was expanded and now owns the dead masonry space; the other
         # browser is left alone even if it could also report slack later.
         _, _, target_dock, target_width = max(candidates, key=lambda item: (item[0], item[1]))
         self._coordinated_masonry_snap_applying_until = time.time() + 0.45
+        primary_dock = getattr(self, 'image_list', None)
+        secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        sibling_docks = [candidate for candidate in docks if candidate is not target_dock]
+        if splitter_kind == 'middle' and len(sibling_docks) == 1:
+            sibling_dock = sibling_docks[0]
+            current_total = max(
+                2,
+                int(target_dock.width() or 0) + int(sibling_dock.width() or 0),
+            )
+            target_min = max(1, int(target_dock.minimumWidth() or 0))
+            sibling_min = max(1, int(sibling_dock.minimumWidth() or 0))
+            clamped_target = max(
+                target_min,
+                min(int(target_width), max(target_min, current_total - sibling_min)),
+            )
+            sibling_width = max(
+                sibling_min,
+                current_total - clamped_target,
+            )
+            self.resizeDocks(
+                [target_dock, sibling_dock],
+                [clamped_target, sibling_width],
+                Qt.Orientation.Horizontal,
+            )
+            return
+        if (
+            target_dock is secondary_dock
+            and primary_dock is not None
+            and primary_dock in docks
+            and primary_dock is not target_dock
+        ):
+            self._resize_secondary_browser_preserving_primary_width(target_dock, int(target_width))
+            return
         self.resizeDocks([target_dock], [target_width], Qt.Orientation.Horizontal)
 
     @Slot()
@@ -6931,6 +7247,8 @@ class MainWindow(QMainWindow):
 
         if restore_secondary and self._secondary_browser is not None:
             self._secondary_browser.dock.show()
+            if not window_state_bytes:
+                self._place_secondary_browser(self._saved_secondary_browser_placement())
             settings.setValue('secondary_browser_visible', True)
             settings.setValue('secondary_browser_restore_on_startup', True)
             diagnostic_print(
@@ -7258,6 +7576,17 @@ class MainWindow(QMainWindow):
         try:
             self._workspace_active_id = workspace_id
             left_dock = self.image_list
+            secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+            secondary_was_visible = False
+            secondary_placement = self._saved_secondary_browser_placement()
+            if secondary_dock is not None:
+                try:
+                    secondary_was_visible = bool(secondary_dock.isVisible() and not secondary_dock.isFloating())
+                except Exception:
+                    secondary_was_visible = False
+                if secondary_was_visible:
+                    secondary_placement = self._infer_secondary_browser_placement()
+                    self._remember_secondary_browser_placement(secondary_placement)
             right_dock_map = {
                 "image_tags_editor": self.image_tags_editor,
                 "all_tags_editor": self.all_tags_editor,
@@ -7434,6 +7763,12 @@ class MainWindow(QMainWindow):
                 self.image_list.raise_()
                 fitted_size = self._compute_full_masonry_initial_size()
                 self._set_image_list_thumbnail_size(fitted_size, persist=False)
+
+            if secondary_was_visible and secondary_dock is not None:
+                self._place_secondary_browser(secondary_placement)
+                secondary_dock.show()
+                if secondary_placement != 'tabbed':
+                    secondary_dock.raise_()
 
             if self.directory_path is not None:
                 self._set_central_content_page()

@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-25
+
+### Added
+
+- Two-browser workspace and splitter coordination
+- Add and stabilize the secondary image browser
+- Preserve split placement across workspace changes and startup restore
+- Keep masonry snapping working correctly with the secondary browser
+
+### Fixed
+
+- Fix splitter snapping so the browser layouts stay independent
 ## [1.2.8] - 2026-04-17
 
 ### Added

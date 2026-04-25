@@ -1,7 +1,7 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 import math
 from PySide6.QtCore import Property
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QDockWidget, QMainWindow
 from utils.diagnostic_logging import diagnostic_print
 
 try:
@@ -572,7 +572,20 @@ class ImageListViewGeometryMixin:
         host = self.window()
         if not isinstance(host, QMainWindow):
             return False
-        return not bool(getattr(host, "_main_viewer_visible", True))
+        if bool(getattr(host, "_main_viewer_visible", True)):
+            return False
+
+        dock = self.parentWidget()
+        while dock is not None and not isinstance(dock, QDockWidget):
+            dock = dock.parentWidget()
+        split_browser_docks = getattr(host, "_split_image_browser_docks_for_masonry_snap", None)
+        if isinstance(dock, QDockWidget) and callable(split_browser_docks):
+            try:
+                if len(split_browser_docks(dock)) >= 2:
+                    return False
+            except Exception:
+                pass
+        return True
 
     def _resolve_full_width_masonry_thumbnail_size(self, target_size: int, zoom_direction: int = 0) -> int:
         """Resolve a target thumbnail size to the closest exact-fit masonry size."""
