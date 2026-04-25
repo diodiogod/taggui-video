@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-04-25
+
+### Added
+
+- Two-browser workflow and detached browser routing
+- Stabilize the secondary browser layout and snapping behavior
+- Preserve browser placement across workspace changes and startup restore
+- Keep browser selection driving the anchored main viewer instead of spawned snapshots
+
+### Fixed
+
+- Fix detached browser click, drag-spawn, and compare routing so floating docks still resolve the real main window
 ## [1.3.0] - 2026-04-25
 
 ### Added
