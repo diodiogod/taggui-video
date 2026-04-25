@@ -377,8 +377,8 @@ class ImageList(QDockWidget):
         self.controls_layout = QHBoxLayout(self.controls_container)
         self.controls_layout.setContentsMargins(4, 2, 4, 2)
         self.controls_layout.setSpacing(6)
-        sort_label = QLabel('Sort')
-        sort_label.setSizePolicy(
+        self.sort_label = QLabel('Sort')
+        self.sort_label.setSizePolicy(
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Preferred,
         )
@@ -423,7 +423,7 @@ class ImageList(QDockWidget):
         )
 
         self.controls_layout.addWidget(self.filter_line_edit, stretch=5)
-        self.controls_layout.addWidget(sort_label)
+        self.controls_layout.addWidget(self.sort_label)
         self.controls_layout.addWidget(self.sort_combo_box, stretch=2)
         self.controls_layout.addWidget(self.media_type_combo_box)
 
@@ -540,6 +540,7 @@ class ImageList(QDockWidget):
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_combo_text_changed)
         self.sort_combo_box.activated.connect(self._on_sort_combo_activated)
         self._update_sort_combo_display()
+        QTimer.singleShot(0, self._update_sort_label_visibility)
 
         # DISABLED: Cache warming causes UI blocking
         # Connect cache warming signal to update cache status label
@@ -552,6 +553,27 @@ class ImageList(QDockWidget):
 
     def set_title_strip_height(self, height: int):
         self.controls_toggle_strip.set_strip_height(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._update_sort_label_visibility)
+
+    def _update_sort_label_visibility(self):
+        if not hasattr(self, 'controls_container') or not hasattr(self, 'sort_label'):
+            return
+        if not self.controls_container.isVisible():
+            return
+        if not self.filter_line_edit.isVisible():
+            self.sort_label.setVisible(False)
+            return
+
+        filter_width = int(self.filter_line_edit.width() or 0)
+        if filter_width <= 0:
+            return
+
+        # Keep the existing layout behavior and only let the Sort label yield
+        # once the filter has already been squeezed down substantially.
+        self.sort_label.setVisible(filter_width >= 120)
 
     def setObjectName(self, name: str):
         super().setObjectName(name)
