@@ -82,6 +82,8 @@ class SecondaryBrowser(QObject):
         )
         self.dock.setObjectName('secondary_image_list')
         self.dock.setWindowTitle('Browser 2')
+        self.dock._secondary_browser_owner = self
+        self.dock.list_view._secondary_browser_owner = self
 
         # ── Self-wire filter / media-type → secondary proxy ──────────────────
         # These replace what signal_manager does for the primary image_list
@@ -301,6 +303,24 @@ class SecondaryBrowser(QObject):
             self.context_activated.emit(ctx)
         except Exception as exc:
             print(f'[SecondaryBrowser] selection error: {exc}')
+
+    def commit_thumbnail_click_selection(self, proxy_image_index: QModelIndex | None = None):
+        index = proxy_image_index if isinstance(proxy_image_index, QModelIndex) and proxy_image_index.isValid() else self._sel.currentIndex()
+        if not index.isValid():
+            return
+        self._update_index_label(index)
+        try:
+            ctx = {
+                'name': 'secondary',
+                'proxy_index': index,
+                'image_list_model': self.image_list_model,
+                'proxy_image_list_model': self.proxy_image_list_model,
+                'tag_counter_model': self.tag_counter_model,
+                'image_list': self.dock,
+            }
+            self.context_activated.emit(ctx)
+        except Exception as exc:
+            print(f'[SecondaryBrowser] commit selection error: {exc}')
 
     # ─────────────────────────────────────────────────────────────────────────
     # Tag counting

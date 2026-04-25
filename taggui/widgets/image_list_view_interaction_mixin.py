@@ -322,9 +322,13 @@ class ImageListViewInteractionMixin:
                             )
                         else:
                             self.setCurrentIndex(proxy_idx)
-                        host = self.window()
-                        if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
-                            host.commit_thumbnail_click_selection(proxy_idx)
+                        selection_owner = getattr(self, "_secondary_browser_owner", None)
+                        if selection_owner is not None and hasattr(selection_owner, "commit_thumbnail_click_selection"):
+                            selection_owner.commit_thumbnail_click_selection(proxy_idx)
+                        else:
+                            host = self.window()
+                            if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
+                                host.commit_thumbnail_click_selection(proxy_idx)
             except Exception:
                 pass
 
@@ -1819,8 +1823,52 @@ class ImageListViewInteractionMixin:
                             0,
                             lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
                         )
+            selection_owner = getattr(self, "_secondary_browser_owner", None)
             host = self.window()
-            if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
+            if selection_owner is not None and hasattr(selection_owner, "commit_thumbnail_click_selection"):
+                commit_index = QModelIndex()
+                pending_global = getattr(self, "_pending_click_commit_global", None)
+                if isinstance(pending_global, int) and pending_global >= 0:
+                    try:
+                        source_model = (
+                            self.model().sourceModel()
+                            if self.model() and hasattr(self.model(), "sourceModel")
+                            else self.model()
+                        )
+                        loaded_row = -1
+                        if source_model is not None and hasattr(source_model, "get_loaded_row_for_global_index"):
+                            loaded_row = int(source_model.get_loaded_row_for_global_index(int(pending_global)))
+                        if loaded_row >= 0 and source_model is not None:
+                            src_idx = source_model.index(loaded_row, 0)
+                            proxy_model = self.model()
+                            if proxy_model is not None and hasattr(proxy_model, "mapFromSource"):
+                                mapped_idx = proxy_model.mapFromSource(src_idx)
+                            else:
+                                mapped_idx = src_idx
+                            if mapped_idx.isValid():
+                                commit_index = mapped_idx
+                    except Exception:
+                        commit_index = QModelIndex()
+                pending_commit = QPersistentModelIndex(
+                    getattr(self, "_pending_click_commit_index", QPersistentModelIndex())
+                )
+                if (not commit_index.isValid()) and pending_commit.isValid():
+                    try:
+                        live_model = self.model()
+                        if live_model is not None:
+                            if isinstance(pending_commit, QPersistentModelIndex) and pending_commit.isValid():
+                                live_index = QModelIndex(pending_commit)
+                            else:
+                                live_index = live_model.index(pending_commit.row(), pending_commit.column())
+                            if live_index.isValid():
+                                commit_index = live_index
+                    except Exception:
+                        commit_index = QModelIndex()
+                try:
+                    selection_owner.commit_thumbnail_click_selection(commit_index)
+                except Exception:
+                    pass
+            elif host is not None and hasattr(host, "commit_thumbnail_click_selection"):
                 commit_index = QModelIndex()
                 pending_global = getattr(self, "_pending_click_commit_global", None)
                 if isinstance(pending_global, int) and pending_global >= 0:

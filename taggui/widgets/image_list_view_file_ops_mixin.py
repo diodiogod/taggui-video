@@ -45,7 +45,11 @@ class ImageListViewFileOpsMixin:
         except Exception:
             pass
 
-        opener(selected_indices, anchor_global_pos=anchor_global_pos)
+        opener(
+            selected_indices,
+            anchor_global_pos=anchor_global_pos,
+            current_index=self.currentIndex(),
+        )
 
     def _open_in_system_default_app(self, file_path: Path) -> bool:
         """Open a file with the OS default application."""

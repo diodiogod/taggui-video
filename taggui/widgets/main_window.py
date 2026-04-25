@@ -4754,8 +4754,10 @@ class MainWindow(QMainWindow):
         selected_indices=None,
         *,
         anchor_global_pos: QPoint | None = None,
+        current_index=None,
     ):
         """Open the current selection as a masonry wall of floating viewers."""
+        selected_proxy_model = None
         proxy_indices = []
         seen_rows = set()
 
@@ -4771,7 +4773,19 @@ class MainWindow(QMainWindow):
             candidates = []
 
         for index_like in candidates:
-            proxy_index = self._normalize_spawn_proxy_index(index_like)
+            candidate_model = None
+            try:
+                model = index_like.model()
+                if model is not None and hasattr(model, "sourceModel") and hasattr(model, "mapFromSource"):
+                    candidate_model = model
+            except Exception:
+                candidate_model = None
+            if selected_proxy_model is None and candidate_model is not None:
+                selected_proxy_model = candidate_model
+            proxy_index = self._normalize_spawn_proxy_index(
+                index_like,
+                proxy_model=selected_proxy_model or candidate_model,
+            )
             if not proxy_index.isValid():
                 continue
             row = int(proxy_index.row())
@@ -4782,9 +4796,11 @@ class MainWindow(QMainWindow):
 
         if not proxy_indices:
             return []
+        selected_proxy_model = selected_proxy_model or proxy_indices[0].model()
         if len(proxy_indices) == 1:
             single_window = self.spawn_floating_viewer_at(
                 target_index=proxy_indices[0],
+                proxy_image_list_model=selected_proxy_model,
                 spawn_global_pos=anchor_global_pos,
                 clamp_to_screen=True,
             )
@@ -4812,7 +4828,8 @@ class MainWindow(QMainWindow):
 
         spawned_infos = []
         current_index = self._normalize_spawn_proxy_index(
-            getattr(self.image_list_selection_model, 'currentIndex', lambda: QModelIndex())()
+            current_index if current_index is not None else proxy_indices[0],
+            proxy_model=selected_proxy_model,
         )
         focus_window = None
 
@@ -4820,6 +4837,7 @@ class MainWindow(QMainWindow):
             image = proxy_index.data(Qt.ItemDataRole.UserRole)
             window = self.spawn_floating_viewer_at(
                 target_index=proxy_index,
+                proxy_image_list_model=selected_proxy_model,
                 geometry_override=window_rect,
                 raise_window=False,
                 activate_window=False,
