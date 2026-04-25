@@ -18,10 +18,6 @@ from pathlib import Path
 from PySide6.QtCore import (
     Qt, Signal, Slot, QModelIndex, QItemSelectionModel, QObject, QTimer,
 )
-from PySide6.QtWidgets import (
-    QDockWidget, QFileDialog, QPushButton,
-)
-
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
@@ -87,9 +83,6 @@ class SecondaryBrowser(QObject):
         self.dock.setObjectName('secondary_image_list')
         self.dock.setWindowTitle('Browser 2')
 
-        # ── Inject "Open Folder" button ──────────────────────────────────────
-        self._inject_open_folder_button()
-
         # ── Self-wire filter / media-type → secondary proxy ──────────────────
         # These replace what signal_manager does for the primary image_list
         self.dock.filter_line_edit.textChanged.connect(self._on_filter_changed)
@@ -133,31 +126,6 @@ class SecondaryBrowser(QObject):
             return AutoTokenizer.from_pretrained(_grp(_tpath))
         except Exception:
             return None
-
-    def _inject_open_folder_button(self):
-        try:
-            btn = QPushButton('Open...')
-            btn.setToolTip('Load a folder into this browser (Ctrl+Shift+B)')
-            btn.clicked.connect(self._on_open_folder_clicked)
-            btn.setObjectName('secondaryBrowserOpenFolder')
-            btn.setStyleSheet("""
-                QPushButton#secondaryBrowserOpenFolder {
-                    background: transparent;
-                    border: 1px solid rgba(255,255,255,0.12);
-                    color: #c0c8d8;
-                    border-radius: 5px;
-                    padding: 3px 8px;
-                    font-size: 11px;
-                }
-                QPushButton#secondaryBrowserOpenFolder:hover {
-                    background: rgba(255,255,255,0.07);
-                    border-color: rgba(255,255,255,0.25);
-                }
-            """)
-            if hasattr(self.dock, 'add_controls_widget'):
-                self.dock.add_controls_widget(btn)
-        except Exception as exc:
-            print(f'[SecondaryBrowser] inject button error: {exc}')
 
     def _patch_thumbnail_buttons(self):
         """Replace the dock's _step_thumbnail_size so it targets its own list_view.
@@ -345,16 +313,6 @@ class SecondaryBrowser(QObject):
             self.tag_counter_model.count_tags(images)
         except Exception:
             pass
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Folder dialog
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _on_open_folder_clicked(self):
-        last_dir = str(settings.value(_PREFIX + 'directory_path', '', type=str) or '')
-        path = QFileDialog.getExistingDirectory(self.dock, 'Open Folder in Browser 2', last_dir)
-        if path:
-            self.load_directory(Path(path))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Title indicator

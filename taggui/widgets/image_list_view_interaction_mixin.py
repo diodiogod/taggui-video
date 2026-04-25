@@ -854,7 +854,7 @@ class ImageListViewInteractionMixin:
         host = self.window()
         if host is not None and hasattr(host, "begin_compare_drag_from_thumbnail"):
             try:
-                host.begin_compare_drag_from_thumbnail(index)
+                host.begin_compare_drag_from_thumbnail(index, proxy_image_list_model=self.model())
             except Exception:
                 pass
         if hasattr(self, "_spawn_drag_poll_timer"):

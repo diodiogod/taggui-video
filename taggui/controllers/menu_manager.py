@@ -1151,6 +1151,10 @@ class MenuManager:
             self._remove_recent_folder(dir_path)
             return
         self.recent_folders_menu.hide()
+        loader = getattr(self.main_window, 'load_directory_in_active_browser', None)
+        if callable(loader):
+            loader(folder_path, save_path_to_settings=True)
+            return
         self.main_window.load_directory(folder_path, save_path_to_settings=True)
 
     def _set_current_recent_folder(self, dir_path: str):

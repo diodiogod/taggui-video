@@ -2054,11 +2054,36 @@ class MainWindow(QMainWindow):
             return self.image_viewer
         return viewer
 
+    def _is_comparison_viewer(self, viewer: ImageViewer | None) -> bool:
+        if viewer is None:
+            return False
+        checker = getattr(viewer, "is_compare_mode_active", None)
+        if callable(checker):
+            try:
+                if checker():
+                    return True
+            except Exception:
+                pass
+        for comp_window in list(getattr(self, "_comparison_windows", [])):
+            try:
+                viewers = comp_window.viewers() if hasattr(comp_window, "viewers") else []
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+            for comp_viewer in viewers:
+                if comp_viewer is viewer:
+                    return True
+        return False
+
     def get_selection_target_viewer(self) -> ImageViewer:
         """Return viewer that should receive image-list selection loads."""
         if not bool(getattr(self, '_main_viewer_visible', True)):
             return self.image_viewer
-        return self.get_active_viewer()
+        active_viewer = self.get_active_viewer()
+        if self._is_comparison_viewer(active_viewer):
+            return self.image_viewer
+        return active_viewer
 
     def _image_to_global_rank(self, image: Image | None) -> int | None:
         if image is None:
@@ -3491,7 +3516,7 @@ class MainWindow(QMainWindow):
             slot_id += 1
         return slot_id
 
-    def _normalize_spawn_proxy_index(self, index_like) -> QModelIndex:
+    def _normalize_spawn_proxy_index(self, index_like, proxy_model=None) -> QModelIndex:
         """Return a fresh proxy index for floating-spawn operations."""
         if index_like is None:
             return QModelIndex()
@@ -3499,18 +3524,24 @@ class MainWindow(QMainWindow):
             if not hasattr(index_like, 'isValid') or not index_like.isValid():
                 return QModelIndex()
 
+            target_proxy_model = proxy_model or self.proxy_image_list_model
+            target_source_model = (
+                target_proxy_model.sourceModel()
+                if target_proxy_model is not None and hasattr(target_proxy_model, 'sourceModel')
+                else None
+            )
             model = index_like.model()
             row = index_like.row()
             col = index_like.column()
 
-            if model is self.proxy_image_list_model:
-                if 0 <= row < self.proxy_image_list_model.rowCount():
-                    return self.proxy_image_list_model.index(row, col)
+            if model is target_proxy_model:
+                if 0 <= row < target_proxy_model.rowCount():
+                    return target_proxy_model.index(row, col)
                 return QModelIndex()
 
-            if model is self.image_list_model:
-                source_index = self.image_list_model.index(row, col)
-                mapped = self.proxy_image_list_model.mapFromSource(source_index)
+            if model is target_source_model:
+                source_index = target_source_model.index(row, col)
+                mapped = target_proxy_model.mapFromSource(source_index)
                 if mapped.isValid():
                     return mapped
             return QModelIndex()
@@ -3638,32 +3669,49 @@ class MainWindow(QMainWindow):
             return QModelIndex()
         kind = source.get("kind")
         if kind == "thumbnail":
-            return self._normalize_spawn_proxy_index(source.get("proxy_index"))
+            return self._normalize_spawn_proxy_index(
+                source.get("proxy_index"),
+                proxy_model=source.get("proxy_model"),
+            )
         if kind == "window":
             viewer = source.get("viewer")
             if viewer is None:
                 return QModelIndex()
+            proxy_model = getattr(viewer, "proxy_image_list_model", None)
             checker = getattr(viewer, "is_compare_mode_active", None)
             if callable(checker):
                 try:
                     if checker() and hasattr(viewer, "get_compare_base_index"):
-                        return self._normalize_spawn_proxy_index(viewer.get_compare_base_index())
+                        return self._normalize_spawn_proxy_index(
+                            viewer.get_compare_base_index(),
+                            proxy_model=proxy_model,
+                        )
                 except Exception:
                     pass
-            return self._normalize_spawn_proxy_index(getattr(viewer, "proxy_image_index", QModelIndex()))
+            return self._normalize_spawn_proxy_index(
+                getattr(viewer, "proxy_image_index", QModelIndex()),
+                proxy_model=proxy_model,
+            )
         return QModelIndex()
 
     def _resolve_compare_target_proxy_index(self, viewer: ImageViewer) -> QModelIndex:
         if viewer is None:
             return QModelIndex()
+        proxy_model = getattr(viewer, "proxy_image_list_model", None)
         checker = getattr(viewer, "is_compare_mode_active", None)
         if callable(checker):
             try:
                 if checker() and hasattr(viewer, "get_compare_base_index"):
-                    return self._normalize_spawn_proxy_index(viewer.get_compare_base_index())
+                    return self._normalize_spawn_proxy_index(
+                        viewer.get_compare_base_index(),
+                        proxy_model=proxy_model,
+                    )
             except Exception:
                 pass
-        return self._normalize_spawn_proxy_index(getattr(viewer, "proxy_image_index", QModelIndex()))
+        return self._normalize_spawn_proxy_index(
+            getattr(viewer, "proxy_image_index", QModelIndex()),
+            proxy_model=proxy_model,
+        )
 
     def _is_static_image_index(self, proxy_index: QModelIndex) -> bool:
         return self._media_kind_for_index(proxy_index) == "image"
@@ -3823,14 +3871,16 @@ class MainWindow(QMainWindow):
         self._compare_drag_last_target = None
         self._compare_drop_overlay.hide_feedback()
 
-    def begin_compare_drag_from_thumbnail(self, index_like) -> bool:
-        proxy_index = self._normalize_spawn_proxy_index(index_like)
+    def begin_compare_drag_from_thumbnail(self, index_like, proxy_image_list_model=None) -> bool:
+        proxy_index = self._normalize_spawn_proxy_index(index_like, proxy_model=proxy_image_list_model)
         if not proxy_index.isValid():
             return False
+        proxy_model = proxy_index.model()
         self._compare_drag_source = {
             "kind": "thumbnail",
             "proxy_index": QPersistentModelIndex(proxy_index),
-            "key": f"thumb:{proxy_index.row()}:{proxy_index.column()}",
+            "proxy_model": proxy_model,
+            "key": f"thumb:{id(proxy_model)}:{proxy_index.row()}:{proxy_index.column()}",
         }
         self._compare_drag_last_target = None
         self._compare_drag_coordinator.begin_drag(self._compare_drag_source["key"])
@@ -3859,6 +3909,7 @@ class MainWindow(QMainWindow):
             "kind": "window",
             "window": window,
             "viewer": viewer,
+            "proxy_model": getattr(viewer, "proxy_image_list_model", None),
             "key": key,
         }
         self._compare_drag_last_target = None
@@ -3976,7 +4027,12 @@ class MainWindow(QMainWindow):
                 primary_getter = getattr(target_comparison, "get_primary_proxy_index", None)
                 if callable(primary_getter):
                     try:
-                        primary_index = self._normalize_spawn_proxy_index(primary_getter())
+                        primary_raw = primary_getter()
+                        primary_model = primary_raw.model() if hasattr(primary_raw, "model") else None
+                        primary_index = self._normalize_spawn_proxy_index(
+                            primary_raw,
+                            proxy_model=primary_model,
+                        )
                         if primary_index.isValid():
                             target_index = primary_index
                     except Exception:
@@ -4430,6 +4486,7 @@ class MainWindow(QMainWindow):
         self,
         target_index=None,
         *,
+        proxy_image_list_model=None,
         initial_size_fraction: float | None = None,
         aspect_ratio_override: float | None = None,
     ) -> dict | None:
@@ -4437,15 +4494,17 @@ class MainWindow(QMainWindow):
         if self._viewer_is_fullscreen(self.image_viewer):
             return None
 
+        proxy_model = proxy_image_list_model or self.proxy_image_list_model
         source_viewer = self.get_active_viewer()
         source_video_state = self._capture_viewer_video_state(source_viewer)
 
-        target_proxy_index = self._normalize_spawn_proxy_index(target_index)
+        target_proxy_index = self._normalize_spawn_proxy_index(target_index, proxy_model)
         if not target_proxy_index.isValid():
-            target_proxy_index = self.image_list_selection_model.currentIndex()
-        target_proxy_index = self._normalize_spawn_proxy_index(target_proxy_index)
+            if proxy_model is self.proxy_image_list_model:
+                target_proxy_index = self.image_list_selection_model.currentIndex()
+        target_proxy_index = self._normalize_spawn_proxy_index(target_proxy_index, proxy_model)
 
-        viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=True)
+        viewer = ImageViewer(proxy_model, is_spawned_viewer=True)
         viewer.set_scene_padding(0)
         self._connect_floating_viewer(viewer)
 
@@ -4490,6 +4549,7 @@ class MainWindow(QMainWindow):
             'target_row': int(target_row),
             'target_col': int(target_col),
             'target_proxy_index': QPersistentModelIndex(target_proxy_index),
+            'proxy_image_list_model': proxy_model,
             'source_video_state': source_video_state,
         }
 
@@ -4502,16 +4562,18 @@ class MainWindow(QMainWindow):
         target_col = 0 if target_col_raw is None else int(target_col_raw)
         source_video_state = payload.get('source_video_state')
         target_proxy_index = payload.get('target_proxy_index', QPersistentModelIndex())
+        proxy_model = payload.get('proxy_image_list_model') or self.proxy_image_list_model
         defer_performance_refresh = bool(payload.get('defer_performance_refresh', False))
 
         try:
             if target_row < 0:
                 return
 
-            live_target = self._normalize_spawn_proxy_index(target_proxy_index)
+            live_target = self._normalize_spawn_proxy_index(target_proxy_index, proxy_model)
             if not live_target.isValid():
                 live_target = self._normalize_spawn_proxy_index(
-                    self.proxy_image_list_model.index(target_row, target_col)
+                    proxy_model.index(target_row, target_col),
+                    proxy_model,
                 )
             if not live_target.isValid():
                 return
@@ -4529,6 +4591,7 @@ class MainWindow(QMainWindow):
     def spawn_floating_viewer_at(
         self,
         target_index=None,
+        proxy_image_list_model=None,
         spawn_global_pos: QPoint | None = None,
         initial_size_fraction: float | None = None,
         clamp_to_screen: bool = False,
@@ -4542,6 +4605,7 @@ class MainWindow(QMainWindow):
         """Create a floating viewer for a specific index and optional global position."""
         payload = self._create_floating_viewer_payload(
             target_index,
+            proxy_image_list_model=proxy_image_list_model,
             initial_size_fraction=initial_size_fraction,
         )
         if not payload:
@@ -4820,8 +4884,23 @@ class MainWindow(QMainWindow):
         reference_widget=None,
     ) -> MediaComparisonWidget | None:
         """Spawn an A/B comparison window for two media indices."""
-        target_proxy = self._normalize_spawn_proxy_index(target_index)
-        source_proxy = self._normalize_spawn_proxy_index(source_index)
+        def _proxy_model_for_compare_index(index_like):
+            try:
+                model = index_like.model()
+                if model is not None and hasattr(model, "sourceModel") and hasattr(model, "mapToSource"):
+                    return model
+            except Exception:
+                pass
+            return None
+
+        target_proxy = self._normalize_spawn_proxy_index(
+            target_index,
+            proxy_model=_proxy_model_for_compare_index(target_index),
+        )
+        source_proxy = self._normalize_spawn_proxy_index(
+            source_index,
+            proxy_model=_proxy_model_for_compare_index(source_index),
+        )
         if not target_proxy.isValid() or not source_proxy.isValid():
             return None
         if self._compare_pair_kind(source_proxy, target_proxy) is None:
@@ -4830,7 +4909,7 @@ class MainWindow(QMainWindow):
         comp_widget = MediaComparisonWidget(
             target_proxy,
             source_proxy,
-            self.proxy_image_list_model,
+            target_proxy.model() or self.proxy_image_list_model,
             parent=self,
         )
 
@@ -5482,7 +5561,7 @@ class MainWindow(QMainWindow):
         if saved and Path(saved).exists():
             self._secondary_browser.load_directory(Path(saved))
         else:
-            self._secondary_browser._on_open_folder_clicked()
+            self.select_and_load_directory(target_browser='secondary')
 
     def _ensure_secondary_browser(self) -> bool:
         if self._secondary_browser is not None:
@@ -5686,17 +5765,66 @@ class MainWindow(QMainWindow):
         if self._context_switch_manager is not None:
             self._context_switch_manager.restore_primary()
 
+    def _active_directory_browser_name(self) -> str:
+        manager = getattr(self, '_context_switch_manager', None)
+        secondary = getattr(self, '_secondary_browser', None)
+        try:
+            if (
+                manager is not None
+                and manager.active_context == 'secondary'
+                and secondary is not None
+                and secondary.dock.isVisible()
+            ):
+                return 'secondary'
+        except Exception:
+            pass
+        return 'primary'
+
+    def load_directory_in_active_browser(
+        self,
+        path: Path,
+        *,
+        save_path_to_settings: bool = True,
+        target_browser: str | None = None,
+    ):
+        target = target_browser if target_browser in {'primary', 'secondary'} else self._active_directory_browser_name()
+        if target == 'secondary' and self._secondary_browser is not None:
+            resolved = path.resolve()
+            self._secondary_browser.load_directory(resolved)
+            settings.setValue('secondary_browser_visible', True)
+            settings.setValue('secondary_browser_restore_on_startup', True)
+            if save_path_to_settings:
+                self._add_to_recent_directories(str(resolved))
+            return
+        self.load_directory(path, save_path_to_settings=save_path_to_settings)
+
     @Slot()
-    def select_and_load_directory(self):
-        initial_directory = (str(self.directory_path)
-                             if self.directory_path else '')
+    def select_and_load_directory(self, target_browser: str | None = None):
+        target = target_browser if target_browser in {'primary', 'secondary'} else self._active_directory_browser_name()
+        if target == 'secondary':
+            initial_directory = str(
+                settings.value('secondary_browser_directory_path', '', type=str) or ''
+            )
+        else:
+            initial_directory = (str(self.directory_path)
+                                 if self.directory_path else '')
+        caption = (
+            'Select directory to load images from in Browser 2'
+            if target == 'secondary'
+            else 'Select directory to load images from'
+        )
         load_directory_path = QFileDialog.getExistingDirectory(
-            parent=self, caption='Select directory to load images from',
-            dir=initial_directory)
+            parent=self,
+            caption=caption,
+            dir=initial_directory,
+        )
         if not load_directory_path:
             return
-        self.load_directory(Path(load_directory_path),
-                            save_path_to_settings=True)
+        self.load_directory_in_active_browser(
+            Path(load_directory_path),
+            save_path_to_settings=True,
+            target_browser=target,
+        )
 
     @Slot()
     def reload_directory(self):

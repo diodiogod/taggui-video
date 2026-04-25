@@ -803,10 +803,10 @@ class ImageViewer(QWidget):
             return False
 
     def _load_static_pixmap_for_proxy_index(self, proxy_index: QModelIndex) -> QPixmap:
-        proxy_index = self._normalize_proxy_index(proxy_index)
+        proxy_index = self._normalize_any_proxy_index(proxy_index)
         if not proxy_index.isValid():
             return QPixmap()
-        image = self._safe_get_image(proxy_index)
+        image = proxy_index.data(Qt.ItemDataRole.UserRole)
         if image is None or bool(getattr(image, "is_video", False)):
             return QPixmap()
 
@@ -1072,7 +1072,7 @@ class ImageViewer(QWidget):
             return False
 
         for layer_idx in range(overlay_count):
-            incoming_proxy = self._normalize_proxy_index(self._compare_overlay_indices[layer_idx])
+            incoming_proxy = self._normalize_any_proxy_index(self._compare_overlay_indices[layer_idx])
             if not incoming_proxy.isValid():
                 return False
             incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
@@ -1410,7 +1410,7 @@ class ImageViewer(QWidget):
         keep_split_ratio: bool = True,
     ) -> bool:
         base_proxy = self._normalize_proxy_index(base_index)
-        incoming_proxy = self._normalize_proxy_index(incoming_index)
+        incoming_proxy = self._normalize_any_proxy_index(incoming_index)
         if not base_proxy.isValid() or not incoming_proxy.isValid():
             return False
         if not self._is_static_image_index(base_proxy) or not self._is_static_image_index(incoming_proxy):
@@ -1486,7 +1486,7 @@ class ImageViewer(QWidget):
             self._show_controls_permanent()
 
     def add_compare_layer(self, incoming_index) -> bool:
-        incoming_proxy = self._normalize_proxy_index(incoming_index)
+        incoming_proxy = self._normalize_any_proxy_index(incoming_index)
         if not incoming_proxy.isValid() or not self._is_static_image_index(incoming_proxy):
             return False
         if not self._compare_mode_active:
@@ -1518,7 +1518,7 @@ class ImageViewer(QWidget):
         return True
 
     def replace_compare_right(self, incoming_index) -> bool:
-        incoming_proxy = self._normalize_proxy_index(incoming_index)
+        incoming_proxy = self._normalize_any_proxy_index(incoming_index)
         if not incoming_proxy.isValid() or not self._is_static_image_index(incoming_proxy):
             return False
         if not self._compare_mode_active:
@@ -2066,6 +2066,24 @@ class ImageViewer(QWidget):
                 col = index_like.column()
 
             if model is None or model is not self.proxy_image_list_model:
+                return QModelIndex()
+            if row < 0 or row >= model.rowCount() or col < 0:
+                return QModelIndex()
+            return model.index(row, col)
+        except Exception:
+            return QModelIndex()
+
+    def _normalize_any_proxy_index(self, index_like) -> QModelIndex:
+        """Build a fresh proxy index without requiring this viewer's own model."""
+        try:
+            if index_like is None:
+                return QModelIndex()
+            if not hasattr(index_like, 'isValid') or not index_like.isValid():
+                return QModelIndex()
+            model = index_like.model()
+            row = index_like.row()
+            col = index_like.column()
+            if model is None or not hasattr(model, "rowCount") or not hasattr(model, "index"):
                 return QModelIndex()
             if row < 0 or row >= model.rowCount() or col < 0:
                 return QModelIndex()

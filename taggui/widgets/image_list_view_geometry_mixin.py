@@ -1377,6 +1377,7 @@ class ImageListViewGeometryMixin:
                     preview_started = False
             main_window.spawn_floating_viewer_at(
                 target_index=live_index,
+                proxy_image_list_model=self.model(),
                 spawn_global_pos=spawn_point,
                 initial_size_fraction=drag_spawn_size_fraction,
             )

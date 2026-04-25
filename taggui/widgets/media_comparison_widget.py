@@ -75,6 +75,10 @@ class MediaComparisonWidget(QWidget):
         self._close_hover_zone_px = 56
         self._video_fit_transform_stamp: dict[int, tuple] = {}
         self._proxy_image_list_model = proxy_image_list_model
+        self._proxy_model_a = self._proxy_model_for_index(model_a, proxy_image_list_model)
+        self._proxy_model_b = self._proxy_model_for_index(model_b, proxy_image_list_model)
+        self._proxy_model_c = self._proxy_model_for_index(model_c, proxy_image_list_model)
+        self._proxy_model_d = self._proxy_model_for_index(model_d, proxy_image_list_model)
         self._divider_thickness_px = COMPARE_DIVIDER_THICKNESS_PX
         self._divider_color = COMPARE_DIVIDER_COLOR
         video_compare_fit_mode = str(
@@ -112,12 +116,12 @@ class MediaComparisonWidget(QWidget):
         self._model_c = QPersistentModelIndex(model_c) if hasattr(model_c, "isValid") and model_c.isValid() else QPersistentModelIndex()
         self._model_d = QPersistentModelIndex(model_d) if hasattr(model_d, "isValid") and model_d.isValid() else QPersistentModelIndex()
 
-        self.viewer_a = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
+        self.viewer_a = ImageViewer(self._proxy_model_a, is_spawned_viewer=True)
         self.viewer_a.setParent(self)
         self.viewer_a.set_scene_padding(0)
         self.viewer_a.view.setBackgroundBrush(Qt.GlobalColor.black)
 
-        self.viewer_b = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
+        self.viewer_b = ImageViewer(self._proxy_model_b, is_spawned_viewer=True)
         self._viewer_b_clip = QWidget(self)
         self._viewer_b_clip.setObjectName("mediaComparisonClip")
         self._viewer_b_clip.setMouseTracking(True)
@@ -127,7 +131,7 @@ class MediaComparisonWidget(QWidget):
         self.viewer_b.set_scene_padding(0)
         self.viewer_b.view.setBackgroundBrush(Qt.GlobalColor.black)
 
-        self.viewer_c = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
+        self.viewer_c = ImageViewer(self._proxy_model_c, is_spawned_viewer=True)
         self._viewer_c_clip = QWidget(self)
         self._viewer_c_clip.setObjectName("mediaComparisonClipBottom")
         self._viewer_c_clip.setMouseTracking(True)
@@ -138,7 +142,7 @@ class MediaComparisonWidget(QWidget):
         self.viewer_c.view.setBackgroundBrush(Qt.GlobalColor.black)
         self._viewer_c_clip.hide()
 
-        self.viewer_d = ImageViewer(proxy_image_list_model, is_spawned_viewer=True)
+        self.viewer_d = ImageViewer(self._proxy_model_d, is_spawned_viewer=True)
         self._viewer_d_clip = QWidget(self)
         self._viewer_d_clip.setObjectName("mediaComparisonClipBottomRight")
         self._viewer_d_clip.setMouseTracking(True)
@@ -250,7 +254,18 @@ class MediaComparisonWidget(QWidget):
             viewers.append(self.viewer_d)
         return viewers
 
-    def _normalize_proxy_index(self, index_like) -> QModelIndex:
+    @staticmethod
+    def _proxy_model_for_index(index_like, fallback_model):
+        try:
+            if hasattr(index_like, "isValid") and index_like.isValid():
+                model = index_like.model()
+                if model is not None:
+                    return model
+        except Exception:
+            pass
+        return fallback_model
+
+    def _normalize_proxy_index(self, index_like, proxy_model=None) -> QModelIndex:
         try:
             if index_like is None:
                 return QModelIndex()
@@ -266,7 +281,16 @@ class MediaComparisonWidget(QWidget):
                 model = index_like.model()
                 row = index_like.row()
                 col = index_like.column()
-            if model is None or model is not self._proxy_image_list_model:
+            target_model = proxy_model or model
+            allowed_models = (
+                self._proxy_model_a,
+                self._proxy_model_b,
+                self._proxy_model_c,
+                self._proxy_model_d,
+            )
+            if model is None or model is not target_model:
+                return QModelIndex()
+            if proxy_model is None and not any(model is allowed_model for allowed_model in allowed_models):
                 return QModelIndex()
             if row < 0 or row >= model.rowCount() or col < 0:
                 return QModelIndex()
@@ -312,19 +336,55 @@ class MediaComparisonWidget(QWidget):
             return False
         return True
 
+    def _replace_video_layer_viewer(self, viewer_attr: str, clip_attr: str, proxy_model):
+        current = getattr(self, viewer_attr, None)
+        try:
+            if current is not None and getattr(current, "proxy_image_list_model", None) is proxy_model:
+                return current
+        except RuntimeError:
+            current = None
+
+        if current is not None:
+            try:
+                current.hide()
+                current.setParent(None)
+                current.deleteLater()
+            except Exception:
+                pass
+
+        clip = getattr(self, clip_attr)
+        viewer = ImageViewer(proxy_model, is_spawned_viewer=True)
+        viewer.setParent(clip)
+        viewer.set_scene_padding(0)
+        viewer.view.setBackgroundBrush(Qt.GlobalColor.black)
+        self._suppress_local_viewer_controls(viewer)
+        setattr(self, viewer_attr, viewer)
+        return viewer
+
     def add_video_layer(self, incoming_index) -> bool:
         if not self.can_add_video_layer():
             return False
-        incoming_proxy = self._normalize_proxy_index(incoming_index)
+        incoming_model = incoming_index.model() if hasattr(incoming_index, "model") else None
+        incoming_proxy = self._normalize_proxy_index(incoming_index, proxy_model=incoming_model)
         if not incoming_proxy.isValid() or not self._is_video_index(incoming_proxy):
             return False
         load_viewer = None
         if not self._has_third_layer():
+            self._proxy_model_c = incoming_proxy.model()
+            load_viewer = self._replace_video_layer_viewer(
+                "viewer_c",
+                "_viewer_c_clip",
+                self._proxy_model_c,
+            )
             self._model_c = QPersistentModelIndex(incoming_proxy)
-            load_viewer = self.viewer_c
         elif not self._has_fourth_layer():
+            self._proxy_model_d = incoming_proxy.model()
+            load_viewer = self._replace_video_layer_viewer(
+                "viewer_d",
+                "_viewer_d_clip",
+                self._proxy_model_d,
+            )
             self._model_d = QPersistentModelIndex(incoming_proxy)
-            load_viewer = self.viewer_d
         if load_viewer is None:
             return False
         try:
