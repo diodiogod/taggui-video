@@ -3,6 +3,35 @@ from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.settings import DEFAULT_SETTINGS, settings
 
 class ImageListViewInteractionMixin:
+    def _main_window_host(self):
+        """Resolve the owning main window even when the dock is floating."""
+        for origin in (self, self.window()):
+            candidate = origin
+            visited = set()
+            while candidate is not None:
+                marker = id(candidate)
+                if marker in visited:
+                    break
+                visited.add(marker)
+                if hasattr(candidate, 'spawn_floating_viewer_at'):
+                    return candidate
+                next_candidate = None
+                parent_widget = getattr(candidate, 'parentWidget', None)
+                if callable(parent_widget):
+                    try:
+                        next_candidate = parent_widget()
+                    except Exception:
+                        next_candidate = None
+                if next_candidate is None:
+                    parent_object = getattr(candidate, 'parent', None)
+                    if callable(parent_object):
+                        try:
+                            next_candidate = parent_object()
+                        except Exception:
+                            next_candidate = None
+                candidate = next_candidate
+        return self.window()
+
     def _mark_selection_log_source(self, source: str, *, hold_s: float = 2.0):
         """Tag upcoming selection persistence with a short-lived origin label."""
         import time as _t
@@ -68,7 +97,7 @@ class ImageListViewInteractionMixin:
             hold_until,
         )
 
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -107,7 +136,7 @@ class ImageListViewInteractionMixin:
         """Open the clicked item in a spawned floating viewer."""
         if not index.isValid():
             return False
-        host = self.window()
+        host = self._main_window_host()
         spawn = getattr(host, 'spawn_floating_viewer_at', None)
         if not callable(spawn):
             return False
@@ -192,7 +221,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
             self._exact_jump_settle_connected = False
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -326,7 +355,7 @@ class ImageListViewInteractionMixin:
                         if selection_owner is not None and hasattr(selection_owner, "commit_thumbnail_click_selection"):
                             selection_owner.commit_thumbnail_click_selection(proxy_idx)
                         else:
-                            host = self.window()
+                            host = self._main_window_host()
                             if host is not None and hasattr(host, "commit_thumbnail_click_selection"):
                                 host.commit_thumbnail_click_selection(proxy_idx)
             except Exception:
@@ -349,7 +378,7 @@ class ImageListViewInteractionMixin:
         self._restore_anchor_until = 0.0
         self._restore_target_page = None
         self._restore_target_global_index = None
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -489,7 +518,7 @@ class ImageListViewInteractionMixin:
             else:
                 self.setCurrentIndex(proxy_idx)
 
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -561,7 +590,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 self._exact_jump_settle_connected = False
 
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -634,7 +663,7 @@ class ImageListViewInteractionMixin:
                 float(getattr(self, "_exact_jump_settle_until", 0.0) or 0.0),
                 hold_until,
             )
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -702,7 +731,7 @@ class ImageListViewInteractionMixin:
             now + 30.0,
         )
 
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")
@@ -855,7 +884,7 @@ class ImageListViewInteractionMixin:
         update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
         if callable(update_ghost):
             update_ghost(self._spawn_drag_last_global_pos)
-        host = self.window()
+        host = self._main_window_host()
         if host is not None and hasattr(host, "begin_compare_drag_from_thumbnail"):
             try:
                 host.begin_compare_drag_from_thumbnail(index, proxy_image_list_model=self.model())
@@ -869,7 +898,7 @@ class ImageListViewInteractionMixin:
         if hasattr(self, "_spawn_drag_poll_timer"):
             self._spawn_drag_poll_timer.stop()
         hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
-        host = self.window()
+        host = self._main_window_host()
         active_index = QPersistentModelIndex(getattr(self, "_spawn_drag_active_index", QPersistentModelIndex()))
         self._spawn_drag_active = False
         self._suppress_selection_commit_until_release = False
@@ -953,7 +982,7 @@ class ImageListViewInteractionMixin:
         update_ghost = getattr(self, "_update_spawn_drag_ghost_pos", None)
         if callable(update_ghost):
             update_ghost(self._spawn_drag_last_global_pos)
-        host = self.window()
+        host = self._main_window_host()
         if host is not None and hasattr(host, "update_compare_drag_cursor"):
             try:
                 host.update_compare_drag_cursor(self._spawn_drag_last_global_pos)
@@ -994,7 +1023,7 @@ class ImageListViewInteractionMixin:
         self._restore_target_page = None
         self._restore_target_global_index = None
         # Clear main_window's restore-in-progress so save_image_index isn't suppressed.
-        mw = self.window()
+        mw = self._main_window_host()
         if mw and hasattr(mw, '_restore_in_progress'):
             mw._restore_in_progress = False
             mw._restore_target_global_rank = -1
@@ -1824,7 +1853,7 @@ class ImageListViewInteractionMixin:
                             lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
                         )
             selection_owner = getattr(self, "_secondary_browser_owner", None)
-            host = self.window()
+            host = self._main_window_host()
             if selection_owner is not None and hasattr(selection_owner, "commit_thumbnail_click_selection"):
                 commit_index = QModelIndex()
                 pending_global = getattr(self, "_pending_click_commit_global", None)
@@ -2790,7 +2819,7 @@ class ImageListViewInteractionMixin:
         self._restore_anchor_until = _t.time() + 30.0
         self._selected_global_index = int(target_global)
 
-        mw = self.window()
+        mw = self._main_window_host()
         if (
             mw is not None
             and hasattr(mw, "_restore_in_progress")

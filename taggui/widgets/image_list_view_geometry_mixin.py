@@ -1352,7 +1352,8 @@ class ImageListViewGeometryMixin:
                 hide_ghost()
             return False
         spawn_point = spawn_global_pos if spawn_global_pos is not None else QCursor.pos()
-        main_window = self.window()
+        resolve_main_window = getattr(self, "_main_window_host", None)
+        main_window = resolve_main_window() if callable(resolve_main_window) else self.window()
         if not (main_window and hasattr(main_window, 'spawn_floating_viewer_at')):
             hide_ghost = getattr(self, "_hide_spawn_drag_ghost", None)
             if callable(hide_ghost):

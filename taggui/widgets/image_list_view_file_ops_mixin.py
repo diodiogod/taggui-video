@@ -26,7 +26,8 @@ class ImageListViewFileOpsMixin:
     @Slot()
     def open_selected_items_in_masonry_wall(self):
         """Open the current selection in a floating masonry review wall."""
-        main_window = self.window()
+        resolve_main_window = getattr(self, "_main_window_host", None)
+        main_window = resolve_main_window() if callable(resolve_main_window) else self.window()
         opener = getattr(main_window, 'open_selection_masonry_wall', None)
         if not callable(opener):
             return

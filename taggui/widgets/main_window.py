@@ -2086,12 +2086,10 @@ class MainWindow(QMainWindow):
 
     def get_selection_target_viewer(self) -> ImageViewer:
         """Return viewer that should receive image-list selection loads."""
-        if not bool(getattr(self, '_main_viewer_visible', True)):
-            return self.image_viewer
-        active_viewer = self.get_active_viewer()
-        if self._is_comparison_viewer(active_viewer):
-            return self.image_viewer
-        return active_viewer
+        # Browser selection is always supposed to drive the anchored main viewer.
+        # Spawned floating viewers and compare views are snapshots and should not
+        # start following later thumbnail clicks.
+        return self.image_viewer
 
     def _image_to_global_rank(self, image: Image | None) -> int | None:
         if image is None:
