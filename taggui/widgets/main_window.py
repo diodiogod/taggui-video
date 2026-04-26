@@ -7224,7 +7224,7 @@ class MainWindow(QMainWindow):
         legacy_visible_flag = settings.value('secondary_browser_visible', False, type=bool)
         saved_secondary_dir = settings.value('secondary_browser_directory_path', '', type=str)
         saved_secondary_exists = bool(saved_secondary_dir and Path(saved_secondary_dir).exists())
-        restore_secondary = bool(restore_secondary_flag or legacy_visible_flag or saved_secondary_exists)
+        restore_secondary = bool(restore_secondary_flag or legacy_visible_flag)
         diagnostic_print(
             "[RESTORE][Browser2] startup "
             f"restore_flag={restore_secondary_flag} legacy_visible={legacy_visible_flag} "
