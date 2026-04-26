@@ -62,6 +62,7 @@ class _PlayerEntry:
         self.end_ms = 0.0
         self.duration_ms = 0.0
         self.cycle_duration_ms = 0.0
+        self.wall_cycle_duration_ms = 0.0
         self.finished = False
         self._sync_label: QLabel | None = None
 
@@ -71,6 +72,7 @@ class _PlayerEntry:
         self.end_frame = None
         self.duration_ms = max(0.0, float(player.duration_ms or 0.0))
         self.cycle_duration_ms = self.duration_ms
+        self._update_wall_cycle_duration()
         try:
             controls = self.viewer.video_controls
             if bool(getattr(controls, 'is_looping', False)):
@@ -87,12 +89,22 @@ class _PlayerEntry:
                     self.end_ms = ((self.end_frame + 1) / fps) * 1000.0
                     self.end_ms = min(self.duration_ms, self.end_ms) if self.duration_ms > 0 else self.end_ms
                     self.cycle_duration_ms = max(1.0, self.end_ms - self.start_ms)
+                    self._update_wall_cycle_duration()
                     return
         except Exception:
             pass
         self.start_ms = 0.0
         self.end_ms = self.duration_ms
         self.cycle_duration_ms = max(0.0, self.end_ms - self.start_ms)
+        self._update_wall_cycle_duration()
+
+    def _update_wall_cycle_duration(self):
+        try:
+            speed = abs(float(getattr(self.player, 'playback_speed', 1.0) or 1.0))
+        except Exception:
+            speed = 1.0
+        speed = max(0.1, speed)
+        self.wall_cycle_duration_ms = max(1.0, float(self.cycle_duration_ms) / speed)
 
     def ensure_backend_ready(self):
         """Pre-warm heavy playback backends before the sync barrier."""
@@ -328,9 +340,7 @@ class VideoSyncCoordinator(QObject):
             except Exception:
                 pass
 
-        self._longest_duration_ms = max(
-            (e.cycle_duration_ms for e in self._entries), default=0.0
-        )
+        self._refresh_runtime_expectations()
 
         for entry in self._entries:
             if self._show_sync_icon:
@@ -387,9 +397,7 @@ class VideoSyncCoordinator(QObject):
 
         removed_was_finished = bool(removed_entry.finished)
         del self._entries[remove_index]
-        self._longest_duration_ms = max(
-            (e.cycle_duration_ms for e in self._entries), default=0.0
-        )
+        self._refresh_runtime_expectations()
 
         remaining = len(self._entries)
         if remaining < 2:
@@ -542,11 +550,38 @@ class VideoSyncCoordinator(QObject):
         """Force restart if one or more players stalled and never finished."""
         if self._state != self._STATE_RUNNING:
             return
+        self._refresh_runtime_expectations()
+        elapsed_ms = max(0.0, (time.monotonic() - self._play_started_monotonic) * 1000.0)
+        dynamic_watchdog_ms = float(self._longest_duration_ms + _STALL_TIMEOUT_MS)
+        if elapsed_ms + 1.0 < dynamic_watchdog_ms:
+            self._watchdog_timer.start(max(1, int(dynamic_watchdog_ms - elapsed_ms)))
+            return
         stalled = [e for e in self._entries if not e.finished]
         if stalled:
             _sync_log(f"[SYNC] Watchdog: {len(stalled)} player(s) stalled - forcing restart")
         self._state = self._STATE_BARRIER
         self._begin_barrier()
+
+    def _refresh_runtime_expectations(self):
+        """Refresh expected wall-clock cycle durations from current playback speeds."""
+        for entry in self._entries:
+            try:
+                entry._update_wall_cycle_duration()
+            except Exception:
+                continue
+        self._longest_duration_ms = max(
+            (e.wall_cycle_duration_ms for e in self._entries), default=0.0
+        )
+
+    def notify_playback_timing_changed(self):
+        """Refresh watchdog timing after playback speed changes mid-cycle."""
+        self._refresh_runtime_expectations()
+        if self._state != self._STATE_RUNNING:
+            return
+        self._watchdog_timer.stop()
+        elapsed_ms = max(0.0, (time.monotonic() - self._play_started_monotonic) * 1000.0)
+        remaining_ms = max(1, int((self._longest_duration_ms + _STALL_TIMEOUT_MS) - elapsed_ms))
+        self._watchdog_timer.start(remaining_ms)
 
     # ------------------------------------------------------------------
     # Batch play
@@ -557,6 +592,7 @@ class VideoSyncCoordinator(QObject):
         self._finished_count = 0
         for entry in self._entries:
             entry.finished = False
+        self._refresh_runtime_expectations()
         self._play_started_monotonic = time.monotonic()
         _sync_log(f"[SYNC] firing play on {len(self._entries)} players")
         for entry in self._entries:

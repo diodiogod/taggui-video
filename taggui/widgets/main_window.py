@@ -5,11 +5,11 @@ import hashlib
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF
+from PySide6.QtCore import QEvent, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QFileDialog, QMainWindow,
-                               QMessageBox, QStackedWidget, QToolBar,
+                               QMessageBox, QStackedWidget, QToolBar, QSlider, QFrame,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
                                QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu)
 
@@ -385,6 +385,110 @@ class PerfHudOverlay(QWidget):
         self.setToolTip(tips.get(key, ""))
 
 
+class SelectionWallSpeedOverlay(QFrame):
+    """Shared speed slider for selection masonry wall videos."""
+
+    speed_changed = Signal(float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setObjectName("selectionWallSpeedOverlay")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(10)
+
+        title_label = QLabel("Wall speed")
+        title_label.setStyleSheet("QLabel { color: #EAF4FF; font-weight: 700; }")
+
+        self._speed_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self._speed_slider.setRange(25, 400)
+        self._speed_slider.setSingleStep(5)
+        self._speed_slider.setPageStep(25)
+        self._speed_slider.setFixedWidth(220)
+        self._speed_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 7px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0.0 #3156C7,
+                    stop:0.35 #3AAE90,
+                    stop:1.0 #7ED957);
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #F7FBFF;
+                border: 1px solid rgba(18, 22, 28, 180);
+                width: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }
+        """)
+
+        self._value_label = QLabel("1.00x")
+        self._value_label.setMinimumWidth(48)
+        self._value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._value_label.setStyleSheet(
+            "QLabel { color: #D8FFE5; font-weight: 700; background: rgba(80, 170, 110, 40);"
+            " border: 1px solid rgba(126, 217, 87, 110); border-radius: 6px; padding: 2px 6px; }"
+        )
+
+        self._reset_button = QPushButton("1.00x")
+        self._reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_button.setToolTip("Reset masonry wall video speed")
+        self._reset_button.setStyleSheet(
+            "QPushButton { color: #F5F8FF; background: rgba(255,255,255,28);"
+            " border: 1px solid rgba(180,200,255,82); border-radius: 6px; padding: 4px 8px; }"
+            "QPushButton:hover { background: rgba(255,255,255,42); }"
+        )
+
+        layout.addWidget(title_label)
+        layout.addWidget(self._speed_slider)
+        layout.addWidget(self._value_label)
+        layout.addWidget(self._reset_button)
+
+        self.setStyleSheet("""
+            QFrame#selectionWallSpeedOverlay {
+                background: rgba(12, 15, 20, 228);
+                border: 1px solid rgba(150, 190, 255, 82);
+                border-radius: 12px;
+            }
+        """)
+
+        self._speed_slider.valueChanged.connect(self._on_slider_value_changed)
+        self._reset_button.clicked.connect(lambda: self.set_speed_value(1.0, emit_signal=True))
+        self.hide()
+
+    def set_speed_value(self, speed: float, *, emit_signal: bool = False):
+        clamped = max(0.25, min(4.0, float(speed)))
+        self._speed_slider.blockSignals(True)
+        self._speed_slider.setValue(int(round(clamped * 100.0)))
+        self._speed_slider.blockSignals(False)
+        self._value_label.setText(f"{clamped:.2f}x")
+        if emit_signal:
+            self.speed_changed.emit(clamped)
+
+    def show_for_screen(self, screen):
+        if screen is None:
+            return
+        self.adjustSize()
+        geometry = screen.availableGeometry()
+        self.move(
+            geometry.left() + max(0, (geometry.width() - self.width()) // 2),
+            geometry.bottom() - self.height() - 18,
+        )
+        self.show()
+        self.raise_()
+
+    @Slot(int)
+    def _on_slider_value_changed(self, value: int):
+        speed = max(0.25, min(4.0, float(value) / 100.0))
+        self._value_label.setText(f"{speed:.2f}x")
+        self.speed_changed.emit(speed)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, app: QApplication):
         super().__init__()
@@ -478,6 +582,7 @@ class MainWindow(QMainWindow):
         self._sync_scope = 'manual'
         self._sync_viewer_ids: set[int] = set()
         self._selection_wall_sync_token = 0
+        self._selection_wall_shared_speed = 1.0
         self._exclusive_video_controls_visibility = True
         self._video_controls_perf_profile = 'single'
         self._video_controls_pending_updates = {}
@@ -494,6 +599,8 @@ class MainWindow(QMainWindow):
         self._perf_hud = PerfHudOverlay(self)
         self._perf_hud.set_mode_changed_callback(self._on_perf_hud_mode_changed)
         self._perf_hud.set_geometry_changed_callback(self._on_perf_hud_geometry_changed)
+        self._selection_wall_speed_overlay = SelectionWallSpeedOverlay(self)
+        self._selection_wall_speed_overlay.speed_changed.connect(self._on_selection_wall_speed_changed)
         self._perf_hud_timer = QTimer(self)
         self._perf_hud_timer.setInterval(120)
         self._perf_hud_timer.timeout.connect(self._update_perf_hud)
@@ -506,6 +613,7 @@ class MainWindow(QMainWindow):
         self._hud_shortcut_last_toggle_at = 0.0
         self._floating_hold_shortcut_last_toggle_at = 0.0
         self._active_nav_mouse_buttons = set()
+        self.app.applicationStateChanged.connect(self._on_application_state_changed)
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
         self.image_viewer.view.customContextMenuRequested.connect(
@@ -3141,12 +3249,6 @@ class MainWindow(QMainWindow):
             toggled = self.toggle_viewer_play_pause(viewer)
             if not toggled:
                 return
-            if (
-                self._sync_scope == 'selection_wall'
-                and bool(getattr(viewer, '_selection_masonry_wall_viewer', False))
-                and not bool(getattr(video_player, 'is_playing', False))
-            ):
-                self._remove_viewer_from_selection_wall_sync(viewer)
 
         video_controls.play_pause_requested.connect(on_play_pause_requested)
 
@@ -3502,6 +3604,111 @@ class MainWindow(QMainWindow):
                 )
         except Exception as e:
             print(f"[VIEWER] Inheritance warning: {e}")
+
+    def _iter_selection_wall_windows(self):
+        """Yield live floating windows that belong to the selection masonry wall."""
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                if bool(getattr(window, '_selection_masonry_wall_window', False)):
+                    yield window
+            except RuntimeError:
+                continue
+
+    def _selection_wall_video_viewers(self) -> list[ImageViewer]:
+        """Collect live selection-wall viewers that correspond to video items."""
+        viewers = []
+        for window in self._iter_selection_wall_windows():
+            try:
+                viewer = getattr(window, 'viewer', None)
+                if viewer is None:
+                    continue
+                if bool(getattr(viewer, '_selection_masonry_wall_has_video', False)):
+                    viewers.append(viewer)
+            except RuntimeError:
+                continue
+        return viewers
+
+    def _apply_selection_wall_shared_speed_to_viewer(self, viewer: ImageViewer):
+        """Push current wall speed into one wall video viewer."""
+        try:
+            if not bool(getattr(viewer, '_selection_masonry_wall_has_video', False)):
+                return
+            controls = getattr(viewer, 'video_controls', None)
+            if controls is None:
+                return
+            controls.set_speed_value(float(self._selection_wall_shared_speed), emit_signal=True)
+        except Exception:
+            pass
+
+    def _refresh_selection_wall_speed_overlay(self):
+        """Show shared speed overlay only while a masonry wall has at least one video."""
+        video_viewers = self._selection_wall_video_viewers()
+        if not video_viewers:
+            self._selection_wall_shared_speed = 1.0
+            self._selection_wall_speed_overlay.hide()
+            return
+
+        app_state = QApplication.instance().applicationState() if QApplication.instance() is not None else Qt.ApplicationState.ApplicationInactive
+        if app_state != Qt.ApplicationState.ApplicationActive:
+            self._selection_wall_speed_overlay.hide()
+            return
+
+        reference_speed = None
+        for viewer in video_viewers:
+            try:
+                controls = getattr(viewer, 'video_controls', None)
+                if controls is None:
+                    continue
+                reference_speed = float(controls.get_speed_value())
+                break
+            except Exception:
+                continue
+        if reference_speed is None:
+            reference_speed = float(getattr(self, '_selection_wall_shared_speed', 1.0) or 1.0)
+
+        self._selection_wall_shared_speed = max(0.25, min(4.0, reference_speed))
+        self._selection_wall_speed_overlay.set_speed_value(self._selection_wall_shared_speed, emit_signal=False)
+
+        anchor_screen = None
+        for window in self._iter_selection_wall_windows():
+            try:
+                anchor_screen = QApplication.screenAt(window.frameGeometry().center())
+                if anchor_screen is not None:
+                    break
+            except Exception:
+                continue
+        if anchor_screen is None:
+            anchor_screen = QApplication.primaryScreen()
+
+        if anchor_screen is None:
+            self._selection_wall_speed_overlay.hide()
+            return
+
+        self._selection_wall_speed_overlay.show_for_screen(anchor_screen)
+
+    @Slot(float)
+    def _on_selection_wall_speed_changed(self, speed: float):
+        """Apply the shared masonry-wall speed to every wall video viewer."""
+        self._selection_wall_shared_speed = max(0.25, min(4.0, float(speed)))
+        for viewer in self._selection_wall_video_viewers():
+            self._apply_selection_wall_shared_speed_to_viewer(viewer)
+        coordinator = getattr(self, '_sync_coordinator', None)
+        if coordinator is not None and getattr(self, '_sync_scope', '') == 'selection_wall':
+            notifier = getattr(coordinator, 'notify_playback_timing_changed', None)
+            if callable(notifier):
+                try:
+                    notifier()
+                except Exception:
+                    pass
+        self._refresh_selection_wall_speed_overlay()
+
+    @Slot(Qt.ApplicationState)
+    def _on_application_state_changed(self, state):
+        """Hide floating wall controls when the app is not the active application."""
+        if state != Qt.ApplicationState.ApplicationActive:
+            self._selection_wall_speed_overlay.hide()
+            return
+        self._refresh_selection_wall_speed_overlay()
 
     def _next_floating_slot_id(self) -> int:
         """Return the lowest available floating viewer slot id (1-based)."""
@@ -4586,11 +4793,15 @@ class MainWindow(QMainWindow):
 
             viewer.load_image(live_target)
             self._apply_inherited_video_state(viewer, source_video_state)
+            if bool(getattr(viewer, '_selection_masonry_wall_has_video', False)):
+                self._apply_selection_wall_shared_speed_to_viewer(viewer)
         except RuntimeError:
             return
         except Exception as e:
             print(f"[VIEWER] Deferred spawn-load warning: {e}")
         finally:
+            if bool(getattr(viewer, '_selection_masonry_wall_viewer', False)):
+                self._refresh_selection_wall_speed_overlay()
             if not defer_performance_refresh:
                 self.refresh_video_controls_performance_profile()
 
@@ -4725,6 +4936,7 @@ class MainWindow(QMainWindow):
 
             try:
                 if getattr(viewer, '_is_video_loaded', False) and getattr(viewer.video_player, 'video_path', None):
+                    self._apply_selection_wall_shared_speed_to_viewer(viewer)
                     loaded_video_viewers.append(viewer)
                 else:
                     pending_video = True
@@ -4856,6 +5068,8 @@ class MainWindow(QMainWindow):
             try:
                 window._selection_masonry_wall_window = True
                 window.viewer._selection_masonry_wall_viewer = True
+                window._selection_masonry_wall_has_video = bool(getattr(image, 'is_video', False))
+                window.viewer._selection_masonry_wall_has_video = bool(getattr(image, 'is_video', False))
                 if hasattr(window, 'set_review_slots_enabled'):
                     window.set_review_slots_enabled(True)
             except Exception:
@@ -4885,6 +5099,7 @@ class MainWindow(QMainWindow):
             pass
 
         self._selection_wall_sync_token = int(getattr(self, '_selection_wall_sync_token', 0) or 0) + 1
+        self._refresh_selection_wall_speed_overlay()
         if any(bool(info.get('is_video', False)) for info in spawned_infos):
             QTimer.singleShot(
                 120,
@@ -5035,6 +5250,7 @@ class MainWindow(QMainWindow):
                 self.set_active_viewer(self.image_viewer)
             except Exception:
                 pass
+            self._refresh_selection_wall_speed_overlay()
             self.refresh_video_controls_performance_profile()
             return
 
@@ -5060,6 +5276,7 @@ class MainWindow(QMainWindow):
             self.set_active_viewer(self.image_viewer)
         except Exception:
             pass
+        self._refresh_selection_wall_speed_overlay()
         self.refresh_video_controls_performance_profile()
         if not self._bulk_close_timer.isActive():
             self._bulk_close_timer.start()
@@ -5081,6 +5298,7 @@ class MainWindow(QMainWindow):
 
         self._bulk_close_timer.stop()
         self._bulk_closing_floating_viewers = False
+        self._refresh_selection_wall_speed_overlay()
         self.refresh_video_controls_performance_profile()
         if self._bulk_close_gc_pending:
             self._bulk_close_gc_pending = False
@@ -5154,6 +5372,7 @@ class MainWindow(QMainWindow):
         ):
             self.set_active_viewer(self.image_viewer)
         if not bulk_close_mode:
+            self._refresh_selection_wall_speed_overlay()
             self.refresh_video_controls_performance_profile()
 
     @Slot()
