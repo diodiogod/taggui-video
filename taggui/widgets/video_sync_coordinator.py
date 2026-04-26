@@ -312,6 +312,8 @@ class VideoSyncCoordinator(QObject):
         self._warmup_index = 0
         self._warmup_batch_size = 0
         self._warmup_step_ms = 0
+        self._paused = False
+        self._paused_started_monotonic = 0.0
 
         # Barrier poll timer — only active during barrier phase.
         self._poll_timer = QTimer(self)
@@ -369,6 +371,8 @@ class VideoSyncCoordinator(QObject):
         self._running_timer.stop()
         self._watchdog_timer.stop()
         self._state = self._STATE_IDLE
+        self._paused = False
+        self._paused_started_monotonic = 0.0
         for entry in self._entries:
             try:
                 entry.player.playback_finished.disconnect(self._on_player_finished)
@@ -492,7 +496,7 @@ class VideoSyncCoordinator(QObject):
 
     @Slot()
     def _poll_running(self):
-        if self._state != self._STATE_RUNNING:
+        if self._state != self._STATE_RUNNING or self._paused:
             return
 
         for idx, entry in enumerate(self._entries):
@@ -530,7 +534,7 @@ class VideoSyncCoordinator(QObject):
             f"[SYNC] playback_finished player={idx} already_finished={already} "
             f"state={self._state} count={self._finished_count+1}/{len(self._entries)}"
         )
-        if self._state != self._STATE_RUNNING:
+        if self._state != self._STATE_RUNNING or self._paused:
             return
         if idx >= 0 and self._entries[idx].finished:
             _sync_log(f"[SYNC] duplicate finished from player={idx} - ignoring")
@@ -548,7 +552,7 @@ class VideoSyncCoordinator(QObject):
     @Slot()
     def _on_watchdog(self):
         """Force restart if one or more players stalled and never finished."""
-        if self._state != self._STATE_RUNNING:
+        if self._state != self._STATE_RUNNING or self._paused:
             return
         self._refresh_runtime_expectations()
         elapsed_ms = max(0.0, (time.monotonic() - self._play_started_monotonic) * 1000.0)
@@ -576,12 +580,49 @@ class VideoSyncCoordinator(QObject):
     def notify_playback_timing_changed(self):
         """Refresh watchdog timing after playback speed changes mid-cycle."""
         self._refresh_runtime_expectations()
-        if self._state != self._STATE_RUNNING:
+        if self._state != self._STATE_RUNNING or self._paused:
             return
         self._watchdog_timer.stop()
         elapsed_ms = max(0.0, (time.monotonic() - self._play_started_monotonic) * 1000.0)
         remaining_ms = max(1, int((self._longest_duration_ms + _STALL_TIMEOUT_MS) - elapsed_ms))
         self._watchdog_timer.start(remaining_ms)
+
+    def set_paused(self, paused: bool):
+        """Pause or resume the active running cycle without dropping sync membership."""
+        paused = bool(paused)
+        if paused == self._paused:
+            return
+        if self._state != self._STATE_RUNNING:
+            self._paused = paused
+            if not paused:
+                self._paused_started_monotonic = 0.0
+            return
+
+        if paused:
+            self._paused = True
+            self._paused_started_monotonic = time.monotonic()
+            self._running_timer.stop()
+            self._watchdog_timer.stop()
+            for entry in self._entries:
+                try:
+                    entry.pause_hard()
+                except Exception:
+                    pass
+            return
+
+        pause_started = self._paused_started_monotonic
+        self._paused = False
+        self._paused_started_monotonic = 0.0
+        if pause_started > 0.0:
+            self._play_started_monotonic += max(0.0, time.monotonic() - pause_started)
+        for entry in self._entries:
+            try:
+                if not entry.finished:
+                    entry.fire_play()
+            except Exception:
+                pass
+        self._running_timer.start()
+        self.notify_playback_timing_changed()
 
     # ------------------------------------------------------------------
     # Batch play
@@ -589,6 +630,8 @@ class VideoSyncCoordinator(QObject):
 
     def _fire_play_all(self):
         self._state = self._STATE_RUNNING
+        self._paused = False
+        self._paused_started_monotonic = 0.0
         self._finished_count = 0
         for entry in self._entries:
             entry.finished = False

@@ -389,6 +389,9 @@ class SelectionWallSpeedOverlay(QFrame):
     """Shared speed slider for selection masonry wall videos."""
 
     speed_changed = Signal(float)
+    play_pause_requested = Signal()
+    step_backward_requested = Signal()
+    step_forward_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -396,13 +399,32 @@ class SelectionWallSpeedOverlay(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setObjectName("selectionWallSpeedOverlay")
+        self._is_playing = True
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(10)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(14, 10, 14, 10)
+        root_layout.setSpacing(8)
 
-        title_label = QLabel("Wall speed")
-        title_label.setStyleSheet("QLabel { color: #EAF4FF; font-weight: 700; }")
+        transport_layout = QHBoxLayout()
+        transport_layout.setContentsMargins(0, 0, 0, 0)
+        transport_layout.setSpacing(8)
+
+        self._step_back_button = QPushButton("-1f")
+        self._play_pause_button = QPushButton("Pause")
+        self._step_forward_button = QPushButton("+1f")
+        for button in (self._step_back_button, self._play_pause_button, self._step_forward_button):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setMinimumHeight(28)
+            button.setStyleSheet(
+                "QPushButton { color: #F5F8FF; background: rgba(255,255,255,28);"
+                " border: 1px solid rgba(180,200,255,82); border-radius: 8px; padding: 4px 10px; }"
+                "QPushButton:hover { background: rgba(255,255,255,42); }"
+            )
+            transport_layout.addWidget(button)
+
+        scrubber_layout = QHBoxLayout()
+        scrubber_layout.setContentsMargins(0, 0, 0, 0)
+        scrubber_layout.setSpacing(10)
 
         self._speed_slider = QSlider(Qt.Orientation.Horizontal, self)
         self._speed_slider.setRange(25, 400)
@@ -427,27 +449,21 @@ class SelectionWallSpeedOverlay(QFrame):
             }
         """)
 
-        self._value_label = QLabel("1.00x")
-        self._value_label.setMinimumWidth(48)
-        self._value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._value_label.setStyleSheet(
-            "QLabel { color: #D8FFE5; font-weight: 700; background: rgba(80, 170, 110, 40);"
-            " border: 1px solid rgba(126, 217, 87, 110); border-radius: 6px; padding: 2px 6px; }"
+        self._value_button = QPushButton("1.00x")
+        self._value_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._value_button.setToolTip("Reset masonry wall video speed")
+        self._value_button.setMinimumWidth(58)
+        self._value_button.setStyleSheet(
+            "QPushButton { color: #D8FFE5; font-weight: 700; background: rgba(80, 170, 110, 40);"
+            " border: 1px solid rgba(126, 217, 87, 110); border-radius: 8px; padding: 4px 8px; }"
+            "QPushButton:hover { background: rgba(80, 170, 110, 64); }"
         )
 
-        self._reset_button = QPushButton("1.00x")
-        self._reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._reset_button.setToolTip("Reset masonry wall video speed")
-        self._reset_button.setStyleSheet(
-            "QPushButton { color: #F5F8FF; background: rgba(255,255,255,28);"
-            " border: 1px solid rgba(180,200,255,82); border-radius: 6px; padding: 4px 8px; }"
-            "QPushButton:hover { background: rgba(255,255,255,42); }"
-        )
+        scrubber_layout.addWidget(self._speed_slider)
+        scrubber_layout.addWidget(self._value_button)
 
-        layout.addWidget(title_label)
-        layout.addWidget(self._speed_slider)
-        layout.addWidget(self._value_label)
-        layout.addWidget(self._reset_button)
+        root_layout.addLayout(transport_layout)
+        root_layout.addLayout(scrubber_layout)
 
         self.setStyleSheet("""
             QFrame#selectionWallSpeedOverlay {
@@ -458,7 +474,10 @@ class SelectionWallSpeedOverlay(QFrame):
         """)
 
         self._speed_slider.valueChanged.connect(self._on_slider_value_changed)
-        self._reset_button.clicked.connect(lambda: self.set_speed_value(1.0, emit_signal=True))
+        self._value_button.clicked.connect(lambda: self.set_speed_value(1.0, emit_signal=True))
+        self._play_pause_button.clicked.connect(self.play_pause_requested.emit)
+        self._step_back_button.clicked.connect(self.step_backward_requested.emit)
+        self._step_forward_button.clicked.connect(self.step_forward_requested.emit)
         self.hide()
 
     def set_speed_value(self, speed: float, *, emit_signal: bool = False):
@@ -466,9 +485,13 @@ class SelectionWallSpeedOverlay(QFrame):
         self._speed_slider.blockSignals(True)
         self._speed_slider.setValue(int(round(clamped * 100.0)))
         self._speed_slider.blockSignals(False)
-        self._value_label.setText(f"{clamped:.2f}x")
+        self._value_button.setText(f"{clamped:.2f}x")
         if emit_signal:
             self.speed_changed.emit(clamped)
+
+    def set_playing(self, is_playing: bool):
+        self._is_playing = bool(is_playing)
+        self._play_pause_button.setText("Pause" if self._is_playing else "Play")
 
     def show_for_screen(self, screen):
         if screen is None:
@@ -485,7 +508,7 @@ class SelectionWallSpeedOverlay(QFrame):
     @Slot(int)
     def _on_slider_value_changed(self, value: int):
         speed = max(0.25, min(4.0, float(value) / 100.0))
-        self._value_label.setText(f"{speed:.2f}x")
+        self._value_button.setText(f"{speed:.2f}x")
         self.speed_changed.emit(speed)
 
 
@@ -601,6 +624,13 @@ class MainWindow(QMainWindow):
         self._perf_hud.set_geometry_changed_callback(self._on_perf_hud_geometry_changed)
         self._selection_wall_speed_overlay = SelectionWallSpeedOverlay(self)
         self._selection_wall_speed_overlay.speed_changed.connect(self._on_selection_wall_speed_changed)
+        self._selection_wall_speed_overlay.play_pause_requested.connect(self._toggle_selection_wall_play_pause)
+        self._selection_wall_speed_overlay.step_backward_requested.connect(
+            lambda: self._step_selection_wall_frames(-1)
+        )
+        self._selection_wall_speed_overlay.step_forward_requested.connect(
+            lambda: self._step_selection_wall_frames(1)
+        )
         self._perf_hud_timer = QTimer(self)
         self._perf_hud_timer.setInterval(120)
         self._perf_hud_timer.timeout.connect(self._update_perf_hud)
@@ -3277,11 +3307,32 @@ class MainWindow(QMainWindow):
         video_player.playback_started.connect(
             lambda: video_controls.set_playing(True)
         )
+        video_player.playback_started.connect(
+            lambda current_viewer=viewer: (
+                self._refresh_selection_wall_speed_overlay()
+                if bool(getattr(current_viewer, '_selection_masonry_wall_viewer', False))
+                else None
+            )
+        )
         video_player.playback_paused.connect(
             lambda: video_controls.set_playing(False)
         )
+        video_player.playback_paused.connect(
+            lambda current_viewer=viewer: (
+                self._refresh_selection_wall_speed_overlay()
+                if bool(getattr(current_viewer, '_selection_masonry_wall_viewer', False))
+                else None
+            )
+        )
         video_player.playback_finished.connect(
             lambda: video_controls.set_playing(False)
+        )
+        video_player.playback_finished.connect(
+            lambda current_viewer=viewer: (
+                self._refresh_selection_wall_speed_overlay()
+                if bool(getattr(current_viewer, '_selection_masonry_wall_viewer', False))
+                else None
+            )
         )
         video_controls.loop_toggled.connect(
             lambda enabled: self._apply_loop_state_to_viewer_player(viewer)
@@ -3628,6 +3679,17 @@ class MainWindow(QMainWindow):
                 continue
         return viewers
 
+    def _selection_wall_any_playing(self) -> bool:
+        """True when any masonry-wall video is actively playing."""
+        for viewer in self._selection_wall_video_viewers():
+            try:
+                player = getattr(viewer, 'video_player', None)
+                if player is not None and bool(getattr(player, 'is_playing', False)):
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
     def _apply_selection_wall_shared_speed_to_viewer(self, viewer: ImageViewer):
         """Push current wall speed into one wall video viewer."""
         try:
@@ -3668,6 +3730,7 @@ class MainWindow(QMainWindow):
 
         self._selection_wall_shared_speed = max(0.25, min(4.0, reference_speed))
         self._selection_wall_speed_overlay.set_speed_value(self._selection_wall_shared_speed, emit_signal=False)
+        self._selection_wall_speed_overlay.set_playing(self._selection_wall_any_playing())
 
         anchor_screen = None
         for window in self._iter_selection_wall_windows():
@@ -3700,6 +3763,76 @@ class MainWindow(QMainWindow):
                     notifier()
                 except Exception:
                     pass
+        self._refresh_selection_wall_speed_overlay()
+
+    @Slot()
+    def _toggle_selection_wall_play_pause(self):
+        """Pause or resume all selection-wall videos without ejecting them from sync."""
+        video_viewers = self._selection_wall_video_viewers()
+        if not video_viewers:
+            self._refresh_selection_wall_speed_overlay()
+            return
+
+        should_pause = self._selection_wall_any_playing()
+        coordinator = getattr(self, '_sync_coordinator', None)
+        if coordinator is not None and getattr(self, '_sync_scope', '') == 'selection_wall':
+            pause_setter = getattr(coordinator, 'set_paused', None)
+            if callable(pause_setter):
+                try:
+                    pause_setter(should_pause)
+                except Exception:
+                    pass
+        else:
+            for viewer in video_viewers:
+                try:
+                    player = getattr(viewer, 'video_player', None)
+                    controls = getattr(viewer, 'video_controls', None)
+                    if player is None:
+                        continue
+                    if should_pause:
+                        player.pause()
+                        if controls is not None:
+                            controls.set_playing(False, update_auto_play=False)
+                    elif not bool(getattr(player, 'is_playing', False)):
+                        player.play()
+                        if controls is not None:
+                            controls.set_playing(True, update_auto_play=False)
+                except Exception:
+                    continue
+        self._refresh_selection_wall_speed_overlay()
+
+    def _step_selection_wall_frames(self, step: int):
+        """Step every wall video by one frame after pausing the shared cycle."""
+        frame_step = -1 if int(step) < 0 else 1
+        video_viewers = self._selection_wall_video_viewers()
+        if not video_viewers:
+            self._refresh_selection_wall_speed_overlay()
+            return
+
+        coordinator = getattr(self, '_sync_coordinator', None)
+        if coordinator is not None and getattr(self, '_sync_scope', '') == 'selection_wall':
+            pause_setter = getattr(coordinator, 'set_paused', None)
+            if callable(pause_setter):
+                try:
+                    pause_setter(True)
+                except Exception:
+                    pass
+
+        for viewer in video_viewers:
+            try:
+                player = getattr(viewer, 'video_player', None)
+                controls = getattr(viewer, 'video_controls', None)
+                if player is None:
+                    continue
+                total_frames = max(1, int(player.get_total_frames()))
+                current_frame = int(player.get_current_frame_number())
+                target_frame = max(0, min(total_frames - 1, current_frame + frame_step))
+                player.pause()
+                player.seek_to_frame(target_frame)
+                if controls is not None:
+                    controls.set_playing(False, update_auto_play=False)
+            except Exception:
+                continue
         self._refresh_selection_wall_speed_overlay()
 
     @Slot(Qt.ApplicationState)
