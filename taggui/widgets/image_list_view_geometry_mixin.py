@@ -2,7 +2,7 @@ from widgets.image_list_shared import *  # noqa: F401,F403
 import math
 from PySide6.QtCore import Property
 from PySide6.QtWidgets import QDockWidget, QMainWindow
-from utils.diagnostic_logging import diagnostic_print
+from utils.diagnostic_logging import append_crash_context, diagnostic_print
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -1565,11 +1565,12 @@ class ImageListViewGeometryMixin:
         else:
             mime_data = self.model().mimeData(indices)
         if not mime_data:
-            diagnostic_print(
+            drag_message = (
                 f"[DRAG] Abort start: no mime data | external_only={int(external_only)} "
-                f"| row={model_index.row()} | path={drag_path_text}",
-                detail="essential",
+                f"| row={model_index.row()} | path={drag_path_text}"
             )
+            diagnostic_print(drag_message, detail="essential")
+            append_crash_context(drag_message)
             return
 
         # Build a reliable visual preview pixmap.
@@ -1608,12 +1609,13 @@ class ImageListViewGeometryMixin:
         # Ultra-fast drag/release race: if button is already up by the time we
         # reach drag start, skip QDrag.exec() and spawn immediately.
         if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
-            diagnostic_print(
+            drag_message = (
                 f"[DRAG] Skip exec: mouse released early | external_only={int(external_only)} "
                 f"| row={model_index.row()} | path={drag_path_text} "
-                f"| preview={preview_source} {source_pixmap.width()}x{source_pixmap.height()}",
-                detail="essential",
+                f"| preview={preview_source} {source_pixmap.width()}x{source_pixmap.height()}"
             )
+            diagnostic_print(drag_message, detail="essential")
+            append_crash_context(drag_message)
             if not external_only:
                 live_index = self._resolve_live_spawn_index(dragged_index, dragged_path)
                 self._spawn_floating_from_drag_index(live_index, source_pixmap)
@@ -1641,7 +1643,7 @@ class ImageListViewGeometryMixin:
             supported_actions_text = str(supportedActions)
         except Exception:
             supported_actions_text = "<unavailable>"
-        diagnostic_print(
+        drag_message = (
             f"[DRAG] Exec start | external_only={int(external_only)} "
             f"| row={model_index.row()} valid={int(model_index.isValid())} "
             f"| persistent_valid={int(dragged_index.isValid())} "
@@ -1649,9 +1651,10 @@ class ImageListViewGeometryMixin:
             f"{source_pixmap.width()}x{source_pixmap.height()} | proxy_rows={model_row_count} "
             f"| source_rows={source_row_count} | loaded_pages={loaded_pages} "
             f"| masonry={int(bool(getattr(self, 'use_masonry', False)))} "
-            f"| backend={current_backend} | actions={supported_actions_text}",
-            detail="essential",
+            f"| backend={current_backend} | actions={supported_actions_text}"
         )
+        diagnostic_print(drag_message, detail="essential")
+        append_crash_context(drag_message)
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.setPixmap(drag_pixmap)
@@ -1661,12 +1664,13 @@ class ImageListViewGeometryMixin:
             drop_action_text = str(drop_action)
         except Exception:
             drop_action_text = "<unavailable>"
-        diagnostic_print(
+        drag_message = (
             f"[DRAG] Exec end | external_only={int(external_only)} "
             f"| row={model_index.row()} | path={drag_path_text} "
-            f"| drop_action={drop_action_text}",
-            detail="essential",
+            f"| drop_action={drop_action_text}"
         )
+        diagnostic_print(drag_message, detail="essential")
+        append_crash_context(drag_message)
 
         # If dropped onto no external target, spawn a floating viewer at cursor.
         if (

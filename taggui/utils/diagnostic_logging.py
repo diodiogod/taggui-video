@@ -96,6 +96,22 @@ def diagnostic_print(message: str, *, detail: str = "verbose") -> None:
         print(message)
 
 
+def append_crash_context(message: str) -> None:
+    """Write a high-signal context line straight into taggui_crash.log."""
+    try:
+        text = str(message or "").rstrip()
+        if not text:
+            return
+        append_text_log(
+            Path.cwd() / "taggui_crash.log",
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {text}\n",
+            max_bytes=512 * 1024,
+            retain_days=2,
+        )
+    except Exception:
+        pass
+
+
 def diagnostic_time_prefix() -> str:
     """Return a local wall-clock prefix with millisecond precision."""
     try:

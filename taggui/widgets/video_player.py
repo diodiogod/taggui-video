@@ -537,9 +537,10 @@ class VideoPlayerWidget(QWidget):
             self._mpv_surface_active = False
             self.mpv_geometry_timer.stop()
             try:
-                if self.mpv_widget:
-                    self.mpv_widget.hide()
-                    self.mpv_widget.setGeometry(0, 0, 1, 1)
+                widget = getattr(self, "mpv_widget", None)
+                if widget is not None:
+                    widget.hide()
+                    widget.setGeometry(0, 0, 1, 1)
             except RuntimeError:
                 pass
             try:
