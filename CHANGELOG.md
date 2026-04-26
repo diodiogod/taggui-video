@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-04-25
+
+### Added
+
+- Add a shared speed control for masonry wall videos
+- Keep wall videos participating in the next cycle after pause or timeline scrub
+- Add compact wall-wide pause and frame-step controls with clickable speed reset
+
+### Changed
+
+- Improve masonry wall video controls
+
+### Fixed
+
+- Fix Browser 2 reopening unexpectedly on startup after it was closed
+- Fix slow wall playback restarting too early at reduced speeds
 ## [1.3.1] - 2026-04-25
 
 ### Added

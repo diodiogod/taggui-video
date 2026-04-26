@@ -2,5 +2,5 @@
 
 APP_NAME = "TagGUI"
 APP_DISPLAY_NAME = "TagGUI Video 1M"
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
