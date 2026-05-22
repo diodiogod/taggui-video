@@ -763,12 +763,23 @@ class MediaComparisonWidget(QWidget):
 
         close_all_action = None
         arrange_action = None
+        wall_controls_action = None
         parent = self.parentWidget()
         close_all = getattr(parent, "close_all_floating_viewers", None) if parent is not None else None
-        arrange_windows = getattr(parent, "arrange_all_floating_windows_as_masonry", None) if parent is not None else None
+        arrange_windows = getattr(parent, "arrange_floating_windows_as_masonry", None) if parent is not None else None
+        toggle_wall_controls = getattr(parent, "set_selection_masonry_wall_controls_enabled_for_window", None) if parent is not None else None
         if callable(arrange_windows):
             menu.addSeparator()
-            arrange_action = menu.addAction("Arrange floating windows as masonry")
+            arrange_action = menu.addAction("Arrange as Masonry Wall")
+        if callable(toggle_wall_controls) and bool(getattr(self, '_selection_masonry_wall_window', False)):
+            wall_controls_action = menu.addAction("Masonry wall controls")
+            wall_controls_action.setCheckable(True)
+            try:
+                wall_controls_action.setChecked(
+                    bool(parent.selection_masonry_wall_controls_active_for_window(self))
+                )
+            except Exception:
+                wall_controls_action.setChecked(False)
         if callable(close_all):
             close_all_action = menu.addAction("Close all spawned viewers")
 
@@ -786,6 +797,11 @@ class MediaComparisonWidget(QWidget):
         elif selected is arrange_action and callable(arrange_windows):
             try:
                 arrange_windows()
+            except Exception:
+                pass
+        elif selected is wall_controls_action and callable(toggle_wall_controls):
+            try:
+                toggle_wall_controls(self, bool(wall_controls_action.isChecked()))
             except Exception:
                 pass
         elif selected is close_all_action and callable(close_all):

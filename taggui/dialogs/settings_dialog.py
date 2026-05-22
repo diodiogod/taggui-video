@@ -840,8 +840,54 @@ class SettingsDialog(QDialog):
         display_grid.addWidget(title_strip_height_spin_box, 1, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
+        display_grid.addWidget(QLabel('Floating masonry wall gap (px)'), 2, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        floating_wall_gap_spin_box = SettingsSpinBox(
+            key='floating_viewer_wall_gap_px',
+            minimum=0, maximum=64, default=6)
+        floating_wall_gap_spin_box.setToolTip(
+            'Controls masonry spacing everywhere:\n'
+            '- gap between floating windows\n'
+            '- gap to the screen edges\n'
+            '- Open in Masonry Wall and Arrange as Masonry Wall\n'
+            '0 = no gap.\n'
+            'Applied live.'
+        )
+        display_grid.addWidget(floating_wall_gap_spin_box, 2, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
+        display_grid.addWidget(QLabel('Floating masonry alignment'), 3, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        floating_wall_alignment_combo = SettingsComboBox(
+            key='floating_viewer_wall_alignment',
+            default='Top center')
+        floating_wall_alignment_combo.addItems(['Top left', 'Top center', 'Top right'])
+        floating_wall_alignment_combo.setToolTip(
+            'Controls where floating-window masonry layouts are anchored horizontally.\n'
+            'top_left leaves continuous free space on the right.\n'
+            'top_center matches the previous default behavior.\n'
+            'top_right leaves continuous free space on the left.\n'
+            'Applied live.'
+        )
+        display_grid.addWidget(floating_wall_alignment_combo, 3, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
+        display_grid.addWidget(QLabel('Rearrange preserves screen order'), 4, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        floating_rearrange_preserve_order_check_box = SettingsBigCheckBox(
+            key='floating_viewer_rearrange_preserve_screen_order'
+        )
+        floating_rearrange_preserve_order_check_box.setToolTip(
+            'When enabled, Arrange as Masonry Wall keeps the current\n'
+            'top-left to bottom-right screen order of your floating windows.\n'
+            'When disabled, rearrange uses the neutral pack order instead.\n'
+            'Applied live.'
+        )
+        display_grid.addWidget(floating_rearrange_preserve_order_check_box, 4, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
         # Floating viewer detail zoom fallback
-        display_grid.addWidget(QLabel('Floating double-click detail zoom (%)'), 2, 0,
+        display_grid.addWidget(QLabel('Floating double-click detail zoom (%)'), 5, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_detail_zoom_spin_box = SettingsSpinBox(
             key='floating_double_click_detail_zoom_percent',
@@ -851,7 +897,23 @@ class SettingsDialog(QDialog):
             'double-click cannot apply width/height auto-fill and media is not pannable.\n'
             '100 = 1x (no change), 400 = 4x.\n'
             'Applied live (no restart).')
-        display_grid.addWidget(floating_detail_zoom_spin_box, 2, 1,
+        display_grid.addWidget(floating_detail_zoom_spin_box, 5, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
+        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 6, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        floating_resize_preserve_aspect_check_box = SettingsBigCheckBox(
+            key='floating_resize_preserve_aspect_by_default'
+        )
+        floating_resize_preserve_aspect_check_box.setToolTip(
+            'When enabled, dragging a floating viewer resize edge/corner preserves\n'
+            'the current viewer aspect ratio by default, and holding Shift temporarily\n'
+            'switches to free resize.\n'
+            'When disabled, the current behavior stays the same: free resize by default,\n'
+            'hold Shift to preserve aspect ratio.\n'
+            'Applied live (no restart).'
+        )
+        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 6, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
         workflow_grid.addWidget(QLabel('Image double-click action'), 1, 0,

@@ -2,17 +2,20 @@
 
 [Back to Documentation Hub](HUB.md)
 
-This guide covers the selection masonry wall and the review badge workflow.
+This guide covers the Masonry Wall layout and the review badge workflow.
 
 It is designed for fast comparison of multiple images or videos in separate floating windows, especially when you want to sort many similar generations and mark picks, rejects, questions, or custom badge meanings.
 
 ## What It Is
 
-- The masonry review wall opens the current selection as a wall of floating viewers.
+- The Masonry Wall can open the current selection or rearrange the current floating windows as one wall.
 - It keeps the top aligned and packs the windows in a masonry-style arrangement across the current screen.
 - Mixed images and videos are supported.
 - If the wall contains multiple videos, video sync and playback start automatically.
 - The wall works together with the review badge system, so you can mark files while comparing them.
+- The shared masonry spacing can be adjusted in `Settings -> Advanced -> Floating masonry wall gap (px)`.
+- Horizontal alignment can be adjusted in `Settings -> Advanced -> Floating masonry alignment`.
+- Right-click a wall window and toggle `Masonry wall controls` live.
 
 <p align="center">
   <img src="../images/masonry-review-wall.jpg" alt="Masonry review wall with review badges" width="86%">
@@ -26,6 +29,13 @@ It is designed for fast comparison of multiple images or videos in separate floa
 - Or drag a multi-selection from the image list and release it to open the wall directly.
 
 Single-item spawn is still available. The masonry wall is for multi-item review.
+
+## Arrange Existing Floating Windows
+
+- Right-click a floating viewer or comparison window and choose `Arrange as Masonry Wall`.
+- This repacks the current floating windows into the same Masonry Wall layout.
+- Rearranging starts with the wall controls off.
+- Turn them on later from the window right-click menu if needed.
 
 ## Why Use It
 

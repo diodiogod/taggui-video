@@ -350,7 +350,7 @@ class ImageListView(
         self.delete_images_action.triggered.connect(
             self.delete_selected_images)
         self.open_selection_masonry_wall_action = self.addAction(
-            'Open Selection Masonry Wall'
+            'Open in Masonry Wall'
         )
         self.open_selection_masonry_wall_action.setShortcut('Ctrl+Shift+Return')
         self.open_selection_masonry_wall_action.triggered.connect(

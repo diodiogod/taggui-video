@@ -34,7 +34,14 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - If media is fully fit and not pannable, `left-drag` moves the floating window.
 - If media is zoomed/pannable, `left-drag` pans media instead; use white edge handles or middle-drag to move window.
 - Resize from all corners and all borders (drag edge/corner zones).
-- Hold `Shift` while resizing to keep the floating viewer's current aspect ratio.
+- By default, hold `Shift` while resizing to keep the floating viewer's current aspect ratio.
+- You can invert this in `Settings -> Advanced -> Floating resize keeps aspect ratio by default`, which makes aspect-preserving resize the default and uses `Shift` for temporary free resize.
+- `Arrange as Masonry Wall` and `Open in Masonry Wall` both use the shared spacing from `Settings -> Advanced -> Floating masonry wall gap (px)`, including the screen-edge inset.
+- Both masonry flows use `Settings -> Advanced -> Floating masonry alignment`.
+- `Arrange as Masonry Wall` uses the default rearrange order from `Settings -> Advanced -> Rearrange preserves screen order`.
+- Right-click a Masonry Wall window and toggle `Masonry wall controls` live.
+- `Open in Masonry Wall` starts with the wall controls on.
+- `Arrange as Masonry Wall` starts with the wall controls off.
 - Close button (`x`) appears on hover near the top-right corner.
 
 ## Hold Mode

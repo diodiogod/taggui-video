@@ -50,7 +50,11 @@ DEFAULT_SETTINGS = {
     'diagnostic_log_mode': 'essential',  # off, essential, verbose
     'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
     'image_list_title_strip_height': 8,  # Compact image-list dock title strip height in px
+    'floating_viewer_wall_gap_px': 6,  # Shared gap between floating windows and screen edges for masonry layouts
+    'floating_viewer_wall_alignment': 'Top center',
+    'floating_viewer_rearrange_preserve_screen_order': True,
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
+    'floating_resize_preserve_aspect_by_default': False,
     'image_list_double_click_action': 'spawn viewer',  # spawn viewer, system default app
     'compare_fit_mode': 'preserve',  # preserve, fill, stretch (image compare overlay mode)
     'video_compare_fit_mode': 'preserve',  # preserve, fill, stretch (video compare window mode)

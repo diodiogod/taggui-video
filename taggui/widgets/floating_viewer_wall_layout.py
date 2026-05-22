@@ -24,6 +24,7 @@ def _layout_candidate(
     columns: int,
     min_item_width: int,
     min_item_height: int,
+    horizontal_alignment: str,
 ) -> tuple[list[QRect], float] | None:
     if columns <= 0 or not aspect_ratios or not available_rect.isValid():
         return None
@@ -85,7 +86,13 @@ def _layout_candidate(
     used_width = 0
     if rects:
         used_width = max((rect.right() + 1) for rect in rects)
-    offset_x = int(available_rect.left()) + max(0, (available_width - used_width) // 2)
+    normalized_alignment = str(horizontal_alignment or "center").strip().lower()
+    if normalized_alignment == "left":
+        offset_x = int(available_rect.left())
+    elif normalized_alignment == "right":
+        offset_x = int(available_rect.left()) + max(0, available_width - used_width)
+    else:
+        offset_x = int(available_rect.left()) + max(0, (available_width - used_width) // 2)
     offset_y = int(available_rect.top())
     translated = [rect.translated(offset_x, offset_y) for rect in rects]
     total_area = float(sum(rect.width() * rect.height() for rect in translated))
@@ -100,6 +107,7 @@ def calculate_floating_viewer_wall_layout(
     min_item_width: int = 180,
     min_item_height: int = 120,
     max_columns: int | None = None,
+    horizontal_alignment: str = "center",
 ) -> list[QRect]:
     """Return top-aligned masonry rects sized to fill the current screen."""
     if not aspect_ratios or not available_rect.isValid():
@@ -131,6 +139,7 @@ def calculate_floating_viewer_wall_layout(
             columns=columns,
             min_item_width=min_item_width,
             min_item_height=min_item_height,
+            horizontal_alignment=horizontal_alignment,
         )
         if not candidate:
             continue
@@ -149,6 +158,7 @@ def calculate_floating_viewer_wall_layout(
                 columns=columns,
                 min_item_width=80,
                 min_item_height=80,
+                horizontal_alignment=horizontal_alignment,
             )
             if not candidate:
                 continue
@@ -164,10 +174,18 @@ def calculate_floating_viewer_wall_layout(
     cell_width = max(80, int((available_rect.width() - (spacing * max(0, columns - 1))) / max(1, columns)))
     cell_height = max(80, cell_width)
     rects = []
+    normalized_alignment = str(horizontal_alignment or "center").strip().lower()
+    row_width = (columns * cell_width) + (spacing * max(0, columns - 1))
+    if normalized_alignment == "left":
+        base_x = int(available_rect.left())
+    elif normalized_alignment == "right":
+        base_x = int(available_rect.left()) + max(0, int(available_rect.width()) - row_width)
+    else:
+        base_x = int(available_rect.left()) + max(0, (int(available_rect.width()) - row_width) // 2)
     for index in range(len(aspect_ratios)):
         row = index // columns
         column = index % columns
-        x = int(available_rect.left()) + (column * (cell_width + spacing))
+        x = base_x + (column * (cell_width + spacing))
         y = int(available_rect.top()) + (row * (cell_height + spacing))
         rects.append(QRect(x, y, cell_width, cell_height))
     return rects

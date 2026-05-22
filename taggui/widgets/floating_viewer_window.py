@@ -14,6 +14,7 @@ from utils.review_marks import (
     get_review_badge_specs,
     get_review_badge_text_color,
 )
+from utils.settings import settings
 
 
 class FloatingReviewSlotsOverlay(QWidget):
@@ -590,11 +591,25 @@ class FloatingViewerWindow(QWidget):
             except Exception:
                 pass
 
-    def _shift_resize_modifiers_active(self) -> bool:
+    def _floating_resize_preserve_aspect_by_default(self) -> bool:
         try:
-            return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            return bool(
+                settings.value(
+                    'floating_resize_preserve_aspect_by_default',
+                    False,
+                    type=bool,
+                )
+            )
         except Exception:
             return False
+
+    def _aspect_preserve_resize_active(self) -> bool:
+        try:
+            shift_pressed = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        except Exception:
+            shift_pressed = False
+        default_preserve = self._floating_resize_preserve_aspect_by_default()
+        return (not shift_pressed) if default_preserve else shift_pressed
 
     def _tick_shift_resize_glow(self):
         if self._shift_resize_visual_zone is None:
@@ -644,7 +659,7 @@ class FloatingViewerWindow(QWidget):
 
     def _update_shift_resize_visuals(self, global_pos: QPoint | None = None):
         zone_name = None
-        if self._shift_resize_modifiers_active():
+        if self._aspect_preserve_resize_active():
             if self._resize_active and self._resize_corner:
                 zone_name = self._resize_corner
             else:
@@ -1492,9 +1507,21 @@ class FloatingViewerWindow(QWidget):
                 exit_compare_action = None
         sync_action = menu.addAction("Sync video")
         parent = self.parentWidget()
-        arrange_windows = getattr(parent, "arrange_all_floating_windows_as_masonry", None) if parent is not None else None
+        arrange_windows = getattr(parent, "arrange_floating_windows_as_masonry", None) if parent is not None else None
+        toggle_wall_controls = getattr(parent, "set_selection_masonry_wall_controls_enabled_for_window", None) if parent is not None else None
+        wall_controls_checked = False
+        wall_controls_action = None
+        if callable(toggle_wall_controls):
+            try:
+                wall_controls_checked = bool(parent.selection_masonry_wall_controls_active_for_window(self))
+            except Exception:
+                wall_controls_checked = False
+            if bool(getattr(self, '_selection_masonry_wall_window', False)) or wall_controls_checked:
+                wall_controls_action = menu.addAction("Masonry wall controls")
+                wall_controls_action.setCheckable(True)
+                wall_controls_action.setChecked(wall_controls_checked)
         if callable(arrange_windows):
-            arrange_action = menu.addAction("Arrange floating windows as masonry")
+            arrange_action = menu.addAction("Arrange as Masonry Wall")
         close_all_action = menu.addAction("Close all spawned viewers")
         selected = menu.exec(global_pos)
         if exit_compare_action is not None and selected is exit_compare_action:
@@ -1511,6 +1538,11 @@ class FloatingViewerWindow(QWidget):
         elif selected is arrange_action and callable(arrange_windows):
             try:
                 arrange_windows()
+            except Exception:
+                pass
+        elif selected is wall_controls_action and callable(toggle_wall_controls):
+            try:
+                toggle_wall_controls(self, bool(wall_controls_action.isChecked()))
             except Exception:
                 pass
         elif selected is close_all_action:
@@ -1535,11 +1567,7 @@ class FloatingViewerWindow(QWidget):
         min_w = max(10, self.minimumWidth())
         min_h = max(10, self.minimumHeight())
 
-        preserve_aspect = False
-        try:
-            preserve_aspect = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-        except Exception:
-            preserve_aspect = False
+        preserve_aspect = self._aspect_preserve_resize_active()
 
         if preserve_aspect and start.height() > 0:
             aspect_ratio = start.width() / start.height()

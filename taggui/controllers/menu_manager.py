@@ -651,7 +651,7 @@ class MenuManager:
         self.toggle_reaction_controls_action = QAction('Rating toolbar', parent=self.main_window)
         self.toggle_reaction_controls_action.setCheckable(True)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
-        self.arrange_floating_windows_masonry_action = QAction('Arrange Floating Windows as Masonry', parent=self.main_window)
+        self.arrange_floating_windows_masonry_action = QAction('Arrange as Masonry Wall', parent=self.main_window)
         self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action = QAction('Hold Existing Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action.setShortcut(QKeySequence('H'))
