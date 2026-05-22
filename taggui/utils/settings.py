@@ -82,7 +82,7 @@ DEFAULT_SETTINGS = {
     'thumbnail_show_star_rating_badge': True,
     'thumbnail_reaction_badge_position': 'Left',
     'thumbnail_star_rating_badge_position': 'Right',
-    'thumbnail_star_rating_badge_style': 'Gold Chip: ★3',
+    'thumbnail_star_rating_badge_style': 'Halo Tag: 3★',
 }
 
 
@@ -218,7 +218,7 @@ def normalize_thumbnail_star_badge_style(value) -> str:
         return THUMBNAIL_STAR_BADGE_STYLE_LABEL_TO_KEY[lowered]
     if lowered in THUMBNAIL_STAR_BADGE_STYLE_KEYS:
         return lowered
-    return 'gold_chip_star_left'
+    return 'halo_tag_star_right'
 
 
 def get_thumbnail_star_badge_style_spec(style_key: str | None = None) -> dict:
@@ -417,7 +417,7 @@ def get_thumbnail_star_badge_style_spec(style_key: str | None = None) -> dict:
             'halo_diameter': 17,
         },
     }
-    return specs.get(normalized, specs['gold_chip_star_left'])
+    return specs.get(normalized, specs['halo_tag_star_right'])
 
 
 def get_tag_separator() -> str:

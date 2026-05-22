@@ -91,7 +91,7 @@ class ThumbnailOverlayPreviewWidget(QWidget):
         style = normalize_thumbnail_star_badge_style(
             settings.value(
                 'thumbnail_star_rating_badge_style',
-                defaultValue='Gold Chip: ★3',
+                defaultValue='Halo Tag: 3★',
                 type=str,
             )
         )
@@ -296,7 +296,7 @@ class ThumbnailOverlayPreviewWidget(QWidget):
             style = normalize_thumbnail_star_badge_style(
                 settings.value(
                     'thumbnail_star_rating_badge_style',
-                    defaultValue='Gold Chip: ★3',
+                    defaultValue='Halo Tag: 3★',
                     type=str,
                 )
             )
@@ -667,7 +667,7 @@ class SettingsDialog(QDialog):
         thumbnail_layout.addWidget(QLabel('Star style'), 3, 0, Qt.AlignmentFlag.AlignRight)
         star_style_combo = SettingsComboBox(
             key='thumbnail_star_rating_badge_style',
-            default='Gold Chip: ★3',
+            default='Halo Tag: 3★',
         )
         star_style_combo.addItems([label for _key, label in THUMBNAIL_STAR_BADGE_STYLE_OPTIONS])
         star_style_combo.setMinimumWidth(220)

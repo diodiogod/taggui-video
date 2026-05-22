@@ -526,7 +526,7 @@ class ImageDelegate(QStyledItemDelegate):
         self._star_badge_style = normalize_thumbnail_star_badge_style(
             settings.value(
                 'thumbnail_star_rating_badge_style',
-                defaultValue='Gold Chip: ★3',
+                defaultValue='Halo Tag: 3★',
                 type=str,
             )
         )
@@ -1080,7 +1080,7 @@ class ImageDelegate(QStyledItemDelegate):
 
     def _star_badge_style_spec(self) -> dict:
         return get_thumbnail_star_badge_style_spec(
-            str(getattr(self, '_star_badge_style', 'gold_chip_star_left') or 'gold_chip_star_left')
+            str(getattr(self, '_star_badge_style', 'halo_tag_star_right') or 'halo_tag_star_right')
         )
 
     def _star_badge_label(self, image) -> str | None:
