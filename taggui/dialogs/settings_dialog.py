@@ -840,7 +840,19 @@ class SettingsDialog(QDialog):
         grid_layout.addWidget(image_list_double_click_combo, 5, 1,
                               Qt.AlignmentFlag.AlignLeft)
 
-        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=6)
+        grid_layout.addWidget(QLabel('Repair extensionless images on folder scan'), 6, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        repair_extensionless_images_check_box = SettingsBigCheckBox(
+            key='repair_extensionless_images')
+        repair_extensionless_images_check_box.setToolTip(
+            'Off by default. When enabled, folder scans inspect files with no extension. '
+            'If a JPEG, PNG, GIF, WebP, BMP, TIFF, or JPEG XL header is found, TagGUI '
+            'renames the file to add the detected extension before adding it to the image list.')
+        repair_extensionless_images_check_box.stateChanged.connect(self.show_restart_warning)
+        grid_layout.addWidget(repair_extensionless_images_check_box, 6, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+
+        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=7)
 
         layout.addLayout(grid_layout)
         layout.addStretch()

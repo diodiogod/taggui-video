@@ -50,6 +50,8 @@ UNDO_STACK_SIZE = 32
 _video_lock = threading.Lock()
 # Global lock for thumbnail cache writes (limits I/O contention during scroll).
 _thumbnail_save_lock = threading.Lock()
+_extensionless_repair_log_lock = threading.Lock()
+_extensionless_repair_log_counts: dict[str, int] = {}
 MARKING_CONFIDENCE_PATTERN = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
 
 # Custom event for background load completion
@@ -305,6 +307,210 @@ def _should_skip_internal_dir_name(name: str) -> bool:
     return str(name) in ImageIndexDB.INTERNAL_DIR_NAMES
 
 
+def _detect_extensionless_image_suffix(path: Path) -> str | None:
+    """Detect common image formats for files that have no suffix."""
+    if path.suffix:
+        return None
+
+    try:
+        with path.open('rb') as file:
+            header = file.read(32)
+    except OSError:
+        return None
+
+    if header.startswith(b'\xff\xd8\xff'):
+        return '.jpg'
+    if header.startswith(b'\x89PNG\r\n\x1a\n'):
+        return '.png'
+    if header.startswith((b'GIF87a', b'GIF89a')):
+        return '.gif'
+    if header.startswith(b'BM'):
+        return '.bmp'
+    if header.startswith((b'II*\x00', b'MM\x00*')):
+        return '.tif'
+    if len(header) >= 12 and header.startswith(b'RIFF') and header[8:12] == b'WEBP':
+        return '.webp'
+    if header.startswith(b'\xff\x0a') or (
+        len(header) >= 12 and header[4:12] == b'JXL \r\n\x87\n'
+    ):
+        return '.jxl'
+    return None
+
+
+def _extensionless_repair_cache_path(directory_path: Path) -> Path:
+    return ImageIndexDB.db_dir_path(directory_path) / 'extensionless_repair_cache.json'
+
+
+def _normalize_extensionless_cache_bucket(raw_bucket) -> dict[str, dict[str, float | int | str]]:
+    if not isinstance(raw_bucket, dict):
+        return {}
+    return {
+        str(rel_path): value
+        for rel_path, value in raw_bucket.items()
+        if isinstance(value, dict)
+    }
+
+
+def _load_extensionless_repair_cache(
+    directory_path: Path,
+) -> dict[str, dict[str, dict[str, float | int | str]]]:
+    cache_path = _extensionless_repair_cache_path(directory_path)
+    try:
+        data = json.loads(cache_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {'non_images': {}, 'rename_failed_images': {}}
+    if not isinstance(data, dict) or data.get('version') != 1:
+        return {'non_images': {}, 'rename_failed_images': {}}
+    return {
+        'non_images': _normalize_extensionless_cache_bucket(data.get('non_images')),
+        'rename_failed_images': _normalize_extensionless_cache_bucket(
+            data.get('rename_failed_images')
+        ),
+    }
+
+
+def _save_extensionless_repair_cache(
+    directory_path: Path,
+    repair_cache: dict[str, dict[str, dict[str, float | int | str]]],
+):
+    cache_path = _extensionless_repair_cache_path(directory_path)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + '.tmp')
+        tmp_path.write_text(
+            json.dumps(
+                {
+                    'version': 1,
+                    'non_images': repair_cache.get('non_images', {}),
+                    'rename_failed_images': repair_cache.get('rename_failed_images', {}),
+                },
+                separators=(',', ':'),
+            ),
+            encoding='utf-8',
+        )
+        tmp_path.replace(cache_path)
+    except OSError:
+        pass
+
+
+def _extensionless_cache_entry_matches(
+    entry: dict[str, float | int | str] | None,
+    stat_result,
+) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    try:
+        cached_size = int(entry.get('size', -1))
+        cached_mtime = float(entry.get('mtime', -1.0))
+        current_size = int(getattr(stat_result, 'st_size', -2))
+        current_mtime = float(getattr(stat_result, 'st_mtime', -2.0))
+    except (TypeError, ValueError):
+        return False
+    return cached_size == current_size and abs(cached_mtime - current_mtime) <= 0.001
+
+
+def _unique_detected_image_path(path: Path, suffix: str) -> Path:
+    candidate = path.with_name(f"{path.name}{suffix}")
+    if not candidate.exists():
+        return candidate
+
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.name}_{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _record_extensionless_image_repair(directory_path: Path, repaired_count: int = 1):
+    if repaired_count <= 0:
+        return
+    key = str(Path(directory_path).resolve())
+    with _extensionless_repair_log_lock:
+        _extensionless_repair_log_counts[key] = (
+            _extensionless_repair_log_counts.get(key, 0) + int(repaired_count)
+        )
+
+
+def _pop_extensionless_image_repair_count(directory_path: Path) -> int:
+    key = str(Path(directory_path).resolve())
+    with _extensionless_repair_log_lock:
+        return int(_extensionless_repair_log_counts.pop(key, 0) or 0)
+
+
+def _print_extensionless_image_repair_summary(directory_path: Path):
+    repaired_count = _pop_extensionless_image_repair_count(directory_path)
+    if repaired_count > 0:
+        print(f"[SCAN] Repaired {repaired_count:,} extensionless image file(s)")
+
+
+def repair_extensionless_image_path(
+    path: Path,
+    scan_root: Path | None = None,
+    rel_path: str | None = None,
+    stat_result=None,
+    repair_cache: dict[str, dict[str, dict[str, float | int | str]]] | None = None,
+) -> Path:
+    """Rename an extensionless image to its detected image suffix when possible."""
+    cache_key = _normalize_relative_path(rel_path) if rel_path else None
+    non_image_cache = repair_cache.get('non_images', {}) if repair_cache is not None else None
+    rename_failed_cache = (
+        repair_cache.get('rename_failed_images', {})
+        if repair_cache is not None
+        else None
+    )
+    if (
+        cache_key
+        and stat_result is not None
+        and (
+            (
+                non_image_cache is not None
+                and _extensionless_cache_entry_matches(non_image_cache.get(cache_key), stat_result)
+            )
+            or (
+                rename_failed_cache is not None
+                and _extensionless_cache_entry_matches(rename_failed_cache.get(cache_key), stat_result)
+            )
+        )
+    ):
+        return path
+
+    detected_suffix = _detect_extensionless_image_suffix(path)
+    if detected_suffix is None:
+        if cache_key and stat_result is not None and non_image_cache is not None:
+            try:
+                non_image_cache[cache_key] = {
+                    'size': int(getattr(stat_result, 'st_size')),
+                    'mtime': float(getattr(stat_result, 'st_mtime')),
+                }
+            except (TypeError, ValueError):
+                pass
+        return path
+
+    repaired_path = _unique_detected_image_path(path, detected_suffix)
+    try:
+        path.rename(repaired_path)
+        if cache_key:
+            if non_image_cache is not None:
+                non_image_cache.pop(cache_key, None)
+            if rename_failed_cache is not None:
+                rename_failed_cache.pop(cache_key, None)
+        _record_extensionless_image_repair(scan_root or path.parent)
+        return repaired_path
+    except OSError as e:
+        if cache_key and stat_result is not None and rename_failed_cache is not None:
+            try:
+                rename_failed_cache[cache_key] = {
+                    'size': int(getattr(stat_result, 'st_size')),
+                    'mtime': float(getattr(stat_result, 'st_mtime')),
+                    'suffix': detected_suffix,
+                }
+            except (TypeError, ValueError):
+                pass
+        print(f"[SCAN] Failed to repair extensionless image {path}: {e}")
+        return path
+
+
 def _path_is_within_subtree(rel_path: str, subtree_rel: str) -> bool:
     """Return True when rel_path belongs to subtree_rel (or subtree_rel is root)."""
     rel_path = _normalize_relative_path(rel_path)
@@ -317,6 +523,7 @@ def _path_is_within_subtree(rel_path: str, subtree_rel: str) -> bool:
 def scan_directory_snapshot(
     directory_path: Path,
     progress_callback=None,
+    repair_extensionless_images: bool = False,
 ) -> tuple[set[Path], tuple[int, float], dict[str, float]]:
     """
     Scan the full tree once and return:
@@ -332,6 +539,11 @@ def scan_directory_snapshot(
     file_count = 0
     max_mtime = 0.0
     stack = [(directory_path, "")]
+    extensionless_repair_cache = (
+        _load_extensionless_repair_cache(directory_path)
+        if repair_extensionless_images
+        else None
+    )
 
     print(f"[SCAN] Scanning directory: {directory_path}")
 
@@ -371,7 +583,16 @@ def scan_directory_snapshot(
                         continue
 
                     if stat_module.S_ISREG(mode) or entry.is_symlink():
-                        file_paths.add(Path(entry.path))
+                        file_path = Path(entry.path)
+                        if repair_extensionless_images and not file_path.suffix:
+                            file_path = repair_extensionless_image_path(
+                                file_path,
+                                scan_root=directory_path,
+                                rel_path=_relative_child_path(rel_dir, entry.name),
+                                stat_result=entry_stat,
+                                repair_cache=extensionless_repair_cache,
+                            )
+                        file_paths.add(file_path)
                         file_count += 1
                         if progress_callback and file_count % 20000 == 0:
                             try:
@@ -391,6 +612,12 @@ def scan_directory_snapshot(
         except Exception:
             pass
 
+    if repair_extensionless_images:
+        _save_extensionless_repair_cache(
+            directory_path,
+            extensionless_repair_cache or {'non_images': {}, 'rename_failed_images': {}},
+        )
+        _print_extensionless_image_repair_summary(directory_path)
     print(f"[SCAN] Scan complete: {file_count:,} total files found")
     return file_paths, (file_count, max_mtime), dir_mtimes
 
@@ -440,6 +667,7 @@ def scan_image_paths_in_subtrees(
     image_suffixes: set[str],
     progress_callback=None,
     cooperative_yield: bool = False,
+    repair_extensionless_images: bool = False,
 ) -> tuple[set[str], dict[str, float]]:
     """Scan image files and directory mtimes for the specified subtree roots."""
     import os
@@ -454,6 +682,11 @@ def scan_image_paths_in_subtrees(
     yield_interval_seconds = 0.004
     yield_sleep_seconds = 0.001
     last_yield_ts = time_module.monotonic()
+    extensionless_repair_cache = (
+        _load_extensionless_repair_cache(directory_path)
+        if repair_extensionless_images
+        else None
+    )
 
     if not subtree_roots:
         return image_rel_paths, dir_mtimes
@@ -501,11 +734,21 @@ def scan_image_paths_in_subtrees(
                     if not (stat_module.S_ISREG(mode) or entry.is_symlink()):
                         continue
 
-                    suffix = Path(entry.name).suffix.lower()
+                    file_path = Path(entry.path)
+                    if repair_extensionless_images and not file_path.suffix:
+                        file_path = repair_extensionless_image_path(
+                            file_path,
+                            scan_root=directory_path,
+                            rel_path=_relative_child_path(rel_dir, entry.name),
+                            stat_result=entry_stat,
+                            repair_cache=extensionless_repair_cache,
+                        )
+
+                    suffix = file_path.suffix.lower()
                     if suffix not in image_suffixes:
                         continue
 
-                    image_rel_paths.add(_relative_child_path(rel_dir, entry.name))
+                    image_rel_paths.add(_relative_child_path(rel_dir, file_path.name))
                     image_count += 1
 
                     if progress_callback and image_count % 20000 == 0:
@@ -527,6 +770,12 @@ def scan_image_paths_in_subtrees(
         except Exception:
             pass
 
+    if repair_extensionless_images:
+        _save_extensionless_repair_cache(
+            directory_path,
+            extensionless_repair_cache or {'non_images': {}, 'rename_failed_images': {}},
+        )
+        _print_extensionless_image_repair_summary(directory_path)
     print(f"[SCAN] Refresh complete: {image_count:,} image files found")
     return image_rel_paths, dir_mtimes
 
@@ -552,12 +801,14 @@ def _scan_image_paths_in_subtrees_worker(
     directory_path_str: str,
     subtree_roots: tuple[str, ...],
     image_suffixes: tuple[str, ...],
+    repair_extensionless_images: bool = False,
 ) -> tuple[set[str], dict[str, float]]:
     """Process-safe wrapper for additions-only subtree discovery."""
     return scan_image_paths_in_subtrees(
         Path(directory_path_str),
         list(subtree_roots),
         set(image_suffixes),
+        repair_extensionless_images=repair_extensionless_images,
         cooperative_yield=False,
     )
 
@@ -1276,6 +1527,7 @@ class ImageListModel(QAbstractListModel):
         directory_path: Path,
         changed_roots: list[str],
         image_suffixes: set[str],
+        repair_extensionless_images: bool = False,
     ) -> tuple[set[str], dict[str, float]]:
         """Discover media paths for changed subtrees, preferring a helper process."""
         if not self._scan_process_disabled:
@@ -1288,6 +1540,7 @@ class ImageListModel(QAbstractListModel):
                         str(directory_path),
                         tuple(changed_roots),
                         tuple(sorted(image_suffixes)),
+                        repair_extensionless_images,
                     )
                     return future.result()
                 except Exception as e:
@@ -1309,6 +1562,7 @@ class ImageListModel(QAbstractListModel):
             changed_roots,
             image_suffixes,
             cooperative_yield=True,
+            repair_extensionless_images=repair_extensionless_images,
         )
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
@@ -2705,11 +2959,17 @@ class ImageListModel(QAbstractListModel):
                 if not suffix.startswith('.'):
                     suffix = '.' + suffix
                 image_suffixes.add(suffix)
+            repair_extensionless_images = settings.value(
+                'repair_extensionless_images',
+                defaultValue=DEFAULT_SETTINGS['repair_extensionless_images'],
+                type=bool,
+            )
 
             refreshed_rel_paths, refreshed_dir_mtimes = self._scan_changed_subtrees(
                 directory_path,
                 changed_roots,
                 image_suffixes,
+                repair_extensionless_images=repair_extensionless_images,
             )
             result['scanned_image_count'] = len(refreshed_rel_paths)
 
@@ -4794,6 +5054,11 @@ class ImageListModel(QAbstractListModel):
                 progress_label = "Validating folder changes..."
 
             _emit_progress(progress_label, 0, progress_maximum, False)
+            repair_extensionless_images = settings.value(
+                'repair_extensionless_images',
+                defaultValue=DEFAULT_SETTINGS['repair_extensionless_images'],
+                type=bool,
+            )
 
             refreshed_rel_paths, refreshed_dir_mtimes = scan_image_paths_in_subtrees(
                 directory_path,
@@ -4805,6 +5070,7 @@ class ImageListModel(QAbstractListModel):
                     int(progress_maximum),
                     False,
                 ),
+                repair_extensionless_images=repair_extensionless_images,
             )
 
             merged_rel_paths = {
@@ -4930,6 +5196,11 @@ class ImageListModel(QAbstractListModel):
             if not suffix.startswith('.'):
                 suffix = '.' + suffix
             image_suffixes.append(suffix)
+        repair_extensionless_images = settings.value(
+            'repair_extensionless_images',
+            defaultValue=DEFAULT_SETTINGS['repair_extensionless_images'],
+            type=bool,
+        )
 
         def _ensure_scan_progress():
             nonlocal scan_progress
@@ -5045,6 +5316,7 @@ class ImageListModel(QAbstractListModel):
                             "Rescanning folder files...",
                             count=c,
                         ),
+                        repair_extensionless_images=repair_extensionless_images,
                     )
                 else:
                     print(f"[CACHE] Using {cached_count:,} cached file paths (skipping scan)")
@@ -5058,6 +5330,7 @@ class ImageListModel(QAbstractListModel):
                         "Scanning folder files...",
                         count=c,
                     ),
+                    repair_extensionless_images=repair_extensionless_images,
                 )
 
             # Persist signatures only when a real filesystem scan just ran.

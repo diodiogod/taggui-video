@@ -5,6 +5,7 @@ DEFAULT_SETTINGS = {
     'font_size': 16,
     # Common image formats that are supported in PySide6, as well as JPEG XL and video formats.
     'image_list_file_formats': 'bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp, mp4, avi, mov, mkv, webm',
+    'repair_extensionless_images': False,
     'image_list_image_width': 120,
     'tag_separator': ',',
     'insert_space_after_tag_separator': True,
