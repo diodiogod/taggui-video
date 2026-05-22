@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5] - 2026-05-22
+
+### Added
+
+- Arrange existing floating windows as a Masonry Wall
+- Control masonry spacing, alignment, and rearrange order
+- Toggle Masonry Wall controls live from the right-click menu
+- Keep selection-opened walls review-ready while rearranged walls start clean
+
+### Changed
+
+- Improve masonry wall workspace controls
+
+### Removed
+
+- Improve compare-drop feedback timing and floating resize behavior
 ## [1.3.4] - 2026-05-21
 
 ### Added
