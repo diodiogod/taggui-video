@@ -1,14 +1,15 @@
-from PySide6.QtCore import Qt, Slot, QUrl
+from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
-                               QApplication)
+                               QApplication, QGroupBox, QProgressDialog)
 
 from pathlib import Path
 import sys
 import shutil
 import subprocess
+import threading
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.video.playback_backend import (
     PLAYBACK_BACKEND_CHOICES,
@@ -28,6 +29,36 @@ from utils.grammar_checker import GrammarCheckMode
 from utils.image_index_db import ImageIndexDB
 from utils.review_marks import get_review_badge_specs, reset_review_badge_schema, save_review_badge_schema
 from utils.thumbnail_cache import get_thumbnail_cache
+
+
+class ExtensionlessRepairThread(QThread):
+    progress_changed = Signal(int, int)
+    result_ready = Signal(dict)
+    error_raised = Signal(str)
+
+    def __init__(self, directory_path: Path, parent=None):
+        super().__init__(parent)
+        self.directory_path = Path(directory_path)
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        try:
+            from models.image_list_model import repair_extensionless_images_in_directory
+
+            def progress_callback(file_count: int, extensionless_count: int) -> bool:
+                self.progress_changed.emit(int(file_count), int(extensionless_count))
+                return self._cancel_event.is_set()
+
+            result = repair_extensionless_images_in_directory(
+                self.directory_path,
+                progress_callback=progress_callback,
+            )
+            self.result_ready.emit(result)
+        except Exception as e:
+            self.error_raised.emit(str(e))
 
 
 class SettingsDialog(QDialog):
@@ -75,6 +106,18 @@ class SettingsDialog(QDialog):
         # instead of clipping the whole settings window off-screen.
         self._apply_initial_dialog_size()
         self.warning_label.hide()
+
+    def closeEvent(self, event):
+        repair_thread = getattr(self, '_extensionless_repair_thread', None)
+        if repair_thread is not None and repair_thread.isRunning():
+            QMessageBox.information(
+                self,
+                'Scan Still Running',
+                'Cancel the extensionless image scan before closing Settings.'
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _settings_screen(self):
         parent = self.parentWidget()
@@ -754,23 +797,27 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
 
-        grid_layout = QGridLayout()
+        workflow_group, workflow_grid = self._create_settings_group('Workflow')
+        display_group, display_grid = self._create_settings_group('Image List Display')
+        maintenance_group, maintenance_grid = self._create_settings_group('Folder Maintenance')
+        diagnostics_group, diagnostics_grid = self._create_settings_group('Diagnostics')
+        video_group, video_grid = self._create_settings_group('Video and GPU')
 
         # Trainer target resolution
-        grid_layout.addWidget(QLabel('Trainer target resolution (for exact bucket snap)'), 0, 0,
-                              Qt.AlignmentFlag.AlignRight)
+        workflow_grid.addWidget(QLabel('Trainer target resolution (for exact bucket snap)'), 0, 0,
+                                Qt.AlignmentFlag.AlignRight)
         trainer_target_resolution_spin_box = SettingsSpinBox(
             key='trainer_target_resolution',
             minimum=256, maximum=4096)
         trainer_target_resolution_spin_box.setToolTip(
             'Set your trainer\'s target resolution (e.g., 1024 for 1024x1024). '
             'Use Shift+Ctrl+drag to snap crops to exact buckets for this resolution.')
-        grid_layout.addWidget(trainer_target_resolution_spin_box, 0, 1,
-                              Qt.AlignmentFlag.AlignLeft)
+        workflow_grid.addWidget(trainer_target_resolution_spin_box, 0, 1,
+                                Qt.AlignmentFlag.AlignLeft)
 
         # Masonry/List auto-switch threshold
-        grid_layout.addWidget(QLabel('Keep masonry until (thumbnail px)'), 1, 0,
-                              Qt.AlignmentFlag.AlignRight)
+        display_grid.addWidget(QLabel('Keep masonry until (thumbnail px)'), 0, 0,
+                               Qt.AlignmentFlag.AlignRight)
         masonry_switch_threshold_spin_box = SettingsSpinBox(
             key='masonry_list_switch_threshold',
             minimum=64, maximum=1024, default=150)
@@ -779,23 +826,23 @@ class SettingsDialog(QDialog):
             'Higher value = masonry allowed for larger thumbnails.\n'
             'Set above 512 to effectively disable auto-switch.\n'
             'Applied live.')
-        grid_layout.addWidget(masonry_switch_threshold_spin_box, 1, 1,
-                              Qt.AlignmentFlag.AlignLeft)
+        display_grid.addWidget(masonry_switch_threshold_spin_box, 0, 1,
+                               Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Image list title strip height (px)'), 2, 0,
-                              Qt.AlignmentFlag.AlignRight)
+        display_grid.addWidget(QLabel('Image list title strip height (px)'), 1, 0,
+                               Qt.AlignmentFlag.AlignRight)
         title_strip_height_spin_box = SettingsSpinBox(
             key='image_list_title_strip_height',
             minimum=4, maximum=32, default=8)
         title_strip_height_spin_box.setToolTip(
             'Controls the compact image-list dock title strip height.\n'
             'Applied live.')
-        grid_layout.addWidget(title_strip_height_spin_box, 2, 1,
-                              Qt.AlignmentFlag.AlignLeft)
+        display_grid.addWidget(title_strip_height_spin_box, 1, 1,
+                               Qt.AlignmentFlag.AlignLeft)
 
         # Floating viewer detail zoom fallback
-        grid_layout.addWidget(QLabel('Floating double-click detail zoom (%)'), 3, 0,
-                              Qt.AlignmentFlag.AlignRight)
+        display_grid.addWidget(QLabel('Floating double-click detail zoom (%)'), 2, 0,
+                               Qt.AlignmentFlag.AlignRight)
         floating_detail_zoom_spin_box = SettingsSpinBox(
             key='floating_double_click_detail_zoom_percent',
             minimum=110, maximum=1600, default=400)
@@ -804,27 +851,11 @@ class SettingsDialog(QDialog):
             'double-click cannot apply width/height auto-fill and media is not pannable.\n'
             '100 = 1x (no change), 400 = 4x.\n'
             'Applied live (no restart).')
-        grid_layout.addWidget(floating_detail_zoom_spin_box, 3, 1,
-                              Qt.AlignmentFlag.AlignLeft)
+        display_grid.addWidget(floating_detail_zoom_spin_box, 2, 1,
+                               Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Diagnostic log mode'), 4, 0,
-                              Qt.AlignmentFlag.AlignRight)
-        diagnostic_log_mode_combo = SettingsComboBox(
-            key='diagnostic_log_mode',
-            default='essential')
-        diagnostic_log_mode_combo.addItems(['off', 'essential', 'verbose'])
-        diagnostic_log_mode_combo.setToolTip(
-            'Controls runtime diagnostic logging.\n\n'
-            'off: suppress debug/runtime diagnostics.\n'
-            'essential: keep important navigation/debug lines such as page jumps and selection saves.\n'
-            'verbose: emit the full masonry/pagination diagnostic stream.\n\n'
-            'Applied live (no restart).'
-        )
-        grid_layout.addWidget(diagnostic_log_mode_combo, 4, 1,
-                              Qt.AlignmentFlag.AlignLeft)
-
-        grid_layout.addWidget(QLabel('Image double-click action'), 5, 0,
-                              Qt.AlignmentFlag.AlignRight)
+        workflow_grid.addWidget(QLabel('Image double-click action'), 1, 0,
+                                Qt.AlignmentFlag.AlignRight)
         image_list_double_click_combo = SettingsComboBox(
             key='image_list_double_click_action',
             default='spawn viewer')
@@ -837,11 +868,11 @@ class SettingsDialog(QDialog):
             'Alt+double-click still opens Windows Explorer.\n'
             'Applied live (no restart).'
         )
-        grid_layout.addWidget(image_list_double_click_combo, 5, 1,
-                              Qt.AlignmentFlag.AlignLeft)
+        workflow_grid.addWidget(image_list_double_click_combo, 1, 1,
+                                Qt.AlignmentFlag.AlignLeft)
 
-        grid_layout.addWidget(QLabel('Repair extensionless images on folder scan'), 6, 0,
-                              Qt.AlignmentFlag.AlignRight)
+        maintenance_grid.addWidget(QLabel('Repair extensionless images on folder scan'), 0, 0,
+                                   Qt.AlignmentFlag.AlignRight)
         repair_extensionless_images_check_box = SettingsBigCheckBox(
             key='repair_extensionless_images')
         repair_extensionless_images_check_box.setToolTip(
@@ -849,16 +880,176 @@ class SettingsDialog(QDialog):
             'If a JPEG, PNG, GIF, WebP, BMP, TIFF, or JPEG XL header is found, TagGUI '
             'renames the file to add the detected extension before adding it to the image list.')
         repair_extensionless_images_check_box.stateChanged.connect(self.show_restart_warning)
-        grid_layout.addWidget(repair_extensionless_images_check_box, 6, 1,
-                              Qt.AlignmentFlag.AlignLeft)
+        maintenance_grid.addWidget(repair_extensionless_images_check_box, 0, 1,
+                                   Qt.AlignmentFlag.AlignLeft)
 
-        self._add_gpu_video_settings(grid_layout=grid_layout, start_row=7)
+        maintenance_grid.addWidget(QLabel('Current folder extensionless repair'), 1, 0,
+                                   Qt.AlignmentFlag.AlignRight)
+        repair_current_folder_btn = QPushButton('Scan Current Folder...')
+        repair_current_folder_btn.setToolTip(
+            'Manually scan the currently loaded folder for files with no extension. '
+            'Detected images are renamed and added to the image list without clearing caches.')
+        repair_current_folder_btn.clicked.connect(self.repair_current_folder_extensionless_images)
+        maintenance_grid.addWidget(repair_current_folder_btn, 1, 1,
+                                   Qt.AlignmentFlag.AlignLeft)
 
-        layout.addLayout(grid_layout)
+        diagnostics_grid.addWidget(QLabel('Diagnostic log mode'), 0, 0,
+                                   Qt.AlignmentFlag.AlignRight)
+        diagnostic_log_mode_combo = SettingsComboBox(
+            key='diagnostic_log_mode',
+            default='essential')
+        diagnostic_log_mode_combo.addItems(['off', 'essential', 'verbose'])
+        diagnostic_log_mode_combo.setToolTip(
+            'Controls runtime diagnostic logging.\n\n'
+            'off: suppress debug/runtime diagnostics.\n'
+            'essential: keep important navigation/debug lines such as page jumps and selection saves.\n'
+            'verbose: emit the full masonry/pagination diagnostic stream.\n\n'
+            'Applied live (no restart).'
+        )
+        diagnostics_grid.addWidget(diagnostic_log_mode_combo, 0, 1,
+                                   Qt.AlignmentFlag.AlignLeft)
+
+        self._add_gpu_video_settings(grid_layout=video_grid, start_row=0)
+
+        layout.addWidget(workflow_group)
+        layout.addWidget(display_group)
+        layout.addWidget(maintenance_group)
+        layout.addWidget(diagnostics_group)
+        layout.addWidget(video_group)
         layout.addStretch()
 
         scroll_area.setWidget(widget)
         return scroll_area
+
+    @staticmethod
+    def _create_settings_group(title: str) -> tuple[QGroupBox, QGridLayout]:
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+        grid.setColumnStretch(2, 1)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        return group, grid
+
+    @Slot()
+    def repair_current_folder_extensionless_images(self):
+        """Manually repair extensionless images in the currently loaded folder."""
+        existing_thread = getattr(self, '_extensionless_repair_thread', None)
+        if existing_thread is not None and existing_thread.isRunning():
+            QMessageBox.information(
+                self,
+                'Scan Already Running',
+                'The current folder extensionless image scan is already running.'
+            )
+            return
+
+        main_window = self.parent()
+        current_dir = None
+        if hasattr(main_window, 'directory_path') and main_window.directory_path:
+            current_dir = Path(main_window.directory_path)
+        elif settings.contains('directory_path'):
+            directory_path_str = settings.value('directory_path', type=str)
+            if directory_path_str:
+                current_dir = Path(directory_path_str)
+
+        if not current_dir or not current_dir.exists():
+            QMessageBox.warning(
+                self,
+                'No Directory Loaded',
+                'No directory is currently loaded. Please load a directory first.'
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            'Scan Current Folder',
+            f'This scans the current folder for files with no extension and renames '
+            f'detected images to their real image extension.\n\n'
+            f'{current_dir}\n\n'
+            f'Existing cache data is not cleared.\n\n'
+            f'Continue?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        progress = QProgressDialog(
+            'Scanning extensionless files...',
+            'Cancel',
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle('Repair Extensionless Images')
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+
+        repair_thread = ExtensionlessRepairThread(current_dir, self)
+        self._extensionless_repair_thread = repair_thread
+        self._extensionless_repair_progress = progress
+        progress.canceled.connect(repair_thread.cancel)
+
+        def update_progress(file_count: int, extensionless_count: int):
+            if progress.wasCanceled():
+                return
+            progress.setLabelText(
+                f'Scanning extensionless files...\n'
+                f'Files checked: {int(file_count):,}\n'
+                f'Extensionless files found: {int(extensionless_count):,}'
+            )
+
+        def cleanup_progress():
+            progress.close()
+            progress.deleteLater()
+            if getattr(self, '_extensionless_repair_thread', None) is repair_thread:
+                self._extensionless_repair_thread = None
+            if getattr(self, '_extensionless_repair_progress', None) is progress:
+                self._extensionless_repair_progress = None
+
+        def show_error(message: str):
+            cleanup_progress()
+            QMessageBox.critical(
+                self,
+                'Extensionless Image Scan Failed',
+                f'Failed to scan current folder:\n\n{message}'
+            )
+
+        def show_result(result: dict):
+            cleanup_progress()
+            repaired_paths = result.get('repaired_paths') or []
+            added_count = 0
+            if repaired_paths and hasattr(main_window, 'image_list_model'):
+                try:
+                    added_count = main_window.image_list_model.add_generated_media_batch(
+                        repaired_paths
+                    )
+                except Exception as e:
+                    print(f"[SCAN] Warning: couldn't add repaired images to current model: {e}")
+
+            title = (
+                'Extensionless Image Scan Cancelled'
+                if result.get('cancelled', False)
+                else 'Extensionless Image Scan Complete'
+            )
+            QMessageBox.information(
+                self,
+                title,
+                f'Files checked: {int(result.get("file_count", 0) or 0):,}\n'
+                f'Extensionless files found: {int(result.get("extensionless_count", 0) or 0):,}\n'
+                f'Repaired images: {int(result.get("repaired_count", 0) or 0):,}\n'
+                f'Added to image list: {int(added_count):,}\n'
+                f'Skipped from repair cache: {int(result.get("skipped_cached_count", 0) or 0):,}\n'
+                f'New rename failures: {int(result.get("rename_failed_count", 0) or 0):,}'
+            )
+
+        repair_thread.progress_changed.connect(update_progress)
+        repair_thread.result_ready.connect(show_result)
+        repair_thread.error_raised.connect(show_error)
+        repair_thread.finished.connect(repair_thread.deleteLater)
+        repair_thread.start()
 
     def _get_cache_size(self, directory: Path) -> str:
         """

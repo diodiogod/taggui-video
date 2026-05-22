@@ -780,6 +780,115 @@ def scan_image_paths_in_subtrees(
     return image_rel_paths, dir_mtimes
 
 
+def repair_extensionless_images_in_directory(
+    directory_path: Path,
+    progress_callback=None,
+) -> dict[str, Any]:
+    """Explicitly scan a directory tree for extensionless images and repair them."""
+    import os
+    import stat as stat_module
+
+    directory_path = Path(directory_path)
+    repair_cache = _load_extensionless_repair_cache(directory_path)
+    repaired_paths: list[Path] = []
+    extensionless_count = 0
+    file_count = 0
+    skipped_cached_count = 0
+    failed_before = set(repair_cache.get('rename_failed_images', {}).keys())
+    stack = [(directory_path, "")]
+    cancelled = False
+
+    while stack:
+        if cancelled:
+            break
+        current_path, rel_dir = stack.pop()
+        child_dirs: list[tuple[Path, str]] = []
+
+        try:
+            with os.scandir(current_path) as entries:
+                for entry in entries:
+                    if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+
+                    mode = getattr(entry_stat, "st_mode", 0)
+                    if stat_module.S_ISDIR(mode):
+                        child_dirs.append(
+                            (Path(entry.path), _relative_child_path(rel_dir, entry.name))
+                        )
+                        continue
+
+                    if not (stat_module.S_ISREG(mode) or entry.is_symlink()):
+                        continue
+
+                    file_count += 1
+                    if progress_callback and file_count % 2000 == 0:
+                        try:
+                            if progress_callback(file_count, extensionless_count):
+                                cancelled = True
+                                break
+                        except Exception:
+                            pass
+
+                    file_path = Path(entry.path)
+                    if file_path.suffix:
+                        continue
+
+                    extensionless_count += 1
+                    rel_path = _relative_child_path(rel_dir, entry.name)
+                    cache_key = _normalize_relative_path(rel_path)
+                    cached_non_image = _extensionless_cache_entry_matches(
+                        repair_cache.get('non_images', {}).get(cache_key),
+                        entry_stat,
+                    )
+                    cached_failed = _extensionless_cache_entry_matches(
+                        repair_cache.get('rename_failed_images', {}).get(cache_key),
+                        entry_stat,
+                    )
+                    if cached_non_image or cached_failed:
+                        skipped_cached_count += 1
+                        continue
+
+                    repaired_path = repair_extensionless_image_path(
+                        file_path,
+                        scan_root=directory_path,
+                        rel_path=rel_path,
+                        stat_result=entry_stat,
+                        repair_cache=repair_cache,
+                    )
+                    if repaired_path != file_path:
+                        repaired_paths.append(repaired_path)
+        except OSError:
+            continue
+
+        if cancelled:
+            break
+        stack.extend(reversed(child_dirs))
+
+    if progress_callback:
+        try:
+            progress_callback(file_count, extensionless_count)
+        except Exception:
+            pass
+
+    failed_after = set(repair_cache.get('rename_failed_images', {}).keys())
+    _save_extensionless_repair_cache(directory_path, repair_cache)
+    _print_extensionless_image_repair_summary(directory_path)
+
+    return {
+        'file_count': file_count,
+        'extensionless_count': extensionless_count,
+        'repaired_count': len(repaired_paths),
+        'repaired_paths': repaired_paths,
+        'skipped_cached_count': skipped_cached_count,
+        'rename_failed_count': len(failed_after - failed_before),
+        'cancelled': cancelled,
+    }
+
+
 def _set_low_priority_worker_process():
     """Best-effort low priority for a background helper process."""
     try:
