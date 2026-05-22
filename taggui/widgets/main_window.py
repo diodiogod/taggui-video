@@ -1415,6 +1415,12 @@ class MainWindow(QMainWindow):
             REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
             REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
             REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
+            'thumbnail_show_review_badges',
+            'thumbnail_show_reaction_badges',
+            'thumbnail_show_star_rating_badge',
+            'thumbnail_reaction_badge_position',
+            'thumbnail_star_rating_badge_position',
+            'thumbnail_star_rating_badge_style',
         ):
             self._refresh_review_badge_config()
             return
@@ -3128,6 +3134,8 @@ class MainWindow(QMainWindow):
         if list_view is not None:
             try:
                 delegate = getattr(list_view, 'delegate', None)
+                if delegate is not None and hasattr(delegate, 'refresh_thumbnail_badge_settings'):
+                    delegate.refresh_thumbnail_badge_settings()
                 if delegate is not None and hasattr(delegate, 'clear_labels'):
                     delegate.clear_labels()
             except Exception:
@@ -7775,6 +7783,7 @@ class MainWindow(QMainWindow):
             changed_images,
             sync_rating=True,
         )
+        self._force_immediate_review_badge_repaint()
         self._sync_rating_controls_from_context()
 
     @Slot(str)

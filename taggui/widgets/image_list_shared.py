@@ -32,7 +32,12 @@ from utils.review_marks import (
     get_review_badge_text_color,
     iter_review_flags,
 )
-from utils.settings import settings
+from utils.settings import (
+    settings,
+    get_thumbnail_star_badge_style_spec,
+    normalize_thumbnail_badge_side,
+    normalize_thumbnail_star_badge_style,
+)
 from utils.settings_widgets import SettingsComboBox
 from utils.utils import get_confirmation_dialog_reply, pluralize
 from utils.grid import Grid
@@ -483,6 +488,48 @@ class ImageDelegate(QStyledItemDelegate):
         self._reaction_badge_margin = 5
         self._reaction_badge_size = 18
         self._reaction_badge_gap = 4
+        self._star_badge_margin = 5
+        self._star_badge_height = 18
+        self._star_badge_vertical_gap = 4
+        self.refresh_thumbnail_badge_settings()
+
+    def refresh_thumbnail_badge_settings(self):
+        self._show_review_badges = settings.value(
+            'thumbnail_show_review_badges',
+            defaultValue=True,
+            type=bool,
+        )
+        self._show_reaction_badges = settings.value(
+            'thumbnail_show_reaction_badges',
+            defaultValue=True,
+            type=bool,
+        )
+        self._show_star_rating_badge = settings.value(
+            'thumbnail_show_star_rating_badge',
+            defaultValue=True,
+            type=bool,
+        )
+        self._reaction_badge_position = normalize_thumbnail_badge_side(
+            settings.value(
+                'thumbnail_reaction_badge_position',
+                defaultValue='Left',
+                type=str,
+            )
+        )
+        self._star_badge_position = normalize_thumbnail_badge_side(
+            settings.value(
+                'thumbnail_star_rating_badge_position',
+                defaultValue='Right',
+                type=str,
+            )
+        )
+        self._star_badge_style = normalize_thumbnail_star_badge_style(
+            settings.value(
+                'thumbnail_star_rating_badge_style',
+                defaultValue='Gold Chip: ★3',
+                type=str,
+            )
+        )
 
     def _event_pos(self, event):
         try:
@@ -639,6 +686,7 @@ class ImageDelegate(QStyledItemDelegate):
         self._draw_n4_plus_1_stamp(painter, option, index)
         self._draw_review_badges(painter, option, index)
         self._draw_reaction_badges(painter, option, index)
+        self._draw_star_rating_badge(painter, option, index)
 
         # Draw red border for images marked for deletion (thick, appears below blue border)
         try:
@@ -885,6 +933,8 @@ class ImageDelegate(QStyledItemDelegate):
         try:
             if not painter or not painter.isActive():
                 return
+            if not bool(getattr(self, '_show_review_badges', True)):
+                return
 
             image = index.data(Qt.ItemDataRole.UserRole)
             if not image:
@@ -1013,10 +1063,198 @@ class ImageDelegate(QStyledItemDelegate):
         )
         return path
 
+    def _star_rating_value_text(self, image) -> str | None:
+        try:
+            rating_value = float(getattr(image, 'rating', 0.0) or 0.0)
+        except Exception:
+            rating_value = 0.0
+        if rating_value <= 0.0:
+            return None
+        stars = max(0.0, min(5.0, rating_value * 5.0))
+        rounded_half = round(stars * 2.0) / 2.0
+        if rounded_half <= 0.0:
+            return None
+        if abs(rounded_half - round(rounded_half)) < 0.001:
+            return str(int(round(rounded_half)))
+        return f"{rounded_half:.1f}".rstrip('0').rstrip('.')
+
+    def _star_badge_style_spec(self) -> dict:
+        return get_thumbnail_star_badge_style_spec(
+            str(getattr(self, '_star_badge_style', 'gold_chip_star_left') or 'gold_chip_star_left')
+        )
+
+    def _star_badge_label(self, image) -> str | None:
+        value_text = self._star_rating_value_text(image)
+        if not value_text:
+            return None
+        style_spec = self._star_badge_style_spec()
+        if style_spec.get('label_order') == 'star_right':
+            return f"{value_text}★"
+        return f"★{value_text}"
+
+    def _bottom_badge_group_offsets(self, option, image) -> dict[str, int]:
+        offsets = {
+            'left': 0,
+            'right': 0,
+        }
+        if (
+            bool(getattr(self, '_show_reaction_badges', True))
+            and bool(getattr(image, 'love', False) or getattr(image, 'bomb', False))
+            and getattr(self, '_reaction_badge_position', 'left') == getattr(self, '_star_badge_position', 'right')
+            and bool(getattr(self, '_show_star_rating_badge', True))
+            and self._star_rating_value_text(image)
+        ):
+            offsets[str(getattr(self, '_star_badge_position', 'right'))] = (
+                self._star_badge_height + self._star_badge_vertical_gap
+            )
+        return offsets
+
+    def _star_badge_rect(self, option, image, label: str, font_metrics):
+        style_spec = self._star_badge_style_spec()
+        variant = str(style_spec.get('variant', 'pill') or 'pill')
+        value_text = self._star_rating_value_text(image) or label.replace('★', '').strip()
+        if variant == 'halo':
+            halo_diameter = max(16, min(self._star_badge_height + 2, int(style_spec.get('halo_diameter', 18))))
+            badge_width = int(font_metrics.horizontalAdvance(value_text)) + halo_diameter + int(style_spec.get('padding_x', 18))
+        elif variant == 'split':
+            accent_width = max(16, int(style_spec.get('accent_width', 20)))
+            badge_width = int(font_metrics.horizontalAdvance(value_text)) + accent_width + int(style_spec.get('padding_x', 16))
+        else:
+            badge_width = int(font_metrics.horizontalAdvance(label)) + int(style_spec.get('padding_x', 12))
+        badge_width = max(self._star_badge_height + 8, int(badge_width))
+        side = str(getattr(self, '_star_badge_position', 'right'))
+        y = (
+            option.rect.bottom()
+            - self._star_badge_margin
+            - self._star_badge_height
+            + 1
+            - self._bottom_badge_group_offsets(option, image).get(side, 0)
+        )
+        if side == 'left':
+            x = option.rect.left() + self._star_badge_margin
+        else:
+            x = option.rect.right() - self._star_badge_margin - badge_width + 1
+        return QRect(int(x), int(y), int(badge_width), int(self._star_badge_height))
+
+    def _draw_star_badge_pill(self, painter, badge_rect: QRect, label: str, style_spec: dict):
+        shadow_rect = badge_rect.translated(1, 1)
+        radius = float(style_spec.get('radius', 5.0))
+        painter.setPen(QPen(QColor(0, 0, 0, 55), 1.2))
+        painter.setBrush(QColor(style_spec.get('shadow', QColor(0, 0, 0, 60))))
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+        painter.setPen(QPen(QColor(style_spec.get('outline', QColor(255, 255, 255, 235))), 1.2))
+        painter.setBrush(QColor(style_spec.get('fill', QColor(255, 233, 166, 245))))
+        painter.drawRoundedRect(badge_rect, radius, radius)
+        painter.setPen(QColor(style_spec.get('text', QColor(122, 82, 0, 255))))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _draw_star_badge_glass(self, painter, badge_rect: QRect, label: str, style_spec: dict):
+        shadow_rect = badge_rect.translated(1, 1)
+        radius = float(style_spec.get('radius', 7.0))
+        painter.setPen(QPen(QColor(0, 0, 0, 35), 1.0))
+        painter.setBrush(QColor(style_spec.get('shadow', QColor(0, 0, 0, 38))))
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+        painter.setPen(QPen(QColor(style_spec.get('outline', QColor(255, 255, 255, 165))), 1.1))
+        painter.setBrush(QColor(style_spec.get('fill', QColor(255, 252, 243, 112))))
+        painter.drawRoundedRect(badge_rect, radius, radius)
+        highlight = QRect(
+            badge_rect.left() + 1,
+            badge_rect.top() + 1,
+            max(6, badge_rect.width() - 2),
+            max(4, int(badge_rect.height() * 0.45)),
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(style_spec.get('glass_highlight', QColor(255, 255, 255, 68))))
+        painter.drawRoundedRect(highlight, max(3.0, radius - 2.0), max(3.0, radius - 2.0))
+        painter.setPen(QColor(style_spec.get('text', QColor(255, 247, 230, 255))))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _draw_star_badge_split(self, painter, badge_rect: QRect, label: str, style_spec: dict):
+        shadow_rect = badge_rect.translated(1, 1)
+        radius = float(style_spec.get('radius', 7.0))
+        painter.setPen(QPen(QColor(0, 0, 0, 50), 1.1))
+        painter.setBrush(QColor(style_spec.get('shadow', QColor(0, 0, 0, 54))))
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+        painter.setPen(QPen(QColor(style_spec.get('outline', QColor(255, 255, 255, 220))), 1.1))
+        painter.setBrush(QColor(style_spec.get('fill', QColor(255, 244, 217, 228))))
+        painter.drawRoundedRect(badge_rect, radius, radius)
+
+        star_right = style_spec.get('label_order') == 'star_right'
+        accent_width = max(16, min(badge_rect.width() - 10, int(style_spec.get('accent_width', 20))))
+        if star_right:
+            accent_rect = QRect(badge_rect.right() - accent_width + 1, badge_rect.top(), accent_width, badge_rect.height())
+            value_rect = QRect(badge_rect.left(), badge_rect.top(), badge_rect.width() - accent_width + 1, badge_rect.height())
+        else:
+            accent_rect = QRect(badge_rect.left(), badge_rect.top(), accent_width, badge_rect.height())
+            value_rect = QRect(badge_rect.left() + accent_width - 1, badge_rect.top(), badge_rect.width() - accent_width + 1, badge_rect.height())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(style_spec.get('accent_fill', QColor(245, 185, 54, 246))))
+        painter.drawRoundedRect(accent_rect.adjusted(0, 0, 0, 0), radius, radius)
+        painter.setPen(QPen(QColor(style_spec.get('divider', QColor(172, 115, 0, 70))), 1.0))
+        divider_x = accent_rect.right() if not star_right else accent_rect.left()
+        painter.drawLine(divider_x, badge_rect.top() + 2, divider_x, badge_rect.bottom() - 2)
+        painter.setPen(QColor(style_spec.get('accent_text', QColor(255, 255, 255, 255))))
+        painter.drawText(accent_rect, Qt.AlignmentFlag.AlignCenter, '★')
+        painter.setPen(QColor(style_spec.get('text', QColor(92, 54, 0, 255))))
+        value_text = label.replace('★', '').strip()
+        painter.drawText(value_rect, Qt.AlignmentFlag.AlignCenter, value_text)
+
+    def _draw_star_badge_halo(self, painter, badge_rect: QRect, label: str, style_spec: dict):
+        shadow_rect = badge_rect.translated(1, 1)
+        radius = float(style_spec.get('radius', 7.0))
+        halo_diameter = max(16, min(badge_rect.height() + 2, int(style_spec.get('halo_diameter', 18))))
+        star_right = style_spec.get('label_order') == 'star_right'
+        value_text = label.replace('★', '').strip()
+        painter.setPen(QPen(QColor(0, 0, 0, 55), 1.1))
+        painter.setBrush(QColor(style_spec.get('shadow', QColor(0, 0, 0, 60))))
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+        painter.setPen(QPen(QColor(style_spec.get('outline', QColor(255, 214, 124, 170))), 1.1))
+        painter.setBrush(QColor(style_spec.get('fill', QColor(40, 34, 26, 176))))
+        painter.drawRoundedRect(badge_rect, radius, radius)
+        halo_y = badge_rect.center().y() - halo_diameter / 2.0
+        gap = 2
+        if star_right:
+            halo_x = badge_rect.right() - halo_diameter + 1
+            value_rect = QRect(
+                badge_rect.left() + 4,
+                badge_rect.top(),
+                max(10, badge_rect.width() - halo_diameter - gap - 5),
+                badge_rect.height(),
+            )
+        else:
+            halo_x = badge_rect.left()
+            value_rect = QRect(
+                badge_rect.left() + halo_diameter + gap - 2,
+                badge_rect.top(),
+                max(10, badge_rect.width() - halo_diameter - gap - 5),
+                badge_rect.height(),
+            )
+        halo_rect = QRect(
+            int(halo_x),
+            int(badge_rect.top() + max(0, (badge_rect.height() - halo_diameter) // 2)),
+            int(halo_diameter),
+            int(halo_diameter),
+        )
+        painter.setPen(QPen(QColor(255, 255, 255, 220), 1.0))
+        painter.setBrush(QColor(style_spec.get('halo_fill', QColor(255, 210, 94, 245))))
+        painter.drawEllipse(halo_rect)
+        painter.setPen(QColor(style_spec.get('halo_text', QColor(92, 42, 0, 255))))
+        painter.drawText(halo_rect, Qt.AlignmentFlag.AlignCenter, '★')
+        painter.setPen(QColor(style_spec.get('text', QColor(255, 240, 199, 255))))
+        if star_right:
+            text_rect = value_rect.adjusted(1, 0, -1, 0)
+            text_align = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        else:
+            text_rect = value_rect.adjusted(1, 0, -1, 0)
+            text_align = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+        painter.drawText(text_rect, text_align, value_text)
+
     def _draw_reaction_badges(self, painter, option, index):
         """Draw love/bomb reaction badges on the thumbnail's bottom-left corner."""
         try:
             if not painter or not painter.isActive():
+                return
+            if not bool(getattr(self, '_show_reaction_badges', True)):
                 return
 
             image = index.data(Qt.ItemDataRole.UserRole)
@@ -1054,8 +1292,13 @@ class ImageDelegate(QStyledItemDelegate):
             badge_size = self._reaction_badge_size
             gap = self._reaction_badge_gap
             radius = 5.0
-            x = option.rect.left() + self._reaction_badge_margin
+            side = str(getattr(self, '_reaction_badge_position', 'left'))
             y = option.rect.bottom() - self._reaction_badge_margin - badge_size + 1
+            if side == 'left':
+                x = option.rect.left() + self._reaction_badge_margin
+            else:
+                total_width = len(badges) * badge_size + max(0, len(badges) - 1) * gap
+                x = option.rect.right() - self._reaction_badge_margin - total_width + 1
 
             for kind, background_color, icon_color in badges:
                 badge_rect = QRect(x, y, badge_size, badge_size)
@@ -1079,6 +1322,47 @@ class ImageDelegate(QStyledItemDelegate):
                 painter.drawPath(self._reaction_icon_path(kind, badge_rect))
                 x += badge_size + gap
 
+            painter.restore()
+        except Exception:
+            pass
+
+    def _draw_star_rating_badge(self, painter, option, index):
+        """Draw a compact bottom-corner star badge such as ★3 or ★4.5."""
+        try:
+            if not painter or not painter.isActive():
+                return
+            if not bool(getattr(self, '_show_star_rating_badge', True)):
+                return
+
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if not image:
+                return
+
+            label = self._star_badge_label(image)
+            if not label:
+                return
+
+            if option.rect.width() < 34 or option.rect.height() < 30:
+                return
+
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            style_spec = self._star_badge_style_spec()
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSizeF(float(style_spec.get('font_size', 9.0)))
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            badge_rect = self._star_badge_rect(option, image, label, fm)
+            variant = str(style_spec.get('variant', 'pill') or 'pill')
+            if variant == 'glass':
+                self._draw_star_badge_glass(painter, badge_rect, label, style_spec)
+            elif variant == 'split':
+                self._draw_star_badge_split(painter, badge_rect, label, style_spec)
+            elif variant == 'halo':
+                self._draw_star_badge_halo(painter, badge_rect, label, style_spec)
+            else:
+                self._draw_star_badge_pill(painter, badge_rect, label, style_spec)
             painter.restore()
         except Exception:
             pass

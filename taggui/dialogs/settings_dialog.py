@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
@@ -10,7 +10,14 @@ import sys
 import shutil
 import subprocess
 import threading
-from utils.settings import DEFAULT_SETTINGS, settings
+from utils.settings import (
+    DEFAULT_SETTINGS,
+    THUMBNAIL_STAR_BADGE_STYLE_OPTIONS,
+    get_thumbnail_star_badge_style_spec,
+    normalize_thumbnail_badge_side,
+    normalize_thumbnail_star_badge_style,
+    settings,
+)
 from utils.video.playback_backend import (
     PLAYBACK_BACKEND_CHOICES,
     PLAYBACK_BACKEND_QT_HYBRID,
@@ -59,6 +66,270 @@ class ExtensionlessRepairThread(QThread):
             self.result_ready.emit(result)
         except Exception as e:
             self.error_raised.emit(str(e))
+
+
+class ThumbnailOverlayPreviewWidget(QWidget):
+    """Live preview of thumbnail overlay badge settings."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(240, 180)
+        settings.change.connect(self._on_setting_changed)
+
+    def sizeHint(self):
+        return super().sizeHint().expandedTo(self.minimumSize())
+
+    @Slot(str, object)
+    def _on_setting_changed(self, key: str, _value):
+        if key.startswith('thumbnail_'):
+            self.update()
+
+    def _star_value_text(self) -> str:
+        return '4.5'
+
+    def _star_label(self) -> str:
+        style = normalize_thumbnail_star_badge_style(
+            settings.value(
+                'thumbnail_star_rating_badge_style',
+                defaultValue='Gold Chip: ★3',
+                type=str,
+            )
+        )
+        value_text = self._star_value_text()
+        spec = get_thumbnail_star_badge_style_spec(style)
+        if spec.get('label_order') == 'star_right':
+            return f'{value_text}★'
+        return f'★{value_text}'
+
+    def _draw_chip(self, painter: QPainter, rect, *, fill: QColor, outline: QColor, text: str, text_color: QColor, radius: float):
+        shadow_rect = rect.translated(1, 1)
+        painter.setPen(QPen(QColor(0, 0, 0, 55), 1.2))
+        painter.setBrush(QColor(0, 0, 0, 60))
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+        painter.setPen(QPen(outline, 1.2))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(text_color)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _draw_star_badge(self, painter: QPainter, rect, label: str, spec: dict):
+        variant = str(spec.get('variant', 'pill') or 'pill')
+        radius = float(spec.get('radius', 5.0))
+        if variant == 'glass':
+            shadow_rect = rect.translated(1, 1)
+            painter.setPen(QPen(QColor(0, 0, 0, 35), 1.0))
+            painter.setBrush(QColor(spec.get('shadow', QColor(0, 0, 0, 38))))
+            painter.drawRoundedRect(shadow_rect, radius, radius)
+            painter.setPen(QPen(QColor(spec.get('outline', QColor(255, 255, 255, 165))), 1.1))
+            painter.setBrush(QColor(spec.get('fill', QColor(255, 252, 243, 112))))
+            painter.drawRoundedRect(rect, radius, radius)
+            highlight = rect.adjusted(1, 1, -1, -max(6, int(rect.height() * 0.55)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(spec.get('glass_highlight', QColor(255, 255, 255, 68))))
+            painter.drawRoundedRect(highlight, max(3.0, radius - 2.0), max(3.0, radius - 2.0))
+            painter.setPen(QColor(spec.get('text', QColor(255, 247, 230, 255))))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+            return
+
+        if variant == 'split':
+            shadow_rect = rect.translated(1, 1)
+            painter.setPen(QPen(QColor(0, 0, 0, 50), 1.1))
+            painter.setBrush(QColor(spec.get('shadow', QColor(0, 0, 0, 54))))
+            painter.drawRoundedRect(shadow_rect, radius, radius)
+            painter.setPen(QPen(QColor(spec.get('outline', QColor(255, 255, 255, 220))), 1.1))
+            painter.setBrush(QColor(spec.get('fill', QColor(255, 244, 217, 228))))
+            painter.drawRoundedRect(rect, radius, radius)
+            star_right = spec.get('label_order') == 'star_right'
+            accent_width = max(16, min(rect.width() - 10, int(spec.get('accent_width', 20))))
+            if star_right:
+                accent_rect = rect.__class__(rect.right() - accent_width + 1, rect.top(), accent_width, rect.height())
+                value_rect = rect.__class__(rect.left(), rect.top(), rect.width() - accent_width + 1, rect.height())
+            else:
+                accent_rect = rect.__class__(rect.left(), rect.top(), accent_width, rect.height())
+                value_rect = rect.__class__(rect.left() + accent_width - 1, rect.top(), rect.width() - accent_width + 1, rect.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(spec.get('accent_fill', QColor(245, 185, 54, 246))))
+            painter.drawRoundedRect(accent_rect, radius, radius)
+            painter.setPen(QPen(QColor(spec.get('divider', QColor(172, 115, 0, 70))), 1.0))
+            divider_x = accent_rect.right() if not star_right else accent_rect.left()
+            painter.drawLine(divider_x, rect.top() + 2, divider_x, rect.bottom() - 2)
+            painter.setPen(QColor(spec.get('accent_text', QColor(255, 255, 255, 255))))
+            painter.drawText(accent_rect, Qt.AlignmentFlag.AlignCenter, '★')
+            painter.setPen(QColor(spec.get('text', QColor(92, 54, 0, 255))))
+            painter.drawText(value_rect, Qt.AlignmentFlag.AlignCenter, label.replace('★', '').strip())
+            return
+
+        if variant == 'halo':
+            shadow_rect = rect.translated(1, 1)
+            painter.setPen(QPen(QColor(0, 0, 0, 55), 1.1))
+            painter.setBrush(QColor(spec.get('shadow', QColor(0, 0, 0, 60))))
+            painter.drawRoundedRect(shadow_rect, radius, radius)
+            painter.setPen(QPen(QColor(spec.get('outline', QColor(255, 214, 124, 170))), 1.1))
+            painter.setBrush(QColor(spec.get('fill', QColor(40, 34, 26, 176))))
+            painter.drawRoundedRect(rect, radius, radius)
+            halo_diameter = max(16, min(rect.height() + 2, int(spec.get('halo_diameter', 18))))
+            star_right = spec.get('label_order') == 'star_right'
+            halo_y = rect.center().y() - halo_diameter / 2.0
+            gap = 2
+            if star_right:
+                halo_x = rect.right() - halo_diameter + 1
+                value_rect = rect.__class__(
+                    rect.left() + 4,
+                    rect.top(),
+                    max(10, rect.width() - halo_diameter - gap - 5),
+                    rect.height(),
+                )
+            else:
+                halo_x = rect.left()
+                value_rect = rect.__class__(
+                    rect.left() + halo_diameter + gap - 2,
+                    rect.top(),
+                    max(10, rect.width() - halo_diameter - gap - 5),
+                    rect.height(),
+                )
+            halo_rect = rect.__class__(
+                int(halo_x),
+                int(rect.top() + max(0, (rect.height() - halo_diameter) // 2)),
+                int(halo_diameter),
+                int(halo_diameter),
+            )
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.0))
+            painter.setBrush(QColor(spec.get('halo_fill', QColor(255, 210, 94, 245))))
+            painter.drawEllipse(halo_rect)
+            painter.setPen(QColor(spec.get('halo_text', QColor(92, 42, 0, 255))))
+            painter.drawText(halo_rect, Qt.AlignmentFlag.AlignCenter, '★')
+            painter.setPen(QColor(spec.get('text', QColor(255, 240, 199, 255))))
+            if star_right:
+                text_rect = value_rect.adjusted(1, 0, -1, 0)
+                text_align = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            else:
+                text_rect = value_rect.adjusted(1, 0, -1, 0)
+                text_align = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+            painter.drawText(text_rect, text_align, label.replace('★', '').strip())
+            return
+
+        self._draw_chip(
+            painter,
+            rect,
+            fill=QColor(spec.get('fill', QColor(255, 233, 166, 245))),
+            outline=QColor(spec.get('outline', QColor(255, 255, 255, 235))),
+            text=label,
+            text_color=QColor(spec.get('text', QColor(122, 82, 0, 255))),
+            radius=radius,
+        )
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        outer_rect = self.rect().adjusted(6, 6, -6, -6)
+        painter.fillRect(self.rect(), self.palette().window())
+
+        thumb_rect = outer_rect.adjusted(18, 12, -18, -18)
+        gradient = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomRight())
+        gradient.setColorAt(0.0, QColor(91, 123, 154))
+        gradient.setColorAt(0.45, QColor(203, 161, 116))
+        gradient.setColorAt(1.0, QColor(58, 69, 91))
+        painter.setPen(QPen(QColor(255, 255, 255, 42), 1.0))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(thumb_rect, 12, 12)
+
+        if settings.value('thumbnail_show_review_badges', True, type=bool):
+            review_rect = thumb_rect.adjusted(0, 0, 0, 0)
+            badge_size = 18
+            x = review_rect.right() - 5 - badge_size + 1
+            y = review_rect.top() + 5
+            for label, color in (('1', QColor(255, 193, 7, 238)), ('R', QColor(33, 150, 243, 235))):
+                self._draw_chip(
+                    painter,
+                    review_rect.__class__(x, y, badge_size, badge_size),
+                    fill=color,
+                    outline=QColor(255, 255, 255, 235),
+                    text=label,
+                    text_color=QColor(255, 255, 255, 245),
+                    radius=5.0,
+                )
+                x -= badge_size + 4
+
+        reaction_side = normalize_thumbnail_badge_side(
+            settings.value('thumbnail_reaction_badge_position', defaultValue='Left', type=str)
+        )
+        star_side = normalize_thumbnail_badge_side(
+            settings.value('thumbnail_star_rating_badge_position', defaultValue='Right', type=str)
+        )
+        show_reactions = settings.value('thumbnail_show_reaction_badges', True, type=bool)
+        show_star = settings.value('thumbnail_show_star_rating_badge', True, type=bool)
+
+        bottom_offset = 0
+        if show_reactions and show_star and reaction_side == star_side:
+            bottom_offset = 22
+
+        if show_reactions:
+            badge_size = 18
+            gap = 4
+            labels = [('❤', QColor(255, 221, 226, 245), QColor(214, 54, 82, 255))]
+            labels.append(('B', QColor(36, 36, 40, 240), QColor(255, 181, 97, 255)))
+            total_width = len(labels) * badge_size + (len(labels) - 1) * gap
+            if reaction_side == 'left':
+                x = thumb_rect.left() + 5
+            else:
+                x = thumb_rect.right() - 5 - total_width + 1
+            y = thumb_rect.bottom() - 5 - badge_size + 1
+            text_font = painter.font()
+            text_font.setPointSizeF(8.5)
+            text_font.setBold(True)
+            painter.setFont(text_font)
+            for label, fill, text_color in labels:
+                self._draw_chip(
+                    painter,
+                    thumb_rect.__class__(x, y, badge_size, badge_size),
+                    fill=fill,
+                    outline=QColor(255, 255, 255, 235),
+                    text=label,
+                    text_color=text_color,
+                    radius=5.0,
+                )
+                x += badge_size + gap
+
+        if show_star:
+            style = normalize_thumbnail_star_badge_style(
+                settings.value(
+                    'thumbnail_star_rating_badge_style',
+                    defaultValue='Gold Chip: ★3',
+                    type=str,
+                )
+            )
+            spec = get_thumbnail_star_badge_style_spec(style)
+            label = self._star_label()
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSizeF(float(spec.get('font_size', 9.0)))
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            value_text = self._star_value_text()
+            variant = str(spec.get('variant', 'pill') or 'pill')
+            if variant == 'halo':
+                halo_diameter = max(16, min(20, int(spec.get('halo_diameter', 18))))
+                width = int(fm.horizontalAdvance(value_text)) + halo_diameter + int(spec.get('padding_x', 18))
+            elif variant == 'split':
+                accent_width = max(16, int(spec.get('accent_width', 20)))
+                width = int(fm.horizontalAdvance(value_text)) + accent_width + int(spec.get('padding_x', 16))
+            else:
+                width = int(fm.horizontalAdvance(label)) + int(spec.get('padding_x', 12))
+            width = max(26, int(width))
+            height = 18
+            y = thumb_rect.bottom() - 5 - height + 1 - bottom_offset
+            if star_side == 'left':
+                x = thumb_rect.left() + 5
+            else:
+                x = thumb_rect.right() - 5 - width + 1
+            self._draw_star_badge(
+                painter,
+                thumb_rect.__class__(x, y, width, height),
+                label,
+                spec,
+            )
 
 
 class SettingsDialog(QDialog):
@@ -332,6 +603,80 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
+
+        thumbnail_group = QGroupBox('Thumbnail Overlays')
+        thumbnail_group_layout = QHBoxLayout(thumbnail_group)
+        thumbnail_group_layout.setContentsMargins(12, 12, 12, 12)
+        thumbnail_group_layout.setSpacing(18)
+
+        controls_widget = QWidget()
+        thumbnail_layout = QGridLayout(controls_widget)
+        thumbnail_layout.setContentsMargins(0, 0, 0, 0)
+        thumbnail_layout.setHorizontalSpacing(12)
+        thumbnail_layout.setVerticalSpacing(10)
+
+        thumbnail_layout.addWidget(QLabel('Show review badges'), 0, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(
+            SettingsBigCheckBox(
+                key='thumbnail_show_review_badges',
+                text='Enabled',
+            ),
+            0,
+            1,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+        thumbnail_layout.addWidget(QLabel('Show reaction badges'), 1, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(
+            SettingsBigCheckBox(
+                key='thumbnail_show_reaction_badges',
+                text='Enabled',
+            ),
+            1,
+            1,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+        thumbnail_layout.addWidget(QLabel('Reaction side'), 1, 2, Qt.AlignmentFlag.AlignRight)
+        reaction_position_combo = SettingsComboBox(
+            key='thumbnail_reaction_badge_position',
+            default='Left',
+        )
+        reaction_position_combo.addItems(['Left', 'Right'])
+        thumbnail_layout.addWidget(reaction_position_combo, 1, 3, Qt.AlignmentFlag.AlignLeft)
+
+        thumbnail_layout.addWidget(QLabel('Show star badge'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(
+            SettingsBigCheckBox(
+                key='thumbnail_show_star_rating_badge',
+                text='Enabled',
+            ),
+            2,
+            1,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+        thumbnail_layout.addWidget(QLabel('Star side'), 2, 2, Qt.AlignmentFlag.AlignRight)
+        star_position_combo = SettingsComboBox(
+            key='thumbnail_star_rating_badge_position',
+            default='Right',
+        )
+        star_position_combo.addItems(['Left', 'Right'])
+        thumbnail_layout.addWidget(star_position_combo, 2, 3, Qt.AlignmentFlag.AlignLeft)
+
+        thumbnail_layout.addWidget(QLabel('Star style'), 3, 0, Qt.AlignmentFlag.AlignRight)
+        star_style_combo = SettingsComboBox(
+            key='thumbnail_star_rating_badge_style',
+            default='Gold Chip: ★3',
+        )
+        star_style_combo.addItems([label for _key, label in THUMBNAIL_STAR_BADGE_STYLE_OPTIONS])
+        star_style_combo.setMinimumWidth(220)
+        thumbnail_layout.addWidget(star_style_combo, 3, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+
+        thumbnail_group_layout.addWidget(controls_widget, 1)
+        thumbnail_preview = ThumbnailOverlayPreviewWidget(self)
+        thumbnail_group_layout.addWidget(thumbnail_preview, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(thumbnail_group)
 
         intro_label = QLabel(
             'Customize the review badge symbols, optional hover titles, colors, and shortcut list.\n'

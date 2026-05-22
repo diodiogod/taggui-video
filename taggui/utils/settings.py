@@ -1,4 +1,5 @@
 from PySide6.QtCore import QSettings, Signal
+from PySide6.QtGui import QColor
 
 # Defaults for settings that are accessed from multiple places.
 DEFAULT_SETTINGS = {
@@ -76,6 +77,12 @@ DEFAULT_SETTINGS = {
     'review_badge_text_color': '#FFFFFF',
     'review_badge_font_size': 9,
     'review_badge_corner_radius': 5,
+    'thumbnail_show_review_badges': True,
+    'thumbnail_show_reaction_badges': True,
+    'thumbnail_show_star_rating_badge': True,
+    'thumbnail_reaction_badge_position': 'Left',
+    'thumbnail_star_rating_badge_position': 'Right',
+    'thumbnail_star_rating_badge_style': 'Gold Chip: ★3',
 }
 
 
@@ -107,6 +114,39 @@ AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC = 'classic'
 AUTO_CAPTIONER_LAYOUT_MODES = (
     AUTO_CAPTIONER_LAYOUT_MODE_COMPACT,
     AUTO_CAPTIONER_LAYOUT_MODE_CLASSIC,
+)
+
+THUMBNAIL_BADGE_SIDE_LEFT = 'left'
+THUMBNAIL_BADGE_SIDE_RIGHT = 'right'
+THUMBNAIL_BADGE_SIDES = (
+    THUMBNAIL_BADGE_SIDE_LEFT,
+    THUMBNAIL_BADGE_SIDE_RIGHT,
+)
+
+THUMBNAIL_STAR_BADGE_STYLE_OPTIONS = (
+    ('gold_chip_star_left', 'Gold Chip: ★3'),
+    ('gold_chip_star_right', 'Gold Chip: 3★'),
+    ('review_tile_star_left', 'Review Tile: ★3'),
+    ('review_tile_star_right', 'Review Tile: 3★'),
+    ('dark_chip_star_left', 'Dark Chip: ★3'),
+    ('dark_chip_star_right', 'Dark Chip: 3★'),
+    ('outline_chip_star_left', 'Outline Chip: ★3'),
+    ('outline_chip_star_right', 'Outline Chip: 3★'),
+    ('sunset_chip_star_left', 'Sunset Chip: ★3'),
+    ('sunset_chip_star_right', 'Sunset Chip: 3★'),
+    ('glass_pill_star_left', 'Glass Pill: ★3'),
+    ('glass_pill_star_right', 'Glass Pill: 3★'),
+    ('split_capsule_star_left', 'Split Capsule: ★3'),
+    ('split_capsule_star_right', 'Split Capsule: 3★'),
+    ('halo_tag_star_left', 'Halo Tag: ★3'),
+    ('halo_tag_star_right', 'Halo Tag: 3★'),
+)
+THUMBNAIL_STAR_BADGE_STYLE_LABEL_TO_KEY = {
+    label.strip().casefold(): key
+    for key, label in THUMBNAIL_STAR_BADGE_STYLE_OPTIONS
+}
+THUMBNAIL_STAR_BADGE_STYLE_KEYS = tuple(
+    key for key, _label in THUMBNAIL_STAR_BADGE_STYLE_OPTIONS
 )
 
 
@@ -162,6 +202,222 @@ def persist_auto_captioner_layout_mode(mode: str):
         'auto_captioner_layout_mode',
         normalize_auto_captioner_layout_mode(mode),
     )
+
+
+def normalize_thumbnail_badge_side(value) -> str:
+    text = str(value or '').strip().lower()
+    if text in THUMBNAIL_BADGE_SIDES:
+        return text
+    return THUMBNAIL_BADGE_SIDE_LEFT
+
+
+def normalize_thumbnail_star_badge_style(value) -> str:
+    text = str(value or '').strip()
+    lowered = text.casefold()
+    if lowered in THUMBNAIL_STAR_BADGE_STYLE_LABEL_TO_KEY:
+        return THUMBNAIL_STAR_BADGE_STYLE_LABEL_TO_KEY[lowered]
+    if lowered in THUMBNAIL_STAR_BADGE_STYLE_KEYS:
+        return lowered
+    return 'gold_chip_star_left'
+
+
+def get_thumbnail_star_badge_style_spec(style_key: str | None = None) -> dict:
+    normalized = normalize_thumbnail_star_badge_style(style_key)
+    specs = {
+        'gold_chip_star_left': {
+            'variant': 'pill',
+            'label_order': 'star_left',
+            'fill': QColor(255, 233, 166, 245),
+            'text': QColor(122, 82, 0, 255),
+            'outline': QColor(255, 255, 255, 235),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 5.0,
+            'font_size': 9.0,
+            'padding_x': 12,
+        },
+        'gold_chip_star_right': {
+            'variant': 'pill',
+            'label_order': 'star_right',
+            'fill': QColor(255, 233, 166, 245),
+            'text': QColor(122, 82, 0, 255),
+            'outline': QColor(255, 255, 255, 235),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 5.0,
+            'font_size': 9.0,
+            'padding_x': 12,
+        },
+        'review_tile_star_left': {
+            'variant': 'pill',
+            'label_order': 'star_left',
+            'fill': QColor(255, 193, 7, 238),
+            'text': QColor(255, 255, 255, 248),
+            'outline': QColor(255, 255, 255, 235),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 4.0,
+            'font_size': 8.6,
+            'padding_x': 10,
+        },
+        'review_tile_star_right': {
+            'variant': 'pill',
+            'label_order': 'star_right',
+            'fill': QColor(255, 193, 7, 238),
+            'text': QColor(255, 255, 255, 248),
+            'outline': QColor(255, 255, 255, 235),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 4.0,
+            'font_size': 8.6,
+            'padding_x': 10,
+        },
+        'dark_chip_star_left': {
+            'variant': 'pill',
+            'label_order': 'star_left',
+            'fill': QColor(34, 36, 42, 240),
+            'text': QColor(255, 199, 99, 255),
+            'outline': QColor(255, 255, 255, 205),
+            'shadow': QColor(0, 0, 0, 68),
+            'radius': 5.0,
+            'font_size': 9.0,
+            'padding_x': 12,
+        },
+        'dark_chip_star_right': {
+            'variant': 'pill',
+            'label_order': 'star_right',
+            'fill': QColor(34, 36, 42, 240),
+            'text': QColor(255, 199, 99, 255),
+            'outline': QColor(255, 255, 255, 205),
+            'shadow': QColor(0, 0, 0, 68),
+            'radius': 5.0,
+            'font_size': 9.0,
+            'padding_x': 12,
+        },
+        'outline_chip_star_left': {
+            'variant': 'pill',
+            'label_order': 'star_left',
+            'fill': QColor(255, 249, 223, 108),
+            'text': QColor(176, 122, 0, 255),
+            'outline': QColor(240, 198, 73, 255),
+            'shadow': QColor(0, 0, 0, 52),
+            'radius': 5.0,
+            'font_size': 8.8,
+            'padding_x': 12,
+        },
+        'outline_chip_star_right': {
+            'variant': 'pill',
+            'label_order': 'star_right',
+            'fill': QColor(255, 249, 223, 108),
+            'text': QColor(176, 122, 0, 255),
+            'outline': QColor(240, 198, 73, 255),
+            'shadow': QColor(0, 0, 0, 52),
+            'radius': 5.0,
+            'font_size': 8.8,
+            'padding_x': 12,
+        },
+        'sunset_chip_star_left': {
+            'variant': 'pill',
+            'label_order': 'star_left',
+            'fill': QColor(255, 173, 96, 242),
+            'text': QColor(91, 33, 3, 255),
+            'outline': QColor(255, 244, 235, 230),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 6.0,
+            'font_size': 9.0,
+            'padding_x': 12,
+        },
+        'sunset_chip_star_right': {
+            'variant': 'pill',
+            'label_order': 'star_right',
+            'fill': QColor(255, 173, 96, 242),
+            'text': QColor(91, 33, 3, 255),
+            'outline': QColor(255, 244, 235, 230),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 6.0,
+            'font_size': 9.0,
+            'padding_x': 12,
+        },
+        'glass_pill_star_left': {
+            'variant': 'glass',
+            'label_order': 'star_left',
+            'fill': QColor(255, 252, 243, 112),
+            'text': QColor(255, 247, 230, 255),
+            'outline': QColor(255, 255, 255, 165),
+            'shadow': QColor(0, 0, 0, 38),
+            'radius': 4.5,
+            'font_size': 8.8,
+            'padding_x': 14,
+            'glass_highlight': QColor(255, 255, 255, 68),
+        },
+        'glass_pill_star_right': {
+            'variant': 'glass',
+            'label_order': 'star_right',
+            'fill': QColor(255, 252, 243, 112),
+            'text': QColor(255, 247, 230, 255),
+            'outline': QColor(255, 255, 255, 165),
+            'shadow': QColor(0, 0, 0, 38),
+            'radius': 4.5,
+            'font_size': 8.8,
+            'padding_x': 14,
+            'glass_highlight': QColor(255, 255, 255, 68),
+        },
+        'split_capsule_star_left': {
+            'variant': 'split',
+            'label_order': 'star_left',
+            'fill': QColor(255, 244, 217, 228),
+            'text': QColor(92, 54, 0, 255),
+            'outline': QColor(255, 255, 255, 220),
+            'shadow': QColor(0, 0, 0, 54),
+            'radius': 7.0,
+            'font_size': 8.8,
+            'padding_x': 16,
+            'accent_fill': QColor(245, 185, 54, 246),
+            'accent_text': QColor(255, 255, 255, 255),
+            'accent_width': 20,
+            'divider': QColor(172, 115, 0, 70),
+        },
+        'split_capsule_star_right': {
+            'variant': 'split',
+            'label_order': 'star_right',
+            'fill': QColor(255, 244, 217, 228),
+            'text': QColor(92, 54, 0, 255),
+            'outline': QColor(255, 255, 255, 220),
+            'shadow': QColor(0, 0, 0, 54),
+            'radius': 7.0,
+            'font_size': 8.8,
+            'padding_x': 16,
+            'accent_fill': QColor(245, 185, 54, 246),
+            'accent_text': QColor(255, 255, 255, 255),
+            'accent_width': 20,
+            'divider': QColor(172, 115, 0, 70),
+        },
+        'halo_tag_star_left': {
+            'variant': 'halo',
+            'label_order': 'star_left',
+            'fill': QColor(40, 34, 26, 176),
+            'text': QColor(255, 240, 199, 255),
+            'outline': QColor(255, 214, 124, 170),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 7.0,
+            'font_size': 8.8,
+            'padding_x': 12,
+            'halo_fill': QColor(255, 210, 94, 245),
+            'halo_text': QColor(92, 42, 0, 255),
+            'halo_diameter': 17,
+        },
+        'halo_tag_star_right': {
+            'variant': 'halo',
+            'label_order': 'star_right',
+            'fill': QColor(40, 34, 26, 176),
+            'text': QColor(255, 240, 199, 255),
+            'outline': QColor(255, 214, 124, 170),
+            'shadow': QColor(0, 0, 0, 60),
+            'radius': 7.0,
+            'font_size': 8.8,
+            'padding_x': 12,
+            'halo_fill': QColor(255, 210, 94, 245),
+            'halo_text': QColor(92, 42, 0, 255),
+            'halo_diameter': 17,
+        },
+    }
+    return specs.get(normalized, specs['gold_chip_star_left'])
 
 
 def get_tag_separator() -> str:
