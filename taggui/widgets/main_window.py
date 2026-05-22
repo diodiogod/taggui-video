@@ -525,6 +525,7 @@ class MainWindow(QMainWindow):
         self._secondary_browser: SecondaryBrowser | None = None
         self._context_switch_manager: ContextSwitchManager | None = None
         self._restore_target_global_rank = -1
+        self._directory_restore_selection_path = None
         self._preserve_restored_dock_layout_until = 0.0
         self._workspace_apply_pending_id = None
         self._workspace_apply_timer_active = False
@@ -6119,6 +6120,7 @@ class MainWindow(QMainWindow):
             folder_saved_path = self._get_folder_last_selected_path(self.directory_path)
             if folder_saved_path:
                 select_path = folder_saved_path
+        self._directory_restore_selection_path = str(select_path) if select_path else None
 
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
@@ -6350,23 +6352,54 @@ class MainWindow(QMainWindow):
         if load_session_id is None:
             load_session_id = self._load_session_id
 
+        view = self.image_list.list_view
+        source_model = self.image_list_model
         target_index = QModelIndex()
-        if select_path:
+        restore_global_rank = -1
+        if (
+            select_path
+            and getattr(source_model, '_paginated_mode', False)
+            and hasattr(source_model, 'resolve_restore_target')
+        ):
             try:
-                source_row = self.image_list_model.get_index_for_path(Path(select_path))
+                restore_target = source_model.resolve_restore_target(Path(select_path))
+            except Exception:
+                restore_target = None
+            if isinstance(restore_target, dict):
+                restore_global_rank = int(restore_target.get('target_global', -1))
+
+        is_paginated_strict = (
+            getattr(source_model, '_paginated_mode', False)
+            and hasattr(view, '_use_local_anchor_masonry')
+            and view._use_local_anchor_masonry(source_model)
+        )
+
+        should_defer_row_selection = bool(is_paginated_strict and restore_global_rank >= 0)
+
+        if select_path and not should_defer_row_selection:
+            try:
+                source_row = source_model.get_index_for_path(Path(select_path))
                 if source_row != -1:
-                    source_index = self.image_list_model.index(source_row, 0)
+                    source_index = source_model.index(source_row, 0)
                     target_index = self.proxy_image_list_model.mapFromSource(source_index)
             except Exception:
                 target_index = QModelIndex()
 
-        if not target_index.isValid():
+        if not target_index.isValid() and not (is_paginated_strict and restore_global_rank >= 0):
             if select_index >= self.proxy_image_list_model.rowCount():
                 select_index = self.proxy_image_list_model.rowCount() - 1
             target_index = self.proxy_image_list_model.index(select_index, 0)
 
         if target_index.isValid():
-            self.image_list.list_view.setCurrentIndex(target_index)
+            view.setCurrentIndex(target_index)
+
+        if is_paginated_strict and restore_global_rank >= 0:
+            self._restore_in_progress = True
+            self._restore_target_global_rank = int(restore_global_rank)
+            view._selected_global_index = int(restore_global_rank)
+        else:
+            self._restore_in_progress = False
+            self._restore_target_global_rank = -1
 
         scroll_done = [False]
 
@@ -6375,12 +6408,16 @@ class MainWindow(QMainWindow):
                 return
             if load_session_id != self._load_session_id:
                 try:
-                    self.image_list.list_view.layout_ready.disconnect(do_scroll)
+                    view.layout_ready.disconnect(do_scroll)
                 except Exception:
                     pass
                 return
             scroll_done[0] = True
-            current_model = self.image_list.list_view.model()
+            try:
+                view.layout_ready.disconnect(do_scroll)
+            except Exception:
+                pass
+            current_model = view.model()
             fresh_target_index = QModelIndex()
             if (current_model is not None
                     and target_index.isValid()
@@ -6388,17 +6425,26 @@ class MainWindow(QMainWindow):
                 row = target_index.row()
                 if 0 <= row < current_model.rowCount():
                     fresh_target_index = current_model.index(row, 0)
+            if is_paginated_strict and restore_global_rank >= 0:
+                if hasattr(view, 'start_targeted_relocation'):
+                    try:
+                        if view.start_targeted_relocation(
+                            int(restore_global_rank),
+                            reason='startup_restore',
+                            source_model=source_model,
+                        ):
+                            return
+                    except Exception:
+                        pass
+                self._restore_in_progress = False
+                self._restore_target_global_rank = -1
             if fresh_target_index.isValid():
-                self.image_list.list_view.scrollTo(
+                view.scrollTo(
                     fresh_target_index,
                     QAbstractItemView.ScrollHint.PositionAtCenter,
                 )
-            try:
-                self.image_list.list_view.layout_ready.disconnect(do_scroll)
-            except Exception:
-                pass
 
-        self.image_list.list_view.layout_ready.connect(do_scroll)
+        view.layout_ready.connect(do_scroll)
         QTimer.singleShot(2000, do_scroll)
 
     def _reload_directory_from_state(
@@ -6429,7 +6475,15 @@ class MainWindow(QMainWindow):
             return
 
         current_sort = str(self.image_list.sort_combo_box.currentText() or '')
-        if not current_sort:
+        restore_path = str(getattr(self, '_directory_restore_selection_path', '') or '').strip() or None
+        select_index_key = (
+            'image_index'
+            if self.proxy_image_list_model.filter is None
+            else 'filtered_image_index'
+        )
+        restore_index = settings.value(select_index_key, type=int) or 0
+
+        if not current_sort and not restore_path:
             return
 
         def _replay_current_sort():
@@ -6439,7 +6493,15 @@ class MainWindow(QMainWindow):
                 return
             sort_text = str(self.image_list.sort_combo_box.currentText() or current_sort)
             if sort_text:
-                self.image_list._on_sort_changed(sort_text, preserve_selection=True)
+                self.image_list._on_sort_changed(
+                    sort_text,
+                    preserve_selection=not bool(restore_path),
+                )
+            if restore_path:
+                self._restore_directory_selection(
+                    select_index=restore_index,
+                    select_path=restore_path,
+                )
 
         QTimer.singleShot(0, _replay_current_sort)
 
@@ -7421,6 +7483,7 @@ class MainWindow(QMainWindow):
                     # Access helper method for path (works for Normal & Paginated)
                     img = self.image_list_model.get_image_at_row(source_index.row())
                     if img:
+                        self._directory_restore_selection_path = str(img.path)
                         self._save_folder_last_selected_path(img.path)
                         settings.setValue('last_selected_path', str(img.path))
                         debug_page = getattr(view, '_current_page', None)
