@@ -103,3 +103,27 @@ def test_large_hover_move_after_ready_restarts_hold_progress():
     state = coordinator.update_target("target", blocked=False, hover_pos=(402, 102), now=4.1)
     assert state["state"] == "ready"
     assert state["progress"] == 1.0
+
+
+def test_target_hold_override_requires_longer_main_hover():
+    coordinator = CompareDragCoordinator(hold_seconds=1.0)
+    coordinator.begin_drag("source", now=0.0)
+    state = coordinator.update_target(
+        "main",
+        blocked=False,
+        hold_seconds_override=2.0,
+        now=1.0,
+    )
+    assert state["state"] == "hovering"
+    assert state["ready"] is False
+    assert 0.49 < state["progress"] < 0.51
+
+    state = coordinator.update_target(
+        "main",
+        blocked=False,
+        hold_seconds_override=2.0,
+        now=2.0,
+    )
+    assert state["state"] == "ready"
+    assert state["ready"] is True
+    assert state["progress"] == 1.0

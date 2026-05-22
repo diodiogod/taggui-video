@@ -590,6 +590,8 @@ class MainWindow(QMainWindow):
             hold_seconds=1.0,
             movement_reset_distance=96.0,
         )
+        self._compare_drag_main_feedback_delay_seconds = 1.0
+        self._compare_drag_non_main_feedback_delay_seconds = 0.6
         self._compare_drop_overlay = CompareDropFeedbackOverlay(self)
         self._compare_drag_source = None
         self._compare_drag_last_target = None
@@ -631,6 +633,7 @@ class MainWindow(QMainWindow):
         self._selection_wall_speed_overlay.step_forward_requested.connect(
             lambda: self._step_selection_wall_frames(1)
         )
+        self._selection_wall_controls_active = False
         self._perf_hud_timer = QTimer(self)
         self._perf_hud_timer.setInterval(120)
         self._perf_hud_timer.timeout.connect(self._update_perf_hud)
@@ -3665,6 +3668,141 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 continue
 
+    def _window_is_selection_masonry_wall_member(self, window: QWidget | None) -> bool:
+        """True when the given window belongs to the current masonry wall group."""
+        if window is None:
+            return False
+        try:
+            return bool(getattr(window, '_selection_masonry_wall_window', False))
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
+    def selection_masonry_wall_controls_active_for_window(self, window: QWidget | None) -> bool:
+        """Return the current live controls state for one masonry-wall window."""
+        return (
+            self._window_is_selection_masonry_wall_member(window)
+            and bool(getattr(self, '_selection_wall_controls_active', False))
+        )
+
+    def set_selection_masonry_wall_controls_enabled_for_window(
+        self,
+        window: QWidget | None,
+        enabled: bool,
+    ):
+        """Toggle live controls for the current masonry wall from a wall window menu."""
+        if not self._window_is_selection_masonry_wall_member(window):
+            return
+        self._set_selection_masonry_wall_controls_enabled(bool(enabled))
+
+    def _set_selection_masonry_wall_controls_enabled(self, enabled: bool):
+        """Enable or disable the live controls for the current masonry wall."""
+        self._selection_wall_controls_active = bool(enabled)
+
+        for window in self._iter_selection_wall_windows():
+            try:
+                if hasattr(window, 'set_review_slots_enabled'):
+                    window.set_review_slots_enabled(bool(enabled))
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        self._selection_wall_sync_token = int(getattr(self, '_selection_wall_sync_token', 0) or 0) + 1
+
+        if not enabled:
+            if getattr(self, '_sync_scope', '') == 'selection_wall':
+                self._stop_active_sync_coordinator()
+            self._refresh_selection_wall_speed_overlay()
+            return
+
+        loaded_video_viewers = []
+        for viewer in self._selection_wall_video_viewers():
+            try:
+                if getattr(viewer, '_is_video_loaded', False) and getattr(viewer.video_player, 'video_path', None):
+                    self._apply_selection_wall_shared_speed_to_viewer(viewer)
+                    loaded_video_viewers.append(viewer)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        if len(loaded_video_viewers) >= 2:
+            self._start_video_sync_for_viewers(loaded_video_viewers, scope='selection_wall')
+        elif len(loaded_video_viewers) == 1:
+            try:
+                loaded_video_viewers[0].video_player.play()
+            except Exception:
+                pass
+
+        self._refresh_selection_wall_speed_overlay()
+
+    def _clear_selection_masonry_wall_state(self, *, stop_sync: bool = True):
+        """Remove masonry-wall flags and overlays from all current floating windows."""
+        if stop_sync and getattr(self, '_sync_scope', '') == 'selection_wall':
+            self._stop_active_sync_coordinator()
+
+        self._selection_wall_controls_active = False
+        self._selection_wall_sync_token = int(getattr(self, '_selection_wall_sync_token', 0) or 0) + 1
+
+        for window in list(getattr(self, '_floating_viewers', [])):
+            try:
+                window._selection_masonry_wall_window = False
+                window._selection_masonry_wall_has_video = False
+                viewer = getattr(window, 'viewer', None)
+                if viewer is not None:
+                    viewer._selection_masonry_wall_viewer = False
+                    viewer._selection_masonry_wall_has_video = False
+                if hasattr(window, 'set_review_slots_enabled'):
+                    window.set_review_slots_enabled(False)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        for window in list(getattr(self, '_comparison_windows', [])):
+            try:
+                window._selection_masonry_wall_window = False
+                window._selection_masonry_wall_has_video = False
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        self._refresh_selection_wall_speed_overlay()
+
+    def _mark_floating_window_as_selection_masonry_wall(
+        self,
+        window: FloatingViewerWindow | None,
+        *,
+        has_video: bool | None = None,
+        enable_review_slots: bool = True,
+    ):
+        """Mark one floating viewer window as part of the active masonry wall."""
+        if window is None:
+            return
+        try:
+            viewer = getattr(window, 'viewer', None)
+            if viewer is None:
+                return
+            if has_video is None:
+                image = self._current_viewer_image(viewer)
+                has_video = bool(
+                    getattr(image, 'is_video', False)
+                    or bool(getattr(viewer, '_is_video_loaded', False))
+                )
+            window._selection_masonry_wall_window = True
+            window._selection_masonry_wall_has_video = bool(has_video)
+            viewer._selection_masonry_wall_viewer = True
+            viewer._selection_masonry_wall_has_video = bool(has_video)
+            if hasattr(window, 'set_review_slots_enabled'):
+                window.set_review_slots_enabled(bool(enable_review_slots))
+        except RuntimeError:
+            return
+        except Exception:
+            return
+
     def _selection_wall_video_viewers(self) -> list[ImageViewer]:
         """Collect live selection-wall viewers that correspond to video items."""
         viewers = []
@@ -3704,6 +3842,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_selection_wall_speed_overlay(self):
         """Show shared speed overlay only while a masonry wall has at least one video."""
+        if not bool(getattr(self, '_selection_wall_controls_active', False)):
+            self._selection_wall_shared_speed = 1.0
+            self._selection_wall_speed_overlay.hide()
+            return
+
         video_viewers = self._selection_wall_video_viewers()
         if not video_viewers:
             self._selection_wall_shared_speed = 1.0
@@ -4312,17 +4455,36 @@ class MainWindow(QMainWindow):
         else:
             pair_kind = self._compare_pair_kind(source_index, target_index)
             blocked = pair_kind is None
+        is_main_target = str(target.get("kind") or "") == "main"
+        target_delay_seconds = (
+            max(0.0, float(getattr(self, "_compare_drag_main_feedback_delay_seconds", 1.0) or 1.0))
+            if is_main_target
+            else max(0.0, float(getattr(self, "_compare_drag_non_main_feedback_delay_seconds", 0.6) or 0.6))
+        )
+        base_hold_seconds = float(getattr(self._compare_drag_coordinator, "hold_seconds", 1.0) or 1.0)
+        effective_hold_override = base_hold_seconds + target_delay_seconds
         state = self._compare_drag_coordinator.update_target(
             target.get("key"),
             blocked=blocked,
+            hold_seconds_override=effective_hold_override,
             hover_pos=global_pos,
         )
         self._compare_drag_last_target = target
         if state.get("state") == "none":
             self._compare_drop_overlay.hide_feedback()
             return
+
         state_name = state.get("state", "none")
-        progress = state.get("progress", 0.0)
+        progress = float(state.get("progress", 0.0) or 0.0)
+        if effective_hold_override > 0.0:
+            delay_ratio = max(0.0, min(1.0, target_delay_seconds / effective_hold_override))
+            if progress <= delay_ratio:
+                self._compare_drop_overlay.hide_feedback()
+                return
+            if delay_ratio < 1.0:
+                progress = max(0.0, min(1.0, (progress - delay_ratio) / (1.0 - delay_ratio)))
+            else:
+                progress = 1.0
         rect = target.get("global_rect")
         if isinstance(rect, QRect) and rect.isValid():
             occlusion_rects = self._compare_feedback_occlusion_rects(
@@ -5218,19 +5380,88 @@ class MainWindow(QMainWindow):
                 continue
         return self._resolve_selection_masonry_wall_screen(QCursor.pos())
 
-    @Slot()
-    def arrange_all_floating_windows_as_masonry(self):
+    def _floating_viewer_wall_gap_px(self) -> int:
+        """Return the configured gap for floating-window masonry layouts."""
+        try:
+            gap = int(
+                settings.value(
+                    'floating_viewer_wall_gap_px',
+                    DEFAULT_SETTINGS.get('floating_viewer_wall_gap_px', 6),
+                    type=int,
+                )
+            )
+        except Exception:
+            gap = int(DEFAULT_SETTINGS.get('floating_viewer_wall_gap_px', 6) or 6)
+        return max(0, min(64, gap))
+
+    def _floating_viewer_wall_horizontal_alignment(self) -> str:
+        """Return the configured horizontal alignment for floating masonry walls."""
+        try:
+            value = str(
+                settings.value(
+                    'floating_viewer_wall_alignment',
+                    DEFAULT_SETTINGS.get('floating_viewer_wall_alignment', 'Top center'),
+                    type=str,
+                )
+                or ''
+            ).strip().lower().replace(' ', '_')
+        except Exception:
+            value = str(DEFAULT_SETTINGS.get('floating_viewer_wall_alignment', 'Top center') or 'Top center').strip().lower().replace(' ', '_')
+        mapping = {
+            'top_left': 'left',
+            'left': 'left',
+            'top_right': 'right',
+            'right': 'right',
+            'top_center': 'center',
+            'center': 'center',
+        }
+        return mapping.get(value, 'center')
+
+    def _window_screen_order_sort_key(self, window: QWidget) -> tuple[int, int, int, int]:
+        """Sort windows by current on-screen order from top-left to bottom-right."""
+        rect = self._window_arrangement_rect(window)
+        return (
+            int(rect.top()),
+            int(rect.left()),
+            int(rect.height()),
+            int(rect.width()),
+        )
+
+    def _floating_viewer_rearrange_preserve_screen_order(self) -> bool:
+        """Return whether floating-window rearrange should preserve screen order."""
+        try:
+            return bool(
+                settings.value(
+                    'floating_viewer_rearrange_preserve_screen_order',
+                    DEFAULT_SETTINGS.get('floating_viewer_rearrange_preserve_screen_order', True),
+                    type=bool,
+                )
+            )
+        except Exception:
+            return bool(DEFAULT_SETTINGS.get('floating_viewer_rearrange_preserve_screen_order', True))
+
+    def arrange_floating_windows_as_masonry(
+        self,
+        *,
+        preserve_screen_order: bool | None = None,
+    ):
         """Repack all open floating media windows into one masonry layout."""
         windows = self._iter_rearrangeable_floating_media_windows()
         if not windows:
             return []
+
+        if preserve_screen_order is None:
+            preserve_screen_order = self._floating_viewer_rearrange_preserve_screen_order()
+        if preserve_screen_order:
+            windows = sorted(windows, key=self._window_screen_order_sort_key)
 
         screen = self._resolve_floating_media_arrangement_screen(windows)
         available_geometry = (
             screen.availableGeometry()
             if screen is not None else QRect(80, 80, max(640, self.width()), max(480, self.height()))
         )
-        layout_rect = available_geometry.adjusted(16, 16, -16, -16)
+        outer_margin = self._floating_viewer_wall_gap_px()
+        layout_rect = available_geometry.adjusted(outer_margin, outer_margin, -outer_margin, -outer_margin)
         if not layout_rect.isValid():
             layout_rect = QRect(80, 80, max(640, self.width()), max(480, self.height()))
 
@@ -5238,9 +5469,10 @@ class MainWindow(QMainWindow):
         rects = calculate_floating_viewer_wall_layout(
             [self._window_arrangement_aspect_ratio(window) for window in windows],
             layout_rect,
-            spacing=6,
+            spacing=self._floating_viewer_wall_gap_px(),
             min_item_width=min_item_width,
             min_item_height=120,
+            horizontal_alignment=self._floating_viewer_wall_horizontal_alignment(),
         )
         if not rects:
             return []
@@ -5294,6 +5526,31 @@ class MainWindow(QMainWindow):
                         viewer_state,
                         allow_fit_restore=allow_fit_restore,
                     )
+            self._clear_selection_masonry_wall_state(stop_sync=True)
+            for entry in arranged_entries:
+                window = entry["window"]
+                if isinstance(window, FloatingViewerWindow):
+                    self._mark_floating_window_as_selection_masonry_wall(
+                        window,
+                        enable_review_slots=False,
+                    )
+                elif isinstance(window, MediaComparisonWidget):
+                    try:
+                        active_viewers = window._active_viewers()
+                    except Exception:
+                        active_viewers = []
+                    try:
+                        window._selection_masonry_wall_window = True
+                        window._selection_masonry_wall_has_video = any(
+                            bool(getattr(self._current_viewer_image(viewer), 'is_video', False))
+                            or bool(getattr(viewer, '_is_video_loaded', False))
+                            for viewer in active_viewers
+                            if viewer is not None
+                        )
+                    except Exception:
+                        pass
+            self._set_selection_masonry_wall_controls_enabled(False)
+            self._refresh_selection_wall_speed_overlay()
             try:
                 if active_window is not None:
                     active_window.raise_()
@@ -5312,6 +5569,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, _restore_after_arrange)
         return windows
 
+    @Slot()
+    def arrange_all_floating_windows_as_masonry(self):
+        """Default floating-window masonry rearrange command."""
+        return self.arrange_floating_windows_as_masonry(preserve_screen_order=None)
+
     def _bootstrap_selection_wall_video_sync(
         self,
         viewer_infos: list[dict],
@@ -5321,6 +5583,8 @@ class MainWindow(QMainWindow):
     ):
         """Start sync/playback once the spawned wall videos finish loading."""
         if token != int(getattr(self, '_selection_wall_sync_token', 0) or 0):
+            return
+        if not bool(getattr(self, '_selection_wall_controls_active', False)):
             return
 
         live_infos = []
@@ -5432,6 +5696,7 @@ class MainWindow(QMainWindow):
             )
             return [single_window] if single_window is not None else []
 
+        self._clear_selection_masonry_wall_state(stop_sync=True)
         self._pause_main_viewer_for_selection_wall()
 
         screen = self._resolve_selection_masonry_wall_screen(anchor_global_pos)
@@ -5439,7 +5704,8 @@ class MainWindow(QMainWindow):
             screen.availableGeometry()
             if screen is not None else QRect(80, 80, max(640, self.width()), max(480, self.height()))
         )
-        layout_rect = available_geometry.adjusted(16, 16, -16, -16)
+        outer_margin = self._floating_viewer_wall_gap_px()
+        layout_rect = available_geometry.adjusted(outer_margin, outer_margin, -outer_margin, -outer_margin)
         if not layout_rect.isValid():
             layout_rect = QRect(80, 80, max(640, self.width()), max(480, self.height()))
 
@@ -5447,9 +5713,10 @@ class MainWindow(QMainWindow):
         rects = calculate_floating_viewer_wall_layout(
             [self._get_image_aspect_ratio_for_index(index) or 1.0 for index in proxy_indices],
             layout_rect,
-            spacing=6,
+            spacing=self._floating_viewer_wall_gap_px(),
             min_item_width=min_item_width,
             min_item_height=120,
+            horizontal_alignment=self._floating_viewer_wall_horizontal_alignment(),
         )
 
         spawned_infos = []
@@ -5473,15 +5740,11 @@ class MainWindow(QMainWindow):
             )
             if window is None:
                 continue
-            try:
-                window._selection_masonry_wall_window = True
-                window.viewer._selection_masonry_wall_viewer = True
-                window._selection_masonry_wall_has_video = bool(getattr(image, 'is_video', False))
-                window.viewer._selection_masonry_wall_has_video = bool(getattr(image, 'is_video', False))
-                if hasattr(window, 'set_review_slots_enabled'):
-                    window.set_review_slots_enabled(True)
-            except Exception:
-                pass
+            self._mark_floating_window_as_selection_masonry_wall(
+                window,
+                has_video=bool(getattr(image, 'is_video', False)),
+                enable_review_slots=True,
+            )
 
             info = {
                 'window': window,
@@ -5506,6 +5769,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        self._selection_wall_controls_active = True
         self._selection_wall_sync_token = int(getattr(self, '_selection_wall_sync_token', 0) or 0) + 1
         self._refresh_selection_wall_speed_overlay()
         if any(bool(info.get('is_video', False)) for info in spawned_infos):

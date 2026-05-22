@@ -49,6 +49,7 @@ class CompareDragCoordinator:
         self._target_blocked = False
         self._target_since = 0.0
         self._target_anchor_pos: tuple[float, float] | None = None
+        self._target_hold_seconds = self.hold_seconds
 
     @staticmethod
     def _normalize_hover_pos(hover_pos) -> tuple[float, float] | None:
@@ -78,6 +79,7 @@ class CompareDragCoordinator:
         self._target_blocked = False
         self._target_since = 0.0
         self._target_anchor_pos = None
+        self._target_hold_seconds = self.hold_seconds
 
     @property
     def active(self) -> bool:
@@ -88,13 +90,14 @@ class CompareDragCoordinator:
         return self._source_key
 
     def _state_snapshot(self, *, now: float, state: str) -> dict:
+        effective_hold_seconds = max(0.1, float(getattr(self, "_target_hold_seconds", self.hold_seconds)))
         if not self._target_key:
             elapsed = 0.0
             progress = 0.0
             ready = False
         else:
             elapsed = max(0.0, now - self._target_since)
-            progress = min(1.0, elapsed / self.hold_seconds)
+            progress = min(1.0, elapsed / effective_hold_seconds)
             ready = (not self._target_blocked) and progress >= 1.0
 
         return {
@@ -111,6 +114,7 @@ class CompareDragCoordinator:
         target_key: str | None,
         *,
         blocked: bool = False,
+        hold_seconds_override: float | None = None,
         hover_pos=None,
         now: float | None = None,
     ) -> dict:
@@ -131,21 +135,32 @@ class CompareDragCoordinator:
             self._target_blocked = False
             self._target_since = now
             self._target_anchor_pos = None
+            self._target_hold_seconds = self.hold_seconds
             return self._state_snapshot(now=now, state="none")
 
         target_key = str(target_key)
         blocked = bool(blocked)
+        target_hold_seconds = self.hold_seconds
+        if hold_seconds_override is not None:
+            try:
+                target_hold_seconds = max(0.1, float(hold_seconds_override))
+            except Exception:
+                target_hold_seconds = self.hold_seconds
         if target_key != self._target_key or blocked != self._target_blocked:
             self._target_key = target_key
             self._target_blocked = blocked
             self._target_since = now
             self._target_anchor_pos = None
+            self._target_hold_seconds = target_hold_seconds
+        elif abs(target_hold_seconds - float(getattr(self, "_target_hold_seconds", self.hold_seconds))) > 1e-9:
+            # Keep progress continuous when only the threshold policy changes.
+            self._target_hold_seconds = target_hold_seconds
         elif (
             normalized_hover_pos is not None
             and self.movement_reset_distance > 0.0
         ):
             elapsed = max(0.0, now - self._target_since)
-            ready_for_reset = (not self._target_blocked) and elapsed >= self.hold_seconds
+            ready_for_reset = (not self._target_blocked) and elapsed >= self._target_hold_seconds
             if ready_for_reset:
                 if self._target_anchor_pos is None:
                     # Arm movement resets only after the hold has already completed,
@@ -170,7 +185,8 @@ class CompareDragCoordinator:
             return {"handled": False, "target_key": None, "state": "none"}
 
         elapsed = max(0.0, now - self._target_since)
-        handled = bool(self._target_key) and (not self._target_blocked) and elapsed >= self.hold_seconds
+        effective_hold_seconds = max(0.1, float(getattr(self, "_target_hold_seconds", self.hold_seconds)))
+        handled = bool(self._target_key) and (not self._target_blocked) and elapsed >= effective_hold_seconds
         target_key = self._target_key
         state = "ready" if handled else ("blocked" if self._target_blocked else "hovering")
         self.cancel_drag()
