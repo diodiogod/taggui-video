@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.7] - 2026-05-22
+
+### Added
+
+- Show love and bomb badges directly on thumbnails
+- Loved and bombed media now display compact badges on their thumbnails
+- Reaction badges appear immediately after toggling without needing to click another item
+- Thumbnail reaction feedback now stays in sync in both list and masonry browsing
 ## [1.3.6] - 2026-05-22
 
 ### Added
