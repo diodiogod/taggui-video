@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.8] - 2026-05-22
+
+### Added
+
+- Add configurable star badge styles for thumbnails
+- Thumbnail star ratings now support multiple visual styles and live placement controls
+- Settings now include an inline preview so badge changes can be compared without closing the dialog
+
+### Changed
+
+- Halo and glass star badges were refined to look tighter and align better on real thumbnails
 ## [1.3.7] - 2026-05-22
 
 ### Added
