@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-05-21
+
+### Added
+
+- Add an advanced option to repair extensionless image files during folder scans
+- Detect common image formats such as JPEG, PNG, GIF, WebP, BMP, TIFF, and JPEG XL
+- Avoid repeated work for unchanged extensionless non-images or files that could not be renamed
+- Show a concise total of repaired files instead of logging each rename
+
+### Changed
+
+- Improve large-folder repair and diagnostics
+
+### Fixed
+
+- Improve drag crash diagnostics for troubleshooting
 ## [1.3.2] - 2026-04-25
 
 ### Added
