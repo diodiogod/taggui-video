@@ -8,7 +8,8 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QItemSelection, QItemSelectionModel,
                             QItemSelectionRange, QModelIndex, QSize, QUrl, Qt, QMimeData,
                             Signal, Slot, QPersistentModelIndex, QProcess, QTimer, QRect, QEvent, QPoint)
-from PySide6.QtGui import QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag, QPolygon, QCursor, QIcon
+from PySide6.QtGui import (QDesktopServices, QColor, QPen, QPixmap, QPainter, QDrag,
+                           QPolygon, QCursor, QIcon, QPainterPath)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QListWidget, QListWidgetItem,
@@ -479,6 +480,9 @@ class ImageDelegate(QStyledItemDelegate):
         self._review_badge_margin = 5
         self._review_badge_size = 18
         self._review_badge_gap = 4
+        self._reaction_badge_margin = 5
+        self._reaction_badge_size = 18
+        self._reaction_badge_gap = 4
 
     def _event_pos(self, event):
         try:
@@ -634,6 +638,7 @@ class ImageDelegate(QStyledItemDelegate):
         # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)
         self._draw_review_badges(painter, option, index)
+        self._draw_reaction_badges(painter, option, index)
 
         # Draw red border for images marked for deletion (thick, appears below blue border)
         try:
@@ -944,6 +949,135 @@ class ImageDelegate(QStyledItemDelegate):
                 painter.setPen(text_color)
                 painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
                 x -= badge_size + gap
+
+            painter.restore()
+        except Exception:
+            pass
+
+    def _reaction_icon_path(self, kind: str, rect: QRect) -> QPainterPath:
+        icon_rect = rect.adjusted(3, 3, -3, -3)
+        left = float(icon_rect.left())
+        top = float(icon_rect.top())
+        right = float(icon_rect.right())
+        bottom = float(icon_rect.bottom())
+        width = float(icon_rect.width())
+        height = float(icon_rect.height())
+
+        if str(kind or "").strip().lower() == 'love':
+            path = QPainterPath()
+            path.moveTo(left + 0.5 * width, bottom - 0.12 * height)
+            path.cubicTo(
+                left + 0.12 * width, top + 0.62 * height,
+                left + 0.04 * width, top + 0.24 * height,
+                left + 0.28 * width, top + 0.16 * height,
+            )
+            path.cubicTo(
+                left + 0.42 * width, top + 0.10 * height,
+                left + 0.50 * width, top + 0.20 * height,
+                left + 0.50 * width, top + 0.28 * height,
+            )
+            path.cubicTo(
+                left + 0.50 * width, top + 0.20 * height,
+                left + 0.58 * width, top + 0.10 * height,
+                left + 0.72 * width, top + 0.16 * height,
+            )
+            path.cubicTo(
+                left + 0.96 * width, top + 0.24 * height,
+                left + 0.88 * width, top + 0.62 * height,
+                left + 0.50 * width, bottom - 0.12 * height,
+            )
+            path.closeSubpath()
+            return path
+
+        path = QPainterPath()
+        center_x = left + 0.5 * width
+        center_y = top + 0.5 * height
+        radius = min(width, height) * 0.27
+        path.addEllipse(QRect(int(center_x - radius), int(center_y - radius), int(radius * 2), int(radius * 2)))
+        fuse_start_x = center_x + radius * 0.45
+        fuse_start_y = center_y - radius * 0.85
+        fuse_mid_x = right - width * 0.18
+        fuse_mid_y = top + height * 0.20
+        fuse_end_x = right - width * 0.10
+        fuse_end_y = top + height * 0.08
+        path.moveTo(fuse_start_x, fuse_start_y)
+        path.cubicTo(fuse_mid_x, fuse_mid_y, fuse_mid_x, fuse_mid_y, fuse_end_x, fuse_end_y)
+        spark_radius = radius * 0.16
+        path.addEllipse(
+            QRect(
+                int(center_x + radius * 0.22 - spark_radius),
+                int(center_y - radius * 0.12 - spark_radius),
+                max(1, int(spark_radius * 2)),
+                max(1, int(spark_radius * 2)),
+            )
+        )
+        return path
+
+    def _draw_reaction_badges(self, painter, option, index):
+        """Draw love/bomb reaction badges on the thumbnail's bottom-left corner."""
+        try:
+            if not painter or not painter.isActive():
+                return
+
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if not image:
+                return
+
+            badges: list[tuple[str, QColor, QColor]] = []
+            if bool(getattr(image, 'love', False)):
+                badges.append((
+                    'love',
+                    QColor(255, 221, 226, 245),
+                    QColor(214, 54, 82, 255),
+                ))
+            if bool(getattr(image, 'bomb', False)):
+                badges.append((
+                    'bomb',
+                    QColor(36, 36, 40, 240),
+                    QColor(255, 181, 97, 255),
+                ))
+
+            if not badges:
+                return
+
+            if option.rect.width() < 30 or option.rect.height() < 30:
+                return
+
+            if not hasattr(self, '_reaction_badge_outline_pen'):
+                self._reaction_badge_outline_pen = QPen(QColor(255, 255, 255, 235), 1.2)
+                self._reaction_badge_shadow_pen = QPen(QColor(0, 0, 0, 55), 1.2)
+                self._reaction_badge_shadow_brush = QColor(0, 0, 0, 60)
+
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            badge_size = self._reaction_badge_size
+            gap = self._reaction_badge_gap
+            radius = 5.0
+            x = option.rect.left() + self._reaction_badge_margin
+            y = option.rect.bottom() - self._reaction_badge_margin - badge_size + 1
+
+            for kind, background_color, icon_color in badges:
+                badge_rect = QRect(x, y, badge_size, badge_size)
+                shadow_rect = badge_rect.translated(1, 1)
+                painter.setPen(self._reaction_badge_shadow_pen)
+                painter.setBrush(self._reaction_badge_shadow_brush)
+                painter.drawRoundedRect(shadow_rect, radius, radius)
+                painter.setPen(self._reaction_badge_outline_pen)
+                painter.setBrush(background_color)
+                painter.drawRoundedRect(badge_rect, radius, radius)
+                painter.setPen(
+                    QPen(
+                        icon_color,
+                        1.3,
+                        Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap,
+                        Qt.PenJoinStyle.RoundJoin,
+                    )
+                )
+                painter.setBrush(icon_color)
+                painter.drawPath(self._reaction_icon_path(kind, badge_rect))
+                x += badge_size + gap
 
             painter.restore()
         except Exception:

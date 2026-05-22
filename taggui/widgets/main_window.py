@@ -7874,6 +7874,7 @@ class MainWindow(QMainWindow):
             changed_images,
             sync_reactions=True,
         )
+        self._force_immediate_review_badge_repaint()
         self._sync_rating_controls_from_context()
 
     def set_review_rank(self, rank: int, interactive: bool = False):
