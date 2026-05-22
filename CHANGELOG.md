@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.6] - 2026-05-22
+
+### Added
+
+- Compare feedback now starts more reliably for main and floating viewers
+- Open floating windows can be arranged in masonry layouts
+- Reloading after new media appears now keeps focus on the previously selected image or video instead of drifting or jumping to index zero
+
+### Changed
+
+- Improve masonry browsing stability and refresh restore behavior
+- Better masonry wall layout control handling during active browsing
 ## [1.3.5] - 2026-05-22
 
 ### Added
