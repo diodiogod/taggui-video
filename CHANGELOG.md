@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] - 2026-05-21
+
+### Added
+
+- Add a manual current-folder scan for already-loaded folders
+- Keep Settings responsive while large folders are scanned
+- Show progress, cancellation, repaired totals, skipped cached files, and rename failures
+- Organize Advanced settings into clearer sections
+- Add repaired images to the current image list without clearing folder caches
+
+### Changed
+
+- Improve extensionless image repair workflow
 ## [1.3.3] - 2026-05-21
 
 ### Added
