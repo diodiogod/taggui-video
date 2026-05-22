@@ -5037,6 +5037,281 @@ class MainWindow(QMainWindow):
                 screen = QApplication.primaryScreen()
         return screen
 
+    def _iter_rearrangeable_floating_media_windows(self) -> list[QWidget]:
+        """Return alive floating media windows eligible for masonry rearrange."""
+        live_floating: list[QWidget] = []
+        for window in list(getattr(self, "_floating_viewers", [])):
+            try:
+                if window is None:
+                    continue
+                window.geometry()
+                live_floating.append(window)
+            except RuntimeError:
+                continue
+        self._floating_viewers = live_floating
+
+        live_comparisons: list[QWidget] = []
+        for window in list(getattr(self, "_comparison_windows", [])):
+            try:
+                if window is None or bool(getattr(window, "_closed", False)):
+                    continue
+                window.geometry()
+                live_comparisons.append(window)
+            except RuntimeError:
+                continue
+        self._comparison_windows = live_comparisons
+        return live_floating + live_comparisons
+
+    def _window_arrangement_rect(self, window: QWidget) -> QRect:
+        """Return the most useful pre-arrange geometry for a floating window."""
+        rect = QRect()
+        try:
+            if hasattr(window, "isMinimized") and window.isMinimized():
+                normal_rect = window.normalGeometry() if hasattr(window, "normalGeometry") else QRect()
+                if isinstance(normal_rect, QRect) and normal_rect.isValid():
+                    rect = QRect(normal_rect)
+        except Exception:
+            rect = QRect()
+        if not rect.isValid():
+            try:
+                rect = QRect(window.geometry())
+            except Exception:
+                rect = QRect()
+        if not rect.isValid():
+            try:
+                rect = QRect(0, 0, max(1, int(window.width())), max(1, int(window.height())))
+            except Exception:
+                rect = QRect(0, 0, 640, 480)
+        return rect
+
+    def _window_arrangement_aspect_ratio(self, window: QWidget) -> float:
+        """Use the current window shape as the masonry aspect-ratio hint."""
+        rect = self._window_arrangement_rect(window)
+        width = max(1, int(rect.width()))
+        height = max(1, int(rect.height()))
+        return float(width) / float(height)
+
+    def _snapshot_viewer_arrangement_state(self, viewer: ImageViewer) -> dict | None:
+        """Capture zoom/pan state so a geometry rearrange can restore the current view."""
+        try:
+            view = getattr(viewer, "view", None)
+            scene = getattr(viewer, "scene", None)
+            if view is None or scene is None:
+                return None
+            viewport = view.viewport()
+            viewport_rect = viewport.rect() if viewport is not None else QRect()
+            scene_rect = scene.sceneRect()
+            try:
+                current_scale = abs(float(view.transform().m11()))
+            except Exception:
+                current_scale = 1.0
+            if current_scale <= 0.0:
+                current_scale = 1.0
+            focus_scene_pos = scene_rect.center()
+            try:
+                if viewport_rect.isValid():
+                    focus_scene_pos = view.mapToScene(viewport_rect.center())
+            except Exception:
+                focus_scene_pos = scene_rect.center()
+            return {
+                "zoom_to_fit": bool(getattr(viewer, "is_zoom_to_fit", True)),
+                "scale": float(current_scale),
+                "viewport_width": max(1, int(viewport_rect.width())),
+                "viewport_height": max(1, int(viewport_rect.height())),
+                "focus_scene_pos": QPointF(focus_scene_pos),
+            }
+        except RuntimeError:
+            return None
+        except Exception:
+            return None
+
+    def _restore_viewer_arrangement_state(
+        self,
+        viewer: ImageViewer,
+        state: dict | None,
+        *,
+        allow_fit_restore: bool,
+    ):
+        """Restore a viewer after a masonry rearrange using the new viewport size."""
+        if not state:
+            return
+        try:
+            zoom_to_fit = bool(state.get("zoom_to_fit", True))
+            if zoom_to_fit:
+                if allow_fit_restore and hasattr(viewer, "zoom_fit"):
+                    viewer.zoom_fit()
+                return
+
+            view = getattr(viewer, "view", None)
+            if view is None:
+                return
+            viewport = view.viewport()
+            viewport_rect = viewport.rect() if viewport is not None else QRect()
+            new_w = max(1, int(viewport_rect.width()))
+            new_h = max(1, int(viewport_rect.height()))
+            old_w = max(1, int(state.get("viewport_width", new_w)))
+            old_h = max(1, int(state.get("viewport_height", new_h)))
+            scale_ratio = min(float(new_w) / float(old_w), float(new_h) / float(old_h))
+            if scale_ratio <= 0.0:
+                scale_ratio = 1.0
+
+            target_scale = float(state.get("scale", 1.0) or 1.0) * scale_ratio
+            target_scale = max(1e-6, min(64.0, target_scale))
+            apply_zoom = getattr(viewer, "_apply_uniform_zoom_scale", None)
+            if callable(apply_zoom):
+                apply_zoom(
+                    target_scale,
+                    zoom_to_fit_state=False,
+                    focus_scene_pos=state.get("focus_scene_pos"),
+                    anchor_view_pos=viewport_rect.center(),
+                )
+        except RuntimeError:
+            return
+        except Exception:
+            return
+
+    def _snapshot_window_arrangement_state(self, window: QWidget) -> dict:
+        """Capture the state needed to rearrange a floating media window in-place."""
+        viewer_states = []
+        allow_fit_restore = not isinstance(window, MediaComparisonWidget)
+        candidate_viewers = []
+        try:
+            if isinstance(window, FloatingViewerWindow):
+                candidate_viewers = [window.viewer]
+            elif isinstance(window, MediaComparisonWidget):
+                getter = getattr(window, "_active_viewers", None)
+                candidate_viewers = getter() if callable(getter) else []
+        except RuntimeError:
+            candidate_viewers = []
+        except Exception:
+            candidate_viewers = []
+
+        for viewer in candidate_viewers:
+            state = self._snapshot_viewer_arrangement_state(viewer)
+            if state is not None:
+                viewer_states.append((viewer, state))
+        return {
+            "allow_fit_restore": bool(allow_fit_restore),
+            "viewer_states": viewer_states,
+        }
+
+    def _resolve_floating_media_arrangement_screen(self, windows: list[QWidget]):
+        """Choose the destination screen for the floating-window masonry rearrange."""
+        active_window = QApplication.activeWindow()
+        candidate_windows = []
+        if active_window in windows:
+            candidate_windows.append(active_window)
+        for window in windows:
+            try:
+                if bool(window.isActiveWindow()) and window not in candidate_windows:
+                    candidate_windows.append(window)
+            except Exception:
+                continue
+
+        for window in candidate_windows:
+            try:
+                rect = self._window_arrangement_rect(window)
+                screen = QApplication.screenAt(rect.center())
+                if screen is not None:
+                    return screen
+            except Exception:
+                continue
+        return self._resolve_selection_masonry_wall_screen(QCursor.pos())
+
+    @Slot()
+    def arrange_all_floating_windows_as_masonry(self):
+        """Repack all open floating media windows into one masonry layout."""
+        windows = self._iter_rearrangeable_floating_media_windows()
+        if not windows:
+            return []
+
+        screen = self._resolve_floating_media_arrangement_screen(windows)
+        available_geometry = (
+            screen.availableGeometry()
+            if screen is not None else QRect(80, 80, max(640, self.width()), max(480, self.height()))
+        )
+        layout_rect = available_geometry.adjusted(16, 16, -16, -16)
+        if not layout_rect.isValid():
+            layout_rect = QRect(80, 80, max(640, self.width()), max(480, self.height()))
+
+        min_item_width = 220 if len(windows) <= 8 else 170
+        rects = calculate_floating_viewer_wall_layout(
+            [self._window_arrangement_aspect_ratio(window) for window in windows],
+            layout_rect,
+            spacing=6,
+            min_item_width=min_item_width,
+            min_item_height=120,
+        )
+        if not rects:
+            return []
+
+        active_window = None
+        app_active_window = QApplication.activeWindow()
+        if app_active_window in windows:
+            active_window = app_active_window
+        if active_window is None:
+            for window in windows:
+                try:
+                    if bool(window.isActiveWindow()):
+                        active_window = window
+                        break
+                except Exception:
+                    continue
+        if active_window is None:
+            active_window = windows[0]
+
+        arranged_entries = []
+        for window, target_rect in zip(windows, rects):
+            arranged_entries.append(
+                {
+                    "window": window,
+                    "target_rect": QRect(target_rect),
+                    "state": self._snapshot_window_arrangement_state(window),
+                }
+            )
+
+        for entry in arranged_entries:
+            window = entry["window"]
+            target_rect = entry["target_rect"]
+            try:
+                if hasattr(window, "isMinimized") and window.isMinimized():
+                    window.showNormal()
+                elif not bool(window.isVisible()):
+                    window.show()
+                window.setGeometry(target_rect)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        def _restore_after_arrange():
+            for entry in arranged_entries:
+                state = entry["state"] or {}
+                allow_fit_restore = bool(state.get("allow_fit_restore", True))
+                for viewer, viewer_state in state.get("viewer_states", []):
+                    self._restore_viewer_arrangement_state(
+                        viewer,
+                        viewer_state,
+                        allow_fit_restore=allow_fit_restore,
+                    )
+            try:
+                if active_window is not None:
+                    active_window.raise_()
+                    active_window.activateWindow()
+                    if isinstance(active_window, FloatingViewerWindow):
+                        self.set_active_viewer(active_window.viewer)
+                    elif isinstance(active_window, MediaComparisonWidget):
+                        getter = getattr(active_window, "_active_viewers", None)
+                        active_viewers = getter() if callable(getter) else []
+                        if active_viewers:
+                            self.set_active_viewer(active_viewers[0])
+            except Exception:
+                pass
+            self.refresh_video_controls_performance_profile()
+
+        QTimer.singleShot(0, _restore_after_arrange)
+        return windows
+
     def _bootstrap_selection_wall_video_sync(
         self,
         viewer_infos: list[dict],

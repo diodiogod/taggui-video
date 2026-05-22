@@ -651,6 +651,7 @@ class MenuManager:
         self.toggle_reaction_controls_action = QAction('Rating toolbar', parent=self.main_window)
         self.toggle_reaction_controls_action.setCheckable(True)
         self.spawn_floating_viewer_action = QAction('Spawn Floating Viewer', parent=self.main_window)
+        self.arrange_floating_windows_masonry_action = QAction('Arrange Floating Windows as Masonry', parent=self.main_window)
         self.close_all_floating_viewers_action = QAction('Close All Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action = QAction('Hold Existing Spawned Viewers', parent=self.main_window)
         self.toggle_floating_hold_action.setShortcut(QKeySequence('H'))
@@ -857,6 +858,9 @@ class MenuManager:
         self.spawn_floating_viewer_action.setShortcut(QKeySequence('Ctrl+Shift+N'))
         self.spawn_floating_viewer_action.triggered.connect(
             self.main_window.spawn_floating_viewer)
+        self.arrange_floating_windows_masonry_action.triggered.connect(
+            self.main_window.arrange_all_floating_windows_as_masonry
+        )
         self.close_all_floating_viewers_action.setShortcut(QKeySequence('Ctrl+Shift+W'))
         self.close_all_floating_viewers_action.triggered.connect(
             self.main_window.close_all_floating_viewers)
@@ -868,6 +872,7 @@ class MenuManager:
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_floating_hold_action)
         view_menu.addAction(self.spawn_floating_viewer_action)
+        view_menu.addAction(self.arrange_floating_windows_masonry_action)
         view_menu.addAction(self.close_all_floating_viewers_action)
 
         self.auto_captioner_compact_layout_action.triggered.connect(

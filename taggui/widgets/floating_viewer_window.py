@@ -1463,6 +1463,7 @@ class FloatingViewerWindow(QWidget):
         menu = QMenu(self)
         exit_compare_action = None
         fit_mode_map = {}
+        arrange_action = None
         checker = getattr(self.viewer, "is_compare_mode_active", None)
         if callable(checker):
             try:
@@ -1490,6 +1491,10 @@ class FloatingViewerWindow(QWidget):
             except Exception:
                 exit_compare_action = None
         sync_action = menu.addAction("Sync video")
+        parent = self.parentWidget()
+        arrange_windows = getattr(parent, "arrange_all_floating_windows_as_masonry", None) if parent is not None else None
+        if callable(arrange_windows):
+            arrange_action = menu.addAction("Arrange floating windows as masonry")
         close_all_action = menu.addAction("Close all spawned viewers")
         selected = menu.exec(global_pos)
         if exit_compare_action is not None and selected is exit_compare_action:
@@ -1503,6 +1508,11 @@ class FloatingViewerWindow(QWidget):
                     pass
         elif selected is sync_action:
             self.sync_video_requested.emit()
+        elif selected is arrange_action and callable(arrange_windows):
+            try:
+                arrange_windows()
+            except Exception:
+                pass
         elif selected is close_all_action:
             self.close_all_requested.emit()
 

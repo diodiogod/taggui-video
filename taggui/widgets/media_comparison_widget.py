@@ -762,10 +762,14 @@ class MediaComparisonWidget(QWidget):
             resync_action = menu.addAction("Resync compared videos")
 
         close_all_action = None
+        arrange_action = None
         parent = self.parentWidget()
         close_all = getattr(parent, "close_all_floating_viewers", None) if parent is not None else None
-        if callable(close_all):
+        arrange_windows = getattr(parent, "arrange_all_floating_windows_as_masonry", None) if parent is not None else None
+        if callable(arrange_windows):
             menu.addSeparator()
+            arrange_action = menu.addAction("Arrange floating windows as masonry")
+        if callable(close_all):
             close_all_action = menu.addAction("Close all spawned viewers")
 
         selected = menu.exec(global_pos)
@@ -779,6 +783,11 @@ class MediaComparisonWidget(QWidget):
             self.set_video_compare_fit_mode(fit_mode_map[selected], persist=True)
         elif selected is resync_action:
             self._maybe_start_video_sync(force_restart=True)
+        elif selected is arrange_action and callable(arrange_windows):
+            try:
+                arrange_windows()
+            except Exception:
+                pass
         elif selected is close_all_action and callable(close_all):
             try:
                 close_all()
