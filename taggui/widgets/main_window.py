@@ -1418,7 +1418,9 @@ class MainWindow(QMainWindow):
             'thumbnail_show_review_badges',
             'thumbnail_show_reaction_badges',
             'thumbnail_show_star_rating_badge',
+            'thumbnail_review_badge_style',
             'thumbnail_reaction_badge_position',
+            'thumbnail_reaction_badge_style',
             'thumbnail_star_rating_badge_position',
             'thumbnail_star_rating_badge_style',
         ):

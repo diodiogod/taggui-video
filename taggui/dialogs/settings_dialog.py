@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal
-from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient
+from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient, QPainterPath
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
@@ -12,9 +12,14 @@ import subprocess
 import threading
 from utils.settings import (
     DEFAULT_SETTINGS,
+    THUMBNAIL_BADGE_STYLE_OPTIONS,
     THUMBNAIL_STAR_BADGE_STYLE_OPTIONS,
+    get_thumbnail_reaction_badge_style_spec,
+    get_thumbnail_review_badge_style_spec,
     get_thumbnail_star_badge_style_spec,
     normalize_thumbnail_badge_side,
+    normalize_thumbnail_reaction_badge_style,
+    normalize_thumbnail_review_badge_style,
     normalize_thumbnail_star_badge_style,
     settings,
 )
@@ -87,6 +92,24 @@ class ThumbnailOverlayPreviewWidget(QWidget):
     def _star_value_text(self) -> str:
         return '4.5'
 
+    def _review_style_key(self) -> str:
+        return normalize_thumbnail_review_badge_style(
+            settings.value(
+                'thumbnail_review_badge_style',
+                defaultValue='Review Tile',
+                type=str,
+            )
+        )
+
+    def _reaction_style_key(self) -> str:
+        return normalize_thumbnail_reaction_badge_style(
+            settings.value(
+                'thumbnail_reaction_badge_style',
+                defaultValue='Review Tile',
+                type=str,
+            )
+        )
+
     def _star_label(self) -> str:
         style = normalize_thumbnail_star_badge_style(
             settings.value(
@@ -101,6 +124,171 @@ class ThumbnailOverlayPreviewWidget(QWidget):
             return f'{value_text}★'
         return f'★{value_text}'
 
+    @staticmethod
+    def _color_with_alpha(color: QColor, alpha: int) -> QColor:
+        result = QColor(color)
+        result.setAlpha(max(0, min(255, int(alpha))))
+        return result
+
+    @staticmethod
+    def _blend_colors(first: QColor, second: QColor, ratio: float, alpha: int | None = None) -> QColor:
+        ratio = max(0.0, min(1.0, float(ratio)))
+        mixed = QColor(
+            int(first.red() * (1.0 - ratio) + second.red() * ratio),
+            int(first.green() * (1.0 - ratio) + second.green() * ratio),
+            int(first.blue() * (1.0 - ratio) + second.blue() * ratio),
+            int(first.alpha() * (1.0 - ratio) + second.alpha() * ratio),
+        )
+        if alpha is not None:
+            mixed.setAlpha(max(0, min(255, int(alpha))))
+        return mixed
+
+    def _review_badge_palette(self, base_color: QColor, spec: dict) -> tuple[QColor, QColor, QColor]:
+        fill_mode = str(spec.get('fill_mode', 'base') or 'base')
+        if fill_mode == 'dark':
+            fill = QColor(spec.get('dark_fill', QColor(27, 30, 37, 236)))
+        elif fill_mode == 'base_soft':
+            fill = QColor(base_color)
+            fill.setAlpha(int(spec.get('fill_alpha', 120)))
+        elif fill_mode == 'warm_base':
+            fill = self._blend_colors(
+                QColor(base_color),
+                QColor(spec.get('warm_tint', QColor(255, 162, 102, 255))),
+                float(spec.get('warm_ratio', 0.16)),
+                alpha=QColor(base_color).alpha(),
+            )
+        else:
+            fill = QColor(base_color)
+
+        if str(spec.get('outline_mode', 'fixed') or 'fixed') == 'base':
+            outline = self._color_with_alpha(QColor(base_color), int(spec.get('outline_alpha', 230)))
+        else:
+            outline = QColor(spec.get('outline', QColor(255, 255, 255, 235)))
+
+        if str(spec.get('text_mode', 'fixed') or 'fixed') == 'base':
+            text = self._color_with_alpha(QColor(base_color), int(spec.get('text_alpha', 255)))
+        else:
+            text = QColor(spec.get('text', QColor(255, 255, 255, 245)))
+
+        return fill, outline, text
+
+    @staticmethod
+    def _reaction_badge_palette(kind: str, spec: dict) -> tuple[QColor, QColor, QColor]:
+        prefix = 'love' if str(kind or '').strip().lower() == 'love' else 'bomb'
+        fill = QColor(spec.get(f'{prefix}_fill', QColor(255, 255, 255, 240)))
+        outline = QColor(spec.get(f'{prefix}_outline', spec.get('outline', QColor(255, 255, 255, 235))))
+        icon = QColor(spec.get(f'{prefix}_icon', QColor(255, 255, 255, 255)))
+        return fill, outline, icon
+
+    def _draw_overlay_chip(
+        self,
+        painter: QPainter,
+        rect,
+        *,
+        fill: QColor,
+        outline: QColor,
+        radius: float,
+        shadow: QColor,
+        text: str | None = None,
+        text_color: QColor | None = None,
+        path=None,
+        pen_color: QColor | None = None,
+        variant: str = 'solid',
+        glass_highlight: QColor | None = None,
+    ):
+        shadow_rect = rect.translated(1, 1)
+        shadow_pen = QColor(0, 0, 0, min(255, shadow.alpha() + 6))
+        painter.setPen(QPen(shadow_pen, 1.1))
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+
+        painter.setPen(QPen(outline, 1.1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, radius, radius)
+
+        if variant == 'glass':
+            highlight = rect.adjusted(1, 1, -1, -max(5, int(rect.height() * 0.5)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(glass_highlight or QColor(255, 255, 255, 68)))
+            painter.drawRoundedRect(highlight, max(3.0, radius - 2.0), max(3.0, radius - 2.0))
+
+        if path is not None:
+            painter.setPen(
+                QPen(
+                    pen_color or text_color or QColor(255, 255, 255),
+                    1.3,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+            )
+            painter.setBrush(pen_color or text_color or QColor(255, 255, 255))
+            painter.drawPath(path)
+            return
+
+        if text is not None and text_color is not None:
+            painter.setPen(text_color)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _reaction_icon_path(self, kind: str, rect):
+        icon_rect = rect.adjusted(3, 3, -3, -3)
+        left = float(icon_rect.left())
+        top = float(icon_rect.top())
+        right = float(icon_rect.right())
+        bottom = float(icon_rect.bottom())
+        width = float(icon_rect.width())
+        height = float(icon_rect.height())
+
+        if str(kind or '').strip().lower() == 'love':
+            path = QPainterPath()
+            path.moveTo(left + 0.5 * width, bottom - 0.12 * height)
+            path.cubicTo(
+                left + 0.12 * width, top + 0.62 * height,
+                left + 0.04 * width, top + 0.24 * height,
+                left + 0.28 * width, top + 0.16 * height,
+            )
+            path.cubicTo(
+                left + 0.42 * width, top + 0.10 * height,
+                left + 0.50 * width, top + 0.20 * height,
+                left + 0.50 * width, top + 0.28 * height,
+            )
+            path.cubicTo(
+                left + 0.50 * width, top + 0.20 * height,
+                left + 0.58 * width, top + 0.10 * height,
+                left + 0.72 * width, top + 0.16 * height,
+            )
+            path.cubicTo(
+                left + 0.96 * width, top + 0.24 * height,
+                left + 0.88 * width, top + 0.62 * height,
+                left + 0.50 * width, bottom - 0.12 * height,
+            )
+            path.closeSubpath()
+            return path
+
+        path = QPainterPath()
+        center_x = left + 0.5 * width
+        center_y = top + 0.5 * height
+        radius = min(width, height) * 0.27
+        path.addEllipse(rect.__class__(int(center_x - radius), int(center_y - radius), int(radius * 2), int(radius * 2)))
+        fuse_start_x = center_x + radius * 0.45
+        fuse_start_y = center_y - radius * 0.85
+        fuse_mid_x = right - width * 0.18
+        fuse_mid_y = top + height * 0.20
+        fuse_end_x = right - width * 0.10
+        fuse_end_y = top + height * 0.08
+        path.moveTo(fuse_start_x, fuse_start_y)
+        path.cubicTo(fuse_mid_x, fuse_mid_y, fuse_mid_x, fuse_mid_y, fuse_end_x, fuse_end_y)
+        spark_radius = radius * 0.16
+        path.addEllipse(
+            rect.__class__(
+                int(center_x + radius * 0.22 - spark_radius),
+                int(center_y - radius * 0.12 - spark_radius),
+                max(1, int(spark_radius * 2)),
+                max(1, int(spark_radius * 2)),
+            )
+        )
+        return path
+
     def _draw_chip(self, painter: QPainter, rect, *, fill: QColor, outline: QColor, text: str, text_color: QColor, radius: float):
         shadow_rect = rect.translated(1, 1)
         painter.setPen(QPen(QColor(0, 0, 0, 55), 1.2))
@@ -111,6 +299,40 @@ class ThumbnailOverlayPreviewWidget(QWidget):
         painter.drawRoundedRect(rect, radius, radius)
         painter.setPen(text_color)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _draw_review_badge(self, painter: QPainter, rect, label: str, base_color: QColor):
+        style = self._review_style_key()
+        spec = get_thumbnail_review_badge_style_spec(style)
+        fill, outline, text = self._review_badge_palette(base_color, spec)
+        self._draw_overlay_chip(
+            painter,
+            rect,
+            fill=fill,
+            outline=outline,
+            radius=float(spec.get('radius', 5.0)),
+            shadow=QColor(spec.get('shadow', QColor(0, 0, 0, 60))),
+            text=label,
+            text_color=text,
+            variant=str(spec.get('variant', 'solid') or 'solid'),
+            glass_highlight=QColor(spec.get('glass_highlight', QColor(255, 255, 255, 68))),
+        )
+
+    def _draw_reaction_badge(self, painter: QPainter, rect, kind: str):
+        style = self._reaction_style_key()
+        spec = get_thumbnail_reaction_badge_style_spec(style)
+        fill, outline, icon = self._reaction_badge_palette(kind, spec)
+        self._draw_overlay_chip(
+            painter,
+            rect,
+            fill=fill,
+            outline=outline,
+            radius=float(spec.get('radius', 5.0)),
+            shadow=QColor(spec.get('shadow', QColor(0, 0, 0, 60))),
+            path=self._reaction_icon_path(kind, rect),
+            pen_color=icon,
+            variant=str(spec.get('variant', 'solid') or 'solid'),
+            glass_highlight=QColor(spec.get('glass_highlight', QColor(255, 255, 255, 68))),
+        )
 
     def _draw_star_badge(self, painter: QPainter, rect, label: str, spec: dict):
         variant = str(spec.get('variant', 'pill') or 'pill')
@@ -241,14 +463,11 @@ class ThumbnailOverlayPreviewWidget(QWidget):
             x = review_rect.right() - 5 - badge_size + 1
             y = review_rect.top() + 5
             for label, color in (('1', QColor(255, 193, 7, 238)), ('R', QColor(33, 150, 243, 235))):
-                self._draw_chip(
+                self._draw_review_badge(
                     painter,
                     review_rect.__class__(x, y, badge_size, badge_size),
-                    fill=color,
-                    outline=QColor(255, 255, 255, 235),
-                    text=label,
-                    text_color=QColor(255, 255, 255, 245),
-                    radius=5.0,
+                    label,
+                    color,
                 )
                 x -= badge_size + 4
 
@@ -268,9 +487,8 @@ class ThumbnailOverlayPreviewWidget(QWidget):
         if show_reactions:
             badge_size = 18
             gap = 4
-            labels = [('❤', QColor(255, 221, 226, 245), QColor(214, 54, 82, 255))]
-            labels.append(('B', QColor(36, 36, 40, 240), QColor(255, 181, 97, 255)))
-            total_width = len(labels) * badge_size + (len(labels) - 1) * gap
+            kinds = ['love', 'bomb']
+            total_width = len(kinds) * badge_size + (len(kinds) - 1) * gap
             if reaction_side == 'left':
                 x = thumb_rect.left() + 5
             else:
@@ -280,15 +498,11 @@ class ThumbnailOverlayPreviewWidget(QWidget):
             text_font.setPointSizeF(8.5)
             text_font.setBold(True)
             painter.setFont(text_font)
-            for label, fill, text_color in labels:
-                self._draw_chip(
+            for kind in kinds:
+                self._draw_reaction_badge(
                     painter,
                     thumb_rect.__class__(x, y, badge_size, badge_size),
-                    fill=fill,
-                    outline=QColor(255, 255, 255, 235),
-                    text=label,
-                    text_color=text_color,
-                    radius=5.0,
+                    kind,
                 )
                 x += badge_size + gap
 
@@ -626,6 +840,15 @@ class SettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignLeft,
         )
 
+        thumbnail_layout.addWidget(QLabel('Review style'), 0, 2, Qt.AlignmentFlag.AlignRight)
+        review_style_combo = SettingsComboBox(
+            key='thumbnail_review_badge_style',
+            default='Review Tile',
+        )
+        review_style_combo.addItems([label for _key, label in THUMBNAIL_BADGE_STYLE_OPTIONS])
+        review_style_combo.setMinimumWidth(180)
+        thumbnail_layout.addWidget(review_style_combo, 0, 3, Qt.AlignmentFlag.AlignLeft)
+
         thumbnail_layout.addWidget(QLabel('Show reaction badges'), 1, 0, Qt.AlignmentFlag.AlignRight)
         thumbnail_layout.addWidget(
             SettingsBigCheckBox(
@@ -645,33 +868,42 @@ class SettingsDialog(QDialog):
         reaction_position_combo.addItems(['Left', 'Right'])
         thumbnail_layout.addWidget(reaction_position_combo, 1, 3, Qt.AlignmentFlag.AlignLeft)
 
-        thumbnail_layout.addWidget(QLabel('Show star badge'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Reaction style'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        reaction_style_combo = SettingsComboBox(
+            key='thumbnail_reaction_badge_style',
+            default='Review Tile',
+        )
+        reaction_style_combo.addItems([label for _key, label in THUMBNAIL_BADGE_STYLE_OPTIONS])
+        reaction_style_combo.setMinimumWidth(180)
+        thumbnail_layout.addWidget(reaction_style_combo, 2, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+
+        thumbnail_layout.addWidget(QLabel('Show star badge'), 3, 0, Qt.AlignmentFlag.AlignRight)
         thumbnail_layout.addWidget(
             SettingsBigCheckBox(
                 key='thumbnail_show_star_rating_badge',
                 text='Enabled',
             ),
-            2,
+            3,
             1,
             Qt.AlignmentFlag.AlignLeft,
         )
 
-        thumbnail_layout.addWidget(QLabel('Star side'), 2, 2, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Star side'), 3, 2, Qt.AlignmentFlag.AlignRight)
         star_position_combo = SettingsComboBox(
             key='thumbnail_star_rating_badge_position',
             default='Right',
         )
         star_position_combo.addItems(['Left', 'Right'])
-        thumbnail_layout.addWidget(star_position_combo, 2, 3, Qt.AlignmentFlag.AlignLeft)
+        thumbnail_layout.addWidget(star_position_combo, 3, 3, Qt.AlignmentFlag.AlignLeft)
 
-        thumbnail_layout.addWidget(QLabel('Star style'), 3, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Star style'), 4, 0, Qt.AlignmentFlag.AlignRight)
         star_style_combo = SettingsComboBox(
             key='thumbnail_star_rating_badge_style',
             default='Halo Tag: 3★',
         )
         star_style_combo.addItems([label for _key, label in THUMBNAIL_STAR_BADGE_STYLE_OPTIONS])
         star_style_combo.setMinimumWidth(220)
-        thumbnail_layout.addWidget(star_style_combo, 3, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        thumbnail_layout.addWidget(star_style_combo, 4, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
 
         thumbnail_group_layout.addWidget(controls_widget, 1)
         thumbnail_preview = ThumbnailOverlayPreviewWidget(self)

@@ -80,7 +80,9 @@ DEFAULT_SETTINGS = {
     'thumbnail_show_review_badges': True,
     'thumbnail_show_reaction_badges': True,
     'thumbnail_show_star_rating_badge': True,
+    'thumbnail_review_badge_style': 'Review Tile',
     'thumbnail_reaction_badge_position': 'Left',
+    'thumbnail_reaction_badge_style': 'Review Tile',
     'thumbnail_star_rating_badge_position': 'Right',
     'thumbnail_star_rating_badge_style': 'Halo Tag: 3★',
 }
@@ -121,6 +123,23 @@ THUMBNAIL_BADGE_SIDE_RIGHT = 'right'
 THUMBNAIL_BADGE_SIDES = (
     THUMBNAIL_BADGE_SIDE_LEFT,
     THUMBNAIL_BADGE_SIDE_RIGHT,
+)
+
+THUMBNAIL_BADGE_STYLE_OPTIONS = (
+    ('review_tile', 'Review Tile'),
+    ('gold_chip', 'Gold Chip'),
+    ('dark_chip', 'Dark Chip'),
+    ('outline_chip', 'Outline Chip'),
+    ('sunset_chip', 'Sunset Chip'),
+    ('glass_pill', 'Glass Pill'),
+    ('halo_tag', 'Halo Tag'),
+)
+THUMBNAIL_BADGE_STYLE_LABEL_TO_KEY = {
+    label.strip().casefold(): key
+    for key, label in THUMBNAIL_BADGE_STYLE_OPTIONS
+}
+THUMBNAIL_BADGE_STYLE_KEYS = tuple(
+    key for key, _label in THUMBNAIL_BADGE_STYLE_OPTIONS
 )
 
 THUMBNAIL_STAR_BADGE_STYLE_OPTIONS = (
@@ -209,6 +228,186 @@ def normalize_thumbnail_badge_side(value) -> str:
     if text in THUMBNAIL_BADGE_SIDES:
         return text
     return THUMBNAIL_BADGE_SIDE_LEFT
+
+
+def normalize_thumbnail_badge_style(value, fallback: str = 'review_tile') -> str:
+    text = str(value or '').strip()
+    lowered = text.casefold()
+    if lowered in THUMBNAIL_BADGE_STYLE_LABEL_TO_KEY:
+        return THUMBNAIL_BADGE_STYLE_LABEL_TO_KEY[lowered]
+    if lowered in THUMBNAIL_BADGE_STYLE_KEYS:
+        return lowered
+    if fallback in THUMBNAIL_BADGE_STYLE_KEYS:
+        return fallback
+    return 'review_tile'
+
+
+def normalize_thumbnail_review_badge_style(value) -> str:
+    return normalize_thumbnail_badge_style(value, fallback='review_tile')
+
+
+def normalize_thumbnail_reaction_badge_style(value) -> str:
+    return normalize_thumbnail_badge_style(value, fallback='review_tile')
+
+
+def get_thumbnail_review_badge_style_spec(style_key: str | None = None) -> dict:
+    normalized = normalize_thumbnail_review_badge_style(style_key)
+    specs = {
+        'review_tile': {
+            'variant': 'solid',
+            'radius': 5.0,
+            'shadow': QColor(0, 0, 0, 60),
+            'outline': QColor(255, 255, 255, 235),
+            'outline_mode': 'fixed',
+            'text': QColor(255, 255, 255, 245),
+            'text_mode': 'fixed',
+            'fill_mode': 'base',
+        },
+        'gold_chip': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 52),
+            'outline': QColor(255, 233, 166, 240),
+            'outline_mode': 'fixed',
+            'text': QColor(255, 248, 230, 250),
+            'text_mode': 'fixed',
+            'fill_mode': 'base',
+        },
+        'dark_chip': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 68),
+            'outline': QColor(255, 255, 255, 205),
+            'outline_mode': 'fixed',
+            'text_mode': 'base',
+            'fill_mode': 'dark',
+            'dark_fill': QColor(27, 30, 37, 236),
+        },
+        'outline_chip': {
+            'variant': 'outline',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 48),
+            'outline_mode': 'base',
+            'text_mode': 'base',
+            'fill_mode': 'base_soft',
+            'fill_alpha': 92,
+        },
+        'sunset_chip': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 58),
+            'outline': QColor(255, 244, 235, 225),
+            'outline_mode': 'fixed',
+            'text': QColor(255, 251, 244, 248),
+            'text_mode': 'fixed',
+            'fill_mode': 'warm_base',
+            'warm_tint': QColor(255, 162, 102, 255),
+            'warm_ratio': 0.16,
+        },
+        'glass_pill': {
+            'variant': 'glass',
+            'radius': 4.5,
+            'shadow': QColor(0, 0, 0, 38),
+            'outline': QColor(255, 255, 255, 165),
+            'outline_mode': 'fixed',
+            'text': QColor(255, 255, 255, 248),
+            'text_mode': 'fixed',
+            'fill_mode': 'base_soft',
+            'fill_alpha': 120,
+            'glass_highlight': QColor(255, 255, 255, 68),
+        },
+        'halo_tag': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 60),
+            'outline_mode': 'base',
+            'text': QColor(255, 240, 199, 255),
+            'text_mode': 'fixed',
+            'fill_mode': 'dark',
+            'dark_fill': QColor(40, 34, 26, 176),
+            'outline_alpha': 190,
+        },
+    }
+    return specs.get(normalized, specs['review_tile'])
+
+
+def get_thumbnail_reaction_badge_style_spec(style_key: str | None = None) -> dict:
+    normalized = normalize_thumbnail_reaction_badge_style(style_key)
+    specs = {
+        'review_tile': {
+            'variant': 'solid',
+            'radius': 5.0,
+            'shadow': QColor(0, 0, 0, 60),
+            'outline': QColor(255, 255, 255, 235),
+            'love_fill': QColor(255, 221, 226, 245),
+            'love_icon': QColor(214, 54, 82, 255),
+            'bomb_fill': QColor(36, 36, 40, 240),
+            'bomb_icon': QColor(255, 181, 97, 255),
+        },
+        'gold_chip': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 52),
+            'outline': QColor(255, 233, 166, 240),
+            'love_fill': QColor(255, 241, 224, 245),
+            'love_icon': QColor(203, 75, 106, 255),
+            'bomb_fill': QColor(255, 232, 188, 242),
+            'bomb_icon': QColor(122, 82, 0, 255),
+        },
+        'dark_chip': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 68),
+            'outline': QColor(255, 255, 255, 205),
+            'love_fill': QColor(27, 30, 37, 236),
+            'love_icon': QColor(255, 154, 181, 255),
+            'bomb_fill': QColor(27, 30, 37, 236),
+            'bomb_icon': QColor(255, 194, 115, 255),
+        },
+        'outline_chip': {
+            'variant': 'outline',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 48),
+            'love_fill': QColor(255, 221, 226, 88),
+            'love_outline': QColor(255, 154, 181, 245),
+            'love_icon': QColor(255, 154, 181, 255),
+            'bomb_fill': QColor(255, 214, 143, 76),
+            'bomb_outline': QColor(255, 194, 115, 245),
+            'bomb_icon': QColor(255, 194, 115, 255),
+        },
+        'sunset_chip': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 58),
+            'outline': QColor(255, 244, 235, 225),
+            'love_fill': QColor(255, 196, 165, 242),
+            'love_icon': QColor(122, 45, 21, 255),
+            'bomb_fill': QColor(255, 173, 96, 242),
+            'bomb_icon': QColor(91, 33, 3, 255),
+        },
+        'glass_pill': {
+            'variant': 'glass',
+            'radius': 4.5,
+            'shadow': QColor(0, 0, 0, 38),
+            'outline': QColor(255, 255, 255, 165),
+            'glass_highlight': QColor(255, 255, 255, 68),
+            'love_fill': QColor(255, 240, 243, 120),
+            'love_icon': QColor(255, 232, 236, 255),
+            'bomb_fill': QColor(255, 232, 198, 112),
+            'bomb_icon': QColor(255, 244, 227, 255),
+        },
+        'halo_tag': {
+            'variant': 'solid',
+            'radius': 6.0,
+            'shadow': QColor(0, 0, 0, 60),
+            'outline': QColor(255, 214, 124, 170),
+            'love_fill': QColor(40, 34, 26, 176),
+            'love_icon': QColor(255, 173, 191, 255),
+            'bomb_fill': QColor(40, 34, 26, 176),
+            'bomb_icon': QColor(255, 214, 124, 255),
+        },
+    }
+    return specs.get(normalized, specs['review_tile'])
 
 
 def normalize_thumbnail_star_badge_style(value) -> str:
