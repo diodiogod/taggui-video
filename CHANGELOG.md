@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.9] - 2026-05-22
+
+### Added
+
+- Expand thumbnail badge customization
+- add multiple style families for review badges and love/bomb badges on thumbnails
+- preview badge styles live in Settings before applying them to real thumbnails
+- make Halo Tag 3★ the default star badge style for new and fallback settings
 ## [1.3.8] - 2026-05-22
 
 ### Added
