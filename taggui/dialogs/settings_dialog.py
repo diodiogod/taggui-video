@@ -39,7 +39,18 @@ from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox)
 from utils.grammar_checker import GrammarCheckMode
 from utils.image_index_db import ImageIndexDB
-from utils.review_marks import get_review_badge_specs, reset_review_badge_schema, save_review_badge_schema
+from utils.review_marks import (
+    REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
+    REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
+    REVIEW_BADGE_SCHEMA_SETTINGS_KEY,
+    REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
+    get_review_badge_corner_radius,
+    get_review_badge_font_size,
+    get_review_badge_specs,
+    get_review_badge_text_color,
+    reset_review_badge_schema,
+    save_review_badge_schema,
+)
 from utils.thumbnail_cache import get_thumbnail_cache
 
 
@@ -78,7 +89,7 @@ class ThumbnailOverlayPreviewWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(240, 180)
+        self.setMinimumSize(252, 208)
         settings.change.connect(self._on_setting_changed)
 
     def sizeHint(self):
@@ -86,7 +97,12 @@ class ThumbnailOverlayPreviewWidget(QWidget):
 
     @Slot(str, object)
     def _on_setting_changed(self, key: str, _value):
-        if key.startswith('thumbnail_'):
+        if key.startswith('thumbnail_') or key in {
+            REVIEW_BADGE_SCHEMA_SETTINGS_KEY,
+            REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
+            REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
+            REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
+        }:
             self.update()
 
     def _star_value_text(self) -> str:
@@ -304,12 +320,14 @@ class ThumbnailOverlayPreviewWidget(QWidget):
         style = self._review_style_key()
         spec = get_thumbnail_review_badge_style_spec(style)
         fill, outline, text = self._review_badge_palette(base_color, spec)
+        text = QColor(get_review_badge_text_color())
+        text.setAlpha(245)
         self._draw_overlay_chip(
             painter,
             rect,
             fill=fill,
             outline=outline,
-            radius=float(spec.get('radius', 5.0)),
+            radius=float(get_review_badge_corner_radius()),
             shadow=QColor(spec.get('shadow', QColor(0, 0, 0, 60))),
             text=label,
             text_color=text,
@@ -448,7 +466,8 @@ class ThumbnailOverlayPreviewWidget(QWidget):
         outer_rect = self.rect().adjusted(6, 6, -6, -6)
         painter.fillRect(self.rect(), self.palette().window())
 
-        thumb_rect = outer_rect.adjusted(18, 12, -18, -18)
+        rail_height = 50
+        thumb_rect = outer_rect.adjusted(18, 12, -18, -(rail_height + 10))
         gradient = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomRight())
         gradient.setColorAt(0.0, QColor(91, 123, 154))
         gradient.setColorAt(0.45, QColor(203, 161, 116))
@@ -458,11 +477,19 @@ class ThumbnailOverlayPreviewWidget(QWidget):
         painter.drawRoundedRect(thumb_rect, 12, 12)
 
         if settings.value('thumbnail_show_review_badges', True, type=bool):
+            review_font = painter.font()
+            review_font.setBold(True)
+            review_font.setPointSizeF(float(get_review_badge_font_size()))
+            painter.setFont(review_font)
             review_rect = thumb_rect.adjusted(0, 0, 0, 0)
             badge_size = 18
             x = review_rect.right() - 5 - badge_size + 1
             y = review_rect.top() + 5
-            for label, color in (('1', QColor(255, 193, 7, 238)), ('R', QColor(33, 150, 243, 235))):
+            preview_badges = [
+                (str(spec.label), QColor(spec.color))
+                for spec in get_review_badge_specs()[:4]
+            ]
+            for label, color in preview_badges:
                 self._draw_review_badge(
                     painter,
                     review_rect.__class__(x, y, badge_size, badge_size),
@@ -544,6 +571,91 @@ class ThumbnailOverlayPreviewWidget(QWidget):
                 label,
                 spec,
             )
+
+        rail_rect = outer_rect.adjusted(12, thumb_rect.bottom() + 10, -12, -8)
+        painter.setPen(QPen(QColor(255, 255, 255, 24), 1.0))
+        painter.setBrush(QColor(18, 24, 33, 26))
+        painter.drawRoundedRect(rail_rect, 10, 10)
+
+        badge_size = 18
+        gap = 4
+        rail_x = rail_rect.left() + 8
+        rail_y = rail_rect.top() + 6
+        max_x = rail_rect.right() - 8
+        bottom_limit = rail_rect.bottom() - badge_size
+
+        review_font = painter.font()
+        review_font.setBold(True)
+        review_font.setPointSizeF(float(get_review_badge_font_size()))
+        painter.setFont(review_font)
+
+        def advance_slot():
+            nonlocal rail_x, rail_y
+            rail_x += badge_size + gap
+            if rail_x + badge_size > max_x:
+                rail_x = rail_rect.left() + 8
+                rail_y += badge_size + gap
+
+        for spec in get_review_badge_specs():
+            if rail_y > bottom_limit:
+                break
+            self._draw_review_badge(
+                painter,
+                rail_rect.__class__(rail_x, rail_y, badge_size, badge_size),
+                str(spec.label),
+                QColor(spec.color),
+            )
+            advance_slot()
+
+        if rail_y <= bottom_limit:
+            self._draw_reaction_badge(
+                painter,
+                rail_rect.__class__(rail_x, rail_y, badge_size, badge_size),
+                'love',
+            )
+            advance_slot()
+
+        if rail_y <= bottom_limit:
+            self._draw_reaction_badge(
+                painter,
+                rail_rect.__class__(rail_x, rail_y, badge_size, badge_size),
+                'bomb',
+            )
+            advance_slot()
+
+        if rail_y <= bottom_limit:
+            style = normalize_thumbnail_star_badge_style(
+                settings.value(
+                    'thumbnail_star_rating_badge_style',
+                    defaultValue='Halo Tag: 3★',
+                    type=str,
+                )
+            )
+            spec = get_thumbnail_star_badge_style_spec(style)
+            label = self._star_label()
+            star_font = painter.font()
+            star_font.setBold(True)
+            star_font.setPointSizeF(float(spec.get('font_size', 9.0)))
+            painter.setFont(star_font)
+            fm = painter.fontMetrics()
+            value_text = self._star_value_text()
+            variant = str(spec.get('variant', 'pill') or 'pill')
+            if variant == 'halo':
+                halo_diameter = max(16, min(20, int(spec.get('halo_diameter', 18))))
+                star_width = int(fm.horizontalAdvance(value_text)) + halo_diameter + int(spec.get('padding_x', 18))
+            elif variant == 'split':
+                accent_width = max(16, int(spec.get('accent_width', 20)))
+                star_width = int(fm.horizontalAdvance(value_text)) + accent_width + int(spec.get('padding_x', 16))
+            else:
+                star_width = int(fm.horizontalAdvance(label)) + int(spec.get('padding_x', 12))
+            star_width = max(26, int(star_width))
+            if rail_x + star_width <= max_x:
+                self._draw_star_badge(
+                    painter,
+                    rail_rect.__class__(rail_x, rail_y, star_width, badge_size),
+                    label,
+                    spec,
+                )
 
 
 class SettingsDialog(QDialog):
@@ -909,13 +1021,6 @@ class SettingsDialog(QDialog):
         thumbnail_preview = ThumbnailOverlayPreviewWidget(self)
         thumbnail_group_layout.addWidget(thumbnail_preview, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(thumbnail_group)
-
-        intro_label = QLabel(
-            'Customize the review badge symbols, optional hover titles, colors, and shortcut list.\n'
-            'Shortcuts accept portable text such as "1", "Shift+8", "X", or comma-separated aliases.'
-        )
-        intro_label.setWordWrap(True)
-        layout.addWidget(intro_label)
 
         appearance_grid = QGridLayout()
         appearance_grid.setHorizontalSpacing(10)
