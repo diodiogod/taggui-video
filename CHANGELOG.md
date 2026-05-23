@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.10] - 2026-05-23
+
+### Added
+
+- preview now reflects real review badge labels, colors, and appearance settings live
+- new compact sample area shows review, reaction, and star overlays together
+
+### Changed
+
+- Improve badge preview clarity in Settings
+
+### Removed
+
+- remove redundant explanatory text to free space in the Badges settings tab
 ## [1.3.9] - 2026-05-22
 
 ### Added
