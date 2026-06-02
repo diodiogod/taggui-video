@@ -77,6 +77,8 @@ class ContextSwitchManager:
         # ── 1. Swap viewer proxy + load image ───────────────────────────────
         try:
             target_viewer = mw.get_selection_target_viewer()
+            if hasattr(mw, '_set_explicit_action_target_viewer'):
+                mw._set_explicit_action_target_viewer(target_viewer)
             self._swap_viewer_proxy(target_viewer, new_proxy)
             if hasattr(mw, 'set_active_viewer'):
                 mw.set_active_viewer(target_viewer)

@@ -349,6 +349,7 @@ class ImageViewer(QWidget):
     reaction_flags_changed = Signal(bool, bool, name='reactionFlagsChanged')
     directory_reload_requested = Signal(name='directoryReloadRequested')
     activated = Signal(name='viewerActivated')
+    interaction_clicked = Signal(name='viewerInteractionClicked')
     video_components_ready = Signal(object, name='videoComponentsReady')
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel, *, is_spawned_viewer: bool = False):
@@ -3216,8 +3217,13 @@ class ImageViewer(QWidget):
             if (not self._controls_hover_inside) or (not active_is_self):
                 # Direct switch guarantees immediate exclusive hide/show, even if
                 # signal/event ordering differs across top-level floating windows.
-                if host is not None and hasattr(host, 'set_active_viewer'):
-                    host.set_active_viewer(self)
+                if host is not None:
+                    main_viewer = getattr(host, 'image_viewer', None)
+                    activate_target = getattr(host, '_activate_floating_action_target', None)
+                    if self is not main_viewer and callable(activate_target):
+                        activate_target(self)
+                    elif hasattr(host, 'set_active_viewer'):
+                        host.set_active_viewer(self)
                 else:
                     self.activated.emit()
                 self._controls_hover_inside = True
@@ -3272,8 +3278,10 @@ class ImageViewer(QWidget):
             if viewer_pos is not None and self._is_video_loaded:
                 self._process_controls_hover(viewer_pos)
                 self._update_video_seek_overlays(viewport_pos)
+        if event_type == QEvent.Type.MouseButtonPress:
+            self.interaction_clicked.emit()
+            self.activated.emit()
         if event_type in (
-            QEvent.Type.MouseButtonPress,
             QEvent.Type.FocusIn,
             QEvent.Type.WindowActivate,
         ):

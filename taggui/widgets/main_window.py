@@ -601,6 +601,8 @@ class MainWindow(QMainWindow):
         self._compare_drag_poll_timer.setInterval(16)
         self._compare_drag_poll_timer.timeout.connect(self._poll_compare_drag_cursor)
         self._active_viewer = self.image_viewer
+        self._explicit_action_target_viewer = self.image_viewer
+        self._rating_controls_source_viewer = self.image_viewer
         self._fullscreen_viewer = None
         self._fullscreen_window = None
         self._fullscreen_restore_state = None
@@ -2212,6 +2214,33 @@ class MainWindow(QMainWindow):
             return self.image_viewer
         return viewer
 
+    def _set_explicit_action_target_viewer(self, viewer: ImageViewer | None):
+        """Remember the last viewer explicitly clicked by the user."""
+        target = viewer or self.image_viewer
+        try:
+            _ = target.view
+        except RuntimeError:
+            target = self.image_viewer
+        except Exception:
+            target = self.image_viewer
+        self._explicit_action_target_viewer = target
+        self._rating_controls_source_viewer = (
+            target if target is not self.image_viewer else None
+        )
+
+    def _get_explicit_action_target_viewer(self) -> ImageViewer:
+        """Return the last explicitly clicked viewer, falling back to the active viewer."""
+        viewer = getattr(self, '_explicit_action_target_viewer', None)
+        if viewer is None:
+            return self.get_active_viewer()
+        try:
+            _ = viewer.view
+        except RuntimeError:
+            return self.get_active_viewer()
+        except Exception:
+            return self.get_active_viewer()
+        return viewer
+
     def _is_comparison_viewer(self, viewer: ImageViewer | None) -> bool:
         if viewer is None:
             return False
@@ -2274,7 +2303,9 @@ class MainWindow(QMainWindow):
     ):
         """Route reaction feedback to the visible host."""
         if bool(getattr(self, '_main_viewer_visible', True)):
-            target = self.get_active_viewer()
+            target = getattr(self, '_rating_controls_source_viewer', None)
+            if target is None:
+                target = self._get_explicit_action_target_viewer()
             if target is not None and hasattr(target, 'show_reaction_feedback'):
                 target.show_reaction_feedback(kind, enabled=enabled, stars=stars)
                 return
@@ -2628,6 +2659,8 @@ class MainWindow(QMainWindow):
             _ = target.view
         except RuntimeError:
             target = self.image_viewer
+        except Exception:
+            target = self.image_viewer
         self._promote_floating_window_for_viewer(target)
         if getattr(self, '_active_viewer', None) is target:
             self._sync_rating_controls_from_viewer(target)
@@ -2762,9 +2795,46 @@ class MainWindow(QMainWindow):
             unique_images.append(image)
         return unique_images
 
+    def _resolve_list_view_for_proxy_model(self, proxy_model):
+        """Return the browser list view that owns one proxy model, if any."""
+        if proxy_model is None:
+            return None
+        try:
+            if proxy_model is getattr(self, 'proxy_image_list_model', None):
+                return getattr(getattr(self, 'image_list', None), 'list_view', None)
+        except Exception:
+            pass
+        secondary = getattr(self, '_secondary_browser', None)
+        try:
+            if secondary is not None and proxy_model is getattr(secondary, 'proxy_image_list_model', None):
+                return getattr(getattr(secondary, 'dock', None), 'list_view', None)
+        except Exception:
+            pass
+        return None
+
+    def _target_context_from_viewer(self, viewer: ImageViewer | None):
+        """Resolve image/model/view context for one viewer."""
+        target_viewer = viewer or self._get_explicit_action_target_viewer()
+        image = self._current_viewer_image(target_viewer)
+        proxy_model = getattr(target_viewer, 'proxy_image_list_model', None)
+        source_model = None
+        if proxy_model is not None and hasattr(proxy_model, 'sourceModel'):
+            try:
+                source_model = proxy_model.sourceModel()
+            except Exception:
+                source_model = None
+        list_view = self._resolve_list_view_for_proxy_model(proxy_model)
+        return {
+            'images': [image] if image is not None else [],
+            'source_model': source_model,
+            'proxy_model': proxy_model,
+            'list_view': list_view,
+            'viewer': target_viewer,
+        }
+
     def _should_prefer_active_viewer_target(self) -> bool:
         """Return True when rating/reaction/review actions should target the active viewer image."""
-        active_viewer = self.get_active_viewer()
+        active_viewer = self._get_explicit_action_target_viewer()
         if active_viewer is not None and active_viewer is not self.image_viewer:
             return True
         manager = getattr(self, '_context_switch_manager', None)
@@ -2772,15 +2842,43 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def _rating_reaction_target_images(self) -> list[Image]:
+    def _rating_reaction_target_context(self) -> dict:
+        """Resolve target context for rating/love/bomb actions."""
+        source_viewer = getattr(self, '_rating_controls_source_viewer', None)
+        if source_viewer is not None:
+            try:
+                _ = source_viewer.view
+                if source_viewer is not self.image_viewer:
+                    return self._target_context_from_viewer(source_viewer)
+            except RuntimeError:
+                self._rating_controls_source_viewer = None
+            except Exception:
+                self._rating_controls_source_viewer = None
+
         if self._should_prefer_active_viewer_target():
-            image = self._current_viewer_image()
-            return [image] if image is not None else []
+            return self._target_context_from_viewer(self._get_explicit_action_target_viewer())
+
         selected_images = self._selected_list_images()
         if selected_images:
-            return selected_images
-        image = self._current_viewer_image()
-        return [image] if image is not None else []
+            return {
+                'images': selected_images,
+                'source_model': self.image_list_model,
+                'proxy_model': self.proxy_image_list_model,
+                'list_view': getattr(getattr(self, 'image_list', None), 'list_view', None),
+                'viewer': self.get_active_viewer(),
+            }
+
+        image = self._current_list_image() or self._current_viewer_image()
+        return {
+            'images': [image] if image is not None else [],
+            'source_model': self.image_list_model,
+            'proxy_model': self.proxy_image_list_model,
+            'list_view': getattr(getattr(self, 'image_list', None), 'list_view', None),
+            'viewer': self.get_active_viewer(),
+        }
+
+    def _rating_reaction_target_images(self) -> list[Image]:
+        return list(self._rating_reaction_target_context().get('images') or [])
 
     def _review_target_images(self) -> list[Image]:
         active_viewer = self.get_active_viewer()
@@ -2788,6 +2886,13 @@ class MainWindow(QMainWindow):
             image = self._current_viewer_image(active_viewer)
             return [image] if image is not None else []
         return self._rating_reaction_target_images()
+
+    def _review_target_context(self) -> dict:
+        """Resolve target context for review badge actions."""
+        active_viewer = self._get_explicit_action_target_viewer()
+        if bool(getattr(active_viewer, '_selection_masonry_wall_viewer', False)):
+            return self._target_context_from_viewer(active_viewer)
+        return self._rating_reaction_target_context()
 
     def _apply_review_rank_from_viewer(self, viewer: ImageViewer | None, rank: int):
         if viewer is None:
@@ -2854,19 +2959,28 @@ class MainWindow(QMainWindow):
         changed_states: list[tuple[Image, int, int]],
         *,
         action_name: str,
+        source_model=None,
+        proxy_model=None,
+        list_view=None,
     ) -> bool:
         if not changed_states:
             return False
 
+        owner_model = source_model or self.image_list_model
+        owner_proxy_model = proxy_model or self.proxy_image_list_model
+        owner_list_view = list_view or self._resolve_list_view_for_proxy_model(owner_proxy_model)
+        if owner_model is None:
+            return False
+
         changed_images = [image for image, _, _ in changed_states]
         if len(changed_images) == 1:
-            self.image_list_model.add_image_to_undo_stack(
+            owner_model.add_image_to_undo_stack(
                 changed_images[0],
                 action_name=action_name,
                 should_ask_for_confirmation=False,
             )
         else:
-            self.image_list_model.add_images_to_undo_stack(
+            owner_model.add_images_to_undo_stack(
                 changed_images,
                 action_name=action_name,
                 should_ask_for_confirmation=False,
@@ -2879,14 +2993,21 @@ class MainWindow(QMainWindow):
             image.review_updated_at = review_updated_at
             QTimer.singleShot(
                 0,
-                lambda img=image, model=self.image_list_model: model.persist_review_state(img),
+                lambda img=image, model=owner_model: model.persist_review_state(img),
             )
 
-        self._emit_image_rows_changed(changed_images)
+        self._emit_image_rows_changed(
+            changed_images,
+            source_model=owner_model,
+            proxy_model=owner_proxy_model,
+            list_view=owner_list_view,
+        )
         self._refresh_review_ui_for_images(changed_images)
-        if self._filter_uses_review(self.proxy_image_list_model.filter):
-            self._arm_masonry_refresh_anchor()
-            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        active_filter = getattr(owner_proxy_model, 'filter', None)
+        if self._filter_uses_review(active_filter):
+            if owner_proxy_model is self.proxy_image_list_model:
+                self._arm_masonry_refresh_anchor()
+            owner_proxy_model.set_filter(active_filter)
         self._force_immediate_review_badge_repaint()
         return True
 
@@ -2998,7 +3119,8 @@ class MainWindow(QMainWindow):
             self._force_immediate_review_badge_repaint()
             return
         else:
-            targets = self._review_target_images()
+            target_context = self._review_target_context()
+            targets = list(target_context.get('images') or [])
             action_name = 'Clear review marks'
 
         changed_states: list[tuple[Image, int, int]] = []
@@ -3013,32 +3135,52 @@ class MainWindow(QMainWindow):
         self._commit_review_state_changes(
             changed_states,
             action_name=action_name,
+            source_model=(target_context.get('source_model') if normalized_scope != 'folder' else None),
+            proxy_model=(target_context.get('proxy_model') if normalized_scope != 'folder' else None),
+            list_view=(target_context.get('list_view') if normalized_scope != 'folder' else None),
         )
 
     def _force_immediate_review_badge_repaint(self):
         """Force an immediate masonry/list repaint after bulk badge changes."""
-        source_model = getattr(self, 'image_list_model', None)
-        if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
-            try:
-                source_model.thumbnail_updates_ready.emit()
-            except Exception:
-                pass
-        if bool(getattr(source_model, '_paginated_mode', False)) and hasattr(source_model, '_emit_pages_updated'):
-            try:
-                source_model._emit_pages_updated()
-            except Exception:
-                pass
-        try:
-            list_view = self.image_list.list_view
-            list_view._last_masonry_window_signature = None
-            viewport = list_view.viewport()
-            viewport.update()
-            viewport.repaint()
-        except Exception:
-            pass
+        source_models = [getattr(self, 'image_list_model', None)]
+        secondary = getattr(self, '_secondary_browser', None)
+        secondary_model = getattr(secondary, 'image_list_model', None)
+        if secondary_model is not None and secondary_model not in source_models:
+            source_models.append(secondary_model)
 
-    def _emit_image_rows_changed(self, images: list[Image]):
-        source_model = self.image_list_model
+        for source_model in source_models:
+            if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
+                try:
+                    source_model.thumbnail_updates_ready.emit()
+                except Exception:
+                    pass
+            if bool(getattr(source_model, '_paginated_mode', False)) and hasattr(source_model, '_emit_pages_updated'):
+                try:
+                    source_model._emit_pages_updated()
+                except Exception:
+                    pass
+
+        list_views = [getattr(getattr(self, 'image_list', None), 'list_view', None)]
+        secondary_list_view = getattr(getattr(secondary, 'dock', None), 'list_view', None)
+        if secondary_list_view is not None and secondary_list_view not in list_views:
+            list_views.append(secondary_list_view)
+
+        for list_view in list_views:
+            if list_view is None:
+                continue
+            try:
+                list_view._last_masonry_window_signature = None
+            except Exception:
+                pass
+            try:
+                viewport = list_view.viewport()
+                viewport.update()
+                viewport.repaint()
+            except Exception:
+                pass
+
+    def _emit_image_rows_changed(self, images: list[Image], *, source_model=None, proxy_model=None, list_view=None):
+        source_model = source_model or self.image_list_model
         if source_model is None:
             return
 
@@ -3061,7 +3203,7 @@ class MainWindow(QMainWindow):
             source_model.index(changed_rows[0]),
             source_model.index(changed_rows[-1]),
         )
-        proxy_model = getattr(self, 'proxy_image_list_model', None)
+        proxy_model = proxy_model or getattr(self, 'proxy_image_list_model', None)
         updated_proxy_rects = []
         if proxy_model is not None and hasattr(proxy_model, 'mapFromSource'):
             for row in changed_rows:
@@ -3074,7 +3216,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     continue
         try:
-            list_view = self.image_list.list_view
+            list_view = list_view or self._resolve_list_view_for_proxy_model(proxy_model)
+            if list_view is None:
+                return
             try:
                 list_view._last_masonry_window_signature = None
             except Exception:
@@ -3125,16 +3269,25 @@ class MainWindow(QMainWindow):
                 continue
             except Exception:
                 continue
-        try:
-            list_view = self.image_list.list_view
-            delegate = getattr(list_view, 'delegate', None)
-            if delegate is not None and hasattr(delegate, 'clear_labels'):
-                delegate.clear_labels()
-            source_model = self.image_list_model
-            if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
-                source_model.thumbnail_updates_ready.emit()
-        except Exception:
-            pass
+        for list_view in (
+            getattr(getattr(self, 'image_list', None), 'list_view', None),
+            getattr(getattr(getattr(self, '_secondary_browser', None), 'dock', None), 'list_view', None),
+        ):
+            if list_view is None:
+                continue
+            try:
+                delegate = getattr(list_view, 'delegate', None)
+                if delegate is not None and hasattr(delegate, 'clear_labels'):
+                    delegate.clear_labels()
+            except Exception:
+                pass
+            try:
+                source_model = getattr(list_view.model(), 'sourceModel', None)
+                source_model = source_model() if callable(source_model) else list_view.model()
+                if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
+                    source_model.thumbnail_updates_ready.emit()
+            except Exception:
+                pass
         self._sync_review_controls_from_context()
 
     def _refresh_review_badge_config(self):
@@ -3184,6 +3337,11 @@ class MainWindow(QMainWindow):
         self._sync_review_controls_from_context()
 
     def _sync_rating_controls_from_context(self, *_args):
+        if self._should_prefer_active_viewer_target():
+            viewer = self._get_explicit_action_target_viewer()
+            self._sync_rating_controls_from_viewer(viewer)
+            return
+        self._rating_controls_source_viewer = None
         selected_images = self._selected_list_images()
         current_list_image = self._current_list_image()
         if len(selected_images) > 1:
@@ -3233,7 +3391,14 @@ class MainWindow(QMainWindow):
         self._sync_review_controls_from_context()
 
     def _sync_rating_controls_from_viewer(self, viewer: ImageViewer | None = None):
-        image = self._current_viewer_image(viewer)
+        target_viewer = viewer or self.get_active_viewer()
+        try:
+            explicit_viewer = self._get_explicit_action_target_viewer()
+        except Exception:
+            explicit_viewer = target_viewer
+        if target_viewer is not self.image_viewer or explicit_viewer is self.image_viewer:
+            self._rating_controls_source_viewer = target_viewer
+        image = self._current_viewer_image(target_viewer)
         if image is None:
             self._set_rating_controls_value(0.0, mixed=False)
             self._set_reaction_controls_value(False, False)
@@ -3279,9 +3444,19 @@ class MainWindow(QMainWindow):
             mixed=False,
         )
 
+    def _activate_floating_action_target(self, viewer: ImageViewer):
+        """Make a floating viewer both the displayed state source and action target."""
+        self._set_explicit_action_target_viewer(viewer)
+        self.set_active_viewer(viewer)
+
     def _connect_floating_viewer(self, viewer: ImageViewer):
         """Bind floating viewer signals to existing main-window slots."""
-        viewer.activated.connect(lambda: self.set_active_viewer(viewer))
+        viewer.activated.connect(
+            lambda current_viewer=viewer: self._activate_floating_action_target(current_viewer)
+        )
+        viewer.interaction_clicked.connect(
+            lambda current_viewer=viewer: self._activate_floating_action_target(current_viewer)
+        )
         viewer.rating_changed.connect(lambda *_args, current_viewer=viewer: self._sync_rating_controls_from_viewer(current_viewer))
         viewer.reaction_flags_changed.connect(lambda *_args, current_viewer=viewer: self._sync_rating_controls_from_viewer(current_viewer))
         viewer.crop_changed.connect(self.image_list.list_view.show_crop_size)
@@ -5180,7 +5355,7 @@ class MainWindow(QMainWindow):
         if bool(activate_window):
             window.activateWindow()
         if bool(set_active):
-            self.set_active_viewer(viewer)
+            self._activate_floating_action_target(viewer)
 
         if not bool(load_before_show):
             QTimer.singleShot(
@@ -5580,7 +5755,7 @@ class MainWindow(QMainWindow):
                     active_window.raise_()
                     active_window.activateWindow()
                     if isinstance(active_window, FloatingViewerWindow):
-                        self.set_active_viewer(active_window.viewer)
+                        self._activate_floating_action_target(active_window.viewer)
                     elif isinstance(active_window, MediaComparisonWidget):
                         getter = getattr(active_window, "_active_viewers", None)
                         active_viewers = getter() if callable(getter) else []
@@ -5789,7 +5964,7 @@ class MainWindow(QMainWindow):
         try:
             focus_window.raise_()
             focus_window.activateWindow()
-            self.set_active_viewer(focus_window.viewer)
+            self._activate_floating_action_target(focus_window.viewer)
         except Exception:
             pass
 
@@ -7703,6 +7878,7 @@ class MainWindow(QMainWindow):
         index = proxy_image_index if isinstance(proxy_image_index, QModelIndex) and proxy_image_index.isValid() else self.image_list_selection_model.currentIndex()
         if not index.isValid():
             return
+        self._set_explicit_action_target_viewer(self.get_selection_target_viewer())
         if self._context_switch_manager is not None and self._context_switch_manager.active_context != 'primary':
             self._context_switch_manager.restore_primary()
         try:
@@ -7754,9 +7930,13 @@ class MainWindow(QMainWindow):
             self._set_rating_controls_value(rating, mixed=mixed)
             return
 
-        targets = self._rating_reaction_target_images()
+        target_context = self._rating_reaction_target_context()
+        targets = list(target_context.get('images') or [])
         if not targets:
             return
+        owner_model = target_context.get('source_model') or self.image_list_model
+        owner_proxy_model = target_context.get('proxy_model') or self.proxy_image_list_model
+        owner_list_view = target_context.get('list_view')
 
         changed_images = [
             image for image in targets
@@ -7767,13 +7947,13 @@ class MainWindow(QMainWindow):
             return
 
         if len(changed_images) == 1:
-            self.image_list_model.add_image_to_undo_stack(
+            owner_model.add_image_to_undo_stack(
                 changed_images[0],
                 action_name='Change rating',
                 should_ask_for_confirmation=False,
             )
         else:
-            self.image_list_model.add_images_to_undo_stack(
+            owner_model.add_images_to_undo_stack(
                 changed_images,
                 action_name='Change rating',
                 should_ask_for_confirmation=False,
@@ -7785,10 +7965,15 @@ class MainWindow(QMainWindow):
             image.reaction_updated_at = reaction_updated_at
             QTimer.singleShot(
                 0,
-                lambda img=image, model=self.image_list_model: model.write_meta_to_disk(img),
+                lambda img=image, model=owner_model: model.write_meta_to_disk(img),
             )
 
-        self._emit_image_rows_changed(changed_images)
+        self._emit_image_rows_changed(
+            changed_images,
+            source_model=owner_model,
+            proxy_model=owner_proxy_model,
+            list_view=owner_list_view,
+        )
         feedback_target_global = self._image_to_global_rank(changed_images[0]) if changed_images else None
         self._show_reaction_feedback(
             'stars',
@@ -7797,11 +7982,14 @@ class MainWindow(QMainWindow):
         )
         # Avoid unnecessary proxy invalidation/layout churn in masonry mode.
         # Re-apply filter only when the active filter actually depends on rating.
-        if self._filter_uses_star_rating(self.proxy_image_list_model.filter):
-            self._arm_masonry_refresh_anchor()
-            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        active_filter = getattr(owner_proxy_model, 'filter', None)
+        if self._filter_uses_star_rating(active_filter):
+            if owner_proxy_model is self.proxy_image_list_model:
+                self._arm_masonry_refresh_anchor()
+            owner_proxy_model.set_filter(active_filter)
         self._refresh_reaction_sort_if_active(
             changed_images,
+            source_model=owner_model,
             sync_rating=True,
         )
         self._force_immediate_review_badge_repaint()
@@ -7842,9 +8030,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        targets = self._rating_reaction_target_images()
+        target_context = self._rating_reaction_target_context()
+        targets = list(target_context.get('images') or [])
         if not targets:
             return
+        owner_model = target_context.get('source_model') or self.image_list_model
+        owner_proxy_model = target_context.get('proxy_model') or self.proxy_image_list_model
+        owner_list_view = target_context.get('list_view')
 
         changed_images = []
         for image in targets:
@@ -7860,13 +8052,13 @@ class MainWindow(QMainWindow):
             return
 
         if len(changed_images) == 1:
-            self.image_list_model.add_image_to_undo_stack(
+            owner_model.add_image_to_undo_stack(
                 changed_images[0],
                 action_name='Change reactions',
                 should_ask_for_confirmation=False,
             )
         else:
-            self.image_list_model.add_images_to_undo_stack(
+            owner_model.add_images_to_undo_stack(
                 changed_images,
                 action_name='Change reactions',
                 should_ask_for_confirmation=False,
@@ -7881,10 +8073,15 @@ class MainWindow(QMainWindow):
             image.reaction_updated_at = reaction_updated_at
             QTimer.singleShot(
                 0,
-                lambda img=image, model=self.image_list_model: model.persist_reaction_state(img),
+                lambda img=image, model=owner_model: model.persist_reaction_state(img),
             )
 
-        self._emit_image_rows_changed(changed_images)
+        self._emit_image_rows_changed(
+            changed_images,
+            source_model=owner_model,
+            proxy_model=owner_proxy_model,
+            list_view=owner_list_view,
+        )
         feedback_kind = str(changed_kind or '').strip().lower()
         if feedback_kind == 'love':
             feedback_enabled = bool(love)
@@ -7897,11 +8094,14 @@ class MainWindow(QMainWindow):
             enabled=feedback_enabled,
             target_global=feedback_target_global,
         )
-        if self._filter_uses_reactions(self.proxy_image_list_model.filter):
-            self._arm_masonry_refresh_anchor()
-            self.proxy_image_list_model.set_filter(self.proxy_image_list_model.filter)
+        active_filter = getattr(owner_proxy_model, 'filter', None)
+        if self._filter_uses_reactions(active_filter):
+            if owner_proxy_model is self.proxy_image_list_model:
+                self._arm_masonry_refresh_anchor()
+            owner_proxy_model.set_filter(active_filter)
         self._refresh_reaction_sort_if_active(
             changed_images,
+            source_model=owner_model,
             sync_reactions=True,
         )
         self._force_immediate_review_badge_repaint()
@@ -7913,7 +8113,8 @@ class MainWindow(QMainWindow):
         if not interactive:
             return
 
-        targets = self._review_target_images()
+        target_context = self._review_target_context()
+        targets = list(target_context.get('images') or [])
         if not targets:
             return
 
@@ -7933,6 +8134,9 @@ class MainWindow(QMainWindow):
         self._commit_review_state_changes(
             changed_states,
             action_name='Change review rank',
+            source_model=target_context.get('source_model'),
+            proxy_model=target_context.get('proxy_model'),
+            list_view=target_context.get('list_view'),
         )
 
     def set_review_flag_state(
@@ -7945,7 +8149,8 @@ class MainWindow(QMainWindow):
         if not interactive:
             return
 
-        targets = self._review_target_images()
+        target_context = self._review_target_context()
+        targets = list(target_context.get('images') or [])
         if not targets:
             return
 
@@ -7970,6 +8175,9 @@ class MainWindow(QMainWindow):
         self._commit_review_state_changes(
             changed_states,
             action_name='Change review mark',
+            source_model=target_context.get('source_model'),
+            proxy_model=target_context.get('proxy_model'),
+            list_view=target_context.get('list_view'),
         )
 
     def _arm_masonry_refresh_anchor(self):
@@ -8017,10 +8225,13 @@ class MainWindow(QMainWindow):
         self,
         changed_images: list[Image] | None = None,
         *,
+        source_model=None,
         sync_rating: bool = False,
         sync_reactions: bool = False,
     ):
         """Replay reaction sorting after edits when that sort mode is active."""
+        if source_model is not None and source_model is not self.image_list_model:
+            return
         image_list = getattr(self, "image_list", None)
         if image_list is None:
             return

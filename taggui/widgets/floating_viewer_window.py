@@ -1111,6 +1111,13 @@ class FloatingViewerWindow(QWidget):
     def _force_activate_viewer_owner(self):
         """Force main-window active viewer switch for strict single-controls mode."""
         parent = self.parentWidget()
+        activate_target = getattr(parent, '_activate_floating_action_target', None)
+        if callable(activate_target):
+            try:
+                activate_target(self.viewer)
+                return
+            except Exception:
+                pass
         if parent is not None and hasattr(parent, 'set_active_viewer'):
             try:
                 parent.set_active_viewer(self.viewer)
