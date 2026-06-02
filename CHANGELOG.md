@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.11] - 2026-06-02
+
+### Added
+
+- Re-clicking the same image across split browsers now refreshes the expected viewer
+- Rating and love actions now follow the last clicked floating viewer instead of the underlying browser selection
+- Reaction animations now appear on the viewer you actually interacted with
+
+### Changed
+
+- Improve split browser and floating viewer reaction handling
+- Thumbnail badges update immediately after rating and reaction changes in split browser flows
 ## [1.3.10] - 2026-05-23
 
 ### Added
