@@ -2762,7 +2762,20 @@ class MainWindow(QMainWindow):
             unique_images.append(image)
         return unique_images
 
+    def _should_prefer_active_viewer_target(self) -> bool:
+        """Return True when rating/reaction/review actions should target the active viewer image."""
+        active_viewer = self.get_active_viewer()
+        if active_viewer is not None and active_viewer is not self.image_viewer:
+            return True
+        manager = getattr(self, '_context_switch_manager', None)
+        if manager is not None and getattr(manager, 'active_context', 'primary') == 'secondary':
+            return True
+        return False
+
     def _rating_reaction_target_images(self) -> list[Image]:
+        if self._should_prefer_active_viewer_target():
+            image = self._current_viewer_image()
+            return [image] if image is not None else []
         selected_images = self._selected_list_images()
         if selected_images:
             return selected_images
@@ -7690,6 +7703,12 @@ class MainWindow(QMainWindow):
         index = proxy_image_index if isinstance(proxy_image_index, QModelIndex) and proxy_image_index.isValid() else self.image_list_selection_model.currentIndex()
         if not index.isValid():
             return
+        if self._context_switch_manager is not None and self._context_switch_manager.active_context != 'primary':
+            self._context_switch_manager.restore_primary()
+        try:
+            self.set_active_viewer(self.get_selection_target_viewer())
+        except Exception:
+            pass
         view = self.image_list.list_view
         restore_freeze_until = float(
             getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0

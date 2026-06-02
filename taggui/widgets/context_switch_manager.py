@@ -10,7 +10,7 @@ proxy reference. Everything is fully reversible.
 
 import traceback as _traceback
 
-from PySide6.QtCore import QModelIndex
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex
 
 
 class ContextSwitchManager:
@@ -78,6 +78,8 @@ class ContextSwitchManager:
         try:
             target_viewer = mw.get_selection_target_viewer()
             self._swap_viewer_proxy(target_viewer, new_proxy)
+            if hasattr(mw, 'set_active_viewer'):
+                mw.set_active_viewer(target_viewer)
             if proxy_index.isValid():
                 # proxy_index is from new_proxy (SecondaryBrowser emits current
                 # from its own selection model, which owns new_proxy).
@@ -154,6 +156,7 @@ class ContextSwitchManager:
 
         # Swap
         viewer.proxy_image_list_model = new_proxy
+        viewer.proxy_image_index = QPersistentModelIndex()
         self._viewer_proxy = new_proxy
 
         # Reconnect reset guards with new model

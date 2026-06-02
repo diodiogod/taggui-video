@@ -841,19 +841,12 @@ class ImageDelegate(QStyledItemDelegate):
                 if (
                     hasattr(image, 'is_video')
                     and image.is_video
-                    and hasattr(image, 'video_metadata')
-                    and image.video_metadata
                 ):
-                    frame_count = image.video_metadata.get('frame_count', 0)
-                    if frame_count > 0:
-                        is_valid = (frame_count - 1) % 4 == 0
-                        stamp_rect = self._video_stamp_rect(option).adjusted(-2, -2, 2, 2)
-                        if stamp_rect.contains(event.pos()):
-                            self._filename_tooltip_token += 1
-                            tooltip_text = (
-                                f"N*4+1 validation: {'Valid' if is_valid else 'Invalid'}\n"
-                                f"Frame count: {frame_count}"
-                            )
+                    stamp_rect = self._video_stamp_rect(option).adjusted(-2, -2, 2, 2)
+                    if stamp_rect.contains(event.pos()):
+                        self._filename_tooltip_token += 1
+                        tooltip_text = self._build_video_stamp_tooltip(image)
+                        if tooltip_text:
                             QToolTip.showText(event.globalPos(), tooltip_text, view, option.rect, 2000)
                             self._filename_tooltip_anchor_pos = None
                             return True
@@ -875,8 +868,35 @@ class ImageDelegate(QStyledItemDelegate):
                 pass
         return super().helpEvent(event, view, option, index)
 
+    def _get_video_stamp_status(self, image) -> tuple[QColor, str | None]:
+        """Return badge color and tooltip text for a video thumbnail stamp."""
+        if not getattr(image, 'is_video', False):
+            return QColor(255, 255, 255, 0), None
+
+        video_metadata = getattr(image, 'video_metadata', None) or {}
+        try:
+            frame_count = int(video_metadata.get('frame_count') or 0)
+        except (TypeError, ValueError):
+            frame_count = 0
+
+        if frame_count > 0:
+            is_valid = (frame_count - 1) % 4 == 0
+            color = QColor(76, 175, 80, 235) if is_valid else QColor(244, 67, 54, 235)
+            tooltip = (
+                f"N*4+1 validation: {'Valid' if is_valid else 'Invalid'}\n"
+                f"Frame count: {frame_count}"
+            )
+            return color, tooltip
+
+        return QColor(71, 85, 105, 235), "Video"
+
+    def _build_video_stamp_tooltip(self, image) -> str | None:
+        """Build tooltip text for the video stamp."""
+        _color, tooltip = self._get_video_stamp_status(image)
+        return tooltip
+
     def _draw_n4_plus_1_stamp(self, painter, option, index):
-        """Draw N*4+1 validation stamp on video file previews (optimized)."""
+        """Draw the video stamp, with validation color when frame metadata is available."""
         try:
             # Validate painter state
             if not painter or not painter.isActive():
@@ -887,16 +907,8 @@ class ImageDelegate(QStyledItemDelegate):
             if not image or not hasattr(image, 'is_video') or not image.is_video:
                 return
 
-            # Check if video has metadata with frame count
-            if not hasattr(image, 'video_metadata') or not image.video_metadata:
-                return
-
-            frame_count = image.video_metadata.get('frame_count', 0)
-            if frame_count <= 0:
-                return
-
-            # Check N*4+1 rule: (frame_count - 1) % 4 == 0
-            is_valid = (frame_count - 1) % 4 == 0
+            # Draw a neutral video badge until frame metadata is available.
+            badge_color, _tooltip = self._get_video_stamp_status(image)
 
             # Skip stamp drawing when items are too small for the badge.
             if option.rect.width() < 26 or option.rect.height() < 26:
@@ -925,7 +937,7 @@ class ImageDelegate(QStyledItemDelegate):
 
             # Colored status badge
             painter.setPen(self._stamp_outline_pen)
-            painter.setBrush(self._stamp_green_brush if is_valid else self._stamp_red_brush)
+            painter.setBrush(badge_color)
             painter.drawEllipse(stamp_rect)
 
             # Play triangle
