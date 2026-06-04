@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRect
                                QGraphicsScene, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
 from PIL import Image as pilimage
+from models.image_list_model import fallback_decode_qimage, repair_mismatched_image_extension_path
+from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import (
     settings,
     DEFAULT_SETTINGS,
@@ -35,6 +37,8 @@ try:
     from shiboken6 import isValid as _shiboken_is_valid
 except Exception:
     _shiboken_is_valid = None
+
+ensure_pillow_plugins_registered()
 
 COMPARE_FIT_MODE_PRESERVE = 'preserve'
 COMPARE_FIT_MODE_FILL = 'fill'
@@ -816,8 +820,9 @@ class ImageViewer(QWidget):
         reader.setAutoTransform(True)
         qimage = reader.read()
         if qimage.isNull():
-            pil_image = pilimage.open(image.path)
-            qimage = pil_to_qimage(pil_image)
+            with pilimage.open(image.path) as pil_image:
+                pil_image.load()
+                qimage = pil_to_qimage(pil_image)
         return QPixmap.fromImage(qimage)
 
     def _clear_compare_scene_items(self):
@@ -3443,6 +3448,110 @@ class ImageViewer(QWidget):
             traceback.print_exc()
             self._show_error_placeholder(f"Read Error: {e}")
 
+    def _invalidate_current_thumbnail_after_path_repair(self, image, stale_path=None) -> None:
+        """Clear stale thumbnail state and request one fresh thumbnail repaint."""
+        try:
+            image.thumbnail = None
+            image.thumbnail_qimage = None
+        except Exception:
+            pass
+        try:
+            from utils.thumbnail_cache import get_thumbnail_cache
+            source_model = getattr(self.proxy_image_list_model, 'sourceModel', lambda: None)()
+            cache = get_thumbnail_cache()
+            if cache.enabled and source_model is not None:
+                thumb_width = getattr(source_model, 'thumbnail_generation_width', 512)
+                cache_path_target = stale_path if stale_path is not None else image.path
+                mtime = cache_path_target.stat().st_mtime
+                cache_key = cache._get_cache_key(cache_path_target, mtime, thumb_width)
+                cache_path = cache._get_cache_path(cache_key)
+                if cache_path.exists():
+                    cache_path.unlink()
+        except Exception:
+            pass
+
+    def _clear_hud_crop_if_alive(self) -> None:
+        """Clear crop HUD state only when the Qt object is still alive."""
+        if not hasattr(self, 'hud_item'):
+            return
+        try:
+            if self.hud_item is not None and (
+                _shiboken_is_valid is None or _shiboken_is_valid(self.hud_item)
+            ):
+                self.hud_item.clear_crop()
+        except RuntimeError:
+            self.hud_item = None
+
+    def _persist_repaired_selection_path(self, image_path) -> None:
+        """Update restore settings to follow a repaired or converted media path."""
+        try:
+            repaired_path = image_path if isinstance(image_path, Path) else Path(image_path)
+        except Exception:
+            return
+        host = self.window()
+        if host is not None:
+            try:
+                setattr(host, '_directory_restore_selection_path', str(repaired_path))
+            except Exception:
+                pass
+            saver = getattr(host, '_save_folder_last_selected_path', None)
+            if callable(saver):
+                try:
+                    saver(repaired_path)
+                except Exception:
+                    pass
+        try:
+            settings.setValue('last_selected_path', str(repaired_path))
+        except Exception:
+            pass
+
+    def _schedule_deferred_extension_repair(self, image) -> None:
+        """Attempt one real-file extension repair after the current load finishes."""
+        image_path = getattr(image, 'path', None)
+        if image_path is None:
+            return
+
+        def _attempt() -> None:
+            current_path = getattr(image, 'path', None)
+            if current_path is None:
+                return
+            repaired_path = repair_mismatched_image_extension_path(
+                current_path,
+                allow_cached_copy=False,
+            )
+            if repaired_path == current_path:
+                return
+            source_model = getattr(self.proxy_image_list_model, 'sourceModel', lambda: None)()
+            if source_model is not None:
+                try:
+                    directory_path = getattr(source_model, '_directory_path', None)
+                    db = getattr(source_model, '_db', None)
+                    if db is not None and directory_path is not None:
+                        db.rename_image_path(str(current_path), str(repaired_path), directory_path=directory_path)
+                except Exception:
+                    pass
+            image.path = repaired_path
+            self._invalidate_current_thumbnail_after_path_repair(image, stale_path=current_path)
+            self._persist_repaired_selection_path(image.path)
+
+        QTimer.singleShot(250, _attempt)
+
+        proxy_index = self._normalize_proxy_index(getattr(self, 'proxy_image_index', QModelIndex()))
+        proxy_model = getattr(self, 'proxy_image_list_model', None)
+        if proxy_model is None or not proxy_index.isValid():
+            return
+        try:
+            source_model = proxy_model.sourceModel()
+            source_index = proxy_model.mapToSource(proxy_index)
+            if source_model is not None and source_index.isValid():
+                source_model.dataChanged.emit(
+                    source_index,
+                    source_index,
+                    [Qt.ItemDataRole.DecorationRole],
+                )
+        except Exception:
+            pass
+
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True):
         if self._viewer_model_resetting:
             return
@@ -3597,15 +3706,41 @@ class ImageViewer(QWidget):
                 qimage = image_reader.read()
 
                 if qimage.isNull():
-                    # Fallback to PIL if QImageReader fails
-                    pil_image = pilimage.open(image.path)
-                    qimage = pil_to_qimage(pil_image)
+                    qimage, _fallback_size, fallback_path = fallback_decode_qimage(image.path)
+                    if fallback_path != image.path:
+                        stale_path = image.path
+                        image.path = fallback_path
+                        self._invalidate_current_thumbnail_after_path_repair(image, stale_path=stale_path)
+                        self._persist_repaired_selection_path(image.path)
+                    if qimage is None:
+                        repaired_path = repair_mismatched_image_extension_path(image.path)
+                        if repaired_path != image.path:
+                            stale_path = image.path
+                            image.path = repaired_path
+                            self._invalidate_current_thumbnail_after_path_repair(image, stale_path=stale_path)
+                            self._persist_repaired_selection_path(image.path)
+                            image_reader = QImageReader(str(image.path))
+                            image_reader.setAutoTransform(True)
+                            qimage = image_reader.read()
+
+                        if qimage is None or qimage.isNull():
+                            qimage, _fallback_size, fallback_path = fallback_decode_qimage(image.path)
+                            if fallback_path != image.path:
+                                stale_path = image.path
+                                image.path = fallback_path
+                                self._invalidate_current_thumbnail_after_path_repair(image, stale_path=stale_path)
+                                self._persist_repaired_selection_path(image.path)
+                            if qimage is None:
+                                raise pilimage.UnidentifiedImageError(
+                                    f"cannot identify image file '{image.path}'"
+                                )
 
                 pixmap = QPixmap.fromImage(qimage)
                 self._static_source_qimage = qimage
                 self._static_source_size = qimage.size()
                 self._static_mipmap_pixmaps = {1: pixmap}
                 self._static_current_mip_divisor = 1
+                self._schedule_deferred_extension_repair(image)
 
                 # Use standard pixmap item with SmoothTransformation
                 image_item = QGraphicsPixmapItem(pixmap)
@@ -3684,8 +3819,7 @@ class ImageViewer(QWidget):
             self.add_rectangle(image.crop, ImageMarking.CROP, interactive=False)
         else:
             # No crop - reset HUD state
-            if hasattr(self, 'hud_item'):
-                self.hud_item.clear_crop()
+            self._clear_hud_crop_if_alive()
             calculate_grid(MarkingItem.image_size)
         for marking in image.markings:
             self.add_rectangle(marking.rect, marking.type, interactive=False,
@@ -4161,8 +4295,7 @@ class ImageViewer(QWidget):
                 image.crop = None
                 image.target_dimension = None
                 # Reset HUD when crop is deleted
-                if hasattr(self, 'hud_item'):
-                    self.hud_item.clear_crop()
+                self._clear_hud_crop_if_alive()
                 self.accept_crop_addition.emit(True)
                 calculate_grid(MarkingItem.image_size)
                 self.proxy_image_list_model.sourceModel().dataChanged.emit(

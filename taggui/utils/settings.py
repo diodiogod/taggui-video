@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor
 DEFAULT_SETTINGS = {
     'font_size': 16,
     # Common image formats that are supported in PySide6, as well as JPEG XL and video formats.
-    'image_list_file_formats': 'bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp, mp4, avi, mov, mkv, webm',
+    'image_list_file_formats': 'avif, bmp, gif, jpg, jpeg, jxl, png, tif, tiff, webp, mp4, avi, mov, mkv, webm',
     'repair_extensionless_images': False,
     'image_list_image_width': 120,
     'tag_separator': ',',
@@ -101,6 +101,30 @@ class Settings(QSettings):
 
 # Common shared instance to ensure the Signal is also shared
 settings = Settings()
+
+
+def parse_image_list_formats(raw_value: str | None) -> list[str]:
+    """Parse configured media suffixes and inject runtime-supported defaults."""
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for suffix in str(raw_value or '').split(','):
+        normalized = suffix.strip().lower()
+        if not normalized:
+            continue
+        if not normalized.startswith('.'):
+            normalized = '.' + normalized
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        parsed.append(normalized)
+
+    # New runtime-supported still-image formats should be auto-added for
+    # existing installs whose saved setting predates support.
+    for required in ('.avif',):
+        if required not in seen:
+            seen.add(required)
+            parsed.append(required)
+    return parsed
 
 VIDEO_CONTROLS_VISIBILITY_ALWAYS = 'always'
 VIDEO_CONTROLS_VISIBILITY_AUTO = 'auto'

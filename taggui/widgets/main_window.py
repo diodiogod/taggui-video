@@ -5,7 +5,7 @@ import hashlib
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF, Signal
+from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QFileDialog, QMainWindow,
@@ -2811,6 +2811,264 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return None
+
+    def _iter_image_list_docks(self):
+        """Yield primary and secondary image-list docks that can own deletion marks."""
+        primary = getattr(self, 'image_list', None)
+        if primary is not None:
+            yield primary
+        secondary = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+        if secondary is not None:
+            yield secondary
+
+    def _get_marked_for_deletion_total(self) -> int:
+        """Return the combined deletion-mark count across visible browser docks."""
+        total = 0
+        for dock in self._iter_image_list_docks():
+            counter = getattr(dock, 'get_marked_for_deletion_count', None)
+            if not callable(counter):
+                continue
+            try:
+                total += int(counter() or 0)
+            except Exception:
+                continue
+        return total
+
+    def _resolve_delete_marked_target_dock(self):
+        """Return the browser dock that should own delete/unmark marked actions."""
+        primary = getattr(self, 'image_list', None)
+        secondary = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
+
+        primary_count = 0
+        secondary_count = 0
+        try:
+            if primary is not None:
+                primary_count = int(primary.get_marked_for_deletion_count() or 0)
+        except Exception:
+            primary_count = 0
+        try:
+            if secondary is not None:
+                secondary_count = int(secondary.get_marked_for_deletion_count() or 0)
+        except Exception:
+            secondary_count = 0
+
+        manager = getattr(self, '_context_switch_manager', None)
+        active_context = getattr(manager, 'active_context', 'primary') if manager is not None else 'primary'
+
+        if active_context == 'secondary' and secondary is not None and secondary_count > 0:
+            return secondary
+        if primary is not None and primary_count > 0:
+            return primary
+        if secondary is not None and secondary_count > 0:
+            return secondary
+        return primary
+
+    def unmark_all_marked_images_globally(self):
+        """Clear deletion marks across both browser docks."""
+        changed = False
+        for dock in self._iter_image_list_docks():
+            counter = getattr(dock, 'get_marked_for_deletion_count', None)
+            clearer = getattr(dock, 'unmark_all_images', None)
+            if not callable(counter) or not callable(clearer):
+                continue
+            try:
+                if int(counter() or 0) <= 0:
+                    continue
+            except Exception:
+                continue
+            clearer()
+            changed = True
+        if changed and hasattr(self, 'signal_manager'):
+            try:
+                self.signal_manager._update_delete_button_visibility()
+            except Exception:
+                pass
+
+    def delete_marked_images_globally(self, target_docks=None):
+        """Delete marked images across one or both browser docks with one confirmation."""
+        docks = []
+        candidates = target_docks if target_docks is not None else list(self._iter_image_list_docks())
+        for dock in candidates:
+            if dock is None or dock in docks:
+                continue
+            docks.append(dock)
+
+        dock_infos = []
+        total_marked = 0
+        for dock in docks:
+            collector = getattr(dock, 'collect_marked_for_deletion', None)
+            compute_focus = getattr(dock, 'compute_post_delete_focus_index', None)
+            if not callable(collector):
+                continue
+            try:
+                marked_images, marked_indices = collector()
+            except Exception:
+                continue
+            if not marked_images:
+                continue
+            total_marked += len(marked_images)
+            focus_index = compute_focus(marked_indices) if callable(compute_focus) else None
+            dock_infos.append({
+                'dock': dock,
+                'images': list(marked_images),
+                'focus_index': focus_index,
+            })
+
+        if total_marked <= 0:
+            return
+
+        title = f'Delete {pluralize("Image", total_marked)}'
+        question = (
+            f'Delete {total_marked} marked {pluralize("image", total_marked)} and '
+            f'{"its" if total_marked == 1 else "their"} {pluralize("caption", total_marked)}?'
+        )
+        reply = get_confirmation_dialog_reply(title, question)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        unique_images_by_path = {}
+        for info in dock_infos:
+            for image in info['images']:
+                try:
+                    unique_images_by_path.setdefault(Path(image.path), image)
+                except Exception:
+                    continue
+
+        if not unique_images_by_path:
+            return
+
+        video_was_cleaned = False
+        if hasattr(self, 'image_viewer') and hasattr(self.image_viewer, 'video_player'):
+            video_player = self.image_viewer.video_player
+            if video_player.video_path:
+                try:
+                    current_video_path = Path(video_player.video_path)
+                except Exception:
+                    current_video_path = None
+                if current_video_path is not None and current_video_path in unique_images_by_path:
+                    try:
+                        video_player.cleanup()
+                        video_was_cleaned = True
+                    except Exception:
+                        pass
+
+        for info in dock_infos:
+            for image in info['images']:
+                try:
+                    if bool(getattr(image, 'is_video', False)) and getattr(image, 'thumbnail', None):
+                        image.thumbnail = None
+                except Exception:
+                    continue
+
+        if video_was_cleaned:
+            QThread.msleep(100)
+            QApplication.processEvents()
+
+        deleted_paths = []
+        import gc
+        max_retries = 3
+        for path in list(unique_images_by_path.keys()):
+            success = False
+            for attempt in range(max_retries):
+                if attempt > 0:
+                    QThread.msleep(150)
+                    QApplication.processEvents()
+                    gc.collect()
+
+                image_file = QFile(str(path))
+                if image_file.moveToTrash():
+                    success = True
+                    break
+                if attempt == max_retries - 1:
+                    reply = QMessageBox.question(
+                        self,
+                        'Trash Failed',
+                        f'Could not move {path.name} to trash.\nDelete permanently?',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if reply == QMessageBox.Yes and image_file.remove():
+                        success = True
+
+            if not success:
+                QMessageBox.critical(self, 'Error', f'Failed to delete {path}.')
+                continue
+
+            caption_file_path = path.with_suffix('.txt')
+            if caption_file_path.exists():
+                caption_file = QFile(caption_file_path)
+                if not caption_file.moveToTrash():
+                    caption_file.remove()
+            deleted_paths.append(path)
+
+        if not deleted_paths:
+            return
+
+        deleted_path_set = set(deleted_paths)
+        for info in dock_infos:
+            dock = info['dock']
+            source_model = None
+            try:
+                source_model = dock.proxy_image_list_model.sourceModel()
+            except Exception:
+                source_model = None
+            dock_deleted_paths = []
+            for image in info['images']:
+                try:
+                    image_path = Path(image.path)
+                except Exception:
+                    continue
+                if image_path in deleted_path_set:
+                    dock_deleted_paths.append(image_path)
+            if not dock_deleted_paths:
+                continue
+
+            removed_count = 0
+            try:
+                if source_model is None:
+                    raise RuntimeError('missing source model')
+                removed_count = int(source_model.remove_generated_media_batch(dock_deleted_paths) or 0)
+            except Exception as e:
+                print(f"[DELETE] Warning: failed to clean model/DB index: {e}")
+                try:
+                    dock.directory_reload_requested.emit()
+                except Exception:
+                    pass
+                continue
+
+            if removed_count <= 0:
+                try:
+                    dock.directory_reload_requested.emit()
+                except Exception:
+                    pass
+                continue
+
+            for image in info['images']:
+                try:
+                    if Path(image.path) in deleted_path_set:
+                        image.marked_for_deletion = False
+                except Exception:
+                    continue
+            try:
+                dock.deletion_marking_changed.emit()
+            except Exception:
+                pass
+            try:
+                dock.list_view.viewport().update()
+            except Exception:
+                pass
+            focus_proxy_row = getattr(dock, 'focus_proxy_row', None)
+            if callable(focus_proxy_row):
+                try:
+                    focus_proxy_row(info.get('focus_index'))
+                except Exception:
+                    pass
+
+        if hasattr(self, 'signal_manager'):
+            try:
+                self.signal_manager._update_delete_button_visibility()
+            except Exception:
+                pass
 
     def _target_context_from_viewer(self, viewer: ImageViewer | None):
         """Resolve image/model/view context for one viewer."""
@@ -6757,6 +7015,9 @@ class MainWindow(QMainWindow):
         )
         self._secondary_browser.context_activated.connect(
             self._on_secondary_context_activated
+        )
+        self._secondary_browser.dock.deletion_marking_changed.connect(
+            self.signal_manager._update_delete_button_visibility
         )
         self._secondary_browser.dock.visibilityChanged.connect(
             self._on_secondary_browser_visibility_changed

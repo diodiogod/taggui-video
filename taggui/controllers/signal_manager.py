@@ -517,9 +517,19 @@ class SignalManager:
 
     def _update_delete_button_visibility(self):
         """Show/hide delete marked menu based on whether any images are marked."""
-        if hasattr(self.main_window, 'image_list') and hasattr(self.main_window, 'menu_manager'):
+        if not hasattr(self.main_window, 'menu_manager'):
+            return
+        resolver = getattr(self.main_window, '_get_marked_for_deletion_total', None)
+        if callable(resolver):
+            try:
+                count = int(resolver() or 0)
+            except Exception:
+                count = 0
+        elif hasattr(self.main_window, 'image_list'):
             count = self.main_window.image_list.get_marked_for_deletion_count()
-            self.main_window.menu_manager.update_delete_marked_menu(count)
+        else:
+            count = 0
+        self.main_window.menu_manager.update_delete_marked_menu(count)
 
     def _update_tag_counts(self):
         """Update tag counts based on current model mode (paginated (DB) vs normal)."""

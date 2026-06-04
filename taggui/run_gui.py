@@ -35,6 +35,12 @@ except Exception:
     pass
 
 try:
+    from utils.pillow_plugins import ensure_pillow_plugins_registered
+    ensure_pillow_plugins_registered()
+except Exception:
+    pass
+
+try:
     import transformers
     from PySide6.QtGui import QImageReader, QSurfaceFormat
     from PySide6.QtWidgets import QApplication, QMessageBox

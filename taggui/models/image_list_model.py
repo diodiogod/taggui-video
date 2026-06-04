@@ -1,5 +1,8 @@
 import random
 import re
+import hashlib
+import shutil
+import subprocess
 import sys
 import time
 import multiprocessing
@@ -18,7 +21,6 @@ from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
                             QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG, QTimer)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication
-import pillow_jxl
 from PIL import Image as pilimage  # Import Pillow's Image class
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import threading
@@ -39,10 +41,13 @@ from utils.review_marks import (
     serialize_review_flags,
 )
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
-from utils.settings import DEFAULT_SETTINGS, settings
+from utils.pillow_plugins import ensure_pillow_plugins_registered
+from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
 from utils.thumbnail_cache import get_thumbnail_cache
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
+
+ensure_pillow_plugins_registered()
 
 UNDO_STACK_SIZE = 32
 
@@ -52,6 +57,8 @@ _video_lock = threading.Lock()
 _thumbnail_save_lock = threading.Lock()
 _extensionless_repair_log_lock = threading.Lock()
 _extensionless_repair_log_counts: dict[str, int] = {}
+_mismatched_repair_lock = threading.Lock()
+_mismatched_repair_blocked_cache: dict[str, dict[str, float | int | str]] = {}
 MARKING_CONFIDENCE_PATTERN = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
 
 # Custom event for background load completion
@@ -85,9 +92,271 @@ def pil_to_qimage(pil_image):
     qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
     return qimage
 
+
+def cv2_to_qimage(image_array) -> QImage | None:
+    """Convert an OpenCV image array to a detached QImage."""
+    if image_array is None:
+        return None
+    try:
+        if len(image_array.shape) == 2:
+            height, width = image_array.shape
+            bytes_per_line = width
+            qimage = QImage(
+                image_array.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format_Grayscale8,
+            )
+            return qimage.copy()
+
+        height, width, channels = image_array.shape
+        if channels == 3:
+            rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+            bytes_per_line = 3 * width
+            qimage = QImage(
+                rgb.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format_RGB888,
+            )
+            return qimage.copy()
+
+        if channels == 4:
+            rgba = cv2.cvtColor(image_array, cv2.COLOR_BGRA2RGBA)
+            bytes_per_line = 4 * width
+            qimage = QImage(
+                rgba.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format_RGBA8888,
+            )
+            return qimage.copy()
+    except Exception:
+        return None
+    return None
+
+
+def _unique_converted_image_path(path: Path, suffix: str) -> Path:
+    """Return a unique sibling path for one converted fallback image."""
+    candidate = path.with_suffix(str(suffix))
+    if candidate == path:
+        candidate = path.with_name(f"{path.stem}_converted{suffix}")
+    if not candidate.exists():
+        return candidate
+
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}_converted_{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _repair_media_cache_dir(path: Path) -> Path:
+    """Return one scanner-ignored cache directory for repaired/converted media."""
+    return ImageIndexDB.db_dir_path(path.parent) / 'repaired_media'
+
+
+def _cached_repair_basename(path: Path) -> str:
+    """Build a stable cache basename for one original file path."""
+    digest = hashlib.sha1(str(path).encode('utf-8', errors='ignore')).hexdigest()[:12]
+    return f"{path.stem}__{digest}"
+
+
+def _cached_repair_target_path(path: Path, suffix: str) -> Path:
+    """Return a stable repaired-media cache path under `.taggui`."""
+    cache_dir = _repair_media_cache_dir(path)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return cache_dir / f"{_cached_repair_basename(path)}{suffix}"
+
+
+def _cache_repaired_candidate(path: Path, candidate: Path) -> Path:
+    """Copy one legacy repaired sibling into the internal cache and return the cached path."""
+    cached_target = _cached_repair_target_path(path, candidate.suffix)
+    if cached_target == candidate:
+        return candidate
+    try:
+        if cached_target.exists():
+            detected = _detect_image_suffix_from_header(cached_target)
+            if str(detected or '').lower() == str(candidate.suffix).lower():
+                return cached_target
+        shutil.copy2(candidate, cached_target)
+        return cached_target
+    except OSError:
+        return candidate
+
+
+def _repaired_variant_sort_key(path: Path) -> tuple[float, int]:
+    """Order repaired siblings by freshness, then by numeric suffix when present."""
+    mtime = 0.0
+    try:
+        mtime = float(path.stat().st_mtime)
+    except OSError:
+        pass
+    match = re.search(r'_(\d+)$', path.stem)
+    suffix_num = int(match.group(1)) if match else 0
+    return (mtime, suffix_num)
+
+
+def _iter_repaired_sibling_candidates(path: Path, suffixes: tuple[str, ...]):
+    """Yield sibling files created from one original path by repair/conversion flows."""
+    suffixes = tuple(str(sfx).lower() for sfx in suffixes)
+    stem = path.stem
+    for candidate in path.parent.iterdir():
+        try:
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        if str(candidate.suffix).lower() not in suffixes:
+            continue
+        candidate_stem = candidate.stem
+        if candidate_stem == stem or candidate_stem.startswith(f"{stem}_"):
+            yield candidate
+
+
+def _find_existing_repaired_sibling(path: Path, suffixes: tuple[str, ...]) -> Path | None:
+    """Return the newest valid repaired sibling matching one of the requested suffixes."""
+    candidates = []
+    for suffix in suffixes:
+        cached_candidate = _cached_repair_target_path(path, suffix)
+        if cached_candidate.exists():
+            candidates.append(cached_candidate)
+    candidates.extend(
+        list(_iter_repaired_sibling_candidates(path, suffixes))
+    )
+    candidates = sorted(
+        candidates,
+        key=_repaired_variant_sort_key,
+        reverse=True,
+    )
+    for candidate in candidates:
+        detected = _detect_image_suffix_from_header(candidate)
+        if detected is None:
+            continue
+        if str(candidate.suffix).lower() == str(detected).lower():
+            return _cache_repaired_candidate(path, candidate)
+    return None
+
+
+def _is_legacy_repair_artifact(path: Path) -> bool:
+    """Return True when a sibling file matches the app's old repair naming scheme."""
+    suffix = str(path.suffix).lower()
+    if not suffix:
+        return False
+
+    numbered_match = re.match(r'^(?P<base>.+)_(?P<num>\d+)$', path.stem)
+    copy_match = re.match(r'^(?P<base>.+)_copy(?P<num>\d+)?$', path.stem, re.IGNORECASE)
+
+    base_stem = None
+    if copy_match:
+        base_stem = copy_match.group('base')
+    elif numbered_match:
+        base_stem = numbered_match.group('base')
+    else:
+        return False
+
+    # Legacy numbered/copy siblings from the old repair flow.
+    for original in path.parent.glob(f"{base_stem}.*"):
+        if original == path:
+            continue
+        try:
+            if not original.is_file():
+                continue
+        except OSError:
+            continue
+        detected = _detect_image_suffix_from_header(original)
+        original_suffix = str(original.suffix).lower()
+        if detected is None or original_suffix == str(detected).lower():
+            continue
+        if suffix == '.png' or suffix == str(detected).lower():
+            return True
+    return False
+
+
+def convert_image_with_ffmpeg(path: Path) -> Path:
+    """Convert one unsupported still image to PNG as a last-resort fallback."""
+    existing_png = _find_existing_repaired_sibling(path, ('.png',))
+    if existing_png is not None:
+        print(f"[REPAIR] Reusing existing ffmpeg fallback image: {path.name} -> {existing_png.name}")
+        return existing_png
+
+    target_path = _cached_repair_target_path(path, '.png')
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-i',
+        str(path),
+        str(target_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"[REPAIR] ffmpeg conversion failed for {path}: {e}")
+        return path
+
+    if result.returncode != 0 or not target_path.exists():
+        stderr_tail = (result.stderr or '').strip().splitlines()
+        stderr_tail = stderr_tail[-3:] if stderr_tail else []
+        print(
+            f"[REPAIR] ffmpeg could not convert {path.name}: "
+            f"{' | '.join(stderr_tail) if stderr_tail else f'exit {result.returncode}'}"
+        )
+        return path
+
+    print(f"[REPAIR] Converted unsupported image via ffmpeg: {path.name} -> {target_path.name}")
+    return target_path
+
+
+def fallback_decode_qimage(path: Path) -> tuple[QImage | None, tuple[int, int] | None, Path]:
+    """Decode one still image through secondary libraries when Qt fails."""
+    if not path.exists():
+        sibling_suffixes = (
+            '.avif', '.png', '.jpg', '.jpeg', '.webp', '.jxl',
+            '.heic', '.heif', '.bmp', '.gif', '.tif', '.tiff',
+        )
+        repaired_path = _find_existing_repaired_sibling(path, sibling_suffixes)
+        if repaired_path is not None and repaired_path.exists():
+            path = repaired_path
+
+    try:
+        with pilimage.open(path) as pil_image:
+            pil_image.load()
+            return pil_to_qimage(pil_image), pil_image.size, path
+    except Exception:
+        pass
+
+    try:
+        image_array = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        qimage = cv2_to_qimage(image_array)
+        if qimage is not None and not qimage.isNull():
+            return qimage, (qimage.width(), qimage.height()), path
+    except Exception:
+        pass
+
+    converted_path = convert_image_with_ffmpeg(path)
+    if converted_path != path:
+        qimage = QImage(str(converted_path))
+        if qimage is not None and not qimage.isNull():
+            return qimage, (qimage.width(), qimage.height()), converted_path
+
+    return None, None, path
+
 def load_thumbnail_data(
     image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool
-) -> tuple[QImage | None, bool, tuple[int, int] | None]:
+) -> tuple[QImage | None, bool, tuple[int, int] | None, Path]:
     """
     Load thumbnail data (can run in background thread - uses QImage which IS thread-safe).
 
@@ -98,8 +367,8 @@ def load_thumbnail_data(
         is_video: Whether this is a video file
 
     Returns:
-        (qimage, was_cached, original_size): QImage, cache-hit flag,
-        and original dimensions when available.
+        (qimage, was_cached, original_size, resolved_path): QImage, cache-hit
+        flag, original dimensions when available, and the final file path used.
     """
     from utils.thumbnail_cache import get_thumbnail_cache
 
@@ -117,12 +386,13 @@ def load_thumbnail_data(
                 # Load directly as QImage (thread-safe, no QIcon/QPixmap needed)
                 cached_qimage = QImage(str(cache_path))
             if cached_qimage is not None and not cached_qimage.isNull():
-                return (cached_qimage, True, None)  # Cache hit! (No original dims from cache)
+                return (cached_qimage, True, None, image_path)  # Cache hit! (No original dims from cache)
     except Exception:
         pass  # Cache check failed, fall through to generation
 
     # Generate new thumbnail using QImage (thread-safe for creation)
     original_size = None
+    resolved_path = image_path
     try:
         if is_video:
             # For videos, extract first frame as thumbnail (returns QImage, thread-safe)
@@ -137,9 +407,10 @@ def load_thumbnail_data(
                 qimage = QImage(thumbnail_width, thumbnail_width, QImage.Format_RGB888)
                 qimage.fill(Qt.gray)
         elif image_path.suffix.lower() == ".jxl":
-            pil_image = pilimage.open(image_path)  # Uses pillow-jxl
-            original_size = pil_image.size
-            qimage = pil_to_qimage(pil_image)
+            with pilimage.open(image_path) as pil_image:  # Uses pillow-jxl
+                pil_image.load()
+                original_size = pil_image.size
+                qimage = pil_to_qimage(pil_image)
             if not crop:
                 crop = QRect(QPoint(0, 0), qimage.size())
             if crop.height() > crop.width()*3:
@@ -151,7 +422,7 @@ def load_thumbnail_data(
                 thumbnail_width,
                 Qt.TransformationMode.SmoothTransformation)
         else:
-            image_reader = QImageReader(str(image_path))
+            image_reader = QImageReader(str(resolved_path))
             # Rotate the image based on the orientation tag.
             image_reader.setAutoTransform(True)
             original_size = tuple(image_reader.size().toTuple())
@@ -165,19 +436,44 @@ def load_thumbnail_data(
             # Read as QImage (thread-safe)
             qimage = image_reader.read()
             if qimage.isNull():
-                raise Exception("Failed to read image")
+                qimage, fallback_size, fallback_path = fallback_decode_qimage(resolved_path)
+                if qimage is not None and not qimage.isNull():
+                    resolved_path = fallback_path
+                    original_size = fallback_size
+                    if crop:
+                        safe_crop = crop.intersected(QRect(QPoint(0, 0), qimage.size()))
+                        if safe_crop.isValid() and not safe_crop.isEmpty():
+                            qimage = qimage.copy(safe_crop)
+                else:
+                    repaired_path = repair_mismatched_image_extension_path(resolved_path)
+                    if repaired_path != resolved_path:
+                        resolved_path = repaired_path
+                        image_reader = QImageReader(str(resolved_path))
+                        image_reader.setAutoTransform(True)
+                        original_size = tuple(image_reader.size().toTuple())
+                        if not crop:
+                            crop = QRect(QPoint(0, 0), image_reader.size())
+                        image_reader.setClipRect(crop)
+                        qimage = image_reader.read()
+                    if qimage.isNull():
+                        qimage, fallback_size, fallback_path = fallback_decode_qimage(resolved_path)
+                        if qimage is None or qimage.isNull():
+                            raise Exception("Failed to read image")
+                        resolved_path = fallback_path
+                        original_size = fallback_size
+                        if crop:
+                            safe_crop = crop.intersected(QRect(QPoint(0, 0), qimage.size()))
+                            if safe_crop.isValid() and not safe_crop.isEmpty():
+                                qimage = qimage.copy(safe_crop)
             qimage = qimage.scaledToWidth(
                 thumbnail_width,
                 Qt.TransformationMode.SmoothTransformation)
 
         # Return QImage - caller will convert to QPixmap/QIcon on main thread
-        return qimage, False, original_size
+        return qimage, False, original_size, resolved_path
     except Exception as e:
-        print(f"Error loading image/video {image_path}: {e}")
-        # Return a placeholder QImage
-        qimage = QImage(thumbnail_width, thumbnail_width, QImage.Format_RGB888)
-        qimage.fill(Qt.gray)
-        return qimage, False, None
+        print(f"Error loading image/video {resolved_path}: {e}")
+        return None, False, None, resolved_path
 
 
 def natural_sort_key(path: Path):
@@ -211,6 +507,8 @@ def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
             continue
         # Accept regular files or symlinks (for organized workflows and test datasets)
         if path.is_file() or path.is_symlink():
+            if _is_legacy_repair_artifact(path):
+                continue
             file_paths.add(path)
             count += 1
             if progress_callback and count % 20000 == 0:
@@ -307,14 +605,11 @@ def _should_skip_internal_dir_name(name: str) -> bool:
     return str(name) in ImageIndexDB.INTERNAL_DIR_NAMES
 
 
-def _detect_extensionless_image_suffix(path: Path) -> str | None:
-    """Detect common image formats for files that have no suffix."""
-    if path.suffix:
-        return None
-
+def _detect_image_suffix_from_header(path: Path) -> str | None:
+    """Detect common image formats directly from the file header."""
     try:
         with path.open('rb') as file:
-            header = file.read(32)
+            header = file.read(64)
     except OSError:
         return None
 
@@ -330,11 +625,20 @@ def _detect_extensionless_image_suffix(path: Path) -> str | None:
         return '.tif'
     if len(header) >= 12 and header.startswith(b'RIFF') and header[8:12] == b'WEBP':
         return '.webp'
+    if len(header) >= 12 and header[4:12] in (b'ftypavif', b'ftypavis'):
+        return '.avif'
     if header.startswith(b'\xff\x0a') or (
         len(header) >= 12 and header[4:12] == b'JXL \r\n\x87\n'
     ):
         return '.jxl'
     return None
+
+
+def _detect_extensionless_image_suffix(path: Path) -> str | None:
+    """Detect common image formats for files that have no suffix."""
+    if path.suffix:
+        return None
+    return _detect_image_suffix_from_header(path)
 
 
 def _extensionless_repair_cache_path(directory_path: Path) -> Path:
@@ -417,6 +721,22 @@ def _unique_detected_image_path(path: Path, suffix: str) -> Path:
     counter = 2
     while True:
         candidate = path.with_name(f"{path.name}_{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _unique_repaired_image_path(path: Path, suffix: str) -> Path:
+    """Return a unique renamed path that uses the detected suffix."""
+    candidate = path.with_suffix(str(suffix))
+    if candidate == path:
+        return path
+    if not candidate.exists():
+        return candidate
+
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}_{counter}{suffix}")
         if not candidate.exists():
             return candidate
         counter += 1
@@ -511,6 +831,90 @@ def repair_extensionless_image_path(
         return path
 
 
+def repair_mismatched_image_extension_path(path: Path, *, allow_cached_copy: bool = True) -> Path:
+    """Rename a file whose contents reveal a different image suffix."""
+    try:
+        stat_result = path.stat()
+    except OSError:
+        stat_result = None
+
+    detected_suffix = _detect_image_suffix_from_header(path)
+    if detected_suffix is None:
+        return path
+    if str(path.suffix).lower() == str(detected_suffix).lower():
+        return path
+
+    cache_key = str(path)
+    if stat_result is not None:
+        with _mismatched_repair_lock:
+            blocked_entry = _mismatched_repair_blocked_cache.get(cache_key)
+            if blocked_entry is not None:
+                try:
+                    same_size = int(blocked_entry.get('size', -1)) == int(getattr(stat_result, 'st_size'))
+                    same_mtime = float(blocked_entry.get('mtime', -1.0)) == float(getattr(stat_result, 'st_mtime'))
+                    same_suffix = str(blocked_entry.get('suffix', '')) == str(detected_suffix)
+                    if same_size and same_mtime and same_suffix:
+                        return path
+                except (TypeError, ValueError):
+                    pass
+
+    existing_repaired = _find_existing_repaired_sibling(path, (detected_suffix,))
+    if existing_repaired is not None:
+        print(
+            f"[REPAIR] Reusing existing repaired image extension: "
+            f"{path.name} -> {existing_repaired.name}"
+        )
+        return existing_repaired
+
+    repaired_path = _unique_repaired_image_path(path, detected_suffix)
+    try:
+        path.rename(repaired_path)
+        with _mismatched_repair_lock:
+            _mismatched_repair_blocked_cache.pop(cache_key, None)
+        print(f"[REPAIR] Renamed mismatched image extension: {path.name} -> {repaired_path.name}")
+        return repaired_path
+    except OSError as e:
+        if stat_result is not None:
+            with _mismatched_repair_lock:
+                _mismatched_repair_blocked_cache[cache_key] = {
+                    'size': int(getattr(stat_result, 'st_size')),
+                    'mtime': float(getattr(stat_result, 'st_mtime')),
+                    'suffix': str(detected_suffix),
+                }
+        try:
+            if repaired_path.exists():
+                detected_repaired_suffix = _detect_image_suffix_from_header(repaired_path)
+                if str(detected_repaired_suffix or '').lower() == str(detected_suffix).lower():
+                    print(
+                        f"[REPAIR] Using existing repaired image extension: "
+                        f"{path.name} -> {repaired_path.name}"
+                    )
+                    return repaired_path
+        except OSError:
+            pass
+
+        if not allow_cached_copy:
+            print(
+                f"[REPAIR] Rename blocked for mismatched image extension {path}: {e}"
+            )
+            return path
+
+        try:
+            cached_repaired_path = _cached_repair_target_path(path, detected_suffix)
+            shutil.copy2(path, cached_repaired_path)
+            print(
+                f"[REPAIR] Copied locked mismatched image extension to cache: "
+                f"{path.name} -> {cached_repaired_path.name}"
+            )
+            return cached_repaired_path
+        except OSError as copy_error:
+            print(
+                f"[REPAIR] Failed to repair mismatched image extension {path}: "
+                f"rename={e}; copy={copy_error}"
+            )
+            return path
+
+
 def _path_is_within_subtree(rel_path: str, subtree_rel: str) -> bool:
     """Return True when rel_path belongs to subtree_rel (or subtree_rel is root)."""
     rel_path = _normalize_relative_path(rel_path)
@@ -592,6 +996,8 @@ def scan_directory_snapshot(
                                 stat_result=entry_stat,
                                 repair_cache=extensionless_repair_cache,
                             )
+                        if _is_legacy_repair_artifact(file_path):
+                            continue
                         file_paths.add(file_path)
                         file_count += 1
                         if progress_callback and file_count % 20000 == 0:
@@ -746,6 +1152,8 @@ def scan_image_paths_in_subtrees(
 
                     suffix = file_path.suffix.lower()
                     if suffix not in image_suffixes:
+                        continue
+                    if _is_legacy_repair_artifact(file_path):
                         continue
 
                     image_rel_paths.add(_relative_child_path(rel_dir, file_path.name))
@@ -3060,14 +3468,7 @@ class ImageListModel(QAbstractListModel):
                 defaultValue=DEFAULT_SETTINGS['image_list_file_formats'],
                 type=str,
             )
-            image_suffixes: set[str] = set()
-            for suffix in image_suffixes_string.split(','):
-                suffix = suffix.strip().lower()
-                if not suffix:
-                    continue
-                if not suffix.startswith('.'):
-                    suffix = '.' + suffix
-                image_suffixes.add(suffix)
+            image_suffixes: set[str] = set(parse_image_list_formats(image_suffixes_string))
             repair_extensionless_images = settings.value(
                 'repair_extensionless_images',
                 defaultValue=DEFAULT_SETTINGS['repair_extensionless_images'],
@@ -3961,12 +4362,14 @@ class ImageListModel(QAbstractListModel):
             return
         try:
             # Load QImage in background thread (thread-safe, I/O bound)
-            qimage, was_cached, _ = load_thumbnail_data(path, crop, width, is_video)
+            qimage, was_cached, _, resolved_path = load_thumbnail_data(path, crop, width, is_video)
 
             if qimage and not qimage.isNull():
                 # Find image by PATH, not by idx (array may have been sorted!)
                 for img in self.images:
                     if img.path == path:
+                        if resolved_path != path:
+                            img.path = resolved_path
                         img.thumbnail_qimage = qimage
                         img._last_thumbnail_was_cached = was_cached
                         break
@@ -4190,7 +4593,7 @@ class ImageListModel(QAbstractListModel):
     def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
         """Load thumbnail in background thread, then notify UI."""
         try:
-            qimage, was_cached, original_size = load_thumbnail_data(
+            qimage, was_cached, original_size, _resolved_path = load_thumbnail_data(
                 path, crop, self.thumbnail_generation_width, is_video
             )
             
@@ -4459,11 +4862,13 @@ class ImageListModel(QAbstractListModel):
             if not self._paginated_mode and not image.is_video:
                 # Normal mode for images: Load synchronously (enables preloading to work)
                 try:
-                    qimage, was_cached, _ = load_thumbnail_data(
+                    qimage, was_cached, _, resolved_path = load_thumbnail_data(
                         image.path, image.crop, self.thumbnail_generation_width, image.is_video
                     )
 
                     if qimage and not qimage.isNull():
+                        if resolved_path != image.path:
+                            image.path = resolved_path
                         pixmap = QPixmap.fromImage(qimage)
                         thumbnail = QIcon(pixmap)
                         image.thumbnail = thumbnail
@@ -5299,12 +5704,7 @@ class ImageListModel(QAbstractListModel):
         image_suffixes_string = settings.value(
             'image_list_file_formats',
             defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-        image_suffixes = []
-        for suffix in image_suffixes_string.split(','):
-            suffix = suffix.strip().lower()
-            if not suffix.startswith('.'):
-                suffix = '.' + suffix
-            image_suffixes.append(suffix)
+        image_suffixes = parse_image_list_formats(image_suffixes_string)
         repair_extensionless_images = settings.value(
             'repair_extensionless_images',
             defaultValue=DEFAULT_SETTINGS['repair_extensionless_images'],

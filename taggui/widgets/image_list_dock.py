@@ -1591,142 +1591,51 @@ class ImageList(QDockWidget):
         # Emit signal to update delete button visibility
         self.deletion_marking_changed.emit()
 
-    @Slot()
-    def delete_marked_images(self):
-        """Delete all images marked for deletion."""
-        source_model = self.proxy_image_list_model.sourceModel()
+    def collect_marked_for_deletion(self):
+        """Return marked images with their current proxy rows."""
         marked_images = []
         marked_indices = []
-
-        # Collect all marked images and their proxy indices
         for row in range(self.proxy_image_list_model.rowCount()):
             proxy_index = self.proxy_image_list_model.index(row, 0)
             image = self.proxy_image_list_model.data(proxy_index, Qt.ItemDataRole.UserRole)
             if image and hasattr(image, 'marked_for_deletion') and image.marked_for_deletion:
                 marked_images.append(image)
                 marked_indices.append(row)
+        return marked_images, marked_indices
 
-        if not marked_images:
+    def compute_post_delete_focus_index(self, marked_indices):
+        """Choose the proxy row to focus after marked images are removed."""
+        if not marked_indices:
+            return None
+        max_marked_row = marked_indices[-1]
+        total_rows = self.proxy_image_list_model.rowCount()
+        next_index = max_marked_row + 1 - len(marked_indices)
+        if next_index >= total_rows - len(marked_indices):
+            next_index = max(0, marked_indices[0] - 1)
+        return next_index
+
+    def focus_proxy_row(self, target_row):
+        """Restore selection and scroll to one proxy row when possible."""
+        if target_row is None:
             return
-
-        marked_count = len(marked_images)
-        title = f'Delete {pluralize("Image", marked_count)}'
-        question = (f'Delete {marked_count} marked '
-                    f'{pluralize("image", marked_count)} and '
-                    f'{"its" if marked_count == 1 else "their"} '
-                    f'{pluralize("caption", marked_count)}?')
-        reply = get_confirmation_dialog_reply(title, question)
-        if reply != QMessageBox.StandardButton.Yes:
+        row_count = self.proxy_image_list_model.rowCount()
+        if row_count <= 0:
             return
-
-        # Calculate the index to focus after deletion
-        if marked_indices:
-            max_marked_row = marked_indices[-1]
-            total_rows = self.proxy_image_list_model.rowCount()
-            # Set next index: use the row after the last deleted one, or the one before if it's the last
-            next_index = max_marked_row + 1 - len(marked_indices)
-            if next_index >= total_rows - len(marked_indices):
-                # If we're deleting at the end, focus on the image before the first deleted one
-                next_index = max(0, marked_indices[0] - 1)
-            # Store in main window for use after reload
-            main_window = self.parent()
-            main_window.post_deletion_index = next_index
-
-        # Similar cleanup logic as delete_selected_images
-        main_window = self.parent()
-        video_was_cleaned = False
-        if hasattr(main_window, 'image_viewer') and hasattr(main_window.image_viewer, 'video_player'):
-            video_player = main_window.image_viewer.video_player
-            if video_player.video_path:
-                currently_loaded_path = Path(video_player.video_path)
-                for image in marked_images:
-                    if image.path == currently_loaded_path:
-                        video_player.cleanup()
-                        video_was_cleaned = True
-                        break
-
-        # Clear thumbnails
-        for image in marked_images:
-            if hasattr(image, 'is_video') and image.is_video and image.thumbnail:
-                image.thumbnail = None
-
-        if video_was_cleaned:
-            from PySide6.QtCore import QThread
-            QThread.msleep(100)
-            QApplication.processEvents()
-
-        # Delete files with retries
-        import gc
-        max_retries = 3
-        deleted_paths = []
-        for image in marked_images:
-            success = False
-            for attempt in range(max_retries):
-                if attempt > 0:
-                    QThread.msleep(150)
-                    QApplication.processEvents()
-                    gc.collect()
-
-                image_file = QFile(str(image.path))
-                if image_file.moveToTrash():
-                    success = True
-                    break
-                elif attempt == max_retries - 1:
-                    reply = QMessageBox.question(
-                        self, 'Trash Failed',
-                        f'Could not move {image.path.name} to trash.\nDelete permanently?',
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No
-                    )
-                    if reply == QMessageBox.Yes:
-                        if image_file.remove():
-                            success = True
-
-            if not success:
-                QMessageBox.critical(self, 'Error', f'Failed to delete {image.path}.')
-                continue
-
-            # Delete caption file
-            caption_file_path = image.path.with_suffix('.txt')
-            if caption_file_path.exists():
-                caption_file = QFile(caption_file_path)
-                if not caption_file.moveToTrash():
-                    caption_file.remove()
-            deleted_paths.append(image.path)
-
-        if not deleted_paths:
+        clamped_row = min(int(target_row), max(0, row_count - 1))
+        proxy_index = self.proxy_image_list_model.index(clamped_row, 0)
+        if not proxy_index.isValid():
             return
-
-        removed_count = 0
+        self.list_view.setCurrentIndex(proxy_index)
         try:
-            removed_count = int(source_model.remove_generated_media_batch(deleted_paths) or 0)
-        except Exception as e:
-            print(f"[DELETE] Warning: failed to clean model/DB index: {e}")
-            self.directory_reload_requested.emit()
-            return
+            self.list_view.scrollTo(proxy_index)
+        except Exception:
+            pass
 
-        if removed_count <= 0:
-            self.directory_reload_requested.emit()
-            return
-
-        # Clear deletion marks from any remaining items and refresh the overlay state.
-        for image in marked_images:
-            try:
-                image.marked_for_deletion = False
-            except Exception:
-                pass
-        self.deletion_marking_changed.emit()
-        self.list_view.viewport().update()
-
-        if marked_indices:
-            target_row = min(next_index, max(0, self.proxy_image_list_model.rowCount() - 1))
-            if self.proxy_image_list_model.rowCount() > 0:
-                proxy_index = self.proxy_image_list_model.index(target_row, 0)
-                if proxy_index.isValid():
-                    self.list_view.setCurrentIndex(proxy_index)
-                    try:
-                        self.list_view.scrollTo(proxy_index)
-                    except Exception:
-                        pass
+    @Slot()
+    def delete_marked_images(self):
+        """Delete all images marked for deletion."""
+        main_window = self.parent()
+        if main_window is not None and hasattr(main_window, 'delete_marked_images_globally'):
+            main_window.delete_marked_images_globally([self])
 
 __all__ = ["ImageList"]

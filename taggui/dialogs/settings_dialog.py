@@ -14,6 +14,7 @@ from utils.settings import (
     DEFAULT_SETTINGS,
     THUMBNAIL_BADGE_STYLE_OPTIONS,
     THUMBNAIL_STAR_BADGE_STYLE_OPTIONS,
+    parse_image_list_formats,
     get_thumbnail_reaction_badge_style_spec,
     get_thumbnail_review_badge_style_spec,
     get_thumbnail_star_badge_style_spec,
@@ -2002,12 +2003,7 @@ class SettingsDialog(QDialog):
                     image_suffixes_string = settings.value(
                         'image_list_file_formats',
                         defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-                    image_suffixes = []
-                    for suffix in image_suffixes_string.split(','):
-                        suffix = suffix.strip().lower()
-                        if not suffix.startswith('.'):
-                            suffix = '.' + suffix
-                        image_suffixes.append(suffix)
+                    image_suffixes = parse_image_list_formats(image_suffixes_string)
 
                     file_paths = get_file_paths(current_dir)
                     image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
@@ -2392,12 +2388,7 @@ class SettingsDialog(QDialog):
                 image_suffixes_string = settings.value(
                     'image_list_file_formats',
                     defaultValue=DEFAULT_SETTINGS['image_list_file_formats'], type=str)
-                image_suffixes = []
-                for suffix in image_suffixes_string.split(','):
-                    suffix = suffix.strip().lower()
-                    if not suffix.startswith('.'):
-                        suffix = '.' + suffix
-                    image_suffixes.append(suffix)
+                image_suffixes = parse_image_list_formats(image_suffixes_string)
 
                 file_paths = get_file_paths(current_dir)
                 image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]

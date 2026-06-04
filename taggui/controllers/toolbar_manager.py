@@ -873,10 +873,12 @@ class ToolbarManager:
 
     def _delete_all_marked(self):
         """Delete all marked images."""
-        if hasattr(self.main_window, 'image_list'):
-            self.main_window.image_list.delete_marked_images()
+        handler = getattr(self.main_window, 'delete_marked_images_globally', None)
+        if callable(handler):
+            handler()
 
     def _unmark_all_images(self):
         """Unmark all images marked for deletion."""
-        if hasattr(self.main_window, 'image_list'):
-            self.main_window.image_list.unmark_all_images()
+        handler = getattr(self.main_window, 'unmark_all_marked_images_globally', None)
+        if callable(handler):
+            handler()

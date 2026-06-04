@@ -3735,6 +3735,92 @@ class ImageIndexDB:
             except sqlite3.Error as e:
                 print(f'Database image dimension write error: {e}')
 
+    def rename_image_path(self, old_file_name: str, new_file_name: str, *, directory_path: Path | None = None) -> bool:
+        """Rename one indexed image path in-place after an on-disk file rename."""
+        if not self.enabled or not self.conn:
+            return False
+        if not old_file_name or not new_file_name or old_file_name == new_file_name:
+            return False
+
+        base_dir = directory_path or self._directory_path
+        normalized_old = str(old_file_name)
+        normalized_new = str(new_file_name)
+        full_new_path = None
+        try:
+            old_candidate = Path(normalized_old)
+            if old_candidate.is_absolute():
+                normalized_old = str(old_candidate.relative_to(base_dir))
+        except Exception:
+            normalized_old = str(old_file_name)
+        try:
+            new_candidate = Path(normalized_new)
+            if new_candidate.is_absolute():
+                full_new_path = new_candidate
+                normalized_new = str(new_candidate.relative_to(base_dir))
+            else:
+                full_new_path = base_dir / new_candidate
+        except Exception:
+            normalized_new = str(new_file_name)
+            try:
+                full_new_path = base_dir / normalized_new
+            except Exception:
+                full_new_path = None
+
+        file_size = None
+        mtime = None
+        ctime = None
+        file_type = None
+        if full_new_path is not None:
+            try:
+                stat = full_new_path.stat()
+                file_size = int(stat.st_size)
+                mtime = float(stat.st_mtime)
+                ctime = float(stat.st_ctime)
+                file_type = str(full_new_path.suffix).lower().lstrip('.')
+            except Exception:
+                pass
+
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT id FROM images WHERE file_name = ?', (normalized_old,))
+                row = cursor.fetchone()
+                if not row:
+                    return False
+
+                cursor.execute(
+                    '''
+                    UPDATE images
+                    SET file_name = ?,
+                        mtime = COALESCE(?, mtime),
+                        ctime = COALESCE(?, ctime),
+                        file_size = COALESCE(?, file_size),
+                        file_type = COALESCE(?, file_type)
+                    WHERE file_name = ?
+                    ''',
+                    (
+                        normalized_new,
+                        mtime,
+                        ctime,
+                        file_size,
+                        file_type,
+                        normalized_old,
+                    ),
+                )
+                self.conn.commit()
+                return bool(cursor.rowcount)
+            except sqlite3.IntegrityError:
+                try:
+                    cursor = self.conn.cursor()
+                    cursor.execute('DELETE FROM images WHERE file_name = ?', (normalized_old,))
+                    self.conn.commit()
+                except Exception:
+                    pass
+                return False
+            except sqlite3.Error as e:
+                print(f'Database image rename error: {e}')
+                return False
+
     # ========== Image ID Lookup ==========
 
     def get_image_id(self, file_name: str) -> Optional[int]:
