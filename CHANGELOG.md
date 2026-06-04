@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.12] - 2026-06-04
+
+### Added
+
+- Rating and love actions now follow the active split or floating viewer correctly
+- Files with wrong extensions, such as AVIF images mislabeled as JPG, now recover more reliably
+- Repaired media no longer pollutes the library with duplicate helper files
+- Renamed repaired files now stay visible in the image list and filters
+
+### Changed
+
+- Improve multi-browser actions and AVIF recovery
+
+### Removed
+
+- Delete-marked actions now work consistently across both browser panes
 ## [1.3.11] - 2026-06-02
 
 ### Added
