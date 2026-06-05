@@ -6768,11 +6768,7 @@ class MainWindow(QMainWindow):
         self.image_list.list_view.setFocus()
 
         self.menu_manager.reload_directory_action.setDisabled(False)
-        refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
-        if refresh_new_media_action is not None:
-            refresh_new_media_action.setDisabled(
-                not bool(getattr(self.image_list_model, '_paginated_mode', False))
-            )
+        self._update_refresh_new_media_action_state()
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
 
@@ -6972,10 +6968,13 @@ class MainWindow(QMainWindow):
     def _on_primary_selection_changed(self, current, previous):
         """Restore primary context whenever the user clicks the primary image list."""
         if self._context_switch_manager is None:
+            self._update_refresh_new_media_action_state()
             return
         if self._context_switch_manager.active_context == 'primary':
+            self._update_refresh_new_media_action_state()
             return
         self._context_switch_manager.restore_primary()
+        self._update_refresh_new_media_action_state()
 
     @Slot()
     def open_secondary_browser(self, placement: str = 'split_right'):
@@ -7015,6 +7014,9 @@ class MainWindow(QMainWindow):
         )
         self._secondary_browser.context_activated.connect(
             self._on_secondary_context_activated
+        )
+        self._secondary_browser.image_list_model.new_media_refresh_finished.connect(
+            self._on_new_media_refresh_finished
         )
         self._secondary_browser.dock.deletion_marking_changed.connect(
             self.signal_manager._update_delete_button_visibility
@@ -7488,6 +7490,7 @@ class MainWindow(QMainWindow):
         """Route secondary browser clicks to the context switch manager."""
         if self._context_switch_manager is not None:
             self._context_switch_manager.switch_to_context(ctx)
+        self._update_refresh_new_media_action_state()
 
     def _on_secondary_browser_visibility_changed(self, visible: bool):
         if (
@@ -7505,9 +7508,11 @@ class MainWindow(QMainWindow):
                 detail="verbose",
             )
         if visible:
+            self._update_refresh_new_media_action_state()
             return
         if self._context_switch_manager is not None:
             self._context_switch_manager.restore_primary()
+        self._update_refresh_new_media_action_state()
 
     def _active_directory_browser_name(self) -> str:
         manager = getattr(self, '_context_switch_manager', None)
@@ -7523,6 +7528,85 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return 'primary'
+
+    def _resolve_refresh_new_media_target(self) -> dict | None:
+        browser_name = self._active_directory_browser_name()
+        if browser_name == 'secondary':
+            secondary = getattr(self, '_secondary_browser', None)
+            if secondary is not None and getattr(secondary, 'dock', None) is not None:
+                return {
+                    'browser_name': 'secondary',
+                    'dock': secondary.dock,
+                    'model': secondary.image_list_model,
+                    'proxy_model': secondary.proxy_image_list_model,
+                }
+        return {
+            'browser_name': 'primary',
+            'dock': getattr(self, 'image_list', None),
+            'model': getattr(self, 'image_list_model', None),
+            'proxy_model': getattr(self, 'proxy_image_list_model', None),
+        }
+
+    def _update_refresh_new_media_action_state(self):
+        action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
+        if action is None:
+            return
+        target = self._resolve_refresh_new_media_target() or {}
+        browser_name = str(target.get('browser_name') or 'primary')
+        label = 'Browser 2' if browser_name == 'secondary' else 'Browser 1'
+        action.setText(f'Refresh New Media for {label}')
+        model = target.get('model')
+        action.setDisabled(not bool(model is not None and getattr(model, '_paginated_mode', False)))
+
+    def _capture_refresh_restore_state(self, target: dict) -> tuple[str, int, str | None]:
+        dock = target.get('dock')
+        proxy_model = target.get('proxy_model')
+        if dock is None or proxy_model is None:
+            return '', 0, None
+        filter_widget = getattr(dock, 'filter_line_edit', None)
+        filter_text = filter_widget.text() if filter_widget is not None else ''
+        list_view = getattr(dock, 'list_view', None)
+        current_index = list_view.currentIndex() if list_view is not None else QModelIndex()
+        select_index = int(current_index.row()) if current_index.isValid() else 0
+        select_path = None
+        try:
+            if current_index.isValid():
+                image = current_index.data(Qt.ItemDataRole.UserRole)
+                if image is not None and getattr(image, 'path', None) is not None:
+                    select_path = str(image.path)
+        except Exception:
+            select_path = None
+        return str(filter_text or ''), select_index, select_path
+
+    def _restore_refresh_selection(self, target: dict, *, select_index: int, select_path: str | None):
+        dock = target.get('dock')
+        proxy_model = target.get('proxy_model')
+        if dock is None or proxy_model is None:
+            return
+        list_view = getattr(dock, 'list_view', None)
+        if list_view is None:
+            return
+        target_index = QModelIndex()
+        if select_path:
+            try:
+                source_model = proxy_model.sourceModel()
+                src_row = source_model.get_index_for_path(Path(select_path))
+                if src_row >= 0:
+                    src_index = source_model.index(src_row, 0)
+                    target_index = proxy_model.mapFromSource(src_index)
+            except Exception:
+                target_index = QModelIndex()
+        if not target_index.isValid() and proxy_model.rowCount() > 0:
+            bounded_row = max(0, min(int(select_index or 0), proxy_model.rowCount() - 1))
+            target_index = proxy_model.index(bounded_row, 0)
+        if target_index.isValid():
+            selection_model = list_view.selectionModel()
+            if selection_model is not None:
+                selection_model.setCurrentIndex(
+                    target_index,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                )
+            list_view.scrollTo(target_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def load_directory_in_active_browser(
         self,
@@ -7581,20 +7665,30 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def refresh_new_media_only(self):
-        if not self.directory_path:
+        target = self._resolve_refresh_new_media_target()
+        if not target:
+            return
+        model = target.get('model')
+        dock = target.get('dock')
+        if model is None or dock is None:
+            return
+        directory_path = getattr(model, '_directory_path', None)
+        if not directory_path:
             return
 
-        if getattr(self.image_list_model, '_new_media_refresh_running', False):
+        if getattr(model, '_new_media_refresh_running', False):
             self._log_new_media_refresh_message("Refresh New Media Only is already running.")
             return
 
-        filter_text, select_index, select_path = self._capture_reload_restore_state()
+        filter_text, select_index, select_path = self._capture_refresh_restore_state(target)
         self._pending_new_media_refresh_state = {
-            'directory_path': str(self.directory_path),
+            'browser_name': str(target.get('browser_name') or 'primary'),
+            'directory_path': str(directory_path),
             'filter_text': filter_text,
             'select_index': select_index,
             'select_path': select_path,
         }
+        self._update_refresh_new_media_action_state()
         refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
         if refresh_new_media_action is not None:
             refresh_new_media_action.setDisabled(True)
@@ -7603,41 +7697,45 @@ class MainWindow(QMainWindow):
     @Slot()
     def _begin_refresh_new_media_only(self):
         pending_state = self._pending_new_media_refresh_state or {}
+        target = self._resolve_refresh_new_media_target()
+        expected_browser = str(pending_state.get('browser_name') or 'primary')
+        if not target or str(target.get('browser_name') or 'primary') != expected_browser:
+            target = self._resolve_refresh_new_media_target()
+        model = target.get('model') if target else None
+        dock = target.get('dock') if target else None
         expected_directory = str(pending_state.get('directory_path') or '')
-        if not expected_directory or str(self.directory_path or '') != expected_directory:
-            refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
-            if refresh_new_media_action is not None:
-                refresh_new_media_action.setDisabled(
-                    not bool(getattr(self.image_list_model, '_paginated_mode', False))
-                )
+        actual_directory = str(getattr(model, '_directory_path', '') or '')
+        if model is None or dock is None or not expected_directory or actual_directory != expected_directory:
+            self._update_refresh_new_media_action_state()
             return
 
-        started = self.image_list_model.start_refresh_new_media_only_async()
+        started = model.start_refresh_new_media_only_async()
         if not started:
-            refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
-            if refresh_new_media_action is not None:
-                refresh_new_media_action.setDisabled(
-                    not bool(getattr(self.image_list_model, '_paginated_mode', False))
-                )
-            filter_text = str(pending_state.get('filter_text') or self.image_list.filter_line_edit.text())
+            self._update_refresh_new_media_action_state()
+            filter_widget = getattr(dock, 'filter_line_edit', None)
+            filter_text = str(pending_state.get('filter_text') or (filter_widget.text() if filter_widget is not None else ''))
             select_index = int(pending_state.get('select_index', 0) or 0)
             select_path = pending_state.get('select_path')
-            self._reload_directory_from_state(
-                filter_text=filter_text,
-                select_index=select_index,
-                select_path=select_path,
-            )
+            if str(target.get('browser_name')) == 'secondary':
+                secondary = getattr(self, '_secondary_browser', None)
+                if secondary is not None and expected_directory:
+                    secondary.load_directory(Path(expected_directory))
+                    if filter_widget is not None and filter_widget.text() != filter_text:
+                        filter_widget.setText(filter_text)
+                    self._restore_refresh_selection(target, select_index=select_index, select_path=select_path)
+            else:
+                self._reload_directory_from_state(
+                    filter_text=filter_text,
+                    select_index=select_index,
+                    select_path=select_path,
+                )
             return
 
         self._log_new_media_refresh_message("Refreshing new media in background.")
 
     @Slot(dict)
     def _on_new_media_refresh_finished(self, refresh_stats: dict):
-        refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
-        if refresh_new_media_action is not None:
-            refresh_new_media_action.setDisabled(
-                not bool(getattr(self.image_list_model, '_paginated_mode', False))
-            )
+        self._update_refresh_new_media_action_state()
 
         pending_state = self._pending_new_media_refresh_state or {}
         self._pending_new_media_refresh_state = None
@@ -7648,20 +7746,46 @@ class MainWindow(QMainWindow):
 
         expected_directory = str(pending_state.get('directory_path') or '')
         actual_directory = str(refresh_stats.get('directory_path') or '')
+        browser_name = str(pending_state.get('browser_name') or 'primary')
+        target = self._resolve_refresh_new_media_target()
+        if target and str(target.get('browser_name') or 'primary') != browser_name:
+            if browser_name == 'secondary':
+                secondary = getattr(self, '_secondary_browser', None)
+                if secondary is not None:
+                    target = {
+                        'browser_name': 'secondary',
+                        'dock': secondary.dock,
+                        'model': secondary.image_list_model,
+                        'proxy_model': secondary.proxy_image_list_model,
+                    }
+            else:
+                target = {
+                    'browser_name': 'primary',
+                    'dock': getattr(self, 'image_list', None),
+                    'model': getattr(self, 'image_list_model', None),
+                    'proxy_model': getattr(self, 'proxy_image_list_model', None),
+                }
         if expected_directory and actual_directory and expected_directory != actual_directory:
             self._log_new_media_refresh_message("Ignored new-media refresh result from previous folder.")
             return
 
-        filter_text = str(pending_state.get('filter_text') or self.image_list.filter_line_edit.text())
+        dock = target.get('dock') if target else None
+        filter_widget = getattr(dock, 'filter_line_edit', None) if dock is not None else None
+        filter_text = str(pending_state.get('filter_text') or (filter_widget.text() if filter_widget is not None else ''))
         select_index = int(pending_state.get('select_index', 0) or 0)
         select_path = pending_state.get('select_path')
 
         if not refresh_stats.get('supported', False):
-            self._reload_directory_from_state(
-                filter_text=filter_text,
-                select_index=select_index,
-                select_path=select_path,
-            )
+            if browser_name == 'secondary':
+                secondary = getattr(self, '_secondary_browser', None)
+                if secondary is not None and expected_directory:
+                    secondary.load_directory(Path(expected_directory))
+            else:
+                self._reload_directory_from_state(
+                    filter_text=filter_text,
+                    select_index=select_index,
+                    select_path=select_path,
+                )
             return
 
         if refresh_stats.get('requires_full_reload', False):
@@ -7670,26 +7794,42 @@ class MainWindow(QMainWindow):
                 f"Detected {removed_count:,} removed or renamed {pluralize('file', removed_count)}. "
                 "Running full reload instead."
             )
-            self._reload_directory_from_state(
-                filter_text=filter_text,
-                select_index=select_index,
-                select_path=select_path,
-            )
+            if browser_name == 'secondary':
+                secondary = getattr(self, '_secondary_browser', None)
+                if secondary is not None and expected_directory:
+                    secondary.load_directory(Path(expected_directory))
+                    if filter_widget is not None and filter_widget.text() != filter_text:
+                        filter_widget.setText(filter_text)
+                    if target:
+                        self._restore_refresh_selection(target, select_index=select_index, select_path=select_path)
+            else:
+                self._reload_directory_from_state(
+                    filter_text=filter_text,
+                    select_index=select_index,
+                    select_path=select_path,
+                )
             return
 
-        refresh_stats = self.image_list_model.apply_refresh_new_media_only_result(refresh_stats)
+        target_model = target.get('model') if target else None
+        if target_model is None:
+            return
+        refresh_stats = target_model.apply_refresh_new_media_only_result(refresh_stats)
         added_count = int(refresh_stats.get('added_count', 0) or 0)
         tag_updates_count = int(refresh_stats.get('tag_updates_count', 0) or 0)
         elapsed_ms = int(refresh_stats.get('elapsed_ms', 0) or 0)
         refreshed_model = bool(refresh_stats.get('refreshed_model', False))
 
         if refreshed_model:
-            if self.image_list.filter_line_edit.text() != filter_text:
-                self.image_list.filter_line_edit.setText(filter_text)
-            self._restore_directory_selection(
-                select_index=select_index,
-                select_path=select_path,
-            )
+            if filter_widget is not None and filter_widget.text() != filter_text:
+                filter_widget.setText(filter_text)
+            if browser_name == 'secondary':
+                if target:
+                    self._restore_refresh_selection(target, select_index=select_index, select_path=select_path)
+            else:
+                self._restore_directory_selection(
+                    select_index=select_index,
+                    select_path=select_path,
+                )
 
         if added_count > 0:
             self._log_new_media_refresh_message(

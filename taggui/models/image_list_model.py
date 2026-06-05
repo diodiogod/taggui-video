@@ -251,6 +251,11 @@ def _is_legacy_repair_artifact(path: Path) -> bool:
     if not suffix:
         return False
 
+    repair_suffixes = (
+        '.avif', '.png', '.jpg', '.jpeg', '.webp', '.jxl',
+        '.heic', '.heif', '.bmp', '.gif', '.tif', '.tiff',
+    )
+
     numbered_match = re.match(r'^(?P<base>.+)_(?P<num>\d+)$', path.stem)
     copy_match = re.match(r'^(?P<base>.+)_copy(?P<num>\d+)?$', path.stem, re.IGNORECASE)
 
@@ -262,21 +267,23 @@ def _is_legacy_repair_artifact(path: Path) -> bool:
     else:
         return False
 
-    # Legacy numbered/copy siblings from the old repair flow.
-    for original in path.parent.glob(f"{base_stem}.*"):
-        if original == path:
+    # Old repair artifacts used numbered/copy sibling names next to the original.
+    # Avoid globbing the whole directory here; validation hits this path for many files.
+    if copy_match:
+        return True
+
+    if suffix not in repair_suffixes:
+        return False
+
+    for candidate_suffix in repair_suffixes:
+        if candidate_suffix == suffix:
             continue
+        original = path.with_name(f"{base_stem}{candidate_suffix}")
         try:
-            if not original.is_file():
-                continue
+            if original.exists() and original.is_file():
+                return True
         except OSError:
             continue
-        detected = _detect_image_suffix_from_header(original)
-        original_suffix = str(original.suffix).lower()
-        if detected is None or original_suffix == str(detected).lower():
-            continue
-        if suffix == '.png' or suffix == str(detected).lower():
-            return True
     return False
 
 
