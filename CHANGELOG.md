@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.13] - 2026-06-05
+
+### Added
+
+- Refresh New Media now works for the browser you last activated
+- The menu label now reflects Browser 1 or Browser 2
+- Large-folder validation no longer gets stuck behind repair-artifact scanning
+- Secondary browser refreshes now restore list state more reliably
+
+### Changed
+
+- Improve Browser 2 refresh behavior and folder validation stability
 ## [1.3.12] - 2026-06-04
 
 ### Added
