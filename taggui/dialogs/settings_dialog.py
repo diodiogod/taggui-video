@@ -1523,7 +1523,18 @@ class SettingsDialog(QDialog):
         display_grid.addWidget(title_strip_height_spin_box, 1, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Floating masonry wall gap (px)'), 2, 0,
+        display_grid.addWidget(QLabel('Image list footer strip height (px)'), 2, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        footer_strip_height_spin_box = SettingsSpinBox(
+            key='image_list_footer_strip_height',
+            minimum=4, maximum=32, default=8)
+        footer_strip_height_spin_box.setToolTip(
+            'Controls the compact image-list dock footer strip height.\n'
+            'Applied live.')
+        display_grid.addWidget(footer_strip_height_spin_box, 2, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
+        display_grid.addWidget(QLabel('Floating masonry wall gap (px)'), 3, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_wall_gap_spin_box = SettingsSpinBox(
             key='floating_viewer_wall_gap_px',
@@ -1536,10 +1547,10 @@ class SettingsDialog(QDialog):
             '0 = no gap.\n'
             'Applied live.'
         )
-        display_grid.addWidget(floating_wall_gap_spin_box, 2, 1,
+        display_grid.addWidget(floating_wall_gap_spin_box, 3, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Floating masonry alignment'), 3, 0,
+        display_grid.addWidget(QLabel('Floating masonry alignment'), 4, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_wall_alignment_combo = SettingsComboBox(
             key='floating_viewer_wall_alignment',
@@ -1552,10 +1563,10 @@ class SettingsDialog(QDialog):
             'top_right leaves continuous free space on the left.\n'
             'Applied live.'
         )
-        display_grid.addWidget(floating_wall_alignment_combo, 3, 1,
+        display_grid.addWidget(floating_wall_alignment_combo, 4, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Rearrange preserves screen order'), 4, 0,
+        display_grid.addWidget(QLabel('Rearrange preserves screen order'), 5, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_rearrange_preserve_order_check_box = SettingsBigCheckBox(
             key='floating_viewer_rearrange_preserve_screen_order'
@@ -1566,11 +1577,11 @@ class SettingsDialog(QDialog):
             'When disabled, rearrange uses the neutral pack order instead.\n'
             'Applied live.'
         )
-        display_grid.addWidget(floating_rearrange_preserve_order_check_box, 4, 1,
+        display_grid.addWidget(floating_rearrange_preserve_order_check_box, 5, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
         # Floating viewer detail zoom fallback
-        display_grid.addWidget(QLabel('Floating double-click detail zoom (%)'), 5, 0,
+        display_grid.addWidget(QLabel('Floating double-click detail zoom (%)'), 6, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_detail_zoom_spin_box = SettingsSpinBox(
             key='floating_double_click_detail_zoom_percent',
@@ -1580,10 +1591,10 @@ class SettingsDialog(QDialog):
             'double-click cannot apply width/height auto-fill and media is not pannable.\n'
             '100 = 1x (no change), 400 = 4x.\n'
             'Applied live (no restart).')
-        display_grid.addWidget(floating_detail_zoom_spin_box, 5, 1,
+        display_grid.addWidget(floating_detail_zoom_spin_box, 6, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 6, 0,
+        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 7, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_resize_preserve_aspect_check_box = SettingsBigCheckBox(
             key='floating_resize_preserve_aspect_by_default'
@@ -1596,7 +1607,7 @@ class SettingsDialog(QDialog):
             'hold Shift to preserve aspect ratio.\n'
             'Applied live (no restart).'
         )
-        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 6, 1,
+        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 7, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
         workflow_grid.addWidget(QLabel('Image double-click action'), 1, 0,

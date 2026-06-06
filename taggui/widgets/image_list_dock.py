@@ -33,10 +33,24 @@ class ClickableLabel(QLabel):
 class ControlsToggleStrip(QFrame):
     clicked = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        height_setting_key: str = 'image_list_title_strip_height',
+        variant: str = 'top',
+        title: str = 'Images',
+        toggle_tooltip: str = 'Click to show or hide image list controls',
+        floating_tooltip: str = 'Drag to dock or move this panel',
+        close_tooltip: str = 'Close this panel',
+    ):
         super().__init__(parent)
+        self._height_setting_key = str(height_setting_key or 'image_list_title_strip_height')
+        self._variant = 'footer' if str(variant).lower() == 'footer' else 'top'
+        self._toggle_tooltip = str(toggle_tooltip or '')
+        self._floating_tooltip = str(floating_tooltip or '')
+        self._close_tooltip = str(close_tooltip or '')
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip('Click to show or hide image list controls')
         self.setFrameShape(QFrame.Shape.NoFrame)
         self._press_pos = None
         self._dragging = False
@@ -54,8 +68,52 @@ class ControlsToggleStrip(QFrame):
         self.close_button = QToolButton()
         self.close_button.setAutoRaise(True)
         self.close_button.setText('x')
-        self.close_button.setToolTip('Close this panel')
+        self.close_button.setToolTip(self._close_tooltip)
         layout.addWidget(self.close_button)
+        self.set_title(title)
+        self._apply_compact_style()
+        self.set_strip_height(
+            settings.value(
+                self._height_setting_key,
+                defaultValue=DEFAULT_SETTINGS.get(
+                    self._height_setting_key,
+                    DEFAULT_SETTINGS['image_list_title_strip_height'],
+                ),
+                type=int,
+            )
+        )
+        self.set_floating_mode(False)
+
+    def set_title(self, title: str):
+        self.title_label.setText(str(title or 'Images'))
+
+    def _apply_compact_style(self):
+        if self._variant == 'footer':
+            self.setStyleSheet(
+                """
+                QFrame {
+                    border: none;
+                    background: transparent;
+                }
+                QLabel {
+                    color: palette(mid);
+                    font-size: 8px;
+                }
+                QToolButton {
+                    border: none;
+                    color: palette(mid);
+                    padding: 0px;
+                    margin: 0px;
+                }
+                QToolButton:hover {
+                    color: palette(text);
+                }
+                QFrame:hover {
+                    background: palette(alternate-base);
+                }
+                """
+            )
+            return
         self.setStyleSheet(
             """
             QFrame {
@@ -82,15 +140,31 @@ class ControlsToggleStrip(QFrame):
             }
             """
         )
-        self.set_strip_height(settings.value(
-            'image_list_title_strip_height',
-            defaultValue=DEFAULT_SETTINGS['image_list_title_strip_height'],
-            type=int,
-        ))
-        self.set_floating_mode(False)
 
-    def set_title(self, title: str):
-        self.title_label.setText(str(title or 'Images'))
+    def _apply_floating_style(self):
+        self.setStyleSheet(
+            """
+            QFrame {
+                border: none;
+                background: palette(window);
+            }
+            QLabel {
+                color: palette(text);
+                font-size: 16px;
+            }
+            QToolButton {
+                border: none;
+                color: palette(mid);
+                padding: 0px;
+                margin: 0px;
+                font-size: 18px;
+            }
+            QToolButton:hover {
+                color: palette(text);
+                background: palette(alternate-base);
+            }
+            """
+        )
 
     def _dock_widget(self):
         widget = self.parentWidget()
@@ -99,7 +173,16 @@ class ControlsToggleStrip(QFrame):
         return widget
 
     def set_strip_height(self, height: int):
-        height = max(4, min(32, int(height or DEFAULT_SETTINGS['image_list_title_strip_height'])))
+        height = max(
+            4,
+            min(
+                32,
+                int(height or DEFAULT_SETTINGS.get(
+                    self._height_setting_key,
+                    DEFAULT_SETTINGS['image_list_title_strip_height'],
+                )),
+            ),
+        )
         if self._floating_mode:
             return
         self.setFixedHeight(height)
@@ -117,63 +200,19 @@ class ControlsToggleStrip(QFrame):
             self.setMaximumHeight(height)
             self.close_button.setFixedSize(28, 28)
             self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.setToolTip('Drag to dock or move this panel')
-            self.setStyleSheet(
-                """
-                QFrame {
-                    border: none;
-                    background: palette(window);
-                }
-                QLabel {
-                    color: palette(text);
-                    font-size: 16px;
-                }
-                QToolButton {
-                    border: none;
-                    color: palette(mid);
-                    padding: 0px;
-                    margin: 0px;
-                    font-size: 18px;
-                }
-                QToolButton:hover {
-                    color: palette(text);
-                    background: palette(alternate-base);
-                }
-                """
-            )
+            self.setToolTip(self._floating_tooltip)
+            self._apply_floating_style()
             return
 
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setToolTip('Click to show or hide image list controls')
-        self.setStyleSheet(
-            """
-            QFrame {
-                border: none;
-                border-top: 1px dotted palette(mid);
-                border-bottom: 1px dotted palette(mid);
-                background: palette(window);
-            }
-            QLabel {
-                color: palette(mid);
-                font-size: 8px;
-            }
-            QToolButton {
-                border: none;
-                color: palette(mid);
-                padding: 0px;
-                margin: 0px;
-            }
-            QToolButton:hover {
-                color: palette(text);
-            }
-            QFrame:hover {
-                background: palette(alternate-base);
-            }
-            """
-        )
+        self.setToolTip(self._toggle_tooltip)
+        self._apply_compact_style()
         self.set_strip_height(settings.value(
-            'image_list_title_strip_height',
-            defaultValue=DEFAULT_SETTINGS['image_list_title_strip_height'],
+            self._height_setting_key,
+            defaultValue=DEFAULT_SETTINGS.get(
+                self._height_setting_key,
+                DEFAULT_SETTINGS['image_list_title_strip_height'],
+            ),
             type=int,
         ))
 
@@ -437,6 +476,17 @@ class ImageList(QDockWidget):
         )
         self.topLevelChanged.connect(self._sync_title_bar_widget_for_float_state)
         self._controls_collapsed = False
+        self.footer_toggle_strip = ControlsToggleStrip(
+            height_setting_key='image_list_footer_strip_height',
+            variant='footer',
+            title='Status',
+            toggle_tooltip='Click to show or hide thumbnail controls',
+            floating_tooltip='Thumbnail controls stay docked here',
+            close_tooltip='Close this panel',
+        )
+        self.footer_toggle_strip.clicked.connect(self.toggle_footer_collapsed)
+        self.footer_toggle_strip.close_button.clicked.connect(self.close)
+        self._footer_collapsed = False
 
         self.list_view = ImageListView(self, proxy_image_list_model,
                                        tag_separator, image_width)
@@ -481,7 +531,20 @@ class ImageList(QDockWidget):
             lambda: self._step_thumbnail_size(1)
         )
 
-        status_layout = QHBoxLayout()
+        self.footer_controls_container = QWidget()
+        self.footer_controls_container.setMinimumWidth(0)
+        self.footer_controls_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.footer_controls_container.setStyleSheet(
+            """
+            QWidget {
+                background: transparent;
+            }
+            """
+        )
+        status_layout = QHBoxLayout(self.footer_controls_container)
         status_layout.setContentsMargins(5, 2, 5, 2)
         self.image_index_label.setMinimumWidth(84)
         self.image_index_label.setSizePolicy(
@@ -498,6 +561,18 @@ class ImageList(QDockWidget):
         status_layout.addWidget(self.decrease_thumbnail_size_button)
         status_layout.addWidget(self.thumbnail_size_label)
         status_layout.addWidget(self.increase_thumbnail_size_button)
+
+        self.footer_container = QWidget()
+        self.footer_container.setMinimumWidth(0)
+        self.footer_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+        footer_layout = QVBoxLayout(self.footer_container)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(0)
+        footer_layout.addWidget(self.footer_toggle_strip)
+        footer_layout.addWidget(self.footer_controls_container)
 
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
@@ -516,9 +591,10 @@ class ImageList(QDockWidget):
             QSizePolicy.Policy.Expanding,
         )
         layout.addWidget(self.list_view)
-        layout.addLayout(status_layout)
+        layout.addWidget(self.footer_container)
         self.setWidget(container)
         self.restore_controls_collapsed_state()
+        self.restore_footer_collapsed_state()
 
         initial_sort = str(self.sort_combo_box.currentText() or 'Default')
         self._active_sort_by = initial_sort
@@ -554,6 +630,9 @@ class ImageList(QDockWidget):
     def set_title_strip_height(self, height: int):
         self.controls_toggle_strip.set_strip_height(height)
 
+    def set_footer_strip_height(self, height: int):
+        self.footer_toggle_strip.set_strip_height(height)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._update_sort_label_visibility)
@@ -579,6 +658,8 @@ class ImageList(QDockWidget):
         super().setObjectName(name)
         if hasattr(self, 'controls_container'):
             self.restore_controls_collapsed_state()
+        if hasattr(self, 'footer_controls_container'):
+            self.restore_footer_collapsed_state()
 
     def _controls_collapsed_settings_key(self) -> str:
         object_name = str(self.objectName() or 'image_list')
@@ -615,6 +696,35 @@ class ImageList(QDockWidget):
         state = 'show' if self._controls_collapsed else 'hide'
         self.controls_toggle_strip.setToolTip(
             f'Click to {state} image list controls'
+        )
+
+    def _footer_collapsed_settings_key(self) -> str:
+        object_name = str(self.objectName() or 'image_list')
+        return f'{object_name}_footer_collapsed'
+
+    def restore_footer_collapsed_state(self):
+        collapsed = settings.value(
+            self._footer_collapsed_settings_key(),
+            False,
+            type=bool,
+        )
+        self.set_footer_collapsed(bool(collapsed), persist=False)
+
+    @Slot()
+    def toggle_footer_collapsed(self):
+        self.set_footer_collapsed(not self._footer_collapsed)
+
+    def set_footer_collapsed(self, collapsed: bool, *, persist: bool = True):
+        self._footer_collapsed = bool(collapsed)
+        self.footer_controls_container.setVisible(not self._footer_collapsed)
+        if persist:
+            settings.setValue(
+                self._footer_collapsed_settings_key(),
+                self._footer_collapsed,
+            )
+        state = 'show' if self._footer_collapsed else 'hide'
+        self.footer_toggle_strip.setToolTip(
+            f'Click to {state} thumbnail controls'
         )
 
     def minimumSizeHint(self):

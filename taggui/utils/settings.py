@@ -51,6 +51,7 @@ DEFAULT_SETTINGS = {
     'diagnostic_log_mode': 'essential',  # off, essential, verbose
     'masonry_list_switch_threshold': 150,  # Auto-switch to ListMode when thumbnail size reaches this px
     'image_list_title_strip_height': 8,  # Compact image-list dock title strip height in px
+    'image_list_footer_strip_height': 8,  # Compact image-list dock footer strip height in px
     'floating_viewer_wall_gap_px': 6,  # Shared gap between floating windows and screen edges for masonry layouts
     'floating_viewer_wall_alignment': 'Top center',
     'floating_viewer_rearrange_preserve_screen_order': True,

@@ -15,6 +15,42 @@ from widgets.image_list_masonry_submission_service import MasonrySubmissionServi
 from widgets.image_list_masonry_window_planner_service import MasonryWindowPlannerService
 from widgets.image_list_masonry_completion_service import MasonryCompletionService
 from widgets.reaction_feedback_overlay import ReactionFeedbackOverlay
+from PySide6.QtGui import QColor, QPainterPath, QRegion
+from PySide6.QtWidgets import QProxyStyle
+
+
+class ImageListScrollBarTrackStyle(QProxyStyle):
+    """Paint only the native scrollbar track background."""
+
+    TRACK_COLOR = QColor(50, 50, 50)
+
+    def drawComplexControl(self, control, option, painter, widget=None):
+        super().drawComplexControl(control, option, painter, widget)
+        if control != QStyle.ComplexControl.CC_ScrollBar or option is None:
+            return
+
+        groove_rect = self.subControlRect(
+            control,
+            option,
+            QStyle.SubControl.SC_ScrollBarGroove,
+            widget,
+        )
+        slider_rect = self.subControlRect(
+            control,
+            option,
+            QStyle.SubControl.SC_ScrollBarSlider,
+            widget,
+        )
+        if not groove_rect.isValid() or groove_rect.isNull():
+            return
+
+        painter.save()
+        clip_region = QRegion(groove_rect)
+        if slider_rect.isValid() and not slider_rect.isNull():
+            clip_region = clip_region.subtracted(QRegion(slider_rect))
+        painter.setClipRegion(clip_region)
+        painter.fillRect(groove_rect, self.TRACK_COLOR)
+        painter.restore()
 
 class ImageListView(
     ImageListViewStrategyMixin,
@@ -41,6 +77,8 @@ class ImageListView(
         self.setModel(proxy_image_list_model)
         self.delegate = ImageDelegate(self)
         self.setItemDelegate(self.delegate)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # Get source model for signal connections
         source_model = proxy_image_list_model.sourceModel()
@@ -305,7 +343,9 @@ class ImageListView(
 
         # Set initial view mode based on size
         self._update_view_mode()
-
+        scroll_track_style = ImageListScrollBarTrackStyle(QApplication.style())
+        scroll_track_style.setParent(self)
+        self.verticalScrollBar().setStyle(scroll_track_style)
         # Connect scrollbar events to detect dragging
         self.verticalScrollBar().sliderPressed.connect(self._on_scrollbar_pressed)
         self.verticalScrollBar().sliderReleased.connect(self._on_scrollbar_released)

@@ -1456,6 +1456,19 @@ class MainWindow(QMainWindow):
                     dock.set_title_strip_height(height)
             return
 
+        if key == 'image_list_footer_strip_height':
+            try:
+                height = int(_value)
+            except (TypeError, ValueError):
+                height = DEFAULT_SETTINGS['image_list_footer_strip_height']
+            for dock in (
+                getattr(self, 'image_list', None),
+                getattr(getattr(self, '_secondary_browser', None), 'dock', None),
+            ):
+                if dock is not None and hasattr(dock, 'set_footer_strip_height'):
+                    dock.set_footer_strip_height(height)
+            return
+
         if key not in ('max_pages_in_memory', 'thumbnail_eviction_pages'):
             return
 
