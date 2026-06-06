@@ -122,6 +122,17 @@ class ToolbarManager:
         toolbar.setAllowedAreas(
             Qt.ToolBarArea.TopToolBarArea | Qt.ToolBarArea.BottomToolBarArea
         )
+        toolbar.setStyleSheet("""
+            QToolBar {
+                border: none;
+                border-top: 1px solid rgb(34, 34, 34);
+            }
+            QToolBar::separator {
+                background: transparent;
+                width: 0px;
+                height: 0px;
+            }
+        """)
         if key == 'rating':
             toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.main_window.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)

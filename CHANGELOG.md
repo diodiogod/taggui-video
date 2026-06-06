@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.14] - 2026-06-05
+
+### Added
+
+- The image list scrollbar track now blends with the surrounding edge without the stray border line
+- Toolbar rows remain visually separated, but with a darker divider tone
+- The image list footer controls and collapse strip remain available as before
+
+### Changed
+
+- Improve image list chrome and toolbar separation
 ## [1.3.13] - 2026-06-05
 
 ### Added
