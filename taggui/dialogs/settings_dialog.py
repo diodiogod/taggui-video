@@ -37,7 +37,8 @@ from utils.video.playback_backend import (
     normalize_playback_backend_name,
 )
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
-                                    SettingsSpinBox, SettingsComboBox)
+                                    SettingsSpinBox, SettingsComboBox,
+                                    SettingsSlider)
 from utils.grammar_checker import GrammarCheckMode
 from utils.image_index_db import ImageIndexDB
 from utils.review_marks import (
@@ -1594,7 +1595,24 @@ class SettingsDialog(QDialog):
         display_grid.addWidget(floating_detail_zoom_spin_box, 6, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 7, 0,
+        display_grid.addWidget(QLabel('Floating hold opacity (%)'), 7, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        floating_hold_opacity_slider = SettingsSlider(
+            key='floating_viewer_hold_opacity',
+            minimum=0,
+            maximum=100,
+            default=46,
+        )
+        floating_hold_opacity_slider.setToolTip(
+            'Controls how visible spawned/floating viewers remain while hold mode is enabled.\n'
+            '0 = fully transparent.\n'
+            '100 = fully opaque.\n'
+            'Applied live.'
+        )
+        display_grid.addWidget(floating_hold_opacity_slider, 7, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
+        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 8, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_resize_preserve_aspect_check_box = SettingsBigCheckBox(
             key='floating_resize_preserve_aspect_by_default'
@@ -1607,7 +1625,7 @@ class SettingsDialog(QDialog):
             'hold Shift to preserve aspect ratio.\n'
             'Applied live (no restart).'
         )
-        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 7, 1,
+        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 8, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
         workflow_grid.addWidget(QLabel('Image double-click action'), 1, 0,

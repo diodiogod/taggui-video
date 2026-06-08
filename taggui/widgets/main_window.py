@@ -1429,6 +1429,15 @@ class MainWindow(QMainWindow):
             self._refresh_review_badge_config()
             return
 
+        if key == 'floating_viewer_hold_opacity':
+            for window in list(getattr(self, '_floating_viewers', [])):
+                if bool(getattr(window, '_frozen_passthrough_mode', False)):
+                    try:
+                        window.set_frozen_passthrough_mode(True)
+                    except RuntimeError:
+                        continue
+            return
+
         if key == 'masonry_list_switch_threshold':
             list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
             if list_view is None:

@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QLineEdit,
-                               QPlainTextEdit, QSpinBox)
+                               QPlainTextEdit, QSlider, QSpinBox)
 
 from utils.big_widgets import BigCheckBox
 from utils.focused_scroll_mixin import FocusedScrollMixin
@@ -37,6 +37,18 @@ class SettingsComboBox(QComboBox):
 
 class FocusedScrollSettingsComboBox(FocusedScrollMixin, SettingsComboBox):
     pass
+
+
+class SettingsSlider(QSlider):
+    def __init__(self, key: str, minimum: int, maximum: int, default: int | None = None,
+                 orientation: Qt.Orientation = Qt.Orientation.Horizontal):
+        super().__init__(orientation)
+        self.key = key
+        self.setRange(minimum, maximum)
+        if not settings.contains(key):
+            settings.setValue(key, default or DEFAULT_SETTINGS.get(key))
+        self.setValue(settings.value(key, type=int))
+        self.valueChanged.connect(lambda value: settings.setValue(key, value))
 
 
 class FocusedScrollSettingsDoubleSpinBox(FocusedScrollMixin, QDoubleSpinBox):

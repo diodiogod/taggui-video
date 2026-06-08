@@ -49,6 +49,8 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - `H` toggles hold mode for existing spawned viewers.
 - Middle-click in the main window or image list area also toggles hold mode.
 - In hold mode, existing spawned viewers become dimmed, gray, and click-through.
+- Hold mode opacity is configurable in `Settings -> Advanced -> Floating hold opacity (%)`.
+- Set it to `0` if you want frozen viewers to become fully transparent.
 - Hold mode is meant to keep spawned viewers visible but out of the way while you keep working in the main app or spawn new viewers.
 - Turning hold mode off restores normal interactivity.
 

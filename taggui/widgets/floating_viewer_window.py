@@ -14,7 +14,7 @@ from utils.review_marks import (
     get_review_badge_specs,
     get_review_badge_text_color,
 )
-from utils.settings import settings
+from utils.settings import DEFAULT_SETTINGS, settings
 
 
 class FloatingReviewSlotsOverlay(QWidget):
@@ -1129,25 +1129,26 @@ class FloatingViewerWindow(QWidget):
     def set_frozen_passthrough_mode(self, enabled: bool):
         """Gray out and make this floating window input-transparent."""
         enabled = bool(enabled)
-        if self._frozen_passthrough_mode == enabled:
-            return
+        state_changed = self._frozen_passthrough_mode != enabled
         self._frozen_passthrough_mode = enabled
 
-        opacity = 0.46 if enabled else 1.0
+        opacity = self._frozen_passthrough_opacity() if enabled else 1.0
         self.setWindowOpacity(opacity)
         used_native_passthrough = self._set_native_mouse_passthrough(enabled)
         self._set_widget_tree_mouse_passthrough(False if used_native_passthrough else enabled)
 
         if enabled:
-            self._show_close_button(False)
-            self._hide_all_drag_handles()
-            self._frozen_tint_overlay.show()
-            self._frozen_tint_overlay.raise_()
-            self._frozen_outline.show()
-            self._frozen_outline.raise_()
+            if state_changed:
+                self._show_close_button(False)
+                self._hide_all_drag_handles()
+                self._frozen_tint_overlay.show()
+                self._frozen_tint_overlay.raise_()
+                self._frozen_outline.show()
+                self._frozen_outline.raise_()
         else:
-            self._frozen_tint_overlay.hide()
-            self._frozen_outline.hide()
+            if state_changed:
+                self._frozen_tint_overlay.hide()
+                self._frozen_outline.hide()
         self._apply_style()
         QTimer.singleShot(0, self._refresh_viewer_after_window_transition)
 
@@ -1213,6 +1214,20 @@ class FloatingViewerWindow(QWidget):
             }}
             """
         )
+
+    def _frozen_passthrough_opacity(self) -> float:
+        try:
+            raw_value = settings.value(
+                'floating_viewer_hold_opacity',
+                defaultValue=DEFAULT_SETTINGS.get('floating_viewer_hold_opacity', 46),
+                type=int,
+            )
+        except Exception:
+            raw_value = DEFAULT_SETTINGS.get('floating_viewer_hold_opacity', 46)
+        try:
+            return max(0.0, min(1.0, int(raw_value) / 100.0))
+        except (TypeError, ValueError):
+            return float(DEFAULT_SETTINGS.get('floating_viewer_hold_opacity', 46)) / 100.0
 
     def _reposition_overlay_controls(self):
         margin = self._close_button_margin_px

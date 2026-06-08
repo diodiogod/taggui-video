@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.15] - 2026-06-08
+
+### Added
+
+- Add a settings slider so held floating viewers can be made less visible or fully transparent
+- Keep the H shortcut and middle-click hold behavior unchanged while making the shade configurable
+
+### Changed
+
+- Improve floating-viewer hold mode transparency controls
+- Update the floating viewers guide to describe the new setting
 ## [1.3.14] - 2026-06-05
 
 ### Added
