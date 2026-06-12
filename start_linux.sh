@@ -35,6 +35,7 @@ REFRESH_TORCH=0
 CUDA_OVERRIDE=""
 TORCH_VERSION="2.7.1"
 TORCHVISION_VERSION="0.22.1"
+APP_ARGS=()
 
 echo "Logging to $LOGFILE"
 echo ""
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --clean-old) CLEAN_OLD=1 ;;
         --refresh-torch) REFRESH_TORCH=1 ;;
         --cuda=*) CUDA_OVERRIDE="${1#--cuda=}" ;;
+        *) APP_ARGS+=("$1") ;;
     esac
     shift
 done
@@ -295,4 +297,4 @@ echo "======================================================"
 echo "Starting TagGUI..."
 echo "======================================================"
 echo ""
-python taggui/run_gui.py
+python taggui/run_gui.py "${APP_ARGS[@]}"

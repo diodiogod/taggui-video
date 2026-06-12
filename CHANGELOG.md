@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.16] - 2026-06-12
+
+### Added
+
+- Add folder launch and file-manager integration
+- You can launch TagGUI directly into a folder or media path
+- Startup restore now keeps separate session state per launched folder
+- Windows Explorer can now open folders in the current TagGUI window or a new one
+- Explicit folder launches no longer reopen Browser 2 unintentionally
+- Help now includes file-manager integration controls for this portable copy
 ## [1.3.15] - 2026-06-08
 
 ### Added

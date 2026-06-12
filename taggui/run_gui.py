@@ -7,6 +7,8 @@ import warnings
 import io
 import threading
 import faulthandler
+import argparse
+from pathlib import Path
 from datetime import datetime
 
 CRASH_LOG_PATH = os.path.abspath('taggui_crash.log')
@@ -48,6 +50,13 @@ try:
 
     from utils.settings import settings
     from utils.diagnostic_logging import append_text_log
+    from utils.instance_relay import (
+        OpenRequestRelay,
+        build_instance_server_name,
+        forget_preferred_server_name,
+        preferred_server_name,
+        send_open_request,
+    )
     from widgets.main_window import MainWindow
 except Exception as e:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -208,10 +217,40 @@ def _configure_qt_graphics_stack():
         pass
 
 
-def run_gui():
+def _parse_startup_launch_args(argv: list[str] | None = None) -> tuple[Path | None, str | None, bool]:
+    """Resolve an optional startup folder/file target and reuse mode from CLI args."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('target', nargs='?')
+    parser.add_argument('--open', dest='open_target')
+    parser.add_argument('--reuse-instance', action='store_true')
+    parsed, extras = parser.parse_known_args(list(argv or []))
+
+    raw_target = parsed.open_target or parsed.target
+    if raw_target is None and extras:
+        raw_target = extras[0]
+    if not raw_target:
+        return None, None, bool(parsed.reuse_instance)
+
+    candidate = Path(raw_target).expanduser()
+    try:
+        candidate = candidate.resolve()
+    except Exception:
+        candidate = candidate.absolute()
+
+    if candidate.is_dir():
+        return candidate, None, bool(parsed.reuse_instance)
+    if candidate.is_file():
+        return candidate.parent, str(candidate), bool(parsed.reuse_instance)
+
+    print(f"[STARTUP] Ignoring missing startup target: {raw_target}")
+    return None, None, bool(parsed.reuse_instance)
+
+
+def run_gui(argv: list[str] | None = None):
     # Suppress Qt multimedia ffmpeg output
     os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false'
     _configure_qt_graphics_stack()
+    startup_directory, startup_select_path, reuse_instance = _parse_startup_launch_args(argv)
 
     app = QApplication([])
     # The application name is shown in the taskbar.
@@ -231,7 +270,30 @@ def run_gui():
     except Exception as cache_error:
         print(f"[CACHE INIT] Warmup failed: {cache_error}")
 
-    main_window = MainWindow(app)
+    if reuse_instance and startup_directory is not None:
+        target_server_name = preferred_server_name()
+        if send_open_request(
+            server_name=target_server_name,
+            directory_path=startup_directory,
+            select_path=startup_select_path,
+        ):
+            return 0
+        forget_preferred_server_name(target_server_name)
+
+    relay_server_name = build_instance_server_name()
+    relay = OpenRequestRelay(relay_server_name, parent=app)
+    relay_started = relay.start()
+
+    main_window = MainWindow(
+        app,
+        startup_directory=startup_directory,
+        startup_select_path=startup_select_path,
+        relay_server_name=relay_server_name if relay_started else '',
+    )
+    if relay_started:
+        relay.open_request_received.connect(main_window.handle_instance_open_request)
+        app.aboutToQuit.connect(lambda: forget_preferred_server_name(relay_server_name))
+        app.aboutToQuit.connect(relay.stop)
     main_window.show()
 
     # Install signal handler for console close (Windows Ctrl+C, terminal close, etc.)
@@ -239,8 +301,8 @@ def run_gui():
         print("\n[SHUTDOWN] Console closing, saving settings...")
         # Save settings directly (closeEvent might not fire during forced shutdown)
         main_window._save_main_window_layout_settings()
-        geom = settings.value('geometry', type=bytes)
-        state = settings.value('window_state', type=bytes)
+        geom = main_window._session_settings_value('geometry', None, value_type=bytes)
+        state = main_window._session_settings_value('window_state', None, value_type=bytes)
         print(f"[SHUTDOWN] Saving geometry: {len(geom) if geom else 0} bytes")
         print(f"[SHUTDOWN] Saving state: {len(state) if state else 0} bytes")
         if hasattr(main_window, 'toolbar_manager'):
@@ -272,12 +334,11 @@ def run_gui():
             if event in (0, 2, 5, 6):  # CTRL_C, CTRL_CLOSE, CTRL_LOGOFF, CTRL_SHUTDOWN
                 print("\n[SHUTDOWN] Console closing, saving settings...")
                 # Save settings directly (closeEvent might not fire during forced shutdown)
-                geom = main_window.saveGeometry()
-                state = main_window.saveState()
-                print(f"[SHUTDOWN] Saving geometry: {len(geom)} bytes")
-                print(f"[SHUTDOWN] Saving state: {len(state)} bytes")
-                settings.setValue('geometry', geom)
-                settings.setValue('window_state', state)
+                main_window._save_main_window_layout_settings()
+                geom = main_window._session_settings_value('geometry', None, value_type=bytes)
+                state = main_window._session_settings_value('window_state', None, value_type=bytes)
+                print(f"[SHUTDOWN] Saving geometry: {len(geom) if geom else 0} bytes")
+                print(f"[SHUTDOWN] Saving state: {len(state) if state else 0} bytes")
                 if hasattr(main_window, 'toolbar_manager'):
                     settings.setValue('fixed_marker_size', main_window.toolbar_manager.fixed_marker_size_spinbox.value())
                 settings.sync()  # Force write to disk
@@ -324,7 +385,7 @@ if __name__ == '__main__':
     suppress_warnings()
     install_crash_handlers()
     try:
-        sys.exit(run_gui())
+        sys.exit(run_gui(sys.argv[1:]))
     except Exception as exception:
         _append_crash_log("TOP-LEVEL EXCEPTION", sys.exc_info())
         # DON'T clear settings on every crash - only show error

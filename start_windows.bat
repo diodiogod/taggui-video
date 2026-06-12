@@ -35,6 +35,7 @@ set CLEAN_OLD=0
 set REFRESH_TORCH=0
 set ENABLE_CRASH_DIAG=0
 set CUDA_OVERRIDE=
+set APP_ARGS=
 set TORCH_VERSION=2.7.1
 set TORCHVISION_VERSION=0.22.1
 set NVIDIA_SMI_CMD=
@@ -59,14 +60,25 @@ echo Found Python
 
 :: Parse command line arguments
 for %%A in (%*) do (
+    set FORWARD_ARG=1
     if /I "%%~A"=="--skip-git" set SKIP_GIT=1
+    if /I "%%~A"=="--skip-git" set FORWARD_ARG=0
     if /I "%%~A"=="--clear-cache" set CLEAR_CACHE=1
+    if /I "%%~A"=="--clear-cache" set FORWARD_ARG=0
     if /I "%%~A"=="--clean-old" set CLEAN_OLD=1
+    if /I "%%~A"=="--clean-old" set FORWARD_ARG=0
     if /I "%%~A"=="--refresh-torch" set REFRESH_TORCH=1
+    if /I "%%~A"=="--refresh-torch" set FORWARD_ARG=0
     if /I "%%~A"=="--crash-log" set ENABLE_CRASH_DIAG=1
+    if /I "%%~A"=="--crash-log" set FORWARD_ARG=0
     if /I "%%~A"=="--no-crash-log" set ENABLE_CRASH_DIAG=0
+    if /I "%%~A"=="--no-crash-log" set FORWARD_ARG=0
     set ARG=%%~A
-    if /I "!ARG:~0,7!"=="--cuda=" set CUDA_OVERRIDE=!ARG:~7!
+    if /I "!ARG:~0,7!"=="--cuda=" (
+        set CUDA_OVERRIDE=!ARG:~7!
+        set FORWARD_ARG=0
+    )
+    if !FORWARD_ARG! EQU 1 set APP_ARGS=!APP_ARGS! "%%~A"
 )
 
 call :resolve_nvidia_smi
@@ -372,7 +384,7 @@ if !ENABLE_CRASH_DIAG! EQU 1 (
     set TAGGUI_ENABLE_FAULTHANDLER=0
     echo Crash diagnostics: OFF
 )
-python taggui/run_gui.py
+python taggui/run_gui.py !APP_ARGS!
 set EXITCODE=%ERRORLEVEL%
 if not "%EXITCODE%"=="0" (
     echo.

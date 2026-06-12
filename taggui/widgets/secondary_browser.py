@@ -49,8 +49,16 @@ class SecondaryBrowser(QObject):
     # 'image_list': the dock
     context_activated = Signal(object)
 
-    def __init__(self, image_width=None, tag_separator=None, tokenizer=None, parent=None):
+    def __init__(
+        self,
+        image_width=None,
+        tag_separator=None,
+        tokenizer=None,
+        parent=None,
+        settings_prefix: str = '',
+    ):
         super().__init__(parent)
+        self._settings_prefix = str(settings_prefix or '')
 
         tag_sep = tag_separator or get_tag_separator()
         img_width = image_width or int(settings.value(
@@ -349,7 +357,7 @@ class SecondaryBrowser(QObject):
 
     def load_directory(self, path: Path):
         resolved = path.resolve()
-        settings.setValue(_PREFIX + 'directory_path', str(resolved))
+        settings.setValue(self._settings_key('directory_path'), str(resolved))
         self.image_list_model.load_directory(resolved)
         self._folder_name = resolved.name
         self._update_title()
@@ -367,3 +375,6 @@ class SecondaryBrowser(QObject):
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
         return self._sel.selectedIndexes()
+
+    def _settings_key(self, name: str) -> str:
+        return f"{self._settings_prefix}{_PREFIX}{name}"

@@ -1,5 +1,7 @@
 import json
 import gc
+import subprocess
+import sys
 import time
 import hashlib
 from collections import deque
@@ -43,6 +45,7 @@ from utils.review_marks import (
     serialize_review_flags,
 )
 from utils.image_index_db import ImageIndexDB
+from utils.instance_relay import remember_preferred_server_name
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
 from utils.utils import get_confirmation_dialog_reply, get_resource_path, pluralize
@@ -513,10 +516,23 @@ class SelectionWallSpeedOverlay(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, app: QApplication):
+    def __init__(
+        self,
+        app: QApplication,
+        startup_directory: Path | None = None,
+        startup_select_path: str | None = None,
+        relay_server_name: str = '',
+    ):
         super().__init__()
         self.setAcceptDrops(True)
         self.app = app
+        self._startup_directory = self._normalize_startup_directory(startup_directory)
+        self._startup_select_path = str(startup_select_path) if startup_select_path else None
+        self._startup_has_explicit_target = bool(
+            self._startup_directory is not None or self._startup_select_path
+        )
+        self._relay_server_name = str(relay_server_name or '').strip()
+        self._session_settings_prefix = self._build_session_settings_prefix(self._startup_directory)
         self.directory_path = None
         self.is_running = True
         self.post_deletion_index = None  # Track index to focus after deletion
@@ -768,7 +784,11 @@ class MainWindow(QMainWindow):
             self._reaction_controls_panel_visible,
             save=False,
         )
-        self._main_viewer_visible = settings.value('main_viewer_visible', True, type=bool)
+        self._main_viewer_visible = self._session_settings_value(
+            'main_viewer_visible',
+            True,
+            value_type=bool,
+        )
         self.set_main_viewer_visible(self._main_viewer_visible, save=False)
 
         # Setup image list selection model
@@ -1334,14 +1354,18 @@ class MainWindow(QMainWindow):
     def _save_main_window_layout_settings(self):
         """Persist main-window geometry, dock state, and window mode flags."""
         secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
-        saved_secondary_dir = settings.value('secondary_browser_directory_path', '', type=str)
+        saved_secondary_dir = self._session_settings_value(
+            'secondary_browser_directory_path',
+            '',
+            value_type=str,
+        )
         secondary_restore = bool(
             secondary_dock is not None
             and not secondary_dock.isHidden()
             and str(saved_secondary_dir or '').strip()
         )
-        settings.setValue('secondary_browser_visible', secondary_restore)
-        settings.setValue('secondary_browser_restore_on_startup', secondary_restore)
+        self._session_settings_set_value('secondary_browser_visible', secondary_restore)
+        self._session_settings_set_value('secondary_browser_restore_on_startup', secondary_restore)
         diagnostic_print(
             "[RESTORE][Browser2] save "
             f"exists={secondary_dock is not None} "
@@ -1350,12 +1374,12 @@ class MainWindow(QMainWindow):
             f"folder='{saved_secondary_dir}' restore={secondary_restore}",
             detail="verbose",
         )
-        settings.setValue('geometry', self.saveGeometry())
-        settings.setValue('window_state', self.saveState())
-        settings.setValue('main_window_is_fullscreen', self.isFullScreen())
-        settings.setValue('main_window_is_maximized', self.isMaximized())
+        self._session_settings_set_value('geometry', self.saveGeometry())
+        self._session_settings_set_value('window_state', self.saveState())
+        self._session_settings_set_value('main_window_is_fullscreen', self.isFullScreen())
+        self._session_settings_set_value('main_window_is_maximized', self.isMaximized())
         try:
-            settings.setValue('main_window_normal_geometry', self.normalGeometry())
+            self._session_settings_set_value('main_window_normal_geometry', self.normalGeometry())
         except Exception:
             pass
 
@@ -1719,7 +1743,7 @@ class MainWindow(QMainWindow):
             action.setChecked(self._main_viewer_visible)
             action.blockSignals(False)
         if save:
-            settings.setValue('main_viewer_visible', self._main_viewer_visible)
+            self._session_settings_set_value('main_viewer_visible', self._main_viewer_visible)
 
     def toggle_main_viewer_controls_attachment(self):
         """Toggle whether main-viewer controls live on the viewer or toolbar."""
@@ -2025,6 +2049,161 @@ class MainWindow(QMainWindow):
             random_seed_value = 0
         return sort_value, sort_dir_value, media_value, random_seed_value
 
+    def _normalize_startup_directory(self, path: Path | None) -> Path | None:
+        if path is None:
+            return None
+        try:
+            return path.expanduser().resolve()
+        except Exception:
+            return path
+
+    def _build_session_settings_prefix(self, path: Path | None) -> str:
+        if path is None:
+            return ''
+        normalized = str(path).replace("\\", "/").lower()
+        digest = hashlib.sha1(normalized.encode('utf-8')).hexdigest()
+        return f"startup_sessions/{digest}/"
+
+    def _repo_root_path(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _folder_integration_script_path(self, action: str) -> Path | None:
+        if sys.platform.startswith('win'):
+            script_name = (
+                'register_explorer_context_menu.ps1'
+                if action == 'register'
+                else 'unregister_explorer_context_menu.ps1'
+            )
+            return self._repo_root_path() / 'scripts' / 'windows' / script_name
+        return None
+
+    def _session_settings_key(self, key: str) -> str:
+        prefix = getattr(self, '_session_settings_prefix', '')
+        return f"{prefix}{key}" if prefix else key
+
+    def _session_settings_contains(self, key: str) -> bool:
+        scoped_key = self._session_settings_key(key)
+        return settings.contains(scoped_key) or (
+            bool(getattr(self, '_session_settings_prefix', ''))
+            and settings.contains(key)
+        )
+
+    def _session_settings_value(
+        self,
+        key: str,
+        default_value=None,
+        *,
+        value_type=None,
+        fallback_to_global: bool = True,
+    ):
+        scoped_key = self._session_settings_key(key)
+        if settings.contains(scoped_key):
+            if value_type is not None:
+                return settings.value(scoped_key, default_value, type=value_type)
+            return settings.value(scoped_key, default_value)
+        if fallback_to_global and bool(getattr(self, '_session_settings_prefix', '')):
+            if value_type is not None:
+                return settings.value(key, default_value, type=value_type)
+            return settings.value(key, default_value)
+        if value_type is not None:
+            return settings.value(scoped_key, default_value, type=value_type)
+        return settings.value(scoped_key, default_value)
+
+    def _session_settings_set_value(self, key: str, value):
+        settings.setValue(self._session_settings_key(key), value)
+
+    def install_file_manager_integration(self):
+        self._run_file_manager_integration_script('register')
+
+    def uninstall_file_manager_integration(self):
+        self._run_file_manager_integration_script('unregister')
+
+    def show_file_manager_integration_info(self):
+        if sys.platform.startswith('win'):
+            message = (
+                'TagGUI can install Windows Explorer folder integration for this portable copy.\n\n'
+                'The installed menu adds:\n'
+                '- Open in Current TagGUI Window\n'
+                '- Open in New TagGUI Window\n\n'
+                'Current-window launches reuse the last active TagGUI window and replace Browser 1 only.'
+            )
+        elif sys.platform.startswith('linux'):
+            message = (
+                'TagGUI supports cross-window folder reuse on Linux internally, but file-manager '
+                'integration is not implemented yet in this repository.'
+            )
+        else:
+            message = 'File-manager integration is not implemented for this platform.'
+        QMessageBox.information(self, 'Folder Integration', message)
+
+    def _run_file_manager_integration_script(self, action: str):
+        script_path = self._folder_integration_script_path(action)
+        if script_path is None:
+            QMessageBox.information(
+                self,
+                'Folder Integration',
+                'File-manager integration is not implemented for this platform yet.',
+            )
+            return
+
+        if not script_path.is_file():
+            QMessageBox.warning(
+                self,
+                'Script Not Found',
+                f'Could not find the integration script:\n{script_path}',
+            )
+            return
+
+        verb = 'install' if action == 'register' else 'remove'
+        try:
+            creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            result = subprocess.run(
+                [
+                    'powershell',
+                    '-NoProfile',
+                    '-ExecutionPolicy',
+                    'Bypass',
+                    '-File',
+                    str(script_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(self._repo_root_path()),
+                creationflags=creation_flags,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                'Integration Failed',
+                f'Could not {verb} the file-manager integration.\n\n{exc}',
+            )
+            return
+
+        stdout = (result.stdout or '').strip()
+        stderr = (result.stderr or '').strip()
+        details = '\n'.join(part for part in (stdout, stderr) if part)
+        if result.returncode == 0:
+            if action == 'register':
+                message = (
+                    'File-manager integration was installed successfully.\n\n'
+                    'You can now use the TagGUI submenu from your file manager.'
+                )
+            else:
+                message = 'File-manager integration was removed successfully.'
+            QMessageBox.information(
+                self,
+                'Integration Updated',
+                message,
+            )
+            return
+
+        QMessageBox.critical(
+            self,
+            'Integration Failed',
+            details or f'The file-manager integration script failed with exit code {result.returncode}.',
+        )
+
     def _current_workspace_id(self) -> str:
         """Return the active workspace id with a safe fallback."""
         presets = {preset["id"] for preset in self.get_workspace_presets()}
@@ -2032,7 +2211,7 @@ class MainWindow(QMainWindow):
         if live_workspace_id in presets:
             return live_workspace_id
         workspace_id = str(
-            settings.value('workspace_preset', 'media_viewer', type=str)
+            self._session_settings_value('workspace_preset', 'media_viewer', value_type=str)
             or 'media_viewer'
         ).strip()
         if workspace_id not in presets:
@@ -2042,12 +2221,16 @@ class MainWindow(QMainWindow):
     def _image_list_dock_width_settings_key(self) -> str:
         workspace_id = self._current_workspace_id()
         viewer_mode = "viewer" if bool(getattr(self, '_main_viewer_visible', True)) else "list_only"
-        return f"workspace_layout/{workspace_id}/{viewer_mode}/image_list_dock_width"
+        return self._session_settings_key(
+            f"workspace_layout/{workspace_id}/{viewer_mode}/image_list_dock_width"
+        )
 
     def _right_dock_width_settings_key(self) -> str:
         workspace_id = self._current_workspace_id()
         viewer_mode = "viewer" if bool(getattr(self, '_main_viewer_visible', True)) else "list_only"
-        return f"workspace_layout/{workspace_id}/{viewer_mode}/right_dock_width"
+        return self._session_settings_key(
+            f"workspace_layout/{workspace_id}/{viewer_mode}/right_dock_width"
+        )
 
     def _primary_visible_right_dock(self):
         for dock_name in ('image_tags_editor', 'all_tags_editor', 'auto_captioner', 'auto_markings'):
@@ -4463,7 +4646,48 @@ class MainWindow(QMainWindow):
         if state != Qt.ApplicationState.ApplicationActive:
             self._selection_wall_speed_overlay.hide()
             return
+        self._remember_instance_as_preferred_target()
         self._refresh_selection_wall_speed_overlay()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._remember_instance_as_preferred_target()
+
+    def _remember_instance_as_preferred_target(self):
+        relay_server_name = str(getattr(self, '_relay_server_name', '') or '').strip()
+        if relay_server_name:
+            remember_preferred_server_name(relay_server_name)
+
+    @Slot(str, str)
+    def handle_instance_open_request(self, directory_path: str, select_path: str = ''):
+        """Handle a cross-process request to reuse this window for a folder load."""
+        target_path = Path(str(directory_path or '').strip()).expanduser()
+        if not target_path.is_dir():
+            return
+        resolved = target_path.resolve()
+        target_select_path = str(select_path or '').strip() or None
+        print(f"[IPC] Reusing current TagGUI window for: {resolved}")
+        self._remember_instance_as_preferred_target()
+        manager = getattr(self, '_context_switch_manager', None)
+        if manager is not None:
+            try:
+                manager.restore_primary()
+            except Exception:
+                pass
+        self.load_directory(
+            resolved,
+            save_path_to_settings=True,
+            select_path=target_select_path,
+        )
+        try:
+            if self.isMinimized():
+                self.showNormal()
+            else:
+                self.show()
+        except Exception:
+            self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _next_floating_slot_id(self) -> int:
         """Return the lowest available floating viewer slot id (1-based)."""
@@ -6588,7 +6812,7 @@ class MainWindow(QMainWindow):
         load_session_id = self._load_session_id
         self.directory_path = path.resolve()
         if save_path_to_settings:
-            settings.setValue('directory_path', str(self.directory_path))
+            self._session_settings_set_value('directory_path', str(self.directory_path))
             self._add_to_recent_directories(str(self.directory_path))
         self._update_main_window_title()
 
@@ -6807,11 +7031,11 @@ class MainWindow(QMainWindow):
             select_index = self.post_deletion_index
             self.post_deletion_index = None
         else:
-            select_index = settings.value(select_index_key, type=int) or 0
+            select_index = self._session_settings_value(select_index_key, 0, value_type=int) or 0
 
         select_path = self._get_folder_last_selected_path(self.directory_path)
-        if not select_path and settings.contains('last_selected_path'):
-            select_path = settings.value('last_selected_path', type=str)
+        if not select_path and self._session_settings_contains('last_selected_path'):
+            select_path = self._session_settings_value('last_selected_path', '', value_type=str)
 
         return filter_text, select_index, select_path
 
@@ -7009,11 +7233,15 @@ class MainWindow(QMainWindow):
         self._place_secondary_browser(placement)
         self._secondary_browser.dock.show()
         self._secondary_browser.dock.raise_()
-        settings.setValue('secondary_browser_visible', True)
-        settings.setValue('secondary_browser_restore_on_startup', True)
+        self._session_settings_set_value('secondary_browser_visible', True)
+        self._session_settings_set_value('secondary_browser_restore_on_startup', True)
         diagnostic_print(f"[RESTORE][Browser2] open placement={placement}", detail="verbose")
         # If a folder was previously opened, reload it; otherwise prompt
-        saved = settings.value('secondary_browser_directory_path', '', type=str)
+        saved = self._session_settings_value(
+            'secondary_browser_directory_path',
+            '',
+            value_type=str,
+        )
         if saved and Path(saved).exists():
             self._secondary_browser.load_directory(Path(saved))
         else:
@@ -7033,6 +7261,7 @@ class MainWindow(QMainWindow):
             tag_separator=get_tag_separator(),
             tokenizer=getattr(self, '_shared_tokenizer', None),
             parent=self,
+            settings_prefix=self._session_settings_prefix,
         )
         self._secondary_browser.context_activated.connect(
             self._on_secondary_context_activated
@@ -7063,7 +7292,10 @@ class MainWindow(QMainWindow):
         secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
         primary_dock = getattr(self, 'image_list', None)
         if secondary_dock is None or primary_dock is None:
-            return str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+            return str(
+                self._session_settings_value('secondary_browser_placement', 'split_right', value_type=str)
+                or 'split_right'
+            )
         try:
             if secondary_dock in self.tabifiedDockWidgets(primary_dock):
                 return 'tabbed'
@@ -7073,9 +7305,15 @@ class MainWindow(QMainWindow):
             primary_rect = primary_dock.frameGeometry()
             secondary_rect = secondary_dock.frameGeometry()
         except Exception:
-            return str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+            return str(
+                self._session_settings_value('secondary_browser_placement', 'split_right', value_type=str)
+                or 'split_right'
+            )
         if not primary_rect.isValid() or not secondary_rect.isValid():
-            return str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+            return str(
+                self._session_settings_value('secondary_browser_placement', 'split_right', value_type=str)
+                or 'split_right'
+            )
 
         horizontal_overlap = min(primary_rect.right(), secondary_rect.right()) - max(
             primary_rect.left(),
@@ -7090,7 +7328,10 @@ class MainWindow(QMainWindow):
         return 'split_right'
 
     def _saved_secondary_browser_placement(self) -> str:
-        placement = str(settings.value('secondary_browser_placement', 'split_right', type=str) or 'split_right')
+        placement = str(
+            self._session_settings_value('secondary_browser_placement', 'split_right', value_type=str)
+            or 'split_right'
+        )
         if placement not in {'split_right', 'split_bottom', 'tabbed'}:
             return 'split_right'
         return placement
@@ -7100,7 +7341,7 @@ class MainWindow(QMainWindow):
             placement = self._infer_secondary_browser_placement()
         if placement not in {'split_right', 'split_bottom', 'tabbed'}:
             placement = 'split_right'
-        settings.setValue('secondary_browser_placement', placement)
+        self._session_settings_set_value('secondary_browser_placement', placement)
 
     def _place_secondary_browser(self, placement: str):
         if self._secondary_browser is None:
@@ -7500,8 +7741,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def close_secondary_browser(self):
         """Hide the secondary browser and restore primary context."""
-        settings.setValue('secondary_browser_visible', False)
-        settings.setValue('secondary_browser_restore_on_startup', False)
+        self._session_settings_set_value('secondary_browser_visible', False)
+        self._session_settings_set_value('secondary_browser_restore_on_startup', False)
         diagnostic_print("[RESTORE][Browser2] close requested; restore disabled", detail="verbose")
         if self._secondary_browser is not None:
             self._secondary_browser.dock.hide()
@@ -7519,8 +7760,8 @@ class MainWindow(QMainWindow):
             not bool(getattr(self, '_secondary_browser_restore_in_progress', False))
             and not bool(getattr(self, '_main_window_closing', False))
         ):
-            settings.setValue('secondary_browser_visible', bool(visible))
-            settings.setValue('secondary_browser_restore_on_startup', bool(visible))
+            self._session_settings_set_value('secondary_browser_visible', bool(visible))
+            self._session_settings_set_value('secondary_browser_restore_on_startup', bool(visible))
             diagnostic_print(f"[RESTORE][Browser2] visibility changed visible={visible}", detail="verbose")
         else:
             diagnostic_print(
@@ -7641,8 +7882,8 @@ class MainWindow(QMainWindow):
         if target == 'secondary' and self._secondary_browser is not None:
             resolved = path.resolve()
             self._secondary_browser.load_directory(resolved)
-            settings.setValue('secondary_browser_visible', True)
-            settings.setValue('secondary_browser_restore_on_startup', True)
+            self._session_settings_set_value('secondary_browser_visible', True)
+            self._session_settings_set_value('secondary_browser_restore_on_startup', True)
             if save_path_to_settings:
                 self._add_to_recent_directories(str(resolved))
             return
@@ -7653,7 +7894,7 @@ class MainWindow(QMainWindow):
         target = target_browser if target_browser in {'primary', 'secondary'} else self._active_directory_browser_name()
         if target == 'secondary':
             initial_directory = str(
-                settings.value('secondary_browser_directory_path', '', type=str) or ''
+                self._session_settings_value('secondary_browser_directory_path', '', value_type=str) or ''
             )
         else:
             initial_directory = (str(self.directory_path)
@@ -8028,7 +8269,7 @@ class MainWindow(QMainWindow):
                 self.all_tags_editor.all_tags_list.setCurrentIndex(QModelIndex())
             # Select the previously selected image in the unfiltered image
             # list.
-            select_index = settings.value('image_index', type=int) or 0
+            select_index = self._session_settings_value('image_index', 0, value_type=int) or 0
             self.image_list.list_view.setCurrentIndex(
                 self.proxy_image_list_model.index(select_index, 0))
         else:
@@ -8089,7 +8330,7 @@ class MainWindow(QMainWindow):
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None
                         else 'filtered_image_index')
-        settings.setValue(settings_key, proxy_image_index.row())
+        self._session_settings_set_value(settings_key, proxy_image_index.row())
 
         if not proxy_image_index.isValid():
             self._update_main_window_title()
@@ -8106,7 +8347,7 @@ class MainWindow(QMainWindow):
                     if img:
                         self._directory_restore_selection_path = str(img.path)
                         self._save_folder_last_selected_path(img.path)
-                        settings.setValue('last_selected_path', str(img.path))
+                        self._session_settings_set_value('last_selected_path', str(img.path))
                         debug_page = getattr(view, '_current_page', None)
                         try:
                             debug_page = int(debug_page) + 1
@@ -8825,28 +9066,60 @@ class MainWindow(QMainWindow):
     def restore(self):
         # Restore the window geometry and state.
         import time
-        geometry_bytes = settings.value('geometry', type=bytes) if settings.contains('geometry') else None
-        window_state_bytes = settings.value('window_state', type=bytes) if settings.contains('window_state') else None
-        was_fullscreen = settings.value('main_window_is_fullscreen', False, type=bool)
-        was_maximized = settings.value('main_window_is_maximized', False, type=bool)
+        geometry_bytes = (
+            self._session_settings_value('geometry', None, value_type=bytes)
+            if self._session_settings_contains('geometry')
+            else None
+        )
+        window_state_bytes = (
+            self._session_settings_value('window_state', None, value_type=bytes)
+            if self._session_settings_contains('window_state')
+            else None
+        )
+        was_fullscreen = self._session_settings_value(
+            'main_window_is_fullscreen',
+            False,
+            value_type=bool,
+        )
+        was_maximized = self._session_settings_value(
+            'main_window_is_maximized',
+            False,
+            value_type=bool,
+        )
 
         if geometry_bytes:
             self.restoreGeometry(geometry_bytes)
         else:
-            normal_rect = settings.value('main_window_normal_geometry')
+            normal_rect = self._session_settings_value('main_window_normal_geometry', None)
             if normal_rect is not None and hasattr(normal_rect, 'isValid') and normal_rect.isValid():
                 self.setGeometry(normal_rect)
             else:
                 self.showMaximized()
 
-        restore_secondary_flag = settings.value('secondary_browser_restore_on_startup', False, type=bool)
-        legacy_visible_flag = settings.value('secondary_browser_visible', False, type=bool)
-        saved_secondary_dir = settings.value('secondary_browser_directory_path', '', type=str)
+        restore_secondary_flag = self._session_settings_value(
+            'secondary_browser_restore_on_startup',
+            False,
+            value_type=bool,
+        )
+        legacy_visible_flag = self._session_settings_value(
+            'secondary_browser_visible',
+            False,
+            value_type=bool,
+        )
+        saved_secondary_dir = self._session_settings_value(
+            'secondary_browser_directory_path',
+            '',
+            value_type=str,
+        )
         saved_secondary_exists = bool(saved_secondary_dir and Path(saved_secondary_dir).exists())
-        restore_secondary = bool(restore_secondary_flag or legacy_visible_flag)
+        restore_secondary = bool(
+            (not self._startup_has_explicit_target)
+            and (restore_secondary_flag or legacy_visible_flag)
+        )
         diagnostic_print(
             "[RESTORE][Browser2] startup "
             f"restore_flag={restore_secondary_flag} legacy_visible={legacy_visible_flag} "
+            f"explicit_target={self._startup_has_explicit_target} "
             f"folder='{saved_secondary_dir}' folder_exists={saved_secondary_exists} "
             f"restore={restore_secondary} has_window_state={window_state_bytes is not None}",
             detail="verbose",
@@ -8866,8 +9139,8 @@ class MainWindow(QMainWindow):
             self._secondary_browser.dock.show()
             if not window_state_bytes:
                 self._place_secondary_browser(self._saved_secondary_browser_placement())
-            settings.setValue('secondary_browser_visible', True)
-            settings.setValue('secondary_browser_restore_on_startup', True)
+            self._session_settings_set_value('secondary_browser_visible', True)
+            self._session_settings_set_value('secondary_browser_restore_on_startup', True)
             diagnostic_print(
                 "[RESTORE][Browser2] dock show "
                 f"hidden={self._secondary_browser.dock.isHidden()} "
@@ -8908,30 +9181,39 @@ class MainWindow(QMainWindow):
         # saved splitter position after the first relayout.
         self._preserve_restored_dock_layout_until = time.time() + 8.0
         # Get the last index of the last selected image.
-        if settings.contains('image_index'):
-            image_index = settings.value('image_index', type=int)
-        else:
-            image_index = 0
+        image_index = (
+            self._session_settings_value('image_index', 0, value_type=int)
+            if self._session_settings_contains('image_index')
+            else 0
+        )
 
-        # Load the last loaded directory.
-        if settings.contains('directory_path'):
-            directory_path = Path(settings.value('directory_path',
-                                                      type=str))
-            if directory_path.is_dir():
-                # Prefer folder-specific selection; fallback to legacy global key.
+        if self._startup_directory is not None and self._startup_directory.is_dir():
+            directory_path = self._startup_directory
+        elif self._session_settings_contains('directory_path'):
+            directory_path = Path(
+                self._session_settings_value('directory_path', '', value_type=str)
+            )
+        else:
+            directory_path = None
+
+        if directory_path is not None and directory_path.is_dir():
+            select_path = self._startup_select_path
+            if not select_path:
                 select_path = self._get_folder_last_selected_path(directory_path)
-                if not select_path and settings.contains('last_selected_path'):
-                    select_path = settings.value('last_selected_path', type=str)
-                def _restore_directory():
-                    try:
-                        self.load_directory(
-                            directory_path,
-                            select_index=image_index,
-                            select_path=select_path,
-                        )
-                    except Exception as e:
-                        print(f"[RESTORE] Failed to restore directory '{directory_path}': {e}")
-                QTimer.singleShot(0, _restore_directory)
+            if not select_path and self._session_settings_contains('last_selected_path'):
+                select_path = self._session_settings_value('last_selected_path', '', value_type=str)
+
+            def _restore_directory():
+                try:
+                    self.load_directory(
+                        directory_path,
+                        select_index=image_index,
+                        select_path=select_path,
+                    )
+                except Exception as e:
+                    print(f"[RESTORE] Failed to restore directory '{directory_path}': {e}")
+
+            QTimer.singleShot(0, _restore_directory)
 
     def reset_toolbar_layout(self):
         """Restore toolbar groups to their default docked layout."""
@@ -9128,7 +9410,7 @@ class MainWindow(QMainWindow):
     def _apply_saved_workspace_preset(self):
         """Restore active workspace label without resetting user's custom layout."""
         saved = str(
-            settings.value('workspace_preset', 'media_viewer', type=str)
+            self._session_settings_value('workspace_preset', 'media_viewer', value_type=str)
             or 'media_viewer'
         ).strip()
         presets = {p["id"] for p in self.get_workspace_presets()}
@@ -9391,7 +9673,7 @@ class MainWindow(QMainWindow):
                 self._set_central_content_page()
 
             if save_to_settings:
-                settings.setValue('workspace_preset', workspace_id)
+                self._session_settings_set_value('workspace_preset', workspace_id)
 
             if hasattr(self, 'menu_manager') and self.menu_manager is not None:
                 self.menu_manager.set_active_workspace(workspace_id)

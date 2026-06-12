@@ -20,4 +20,4 @@ if __name__ == '__main__':
     freeze_support()
     suppress_warnings()
     install_crash_handlers()
-    sys.exit(run_gui())
+    sys.exit(run_gui(sys.argv[1:]))

@@ -956,6 +956,35 @@ class MenuManager:
         open_github_repository_action.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPOSITORY_URL)))
         help_menu.addAction(open_github_repository_action)
+
+        help_menu.addSeparator()
+        folder_integration_menu = help_menu.addMenu('Folder Integration')
+
+        install_integration_action = QAction(
+            'Install File Manager Integration', parent=self.main_window
+        )
+        install_integration_action.triggered.connect(
+            self.main_window.install_file_manager_integration
+        )
+        folder_integration_menu.addAction(install_integration_action)
+
+        remove_integration_action = QAction(
+            'Remove File Manager Integration', parent=self.main_window
+        )
+        remove_integration_action.triggered.connect(
+            self.main_window.uninstall_file_manager_integration
+        )
+        folder_integration_menu.addAction(remove_integration_action)
+        folder_integration_menu.addSeparator()
+
+        folder_integration_info_action = QAction(
+            'About Folder Integration', parent=self.main_window
+        )
+        folder_integration_info_action.triggered.connect(
+            self.main_window.show_file_manager_integration_info
+        )
+        folder_integration_menu.addAction(folder_integration_info_action)
+
         help_menu.addSeparator()
 
         about_action = QAction(
