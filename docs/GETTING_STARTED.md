@@ -47,6 +47,22 @@ Windows also supports:
 - `--crash-log` to enable crash diagnostics
 - `--no-crash-log` to disable crash diagnostics
 
+## Start A Folder
+
+You can launch TagGUI directly into a folder by passing the folder path as the only argument.
+
+- Windows: `start_windows.bat "C:\Images\Set 1"`
+- Linux: `bash start_linux.sh "/home/user/images/set1"`
+- Manual launch: `python run_taggui.py "/home/user/images/set1"`
+
+You can also pass a single media file instead of a folder. TagGUI will open the file's parent folder and try to select that file.
+
+The `--open` form is optional, not required:
+
+- `python run_taggui.py --open "/home/user/images/set1"`
+
+The `--reuse-instance` flag is used by the file-manager integration when you want to send a folder to the currently running TagGUI window instead of opening a new instance.
+
 If the launcher warns that it could not parse the NVIDIA driver version, rerun
 the Torch refresh with an explicit override such as:
 

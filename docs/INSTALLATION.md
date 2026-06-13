@@ -74,6 +74,25 @@ Windows also supports:
 - `--crash-log` to enable crash diagnostics
 - `--no-crash-log` to disable crash diagnostics
 
+## Start A Folder
+
+You can start TagGUI directly in a folder by passing the path as the only argument.
+
+```bash
+# Windows
+start_windows.bat "C:\Images\Set 1"
+
+# Linux
+bash start_linux.sh "/home/user/images/set1"
+
+# Manual launch
+python run_taggui.py "/home/user/images/set1"
+```
+
+TagGUI also accepts a file path. In that case it opens the parent folder and tries to select the file.
+
+The `--open` form is optional, not required. The file-manager integration uses `--reuse-instance` when it wants to send a folder to the currently running TagGUI window instead of opening a new one.
+
 ## Manual Launch
 
 If your environment is already prepared, you can start the app manually from the project root:
