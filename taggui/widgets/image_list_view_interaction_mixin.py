@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
+from utils.sidecar import is_taggui_metadata_dict, legacy_json_sidecar_path
 from utils.settings import DEFAULT_SETTINGS, settings
 
 class ImageListViewInteractionMixin:
@@ -163,12 +164,61 @@ class ImageListViewInteractionMixin:
         except Exception:
             return False
 
-    def _drag_to_external_only_mode(self) -> bool:
-        """Alt+drag exports files to other apps instead of spawning a viewer."""
+    def _drag_export_mode(self) -> str:
+        """Return the active thumbnail export drag mode for the current modifiers."""
         try:
-            return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            modifiers = QApplication.keyboardModifiers()
         except Exception:
-            return False
+            return "spawn"
+
+        has_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        has_ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        if has_alt and has_ctrl:
+            return "workflow_smart"
+        if has_alt:
+            return "file"
+        return "spawn"
+
+    def _drag_to_external_only_mode(self) -> bool:
+        """Alt+drag exports files; Ctrl+Alt+drag enables workflow-aware export."""
+        return self._drag_export_mode() != "spawn"
+
+    def _workflow_sidecar_drag_path_for_image_path(self, image_path: Path | None) -> Path | None:
+        """Return a sibling workflow JSON path, excluding TagGUI's own v1 metadata sidecars."""
+        if image_path is None:
+            return None
+        try:
+            json_path = legacy_json_sidecar_path(image_path)
+        except Exception:
+            return None
+        try:
+            if not json_path.is_file() or json_path.stat().st_size <= 0:
+                return None
+        except OSError:
+            return None
+
+        try:
+            import json
+
+            with json_path.open(encoding="UTF-8") as source:
+                payload = json.load(source)
+        except (OSError, UnicodeDecodeError, ValueError):
+            return json_path
+
+        if is_taggui_metadata_dict(payload):
+            return None
+        return json_path
+
+    def _external_drag_path_for_image_path(self, image_path: Path | None) -> Path | None:
+        """Resolve which file path an external drag should export."""
+        if image_path is None:
+            return None
+        mode = self._drag_export_mode()
+        if mode == "workflow_smart":
+            workflow_path = self._workflow_sidecar_drag_path_for_image_path(image_path)
+            if workflow_path is not None:
+                return workflow_path
+        return image_path
 
     def _event_global_point(self, event) -> QPoint:
         """Get reliable global mouse point from event."""
@@ -180,6 +230,23 @@ class ImageListViewInteractionMixin:
         except Exception:
             pass
         return QCursor.pos()
+
+    def _context_menu_browser_name(self) -> str:
+        """Return which browser owns this list view for context-menu actions."""
+        if getattr(self, "_secondary_browser_owner", None) is not None:
+            return "secondary"
+        return "primary"
+
+    def _refresh_new_media_from_context_menu(self):
+        """Run refresh-new-media for the browser that owns this thumbnail view."""
+        host = self._main_window_host()
+        refresh = getattr(host, "refresh_new_media_only", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh(self._context_menu_browser_name())
+        except TypeError:
+            refresh()
 
     def _clear_spawn_drag_tracking(self):
         """Reset pending spawn-drag gesture tracking."""

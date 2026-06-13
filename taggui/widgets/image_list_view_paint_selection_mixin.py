@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from utils.sidecar import existing_json_sidecar_paths_for_media
 
 
 class ImageListViewPaintSelectionMixin:
@@ -741,11 +742,8 @@ class ImageListViewPaintSelectionMixin:
                 if caption_file_path.exists():
                     caption_file_path.replace(
                         move_directory_path / caption_file_path.name)
-                # Also move JSON metadata if it exists
-                json_file_path = image.path.with_suffix('.json')
-                if json_file_path.exists():
-                    json_file_path.replace(
-                        move_directory_path / json_file_path.name)
+                for json_file_path in existing_json_sidecar_paths_for_media(image.path):
+                    json_file_path.replace(move_directory_path / json_file_path.name)
             except OSError as e:
                 QMessageBox.critical(self, 'Error',
                                      f'Failed to move {image.path} to '

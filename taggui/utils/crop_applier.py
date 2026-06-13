@@ -5,21 +5,18 @@ import subprocess
 from pathlib import Path
 from PIL import Image
 from PySide6.QtCore import QRect
+from utils.sidecar import existing_json_sidecar_paths_for_media, sidecar_backup_path
 from utils.video.ffmpeg_gpu import ffmpeg_base_args
 
 
 def _backup_sidecar_json(file_path: Path) -> bool:
-    """Backup sidecar JSON when present."""
-    json_path = file_path.with_suffix('.json')
-    if not json_path.exists():
-        return True
-
-    json_backup_path = json_path.with_suffix(json_path.suffix + '.backup')
-    if json_backup_path.exists():
-        return True
-
+    """Backup JSON sidecars when present."""
     try:
-        shutil.copy2(json_path, json_backup_path)
+        for json_path in existing_json_sidecar_paths_for_media(file_path):
+            json_backup_path = sidecar_backup_path(json_path)
+            if json_backup_path.exists():
+                continue
+            shutil.copy2(json_path, json_backup_path)
         return True
     except Exception:
         return False

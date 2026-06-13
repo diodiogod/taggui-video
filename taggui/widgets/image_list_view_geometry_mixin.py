@@ -1555,19 +1555,29 @@ class ImageListViewGeometryMixin:
         except Exception:
             dragged_path = None
         drag_path_text = str(dragged_path) if dragged_path is not None else None
+        external_drag_path = dragged_path
+        if external_only and hasattr(self, "_external_drag_path_for_image_path"):
+            try:
+                external_drag_path = self._external_drag_path_for_image_path(dragged_path)
+            except Exception:
+                external_drag_path = dragged_path
+        external_drag_path_text = (
+            str(external_drag_path) if external_drag_path is not None else drag_path_text
+        )
         preview_source = "none"
 
         # Use an URLs-only payload for external file drags. Some targets (notably
         # browsers) mis-handle the model's text/plain fallback as dropped text.
-        if external_only and dragged_path is not None:
+        if external_only and external_drag_path is not None:
             mime_data = QMimeData()
-            mime_data.setUrls([QUrl.fromLocalFile(str(dragged_path))])
+            mime_data.setUrls([QUrl.fromLocalFile(str(external_drag_path))])
         else:
             mime_data = self.model().mimeData(indices)
         if not mime_data:
             drag_message = (
                 f"[DRAG] Abort start: no mime data | external_only={int(external_only)} "
-                f"| row={model_index.row()} | path={drag_path_text}"
+                f"| row={model_index.row()} | path={drag_path_text} "
+                f"| external_path={external_drag_path_text}"
             )
             diagnostic_print(drag_message, detail="essential")
             append_crash_context(drag_message)
@@ -1612,6 +1622,7 @@ class ImageListViewGeometryMixin:
             drag_message = (
                 f"[DRAG] Skip exec: mouse released early | external_only={int(external_only)} "
                 f"| row={model_index.row()} | path={drag_path_text} "
+                f"| external_path={external_drag_path_text} "
                 f"| preview={preview_source} {source_pixmap.width()}x{source_pixmap.height()}"
             )
             diagnostic_print(drag_message, detail="essential")
@@ -1647,7 +1658,8 @@ class ImageListViewGeometryMixin:
             f"[DRAG] Exec start | external_only={int(external_only)} "
             f"| row={model_index.row()} valid={int(model_index.isValid())} "
             f"| persistent_valid={int(dragged_index.isValid())} "
-            f"| path={drag_path_text} | preview={preview_source} "
+            f"| path={drag_path_text} | external_path={external_drag_path_text} "
+            f"| preview={preview_source} "
             f"{source_pixmap.width()}x{source_pixmap.height()} | proxy_rows={model_row_count} "
             f"| source_rows={source_row_count} | loaded_pages={loaded_pages} "
             f"| masonry={int(bool(getattr(self, 'use_masonry', False)))} "
@@ -1667,6 +1679,7 @@ class ImageListViewGeometryMixin:
         drag_message = (
             f"[DRAG] Exec end | external_only={int(external_only)} "
             f"| row={model_index.row()} | path={drag_path_text} "
+            f"| external_path={external_drag_path_text} "
             f"| drop_action={drop_action_text}"
         )
         diagnostic_print(drag_message, detail="essential")

@@ -15,6 +15,7 @@ from utils.review_marks import (
     normalize_review_state,
 )
 from utils.settings import settings, DEFAULT_SETTINGS
+from utils.sidecar import preferred_taggui_sidecar_read_path
 
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
@@ -1252,18 +1253,18 @@ class ImageIndexDB:
                 if row_id > last_id:
                     last_id = row_id
 
-                json_path = (directory_path / rel_path).with_suffix('.json')
-                if not json_path.exists():
+                sidecar_path = preferred_taggui_sidecar_read_path(directory_path / rel_path)
+                if sidecar_path is None:
                     continue
                 try:
-                    if json_path.stat().st_size <= 0:
+                    if sidecar_path.stat().st_size <= 0:
                         continue
                 except OSError:
                     continue
 
                 scanned_sidecars += 1
                 try:
-                    with json_path.open(encoding='UTF-8') as fp:
+                    with sidecar_path.open(encoding='UTF-8') as fp:
                         meta = json.load(fp)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     continue
@@ -1783,18 +1784,18 @@ class ImageIndexDB:
                 if row_id > last_id:
                     last_id = row_id
 
-                json_path = (directory_path / rel_path).with_suffix('.json')
-                if not json_path.exists():
+                sidecar_path = preferred_taggui_sidecar_read_path(directory_path / rel_path)
+                if sidecar_path is None:
                     continue
                 try:
-                    if json_path.stat().st_size <= 0:
+                    if sidecar_path.stat().st_size <= 0:
                         continue
                 except OSError:
                     continue
 
                 scanned_sidecars += 1
                 try:
-                    with json_path.open(encoding='UTF-8') as fp:
+                    with sidecar_path.open(encoding='UTF-8') as fp:
                         meta = json.load(fp)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     continue
@@ -2036,18 +2037,18 @@ class ImageIndexDB:
                 if row_id > last_id:
                     last_id = row_id
 
-                json_path = (directory_path / rel_path).with_suffix('.json')
-                if not json_path.exists():
+                sidecar_path = preferred_taggui_sidecar_read_path(directory_path / rel_path)
+                if sidecar_path is None:
                     continue
                 try:
-                    if json_path.stat().st_size <= 0:
+                    if sidecar_path.stat().st_size <= 0:
                         continue
                 except OSError:
                     continue
 
                 scanned_sidecars += 1
                 try:
-                    with json_path.open(encoding='UTF-8') as fp:
+                    with sidecar_path.open(encoding='UTF-8') as fp:
                         meta = json.load(fp)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     continue
@@ -2190,18 +2191,18 @@ class ImageIndexDB:
                     last_id = row_id
                 processed_ids.append(row_id)
 
-                json_path = (directory_path / rel_path).with_suffix('.json')
-                if not json_path.exists():
+                sidecar_path = preferred_taggui_sidecar_read_path(directory_path / rel_path)
+                if sidecar_path is None:
                     continue
                 try:
-                    if json_path.stat().st_size <= 0:
+                    if sidecar_path.stat().st_size <= 0:
                         continue
                 except OSError:
                     continue
 
                 scanned_sidecars += 1
                 try:
-                    with json_path.open(encoding='UTF-8') as fp:
+                    with sidecar_path.open(encoding='UTF-8') as fp:
                         meta = json.load(fp)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     continue

@@ -117,6 +117,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `video/sar_fixer.py`: Sample aspect ratio fixes.
 - `video/validator.py`: Video validation helpers.
 - `video/common.py`: Shared video utility functions.
+- `sidecar.py`: Canonical TagGUI sidecar path rules, legacy JSON fallback, and sidecar copy/restore helpers.
 - `icons.py`: Icon loading helpers.
 - `grid.py`: Grid helpers.
 - `crop_applier.py`: Crop application utilities.

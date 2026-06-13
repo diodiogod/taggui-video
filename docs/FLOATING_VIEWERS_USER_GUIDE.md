@@ -25,6 +25,9 @@ This guide covers spawned/floating viewers (PiP-style windows): how to open them
 - `Ctrl` + double-click the thumbnail to open it in the system default app instead.
 - Drag a thumbnail from list/masonry and release on empty screen area to spawn at drop location.
 - Hold `Alt` while dragging from the list if you want to drag out the real file instead of spawning a viewer.
+- Hold `Ctrl` + `Alt` while dragging from the list to drag a sibling workflow `.json` when present; otherwise it falls back to the media file.
+
+TagGUI now stores its own media metadata in `*.taggui.json`. This avoids clashing with sibling `*.json` files used by other tools such as workflow sidecars.
 
 Spawn actions are blocked while the main viewer is in fullscreen mode.
 

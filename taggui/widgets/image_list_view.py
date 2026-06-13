@@ -402,6 +402,10 @@ class ImageListView(
         self.open_folder_action = self.addAction('Open on Windows Explorer')
         self.open_folder_action.setShortcut('Ctrl+E')
         self.open_folder_action.triggered.connect(self.open_folder)
+        self.refresh_new_media_context_action = self.addAction('Refresh New Media')
+        self.refresh_new_media_context_action.triggered.connect(
+            self._refresh_new_media_from_context_menu
+        )
         self.restore_backup_action = self.addAction('Restore from Backup')
         self.restore_backup_action.triggered.connect(self.restore_backup)
 
@@ -415,6 +419,7 @@ class ImageListView(
         self.context_menu.addAction(self.copy_file_names_action)
         self.context_menu.addAction(self.copy_paths_action)
         self.context_menu.addSeparator()
+        self.context_menu.addAction(self.refresh_new_media_context_action)
         self.context_menu.addAction(self.move_images_action)
         self.context_menu.addAction(self.copy_images_action)
         self.context_menu.addAction(self.duplicate_images_action)

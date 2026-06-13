@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.17] - 2026-06-13
+
+### Added
+
+- TagGUI now stores its own metadata in *.taggui.json so sibling workflow JSON files are no longer overwritten
+- Legacy TagGUI JSON sidecars still load, preserving compatibility with existing folders
+- Ctrl+Alt+drag can send a sibling workflow JSON to other apps when present, while Alt+drag still sends the media file
+- The image thumbnail right-click menu now includes Refresh New Media for the owning browser
+- Documentation now covers the new drag behavior and folder launch guidance
+
+### Changed
+
+- Protect external workflow JSON sidecars and improve refresh access
 ## [1.3.16] - 2026-06-12
 
 ### Added

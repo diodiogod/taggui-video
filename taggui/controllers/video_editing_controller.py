@@ -7,6 +7,14 @@ from PySide6.QtCore import Qt, QTimer
 from collections import deque
 
 from utils.video_editor import VideoEditor
+from utils.sidecar import (
+    copy_existing_json_sidecars,
+    is_taggui_metadata_dict,
+    json_sidecar_paths_for_media,
+    preferred_taggui_sidecar_read_path,
+    restore_json_sidecars,
+    taggui_sidecar_path,
+)
 import subprocess
 import json
 
@@ -40,11 +48,7 @@ class VideoEditingController:
             # Copy current video to snapshot
             shutil.copy2(str(video_path), str(snapshot_path))
 
-            # Also save JSON metadata if it exists
-            json_path = video_path.with_suffix(video_path.suffix + '.json')
-            if json_path.exists():
-                json_snapshot_path = snapshot_path.with_suffix(snapshot_path.suffix + '.json')
-                shutil.copy2(str(json_path), str(json_snapshot_path))
+            copy_existing_json_sidecars(video_path, snapshot_path)
 
             # Add to undo stack
             self.undo_stack.append((video_path, operation_name, snapshot_path))
@@ -65,10 +69,9 @@ class VideoEditingController:
             try:
                 if snapshot_path.exists():
                     os.remove(snapshot_path)
-                # Also delete JSON snapshot if it exists
-                json_snapshot = snapshot_path.with_suffix(snapshot_path.suffix + '.json')
-                if json_snapshot.exists():
-                    os.remove(json_snapshot)
+                for json_snapshot in json_sidecar_paths_for_media(snapshot_path):
+                    if json_snapshot.exists():
+                        os.remove(json_snapshot)
             except:
                 pass
         self.redo_stack.clear()
@@ -85,7 +88,12 @@ class VideoEditingController:
         # Get all snapshots currently in undo stack for this video
         active_snapshots = {str(s) for v, o, s in self.undo_stack if v == video_path}
         # Also include JSON snapshots
-        active_json_snapshots = {str(s.with_suffix(s.suffix + '.json')) for v, o, s in self.undo_stack if v == video_path}
+        active_json_snapshots = {
+            str(sidecar_path)
+            for v, o, s in self.undo_stack
+            if v == video_path
+            for sidecar_path in json_sidecar_paths_for_media(s)
+        }
 
         # Delete snapshots that aren't in the stack
         try:
@@ -172,27 +180,28 @@ class VideoEditingController:
     def _clear_video_loop_markers(self, video_path: Path, *, disable_current_loop: bool = False):
         """Clear persisted loop markers for a video whose timeline changed."""
         try:
-            json_path = video_path.with_suffix('.json')
-            if json_path.exists():
+            json_path = preferred_taggui_sidecar_read_path(video_path)
+            if json_path is not None:
                 try:
                     with json_path.open(encoding='UTF-8') as meta_file:
                         meta = json.load(meta_file)
-                    if not isinstance(meta, dict):
-                        meta = {'version': 1}
+                    if not is_taggui_metadata_dict(meta):
+                        meta = None
                 except Exception:
-                    meta = {'version': 1}
+                    meta = None
 
-                meta['loop_start_frame'] = None
-                meta['loop_end_frame'] = None
-                meta.pop('viewer_loop_markers', None)
-                meta.pop('floating_last_loop_start_frame', None)
-                meta.pop('floating_last_loop_end_frame', None)
+                if meta is not None:
+                    meta['loop_start_frame'] = None
+                    meta['loop_end_frame'] = None
+                    meta.pop('viewer_loop_markers', None)
+                    meta.pop('floating_last_loop_start_frame', None)
+                    meta.pop('floating_last_loop_end_frame', None)
 
-                try:
-                    with json_path.open('w', encoding='UTF-8') as meta_file:
-                        json.dump(meta, meta_file)
-                except Exception:
-                    pass
+                    try:
+                        with taggui_sidecar_path(video_path).open('w', encoding='UTF-8') as meta_file:
+                            json.dump(meta, meta_file)
+                    except Exception:
+                        pass
 
             image_list_model = getattr(self.main_window, 'image_list_model', None)
             if image_list_model is None:
@@ -390,10 +399,8 @@ class VideoEditingController:
             output_caption_path = output_path.with_suffix('.txt')
             shutil.copy2(str(caption_file_path), str(output_caption_path))
 
-        json_file_path = input_path.with_suffix('.json')
-        if json_file_path.exists():
-            output_json_path = output_path.with_suffix('.json')
-            shutil.copy2(str(json_file_path), str(output_json_path))
+        if any(path.exists() for path in json_sidecar_paths_for_media(input_path)):
+            copy_existing_json_sidecars(input_path, output_path)
             self._clear_video_loop_markers(output_path, disable_current_loop=False)
 
     def _run_video_operation(self, operation_name: str, operation_func, *args):
@@ -1669,22 +1676,12 @@ class VideoEditingController:
             redo_snapshot = temp_base / f"{video_path.stem}_redo_{timestamp}{video_path.suffix}"
             shutil.copy2(str(video_path), str(redo_snapshot))
 
-            # Also save current JSON for redo if it exists
-            json_path = video_path.with_suffix(video_path.suffix + '.json')
-            if json_path.exists():
-                redo_json_snapshot = redo_snapshot.with_suffix(redo_snapshot.suffix + '.json')
-                shutil.copy2(str(json_path), str(redo_json_snapshot))
+            copy_existing_json_sidecars(video_path, redo_snapshot)
 
             # Restore from snapshot
             shutil.copy2(str(snapshot_path), str(video_path))
 
-            # Restore JSON from snapshot if it exists
-            json_snapshot = snapshot_path.with_suffix(snapshot_path.suffix + '.json')
-            if json_snapshot.exists():
-                shutil.copy2(str(json_snapshot), str(json_path))
-            elif json_path.exists():
-                # Snapshot has no JSON but current does - delete current JSON
-                json_path.unlink()
+            restore_json_sidecars(snapshot_path, video_path)
 
             # Move to redo stack
             self.redo_stack.append((video_path, operation_name, redo_snapshot))
@@ -1736,22 +1733,12 @@ class VideoEditingController:
             undo_snapshot = temp_base / f"{video_path.stem}_undo_{timestamp}{video_path.suffix}"
             shutil.copy2(str(video_path), str(undo_snapshot))
 
-            # Also save current JSON for undo if it exists
-            json_path = video_path.with_suffix(video_path.suffix + '.json')
-            if json_path.exists():
-                undo_json_snapshot = undo_snapshot.with_suffix(undo_snapshot.suffix + '.json')
-                shutil.copy2(str(json_path), str(undo_json_snapshot))
+            copy_existing_json_sidecars(video_path, undo_snapshot)
 
             # Restore from redo snapshot
             shutil.copy2(str(redo_snapshot), str(video_path))
 
-            # Restore JSON from redo snapshot if it exists
-            redo_json_snapshot = redo_snapshot.with_suffix(redo_snapshot.suffix + '.json')
-            if redo_json_snapshot.exists():
-                shutil.copy2(str(redo_json_snapshot), str(json_path))
-            elif json_path.exists():
-                # Redo snapshot has no JSON but current does - delete current JSON
-                json_path.unlink()
+            restore_json_sidecars(redo_snapshot, video_path)
 
             # Move back to undo stack
             self.undo_stack.append((video_path, operation_name, undo_snapshot))

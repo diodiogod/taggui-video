@@ -40,6 +40,11 @@ from utils.review_marks import (
     parse_review_flag_token,
     serialize_review_flags,
 )
+from utils.sidecar import (
+    legacy_json_sidecar_path,
+    preferred_taggui_sidecar_read_path,
+    taggui_sidecar_path,
+)
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
@@ -1543,8 +1548,10 @@ class ImageListModel(QAbstractListModel):
 
         self._apply_loop_metadata_from_meta(image, meta)
 
-    def _read_cached_sidecar_meta(self, json_file_path: Path) -> dict | None:
+    def _read_cached_sidecar_meta(self, json_file_path: Path | None) -> dict | None:
         """Read a JSON sidecar once per path/mtime/size tuple within this session."""
+        if json_file_path is None:
+            return None
         try:
             stat = json_file_path.stat()
         except OSError:
@@ -1582,6 +1589,22 @@ class ImageListModel(QAbstractListModel):
                     self._sidecar_meta_cache.pop(oldest_key, None)
 
         return meta
+
+    def _preferred_sidecar_meta_path(
+        self,
+        media_path: Path,
+        available_json_path_strings: set[str] | None = None,
+    ) -> Path | None:
+        """Return the preferred metadata sidecar path for one media file."""
+        preferred_path = taggui_sidecar_path(media_path)
+        legacy_path = legacy_json_sidecar_path(media_path)
+        if available_json_path_strings is not None:
+            if str(preferred_path) in available_json_path_strings:
+                return preferred_path
+            if str(legacy_path) in available_json_path_strings:
+                return legacy_path
+            return None
+        return preferred_taggui_sidecar_read_path(media_path)
 
     def _restore_rel_path_candidates(self, path: Path) -> list[str]:
         """Build normalized DB lookup candidates for a file path."""
@@ -2833,7 +2856,7 @@ class ImageListModel(QAbstractListModel):
                 }
 
             # In paginated mode we still need sidecar loop metadata for playback loop markers.
-            json_file_path = file_path.with_suffix('.json')
+            json_file_path = self._preferred_sidecar_meta_path(file_path)
             meta = self._read_cached_sidecar_meta(json_file_path)
             if meta is not None:
                 self._apply_image_metadata_from_meta(image, meta)
@@ -6076,12 +6099,15 @@ class ImageListModel(QAbstractListModel):
             )
             # Store DB cached info (including thumbnail_cached flag) for fast cache checks
             image._db_cached_info = cached if cached else {}
-            json_file_path = image_path.with_suffix('.json')
-            if str(json_file_path) in json_file_path_strings:
+            json_file_path = self._preferred_sidecar_meta_path(
+                image_path,
+                available_json_path_strings=json_file_path_strings,
+            )
+            if json_file_path is not None:
                 meta = self._read_cached_sidecar_meta(json_file_path)
                 if meta is not None:
                     self._apply_image_metadata_from_meta(image, meta)
-                    # Silently ignore unsupported JSON versions (like ComfyUI workflow files)
+                    # Silently ignore legacy sibling JSON files that are not TagGUI metadata.
             new_images.append(image)
 
         progress.setValue(total_images)  # Complete load
@@ -7070,7 +7096,8 @@ class ImageListModel(QAbstractListModel):
         # Keep DB rating synchronized even when only metadata changes.
         self._save_rating_to_db(image)
         self.save_review_state_to_db(image)
-        does_exist = image.path.with_suffix('.json').exists()
+        sidecar_path = taggui_sidecar_path(image.path)
+        does_exist = sidecar_path.exists()
         review_rank, review_flags = normalize_review_state(
             getattr(image, 'review_rank', 0),
             getattr(image, 'review_flags', 0),
@@ -7108,7 +7135,7 @@ class ImageListModel(QAbstractListModel):
                 meta['floating_last_loop_end_frame'] = floating_last.get('loop_end_frame')
         if does_exist or len(meta.keys()) > 1:
             try:
-                with image.path.with_suffix('.json').open('w', encoding='UTF-8') as meta_file:
+                with sidecar_path.open('w', encoding='UTF-8') as meta_file:
                     json.dump(meta, meta_file)
             except OSError:
                 error_message_box = QMessageBox()
@@ -8324,7 +8351,7 @@ class ImageListModel(QAbstractListModel):
             review_updated_at=cached_info.get('review_updated_at'),
         )
 
-        json_file_path = image_path.with_suffix('.json')
+        json_file_path = self._preferred_sidecar_meta_path(image_path)
         meta = self._read_cached_sidecar_meta(json_file_path)
         if meta is not None:
             self._apply_image_metadata_from_meta(image, meta)

@@ -47,6 +47,11 @@ from utils.review_marks import (
 from utils.image_index_db import ImageIndexDB
 from utils.instance_relay import remember_preferred_server_name
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
+from utils.sidecar import (
+    is_taggui_metadata_dict,
+    preferred_taggui_sidecar_read_path,
+    taggui_sidecar_path,
+)
 from utils.shortcut_remover import ShortcutRemover
 from utils.utils import get_confirmation_dialog_reply, get_resource_path, pluralize
 try:
@@ -3555,21 +3560,22 @@ class MainWindow(QMainWindow):
             for rel_path in rel_paths:
                 if rel_path in loaded_by_rel_path:
                     continue
-                json_path = (directory_path / rel_path).with_suffix('.json')
-                if not json_path.exists():
+                sidecar_path = preferred_taggui_sidecar_read_path(directory_path / rel_path)
+                if sidecar_path is None:
                     continue
                 try:
-                    with json_path.open(encoding='UTF-8') as source:
+                    with sidecar_path.open(encoding='UTF-8') as source:
                         meta = json.load(source)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     continue
-                if not isinstance(meta, dict):
+                if not is_taggui_metadata_dict(meta):
                     continue
                 meta['review_rank'] = 0
                 meta['review_flags'] = serialize_review_flags(0)
                 meta['review_updated_at'] = float(review_updated_at)
+                target_sidecar_path = taggui_sidecar_path(directory_path / rel_path)
                 try:
-                    with json_path.open('w', encoding='UTF-8') as meta_file:
+                    with target_sidecar_path.open('w', encoding='UTF-8') as meta_file:
                         json.dump(meta, meta_file)
                 except OSError:
                     continue
@@ -7927,8 +7933,28 @@ class MainWindow(QMainWindow):
         )
 
     @Slot()
-    def refresh_new_media_only(self):
-        target = self._resolve_refresh_new_media_target()
+    def refresh_new_media_only(self, target_browser: str | None = None):
+        if target_browser in {'primary', 'secondary'}:
+            if target_browser == 'secondary':
+                secondary = getattr(self, '_secondary_browser', None)
+                if secondary is not None and getattr(secondary, 'dock', None) is not None:
+                    target = {
+                        'browser_name': 'secondary',
+                        'dock': secondary.dock,
+                        'model': secondary.image_list_model,
+                        'proxy_model': secondary.proxy_image_list_model,
+                    }
+                else:
+                    target = None
+            else:
+                target = {
+                    'browser_name': 'primary',
+                    'dock': getattr(self, 'image_list', None),
+                    'model': getattr(self, 'image_list_model', None),
+                    'proxy_model': getattr(self, 'proxy_image_list_model', None),
+                }
+        else:
+            target = self._resolve_refresh_new_media_target()
         if not target:
             return
         model = target.get('model')

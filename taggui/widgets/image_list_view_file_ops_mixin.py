@@ -1,6 +1,11 @@
 import os
 
 from widgets.image_list_shared import *  # noqa: F401,F403
+from utils.sidecar import (
+    copy_existing_json_sidecars,
+    json_sidecar_paths_for_media,
+    sidecar_backup_path,
+)
 
 class ImageListViewFileOpsMixin:
     def get_selected_proxy_indices(self) -> list[QModelIndex]:
@@ -179,12 +184,14 @@ class ImageListViewFileOpsMixin:
         if not self._is_generated_derivative_media(media_path):
             return
 
-        json_path = media_path.with_suffix('.json')
         txt_path = media_path.with_suffix('.txt')
         media_backup_path = media_path.with_suffix(media_path.suffix + '.backup')
-        json_backup_path = json_path.with_suffix(json_path.suffix + '.backup')
+        sibling_paths = [txt_path, media_backup_path]
+        for json_path in json_sidecar_paths_for_media(media_path):
+            sibling_paths.append(json_path)
+            sibling_paths.append(sidecar_backup_path(json_path))
 
-        for sibling in (txt_path, json_path, media_backup_path, json_backup_path):
+        for sibling in sibling_paths:
             self._delete_sibling_file_safely(sibling)
 
     def copy_selected_images(self):
@@ -252,11 +259,10 @@ class ImageListViewFileOpsMixin:
                     os.utime(new_caption_path, None)
 
                 # Copy JSON metadata file if it exists
-                json_file_path = original_path.with_suffix('.json')
-                if json_file_path.exists():
-                    new_json_path = new_path.with_suffix('.json')
-                    shutil.copyfile(json_file_path, new_json_path)
-                    os.utime(new_json_path, None)
+                copy_existing_json_sidecars(original_path, new_path)
+                for new_json_path in json_sidecar_paths_for_media(new_path):
+                    if new_json_path.exists():
+                        os.utime(new_json_path, None)
 
                 created_paths.append(new_path)
 
@@ -463,15 +469,15 @@ class ImageListViewFileOpsMixin:
         for img, backup_path in images_with_backups:
             try:
                 shutil.copy2(str(backup_path), str(img.path))
-                json_path = img.path.with_suffix('.json')
-                json_backup_path = json_path.with_suffix(json_path.suffix + '.backup')
-                if json_backup_path.exists():
-                    shutil.copy2(str(json_backup_path), str(json_path))
-                elif json_path.exists():
-                    try:
-                        json_path.unlink()
-                    except Exception:
-                        pass
+                for json_path in json_sidecar_paths_for_media(img.path):
+                    json_backup_path = sidecar_backup_path(json_path)
+                    if json_backup_path.exists():
+                        shutil.copy2(str(json_backup_path), str(json_path))
+                    elif json_path.exists():
+                        try:
+                            json_path.unlink()
+                        except Exception:
+                            pass
                 if getattr(img, 'is_video', False) and video_editing_controller is not None:
                     try:
                         video_editing_controller._refresh_edited_video_metadata(img.path)
@@ -524,6 +530,12 @@ class ImageListViewFileOpsMixin:
         self.open_selection_masonry_wall_action.setVisible(selected_image_count >= 2)
         self.open_image_action.setVisible(selected_image_count == 1)
         self.open_folder_action.setVisible(selected_image_count >= 1)
+        browser_label = 'Browser 2' if getattr(self, '_secondary_browser_owner', None) is not None else 'Browser 1'
+        self.refresh_new_media_context_action.setText(f'Refresh New Media for {browser_label}')
+        source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        self.refresh_new_media_context_action.setEnabled(
+            bool(source_model is not None and getattr(source_model, '_paginated_mode', False))
+        )
 
         # Check if any selected images have backups
         has_backup = False
