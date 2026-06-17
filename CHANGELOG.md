@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.18] - 2026-06-17
+
+### Added
+
+- Add startup flags for limited folder views, launch diagnostics, and Qt startup tuning
+- Reduce white-window stalls during startup restore and background refresh recentering
+- Keep background validation visible while it runs without making the app blocking again
+- Add documentation for the new startup flags in the documentation hub
+
+### Changed
+
+- Improve startup behavior for large folders
+- Open large folders faster by letting cached paginated data appear before validation catches up
 ## [1.3.17] - 2026-06-13
 
 ### Added
