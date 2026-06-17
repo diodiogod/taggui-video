@@ -37,12 +37,14 @@ if _early_cli_has_flag('--qt-system-colors'):
     os.environ['TAGGUI_DESKTOP_SETTINGS_AWARE'] = '1'
 elif _early_cli_has_flag('--qt-plain-colors'):
     os.environ['TAGGUI_DESKTOP_SETTINGS_AWARE'] = '0'
+if _early_cli_has_flag('--startup-profile'):
+    os.environ['TAGGUI_STARTUP_PROFILE'] = '1'
 
 if os.getenv('TAGGUI_FAST_QT_STARTUP', '1') != '0':
     os.environ.setdefault('QT_STYLE_OVERRIDE', 'Fusion')
     if (
         sys.platform.startswith('win')
-        and os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '0') != '1'
+        and os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '1') != '1'
     ):
         os.environ.setdefault('QT_QPA_PLATFORM', 'windows:darkmode=0')
 
@@ -256,10 +258,31 @@ def _parse_startup_launch_args(
     parser.add_argument('--no-fast-qt-startup', action='store_true')
     parser.add_argument('--qt-system-colors', action='store_true')
     parser.add_argument('--qt-plain-colors', action='store_true')
+    parser.add_argument('--startup-profile', action='store_true')
+    parser.add_argument('--background-validation-delay-ms', type=int)
+    parser.add_argument('--limited-validation-delay-ms', type=int)
+    parser.add_argument('--skip-limited-validation', action='store_true')
+    parser.add_argument('--secondary-restore-delay-ms', type=int)
+    parser.add_argument('--auto-marking-delay-ms', type=int)
     parser.add_argument('--limit', type=int)
     parser.add_argument('--sort-by', choices=['mtime', 'name', 'rating'])
     parser.add_argument('--sort-dir', choices=['asc', 'desc', 'ASC', 'DESC'])
     parsed, extras = parser.parse_known_args(list(argv or []))
+
+    if parsed.startup_profile:
+        os.environ['TAGGUI_STARTUP_PROFILE'] = '1'
+    if parsed.background_validation_delay_ms is not None:
+        os.environ['TAGGUI_BACKGROUND_VALIDATION_DELAY_MS'] = str(max(0, int(parsed.background_validation_delay_ms)))
+    if parsed.limited_validation_delay_ms is not None:
+        os.environ['TAGGUI_LIMITED_VALIDATION_DELAY_MS'] = str(max(0, int(parsed.limited_validation_delay_ms)))
+    if parsed.skip_limited_validation:
+        os.environ['TAGGUI_SKIP_LIMITED_VALIDATION'] = '1'
+    if parsed.secondary_restore_delay_ms is not None:
+        os.environ['TAGGUI_SECONDARY_RESTORE_DELAY_MS'] = str(max(0, int(parsed.secondary_restore_delay_ms)))
+    if parsed.auto_marking_delay_ms is not None:
+        delay_value = str(max(0, int(parsed.auto_marking_delay_ms)))
+        os.environ['TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS'] = delay_value
+        os.environ['TAGGUI_AUTO_MARKING_RESTORE_DELAY_MS'] = delay_value
 
     load_options = None
     if parsed.limit is not None:
@@ -309,11 +332,15 @@ def run_gui(argv: list[str] | None = None):
         f"fast_qt_startup={os.getenv('TAGGUI_FAST_QT_STARTUP', '1')}, "
         f"QT_QPA_PLATFORM={os.getenv('QT_QPA_PLATFORM', '') or '<default>'}, "
         f"QT_STYLE_OVERRIDE={os.getenv('QT_STYLE_OVERRIDE', '') or '<default>'}, "
-        f"desktop_settings_aware={os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '0')}"
+        f"desktop_settings_aware={os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '1')}, "
+        f"background_validation_delay_ms={os.getenv('TAGGUI_BACKGROUND_VALIDATION_DELAY_MS', '5000')}, "
+        f"limited_validation_delay_ms={os.getenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '60000')}, "
+        f"secondary_restore_delay_ms={os.getenv('TAGGUI_SECONDARY_RESTORE_DELAY_MS', '<default>')}, "
+        f"auto_marking_delay_ms={os.getenv('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', '6000')}"
     )
 
     try:
-        if os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '0') != '1':
+        if os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '1') != '1':
             QApplication.setDesktopSettingsAware(False)
     except Exception:
         pass
@@ -371,6 +398,11 @@ def run_gui(argv: list[str] | None = None):
     main_window.show()
     _log_startup("main-window-shown")
 
+    if os.getenv('TAGGUI_STARTUP_PROFILE', '0') == '1':
+        QTimer.singleShot(0, lambda: _log_startup("event-loop-first-tick"))
+        QTimer.singleShot(100, lambda: _log_startup("event-loop-100ms"))
+        QTimer.singleShot(1000, lambda: _log_startup("event-loop-1000ms"))
+
     def _warm_thumbnail_cache():
         # Warm after first paint so cache setup never delays window visibility.
         try:
@@ -379,7 +411,14 @@ def run_gui(argv: list[str] | None = None):
         except Exception as cache_error:
             print(f"[CACHE INIT] Warmup failed: {cache_error}")
 
-    QTimer.singleShot(50, _warm_thumbnail_cache)
+    try:
+        thumbnail_warmup_delay_ms = max(
+            0,
+            int(os.getenv('TAGGUI_THUMBNAIL_CACHE_WARMUP_DELAY_MS', '1500') or 1500),
+        )
+    except (TypeError, ValueError):
+        thumbnail_warmup_delay_ms = 1500
+    QTimer.singleShot(thumbnail_warmup_delay_ms, _warm_thumbnail_cache)
 
     # Install signal handler for console close (Windows Ctrl+C, terminal close, etc.)
     def signal_handler(signum, frame):

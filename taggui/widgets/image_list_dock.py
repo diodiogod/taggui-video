@@ -55,6 +55,8 @@ class ControlsToggleStrip(QFrame):
         self._press_pos = None
         self._dragging = False
         self._floating_mode = False
+        self._activity_active = False
+        self._activity_message = ''
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 2, 0)
         layout.setSpacing(2)
@@ -87,7 +89,70 @@ class ControlsToggleStrip(QFrame):
     def set_title(self, title: str):
         self.title_label.setText(str(title or 'Images'))
 
+    def set_activity_state(self, active: bool, message: str = ''):
+        self._activity_active = bool(active)
+        self._activity_message = str(message or '')
+        tooltip = self._activity_message or self._toggle_tooltip
+        if self._activity_active:
+            self.setToolTip(tooltip)
+            self._apply_activity_style()
+            return
+        self.set_floating_mode(self._floating_mode)
+
+    def _apply_activity_style(self):
+        if self._variant == 'footer':
+            self.setStyleSheet(
+                """
+                QFrame {
+                    border: none;
+                    background: rgba(190, 40, 36, 90);
+                }
+                QLabel {
+                    color: palette(text);
+                    font-size: 8px;
+                    font-weight: 700;
+                }
+                QToolButton {
+                    border: none;
+                    color: palette(text);
+                    padding: 0px;
+                    margin: 0px;
+                }
+                QFrame:hover {
+                    background: rgba(210, 55, 45, 130);
+                }
+                """
+            )
+            return
+        self.setStyleSheet(
+            """
+            QFrame {
+                border: none;
+                border-top: 1px solid rgba(255, 95, 75, 180);
+                border-bottom: 1px solid rgba(255, 95, 75, 180);
+                background: rgba(190, 40, 36, 105);
+            }
+            QLabel {
+                color: palette(text);
+                font-size: 8px;
+                font-weight: 700;
+            }
+            QToolButton {
+                border: none;
+                color: palette(text);
+                padding: 0px;
+                margin: 0px;
+            }
+            QFrame:hover {
+                background: rgba(210, 55, 45, 145);
+            }
+            """
+        )
+
     def _apply_compact_style(self):
+        if self._activity_active:
+            self._apply_activity_style()
+            return
         if self._variant == 'footer':
             self.setStyleSheet(
                 """
@@ -142,6 +207,9 @@ class ControlsToggleStrip(QFrame):
         )
 
     def _apply_floating_style(self):
+        if self._activity_active:
+            self._apply_activity_style()
+            return
         self.setStyleSheet(
             """
             QFrame {
@@ -377,6 +445,7 @@ class ImageList(QDockWidget):
                  tag_separator: str, image_width: int):
         super().__init__()
         self.proxy_image_list_model = proxy_image_list_model
+        self._background_activity_active = False
         self._default_sort_dirs = {
             'Default': 'ASC',
             'Name': 'ASC',
@@ -606,6 +675,10 @@ class ImageList(QDockWidget):
             settings.value('image_list_random_seed', 0, type=int),
         )
         source_model = self._get_source_model()
+        if source_model is not None and hasattr(source_model, 'background_validation_progress'):
+            source_model.background_validation_progress.connect(
+                self._on_background_validation_progress
+            )
         if source_model is not None and initial_random_seed > 0:
             source_model._random_seed = initial_random_seed
         self.sort_combo_box.set_sort_direction(self._sort_dir)
@@ -617,6 +690,18 @@ class ImageList(QDockWidget):
         self.sort_combo_box.activated.connect(self._on_sort_combo_activated)
         self._update_sort_combo_display()
         QTimer.singleShot(0, self._update_sort_label_visibility)
+
+    @Slot(str, int, int, bool)
+    def _on_background_validation_progress(self, label: str, current: int, maximum: int, done: bool):
+        if done:
+            self._background_activity_active = False
+            self.controls_toggle_strip.set_activity_state(False)
+            return
+        self._background_activity_active = True
+        status = str(label or 'Updating folder index...')
+        if maximum and maximum > 0 and current >= 0:
+            status = f"{status} {int(current):,}/{int(maximum):,}"
+        self.controls_toggle_strip.set_activity_state(True, status)
 
         # DISABLED: Cache warming causes UI blocking
         # Connect cache warming signal to update cache status label

@@ -2,6 +2,7 @@ import json
 import gc
 import subprocess
 import sys
+import os
 import time
 import hashlib
 from collections import deque
@@ -521,6 +522,15 @@ class SelectionWallSpeedOverlay(QFrame):
 
 
 class MainWindow(QMainWindow):
+    async_recenter_ready = Signal(dict)
+
+    @staticmethod
+    def _startup_delay_ms(env_name: str, default_ms: int) -> int:
+        try:
+            return max(0, int(os.getenv(env_name, str(default_ms)) or default_ms))
+        except (TypeError, ValueError):
+            return max(0, int(default_ms))
+
     def _log_startup_perf(self, label: str):
         origin = getattr(self, '_startup_perf_origin', None)
         if origin is None:
@@ -572,6 +582,7 @@ class MainWindow(QMainWindow):
         self._workspace_applying = False
         self._workspace_active_id = None
         self._pending_new_media_refresh_state = None
+        self._async_recenter_request_id = 0
         self._default_window_state = None
         self._background_workers_shutdown = False
         self._main_viewer_visible = True
@@ -602,6 +613,7 @@ class MainWindow(QMainWindow):
         self.image_list_model.background_validation_applied.connect(
             self._on_background_validation_applied
         )
+        self.async_recenter_ready.connect(self._apply_async_recenter_result)
         self.tag_counter_model = TagCounterModel()
         self.image_tag_list_model = ImageTagListModel()
         self._log_startup_perf("models-ready")
@@ -7104,12 +7116,131 @@ class MainWindow(QMainWindow):
 
         return filter_text, select_index, select_path
 
+    def _ui_sort_to_db_sort(self, sort_text: str) -> tuple[str, str]:
+        normalized = str(sort_text or 'Default')
+        sort_map = {
+            'Default': 'file_name',
+            'Name': 'file_name',
+            'Modified': 'mtime',
+            'Created': 'ctime',
+            'Size': 'file_size',
+            'Type': 'file_type',
+            'Love / Rate / Bomb': 'love_rate_bomb',
+            'Random': 'RANDOM()',
+        }
+        sort_dir = (
+            self.image_list.current_sort_direction()
+            if hasattr(self.image_list, 'current_sort_direction')
+            else 'ASC'
+        )
+        return sort_map.get(normalized, 'file_name'), str(sort_dir or 'ASC').upper()
+
+    def _request_async_recenter(self, *, select_path: str, sort_text: str):
+        if not select_path:
+            return
+        if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
+            return
+        directory_path = self.directory_path
+        if directory_path is None:
+            return
+
+        self._async_recenter_request_id += 1
+        request_id = int(self._async_recenter_request_id)
+        load_session_id = int(self._load_session_id)
+        select_path_text = str(select_path)
+        sort_field, sort_dir = self._ui_sort_to_db_sort(sort_text)
+        filter_sql = str(getattr(self.image_list_model, '_filter_sql', '') or '')
+        filter_bindings = tuple(getattr(self.image_list_model, '_filter_bindings', ()) or ())
+        random_seed = int(getattr(self.image_list_model, '_random_seed', 1234567) or 1234567)
+        directory_path_obj = Path(directory_path)
+
+        def _worker():
+            result = {
+                'request_id': request_id,
+                'load_session_id': load_session_id,
+                'directory_path': str(directory_path_obj),
+                'select_path': select_path_text,
+                'target_global': -1,
+                'sort_field': sort_field,
+                'sort_dir': sort_dir,
+            }
+            db = None
+            try:
+                db = ImageIndexDB(directory_path_obj)
+                rel_candidates = self.image_list_model._restore_rel_path_candidates(Path(select_path_text))
+                rank = -1
+                for rel_path in rel_candidates:
+                    rank = db.get_rank_of_image(
+                        rel_path,
+                        sort_field,
+                        sort_dir,
+                        filter_sql=filter_sql,
+                        bindings=filter_bindings,
+                        random_seed=random_seed,
+                    )
+                    if rank != -1:
+                        break
+                result['target_global'] = int(rank) if isinstance(rank, int) and rank >= 0 else -1
+            except Exception:
+                result['target_global'] = -1
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+            self.async_recenter_ready.emit(result)
+
+        try:
+            self.image_list_model._load_executor.submit(_worker)
+        except Exception:
+            pass
+
+    @Slot(dict)
+    def _apply_async_recenter_result(self, result: dict):
+        if not isinstance(result, dict):
+            return
+        if int(result.get('request_id', -1) or -1) != int(self._async_recenter_request_id):
+            return
+        if int(result.get('load_session_id', -1) or -1) != int(self._load_session_id):
+            return
+        if str(result.get('directory_path') or '') != str(self.directory_path or ''):
+            return
+        target_global = int(result.get('target_global', -1) or -1)
+        if target_global < 0:
+            return
+
+        current_sort = str(self.image_list.sort_combo_box.currentText() or '')
+        current_sort_field, current_sort_dir = self._ui_sort_to_db_sort(current_sort)
+        if (
+            str(result.get('sort_field') or '') != current_sort_field
+            or str(result.get('sort_dir') or '').upper() != current_sort_dir
+        ):
+            return
+
+        restore_path = str(result.get('select_path') or '')
+        if restore_path and restore_path != str(getattr(self, '_directory_restore_selection_path', '') or ''):
+            return
+
+        view = self.image_list.list_view
+        source_model = self.image_list_model
+        try:
+            if hasattr(view, 'start_targeted_relocation'):
+                view.start_targeted_relocation(
+                    int(target_global),
+                    reason='async_refresh_restore',
+                    source_model=source_model,
+                )
+        except Exception:
+            pass
+
     def _restore_directory_selection(
         self,
         *,
         select_index: int,
         select_path: str | None,
         load_session_id: int | None = None,
+        allow_sync_rank_lookup: bool = True,
     ):
         """Restore the current selection after a reload or incremental refresh."""
         if load_session_id is None:
@@ -7121,6 +7252,7 @@ class MainWindow(QMainWindow):
         restore_global_rank = -1
         if (
             select_path
+            and allow_sync_rank_lookup
             and getattr(source_model, '_paginated_mode', False)
             and hasattr(source_model, 'resolve_restore_target')
         ):
@@ -7139,7 +7271,11 @@ class MainWindow(QMainWindow):
 
         should_defer_row_selection = bool(is_paginated_strict and restore_global_rank >= 0)
 
-        if select_path and not should_defer_row_selection:
+        if (
+            select_path
+            and not should_defer_row_selection
+            and (allow_sync_rank_lookup or not getattr(source_model, '_paginated_mode', False))
+        ):
             try:
                 source_row = source_model.get_index_for_path(Path(select_path))
                 if source_row != -1:
@@ -7250,27 +7386,52 @@ class MainWindow(QMainWindow):
         if not current_sort and not restore_path:
             return
 
+        def _current_index_is_usable() -> bool:
+            try:
+                current_index = self.image_list.list_view.currentIndex()
+                model = self.image_list.list_view.model()
+                return (
+                    model is not None
+                    and current_index.isValid()
+                    and current_index.model() is model
+                    and 0 <= current_index.row() < model.rowCount()
+                )
+            except Exception:
+                return False
+
         def _replay_current_sort():
             if refreshed_directory != str(self.directory_path or ''):
                 return
             if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
                 return
             sort_text = str(self.image_list.sort_combo_box.currentText() or current_sort)
-            if sort_text:
+            expected_sort_field, expected_sort_dir = self._ui_sort_to_db_sort(sort_text)
+            current_sort_field = str(getattr(self.image_list_model, '_sort_field', '') or '')
+            current_sort_dir = str(getattr(self.image_list_model, '_sort_dir', '') or '').upper()
+            sort_already_current = (
+                current_sort_field == expected_sort_field
+                and current_sort_dir == expected_sort_dir
+            )
+            if sort_text and not sort_already_current:
                 self.image_list._on_sort_changed(
                     sort_text,
-                    preserve_selection=not bool(restore_path),
+                    preserve_selection=False,
                 )
-            if restore_path:
+            if restore_path and not _current_index_is_usable():
                 self._restore_directory_selection(
                     select_index=restore_index,
                     select_path=restore_path,
+                    allow_sync_rank_lookup=False,
+                )
+                self._request_async_recenter(
+                    select_path=restore_path,
+                    sort_text=sort_text,
                 )
 
         replay_delay_ms = (
-            350
+            self._startup_delay_ms('TAGGUI_LIMITED_REFRESH_SORT_REPLAY_DELAY_MS', 1000)
             if getattr(self.image_list_model, '_active_load_options', None) is not None
-            else 0
+            else self._startup_delay_ms('TAGGUI_REFRESH_SORT_REPLAY_DELAY_MS', 1000)
         )
         QTimer.singleShot(replay_delay_ms, _replay_current_sort)
 
@@ -9252,7 +9413,11 @@ class MainWindow(QMainWindow):
                             f"[RESTORE][Browser2] failed loading folder '{saved_secondary_dir}': {e}",
                             detail="verbose",
                         )
-                QTimer.singleShot(450, _restore_secondary_directory)
+                secondary_load_delay_ms = self._startup_delay_ms(
+                    'TAGGUI_SECONDARY_RESTORE_DELAY_MS',
+                    5000 if self._startup_load_options is not None else 2500,
+                )
+                QTimer.singleShot(secondary_load_delay_ms, _restore_secondary_directory)
             else:
                 diagnostic_print("[RESTORE][Browser2] no valid saved folder to load", detail="verbose")
 
@@ -9308,7 +9473,11 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"[RESTORE] Failed to restore directory '{directory_path}': {e}")
 
-            QTimer.singleShot(350, _restore_directory)
+            primary_restore_delay_ms = self._startup_delay_ms(
+                'TAGGUI_PRIMARY_RESTORE_DELAY_MS',
+                150 if self._startup_load_options is not None else 350,
+            )
+            QTimer.singleShot(primary_restore_delay_ms, _restore_directory)
 
     def reset_toolbar_layout(self):
         """Restore toolbar groups to their default docked layout."""

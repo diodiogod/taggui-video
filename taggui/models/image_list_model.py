@@ -5,6 +5,7 @@ import heapq
 import shutil
 import subprocess
 import sys
+import os
 import time
 import multiprocessing
 from typing import List, Dict, Any, Optional
@@ -565,6 +566,24 @@ def _select_limited_paths_from_files(
         return [rel_path for _mtime, rel_path in top_ranked]
 
     return []
+
+
+def _limited_background_validation_delay_ms() -> int:
+    """Delay full-folder validation in limited startup so the UI stays responsive."""
+    raw_value = os.getenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '60000')
+    try:
+        return max(0, int(raw_value))
+    except (TypeError, ValueError):
+        return 60000
+
+
+def _background_validation_delay_ms() -> int:
+    """Delay normal validation briefly so the first usable UI frame wins."""
+    raw_value = os.getenv('TAGGUI_BACKGROUND_VALIDATION_DELAY_MS', '5000')
+    try:
+        return max(0, int(raw_value))
+    except (TypeError, ValueError):
+        return 5000
 
 def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
     """
@@ -3901,13 +3920,11 @@ class ImageListModel(QAbstractListModel):
             if 0 <= int(page_num) < total_pages
         }
 
-        for image_path in touched_paths or []:
-            inserted_rank = self.get_global_rank_for_path(image_path)
-            if inserted_rank < 0:
-                continue
-            inserted_page = int(inserted_rank) // self.PAGE_SIZE
-            if 0 <= inserted_page < total_pages:
-                pages_to_reload.add(inserted_page)
+        if touched_paths and total_pages > 0:
+            # Avoid per-file rank lookups on the UI thread during background
+            # refresh apply. Newly detected files most commonly affect page 0
+            # for recency sorts; already-loaded pages are refreshed above.
+            pages_to_reload.add(0)
 
         if not pages_to_reload and new_total > 0:
             pages_to_reload.add(0)
@@ -5589,9 +5606,12 @@ class ImageListModel(QAbstractListModel):
         removed_count = int(result.get('removed_count', 0) or 0)
         if result.get('changes_detected'):
             print(f"[CACHE] Applying background refresh (+{added_count:,} / -{removed_count:,})")
+            self.background_validation_progress.emit("Applying folder refresh...", 0, 0, False)
         elif tag_updates > 0:
             print(f"[CACHE] Applying background tag refresh ({tag_updates:,} image sidecar change(s))")
+            self.background_validation_progress.emit("Applying tag refresh...", 0, 0, False)
             self.enrichment_complete.emit()
+            self.background_validation_progress.emit("", -1, 0, True)
             return
 
         added_paths: list[Path] = []
@@ -5627,6 +5647,7 @@ class ImageListModel(QAbstractListModel):
                 'tag_updates_count': tag_updates,
                 'reloaded_page_count': len(reloaded_pages),
             })
+            self.background_validation_progress.emit("", -1, 0, True)
             return
 
         self.load_directory(
@@ -5642,6 +5663,7 @@ class ImageListModel(QAbstractListModel):
             'removed_count': removed_count,
             'tag_updates_count': tag_updates,
         })
+        self.background_validation_progress.emit("", -1, 0, True)
 
     def _validate_cached_paths_in_background(
         self,
@@ -5880,6 +5902,12 @@ class ImageListModel(QAbstractListModel):
         def _schedule_background_validation(delay_ms: int = 0):
             if skip_background_validation:
                 return
+            if (
+                normalized_load_options is not None
+                and os.getenv('TAGGUI_SKIP_LIMITED_VALIDATION', '0') == '1'
+            ):
+                print("[CACHE] Skipping limited-mode background validation")
+                return
 
             def _start_validation():
                 if load_generation != self._path_validation_generation:
@@ -6012,7 +6040,11 @@ class ImageListModel(QAbstractListModel):
                 scoped_rel_paths=limited_cached_rel_paths or None,
                 load_options=normalized_load_options,
             )
-            validation_delay_ms = 15000 if normalized_load_options is not None else 0
+            validation_delay_ms = (
+                _limited_background_validation_delay_ms()
+                if normalized_load_options is not None
+                else _background_validation_delay_ms()
+            )
             _schedule_background_validation(delay_ms=validation_delay_ms)
             return
 

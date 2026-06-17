@@ -1,5 +1,6 @@
 import sys
 import json
+import os
 from pathlib import Path
 
 from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer
@@ -26,6 +27,13 @@ from auto_marking.marking_thread import MarkingThread
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 
 
+def _startup_delay_ms(env_name: str, default_ms: int) -> int:
+    try:
+        return max(0, int(os.getenv(env_name, str(default_ms)) or default_ms))
+    except (TypeError, ValueError):
+        return max(0, int(default_ms))
+
+
 class MarkingSettingsForm(QVBoxLayout):
     model_selected = Signal(bool)
 
@@ -40,7 +48,10 @@ class MarkingSettingsForm(QVBoxLayout):
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
         self.model_combo_box.activated.connect(lambda _: self.model_selected.emit(True))
         self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
-        QTimer.singleShot(1500, self.get_local_model_paths)
+        QTimer.singleShot(
+            _startup_delay_ms('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', 6000),
+            self.get_local_model_paths,
+        )
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
         basic_settings_form.addRow('Model', self.model_combo_box)
@@ -217,7 +228,10 @@ class AutoMarkings(QDockWidget):
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_marking)
         self.marking_settings_form.model_selected.connect(self._on_model_selection_changed)
-        QTimer.singleShot(0, self._restore_model_selection_state)
+        QTimer.singleShot(
+            _startup_delay_ms('TAGGUI_AUTO_MARKING_RESTORE_DELAY_MS', 6500),
+            self._restore_model_selection_state,
+        )
 
     @Slot(bool)
     def _on_model_selection_changed(self, has_model_text: bool):
