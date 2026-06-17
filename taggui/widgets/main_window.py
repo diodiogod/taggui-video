@@ -5,6 +5,7 @@ import sys
 import os
 import time
 import hashlib
+import threading
 from collections import deque
 from pathlib import Path
 
@@ -585,6 +586,7 @@ class MainWindow(QMainWindow):
         self._async_recenter_request_id = 0
         self._default_window_state = None
         self._background_workers_shutdown = False
+        self._shutdown_failsafe_armed = False
         self._main_viewer_visible = True
         self._main_viewer_controls_attached = True
         self._reaction_controls_attached = True
@@ -1367,6 +1369,7 @@ class MainWindow(QMainWindow):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
         self._main_window_closing = True
+        self._arm_shutdown_failsafe()
         self.cancel_compare_drag()
         self.close_all_floating_viewers()
         self._save_image_list_dock_width()
@@ -1391,6 +1394,26 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def _arm_shutdown_failsafe(self):
+        """Force a clean Windows exit shortly after close to avoid native teardown crashes."""
+        if not sys.platform.startswith('win'):
+            return
+        if os.getenv('TAGGUI_FORCE_CLEAN_EXIT_ON_CLOSE', '1') == '0':
+            return
+        if self._shutdown_failsafe_armed:
+            return
+        self._shutdown_failsafe_armed = True
+
+        def _failsafe_exit():
+            time.sleep(0.35)
+            os._exit(0)
+
+        threading.Thread(
+            target=_failsafe_exit,
+            name="taggui_shutdown_failsafe",
+            daemon=True,
+        ).start()
 
     def _save_main_window_layout_settings(self):
         """Persist main-window geometry, dock state, and window mode flags."""
@@ -1431,13 +1454,27 @@ class MainWindow(QMainWindow):
         self._background_workers_shutdown = True
 
         # Stop UI timers that may still schedule work while closing.
-        for timer_name in ('_unfreeze_timer', '_filter_timer', '_video_controls_scheduler_timer', '_perf_hud_timer'):
+        for timer_name in ('_unfreeze_timer', '_filter_timer', '_video_controls_scheduler_timer', '_perf_hud_timer', '_bulk_close_timer'):
             timer = getattr(self, timer_name, None)
             if timer is not None and hasattr(timer, 'stop'):
                 try:
                     timer.stop()
                 except Exception:
                     pass
+
+        try:
+            self._stop_active_sync_coordinator()
+        except Exception:
+            pass
+
+        primary_viewer = getattr(self, 'image_viewer', None)
+        if primary_viewer is not None:
+            try:
+                player = getattr(primary_viewer, 'video_player', None)
+                if player is not None:
+                    player.cleanup(force_gc=False)
+            except Exception as e:
+                print(f"[SHUTDOWN] Primary viewer cleanup warning: {e}")
 
         # Cancel model executors first (thumbnail/page/cache queues).
         model = getattr(self, 'image_list_model', None)
@@ -1466,6 +1503,21 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"[SHUTDOWN] Masonry executor shutdown warning: {e}")
                 setattr(list_view, '_masonry_executor', None)
+
+    def _cleanup_window_viewer_for_shutdown(self, window):
+        """Release floating/comparison viewer media backends before Qt teardown."""
+        try:
+            viewer = getattr(window, 'viewer', None)
+        except RuntimeError:
+            return
+        if viewer is None:
+            return
+        try:
+            player = getattr(viewer, 'video_player', None)
+            if player is not None:
+                player.cleanup(force_gc=False)
+        except Exception as e:
+            print(f"[SHUTDOWN] Floating viewer cleanup warning: {e}")
 
     def set_font_size(self):
         font = self.app.font()
@@ -6669,6 +6721,32 @@ class MainWindow(QMainWindow):
                 pass
             self._refresh_selection_wall_speed_overlay()
             self.refresh_video_controls_performance_profile()
+            return
+
+        if bool(getattr(self, '_main_window_closing', False)):
+            self._bulk_close_timer.stop()
+            self._bulk_close_pending_windows.clear()
+            self._bulk_closing_floating_viewers = True
+            self.cancel_compare_drag()
+            self._stop_active_sync_coordinator()
+            self._floating_viewers = []
+            self._comparison_windows = []
+            for window in windows_to_close:
+                try:
+                    window.setProperty('_bulk_close_mode', True)
+                except Exception:
+                    pass
+                self._cleanup_window_viewer_for_shutdown(window)
+                try:
+                    window.hide()
+                except Exception:
+                    pass
+                try:
+                    window.close()
+                except Exception:
+                    pass
+            self._bulk_closing_floating_viewers = False
+            self._bulk_close_gc_pending = False
             return
 
         self._bulk_closing_floating_viewers = True

@@ -2133,7 +2133,7 @@ class ImageViewer(QWidget):
             pass
         try:
             if hasattr(self, 'video_player') and self.video_player:
-                self.video_player.stop()
+                self.video_player.cleanup(force_gc=False)
         except Exception:
             pass
         super().closeEvent(event)

@@ -5622,6 +5622,64 @@ class ImageListModel(QAbstractListModel):
             Qt.ConnectionType.QueuedConnection,
         )
 
+    def _compute_paginated_refresh_preload(
+        self,
+        db: ImageIndexDB,
+        directory_path: Path,
+        *,
+        added_db_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Prepare paginated refresh data off the UI thread."""
+        with self._page_load_lock:
+            loaded_pages_snapshot = tuple(sorted(int(page_num) for page_num in self._pages.keys()))
+
+        filter_sql = str(self._filter_sql or '')
+        filter_bindings = tuple(self._filter_bindings or ())
+        sort_field = str(self._sort_field or 'mtime')
+        sort_dir = str(self._sort_dir or 'DESC')
+        random_seed = int(self._random_seed or 0)
+        new_total = int(
+            db.count(
+                filter_sql=filter_sql,
+                bindings=filter_bindings,
+            ) or 0
+        )
+
+        total_pages = max(0, (new_total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        pages_to_reload = {
+            int(page_num) for page_num in loaded_pages_snapshot
+            if 0 <= int(page_num) < total_pages
+        }
+        if added_db_paths and total_pages > 0:
+            pages_to_reload.add(0)
+        if not pages_to_reload and new_total > 0:
+            pages_to_reload.add(0)
+
+        preloaded_pages: dict[int, list[Image]] = {}
+        for page_num in sorted(pages_to_reload):
+            page_images, _missing_rel_paths = self._load_images_from_db(
+                int(page_num),
+                db=db,
+                directory_path=directory_path,
+                sort_field=sort_field,
+                sort_dir=sort_dir,
+                filter_sql=filter_sql,
+                filter_bindings=filter_bindings,
+                random_seed=random_seed,
+            )
+            preloaded_pages[int(page_num)] = page_images
+
+        return {
+            'new_total': new_total,
+            'pages_to_reload': sorted(pages_to_reload),
+            'preloaded_pages': preloaded_pages,
+            'filter_sql': filter_sql,
+            'filter_bindings': filter_bindings,
+            'sort_field': sort_field,
+            'sort_dir': sort_dir,
+            'random_seed': random_seed,
+        }
+
     @Slot()
     def _apply_pending_path_validation(self):
         """Apply the latest completed background path-validation result."""
@@ -5676,13 +5734,31 @@ class ImageListModel(QAbstractListModel):
                 except Exception:
                     pass
             self._db = ImageIndexDB(self._directory_path)
-            new_total = int(self._db.count(
-                filter_sql=self._filter_sql,
-                bindings=self._filter_bindings,
-            ) or 0)
+            snapshot_matches = (
+                str(result.get('filter_sql') or '') == str(self._filter_sql or '')
+                and tuple(result.get('filter_bindings') or ()) == tuple(self._filter_bindings or ())
+                and str(result.get('sort_field') or 'mtime') == str(self._sort_field or 'mtime')
+                and str(result.get('sort_dir') or 'DESC') == str(self._sort_dir or 'DESC')
+                and int(result.get('random_seed', 0) or 0) == int(self._random_seed or 0)
+            )
+            preloaded_pages = None
+            new_total = None
+            if snapshot_matches:
+                preloaded_pages = {
+                    int(page_num): list(images or [])
+                    for page_num, images in (result.get('preloaded_pages') or {}).items()
+                }
+                if 'new_total' in result:
+                    new_total = int(result.get('new_total', 0) or 0)
+            if new_total is None:
+                new_total = int(self._db.count(
+                    filter_sql=self._filter_sql,
+                    bindings=self._filter_bindings,
+                ) or 0)
             reloaded_pages = self._reload_paginated_model_after_db_update(
                 new_total=new_total,
                 touched_paths=added_paths,
+                preloaded_pages=preloaded_pages,
             )
             self.background_validation_applied.emit({
                 'directory_path': str(directory_path),
@@ -5869,9 +5945,17 @@ class ImageListModel(QAbstractListModel):
                 if tag_updates_count <= 0:
                     print("[CACHE] Background validation complete: image list unchanged")
 
+            paginated_refresh = None
+            if self._paginated_mode and self._active_load_options is None:
+                paginated_refresh = self._compute_paginated_refresh_preload(
+                    db,
+                    directory_path,
+                    added_db_paths=added_db_paths,
+                )
+
             _emit_progress(progress_label, len(refreshed_rel_paths), progress_maximum, True)
 
-            self._queue_path_validation_result({
+            result_payload = {
                 'generation': generation,
                 'directory_path': directory_path,
                 'changes_detected': changes_detected,
@@ -5881,7 +5965,10 @@ class ImageListModel(QAbstractListModel):
                 'tag_updates_count': tag_updates_count,
                 'precomputed_rel_paths': merged_native_paths if changes_detected else None,
                 'db_synced': bool(changes_detected or tag_updates_count),
-            })
+            }
+            if paginated_refresh is not None:
+                result_payload.update(paginated_refresh)
+            self._queue_path_validation_result(result_payload)
 
         except Exception as e:
             if generation == self._path_validation_generation:
