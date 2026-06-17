@@ -5,6 +5,7 @@ This is the main documentation map for TagGUI Video 1M.
 ## Start Here
 
 - [Installation](INSTALLATION.md)
+- [Startup Flags](STARTUP_FLAGS.md)
 - [Getting Started](GETTING_STARTED.md)
 - [Feature Overview](FEATURE_OVERVIEW.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
@@ -36,5 +37,6 @@ This is the main documentation map for TagGUI Video 1M.
 
 ## Technical References
 
+- [Startup Flags](STARTUP_FLAGS.md)
 - [Skin README](../taggui/skins/README.md)
 - [Skin Property Reference](../taggui/skins/PROPERTY_REFERENCE.md)

@@ -2436,11 +2436,14 @@ class ImageListModel(QAbstractListModel):
             dialog = QProgressDialog(label, "", 0, 0)
             dialog.setWindowTitle("Validating Folder")
             dialog.setWindowModality(Qt.NonModal)
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            dialog.setWindowFlag(Qt.WindowType.Tool, True)
             dialog.setCancelButton(None)
             dialog.setMinimumDuration(0)
             dialog.setAutoClose(False)
             dialog.setAutoReset(False)
             dialog.show()
+            dialog.raise_()
             self._background_validation_dialog = dialog
 
         if maximum > 0:
@@ -2453,6 +2456,8 @@ class ImageListModel(QAbstractListModel):
             dialog.setLabelText(f"{label}\nFiles: {int(current):,}")
         else:
             dialog.setLabelText(label)
+        if dialog.isVisible():
+            dialog.raise_()
 
     def _schedule_dimensions_updated(self):
         """Coalesce frequent dimension updates into one masonry refresh signal."""
@@ -2789,6 +2794,45 @@ class ImageListModel(QAbstractListModel):
                     return -1
                 row_offset += len(self._pages[page_num])
         
+        return -1
+
+    def get_loaded_row_for_path(self, path: Path) -> int:
+        """Return the loaded row for a path without triggering DB rank lookup or page loads."""
+        try:
+            if not self._paginated_mode:
+                for i, img in enumerate(self.images):
+                    if getattr(img, 'path', None) == path:
+                        return i
+                return -1
+
+            base_dir = Path(self._directory_path)
+
+            def _norm_rel(candidate_path: Path) -> str:
+                try:
+                    rel = candidate_path.relative_to(base_dir)
+                except Exception:
+                    rel = candidate_path
+                return str(rel).replace('\\', '/').casefold()
+
+            target_norm = _norm_rel(path)
+            target_name = path.name.casefold()
+            with self._page_load_lock:
+                row = 0
+                for page_num in sorted(self._pages.keys()):
+                    for image in self._pages.get(page_num, []):
+                        image_path = getattr(image, 'path', None)
+                        if image_path is None:
+                            row += 1
+                            continue
+                        image_path_obj = Path(image_path)
+                        if (
+                            _norm_rel(image_path_obj) == target_norm
+                            or image_path_obj.name.casefold() == target_name
+                        ):
+                            return int(row)
+                        row += 1
+        except Exception:
+            pass
         return -1
 
         # Page not loaded - trigger async load
@@ -6025,7 +6069,7 @@ class ImageListModel(QAbstractListModel):
         if (
             should_use_limited_cached_bootstrap
             or (
-                effective_cached_count > 1000
+                effective_cached_count > 0
                 and self._should_use_cached_paginated_bootstrap(effective_cached_count)
             )
         ):

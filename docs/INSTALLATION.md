@@ -93,6 +93,18 @@ TagGUI also accepts a file path. In that case it opens the parent folder and tri
 
 The `--open` form is optional, not required. The file-manager integration uses `--reuse-instance` when it wants to send a folder to the currently running TagGUI window instead of opening a new one.
 
+## Startup Flags
+
+TagGUI now has dedicated startup flags for:
+
+- limited folder views such as `--limit 50 --sort-by mtime --sort-dir desc`
+- Qt startup behavior such as `--qt-plain-colors` or `--no-fast-qt-startup`
+- startup diagnostics such as `--startup-profile`
+
+For the full reference, examples, and tuning notes, see:
+
+- [Startup Flags](STARTUP_FLAGS.md)
+
 ## Manual Launch
 
 If your environment is already prepared, you can start the app manually from the project root:
@@ -137,6 +149,7 @@ For video editing workflows, make sure `ffmpeg` is installed and available on yo
 ## Related Docs
 
 - [Getting Started](GETTING_STARTED.md)
+- [Startup Flags](STARTUP_FLAGS.md)
 - [Video Backends](VIDEO_BACKENDS.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)

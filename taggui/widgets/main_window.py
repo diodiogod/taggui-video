@@ -6921,18 +6921,28 @@ class MainWindow(QMainWindow):
             self._current_directory_load_options is not None
             and self._current_directory_load_options.ui_sort_label
         ):
+            sort_text = self._current_directory_load_options.ui_sort_label
             self.image_list.set_sort_state(
-                self._current_directory_load_options.ui_sort_label,
+                sort_text,
                 self._current_directory_load_options.sort_dir,
                 preserve_selection=False,
-                apply_sort=True,
+                apply_sort=not self._model_already_matches_ui_sort(sort_text),
                 emit_signal=False,
-                reapply_sort=True,
+                reapply_sort=False,
             )
         else:
             saved_sort = self.image_list.sort_combo_box.currentText()
             if saved_sort:
-                self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
+                if self._model_already_matches_ui_sort(saved_sort):
+                    self.image_list.set_sort_state(
+                        saved_sort,
+                        preserve_selection=False,
+                        apply_sort=False,
+                        emit_signal=False,
+                        reapply_sort=False,
+                    )
+                else:
+                    self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
         self._save_folder_view_preferences()
             
         # Try to restore selection by path (more robust)
@@ -6941,17 +6951,21 @@ class MainWindow(QMainWindow):
             restore_path = Path(select_path)
             if (
                 getattr(self.image_list_model, '_paginated_mode', False)
-                and hasattr(self.image_list_model, 'resolve_restore_target')
+                and hasattr(self.image_list_model, 'get_loaded_row_for_path')
             ):
-                restore_target = self.image_list_model.resolve_restore_target(restore_path)
-                if isinstance(restore_target, dict):
-                    self._restore_global_rank = int(restore_target.get('target_global', -1))
-                    if self._restore_global_rank >= 0:
-                        print(
-                            f"[RESTORE] Resolved startup target from path: {select_path} "
-                            f"(Global {self._restore_global_rank})"
-                        )
-            if self._restore_global_rank < 0:
+                loaded_row = self.image_list_model.get_loaded_row_for_path(restore_path)
+                if loaded_row >= 0:
+                    self._restore_global_rank = self.image_list_model.get_global_index_for_row(loaded_row)
+                    src_idx = self.image_list_model.index(loaded_row, 0)
+                    proxy_idx = self.proxy_image_list_model.mapFromSource(src_idx)
+                    if proxy_idx.isValid():
+                        select_index = proxy_idx.row()
+                else:
+                    self._request_async_recenter(
+                        select_path=select_path,
+                        sort_text=str(self.image_list.sort_combo_box.currentText() or ''),
+                    )
+            if self._restore_global_rank < 0 and not getattr(self.image_list_model, '_paginated_mode', False):
                 src_row = self.image_list_model.get_index_for_path(restore_path)
                 if src_row != -1:
                     # Store global rank for scroll restore (local rows shift as pages load)
@@ -7135,6 +7149,12 @@ class MainWindow(QMainWindow):
         )
         return sort_map.get(normalized, 'file_name'), str(sort_dir or 'ASC').upper()
 
+    def _model_already_matches_ui_sort(self, sort_text: str) -> bool:
+        expected_sort_field, expected_sort_dir = self._ui_sort_to_db_sort(sort_text)
+        current_sort_field = str(getattr(self.image_list_model, '_sort_field', '') or '')
+        current_sort_dir = str(getattr(self.image_list_model, '_sort_dir', '') or '').upper()
+        return current_sort_field == expected_sort_field and current_sort_dir == expected_sort_dir
+
     def _request_async_recenter(self, *, select_path: str, sort_text: str):
         if not select_path:
             return
@@ -7280,6 +7300,18 @@ class MainWindow(QMainWindow):
                 source_row = source_model.get_index_for_path(Path(select_path))
                 if source_row != -1:
                     source_index = source_model.index(source_row, 0)
+                    target_index = self.proxy_image_list_model.mapFromSource(source_index)
+            except Exception:
+                target_index = QModelIndex()
+        elif (
+            select_path
+            and getattr(source_model, '_paginated_mode', False)
+            and hasattr(source_model, 'get_loaded_row_for_path')
+        ):
+            try:
+                loaded_row = source_model.get_loaded_row_for_path(Path(select_path))
+                if loaded_row >= 0:
+                    source_index = source_model.index(loaded_row, 0)
                     target_index = self.proxy_image_list_model.mapFromSource(source_index)
             except Exception:
                 target_index = QModelIndex()
