@@ -40,7 +40,7 @@ class MarkingSettingsForm(QVBoxLayout):
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
         self.model_combo_box.activated.connect(lambda _: self.model_selected.emit(True))
         self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
-        self.get_local_model_paths()
+        QTimer.singleShot(1500, self.get_local_model_paths)
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
         basic_settings_form.addRow('Model', self.model_combo_box)
@@ -216,9 +216,15 @@ class AutoMarkings(QDockWidget):
 
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_marking)
-        self.marking_settings_form.model_selected.connect(lambda _: self.prepare_generation())
-        self.marking_settings_form.model_selected.connect(self.start_cancel_button.setEnabled)
+        self.marking_settings_form.model_selected.connect(self._on_model_selection_changed)
         QTimer.singleShot(0, self._restore_model_selection_state)
+
+    @Slot(bool)
+    def _on_model_selection_changed(self, has_model_text: bool):
+        if not has_model_text:
+            self.start_cancel_button.setEnabled(False)
+            return
+        self.prepare_generation()
 
     @Slot()
     def start_or_cancel_marking(self):
@@ -375,6 +381,8 @@ class AutoMarkings(QDockWidget):
         self.marking_thread.preload_model()
         if self.marking_thread.model is None:
             self.marking_settings_form.class_table.setRowCount(0)
+            self.start_cancel_button.setEnabled(False)
+            return
         else:
             self.marking_settings_form.class_table.setRowCount(
                 len(self.marking_thread.model.names))
@@ -393,6 +401,7 @@ class AutoMarkings(QDockWidget):
             )
             self.marking_settings_form.class_table.setCellWidget(row, 1, combo)
         self._restore_class_actions_for_current_model()
+        self.start_cancel_button.setEnabled(True)
         # NOTE: As this thread has no place to display the output, we keep
         # `stdout` and `stderr`.
         # Redirect `stdout` and `stderr` so that the outputs are displayed in
@@ -405,6 +414,9 @@ class AutoMarkings(QDockWidget):
         selected_image_indices = self.image_list.get_selected_image_indices()
         if self.marking_thread is None:
             self.prepare_generation()
+        if self.marking_thread is None or self.marking_thread.model is None:
+            self.start_cancel_button.setEnabled(False)
+            return
         self.marking_thread.selected_image_indices = selected_image_indices
         self.marking_thread.marking_settings = self.marking_settings_form.get_marking_settings()
         classes = {}

@@ -1,11 +1,15 @@
 import operator
 import re
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, QTimer, Signal
-from transformers import PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+else:
+    PreTrainedTokenizerBase = object
 
 from models.image_list_model import ImageListModel
 from utils.image import Image

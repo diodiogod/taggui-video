@@ -1,10 +1,16 @@
+from typing import TYPE_CHECKING
+
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
 from PySide6.QtGui import QCloseEvent, QKeyEvent, QIcon, QFont, QWheelEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
                                QPushButton, QStyle, QToolButton, QVBoxLayout, QWidget)
-from transformers import PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+else:
+    PreTrainedTokenizerBase = object
 
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel

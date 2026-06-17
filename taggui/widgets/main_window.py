@@ -15,8 +15,6 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
                                QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu)
 
-from transformers import AutoTokenizer
-
 from controllers.video_editing_controller import VideoEditingController
 from controllers.toolbar_manager import ToolbarManager
 from controllers.menu_manager import MenuManager
@@ -46,6 +44,8 @@ from utils.review_marks import (
 )
 from utils.image_index_db import ImageIndexDB
 from utils.instance_relay import remember_preferred_server_name
+from utils.lazy_tokenizer import LazyTokenizer
+from utils.load_options import LimitedLoadOptions
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.sidecar import (
     is_taggui_metadata_dict,
@@ -521,20 +521,36 @@ class SelectionWallSpeedOverlay(QFrame):
 
 
 class MainWindow(QMainWindow):
+    def _log_startup_perf(self, label: str):
+        origin = getattr(self, '_startup_perf_origin', None)
+        if origin is None:
+            return
+        elapsed_ms = (time.perf_counter() - float(origin)) * 1000.0
+        print(f"[STARTUP] {label}: {elapsed_ms:.0f}ms")
+
     def __init__(
         self,
         app: QApplication,
         startup_directory: Path | None = None,
         startup_select_path: str | None = None,
+        startup_load_options: LimitedLoadOptions | None = None,
         relay_server_name: str = '',
     ):
         super().__init__()
+        self._startup_perf_origin = time.perf_counter()
         self.setAcceptDrops(True)
         self.app = app
         self._startup_directory = self._normalize_startup_directory(startup_directory)
         self._startup_select_path = str(startup_select_path) if startup_select_path else None
+        self._startup_load_options = (
+            startup_load_options.normalized()
+            if isinstance(startup_load_options, LimitedLoadOptions)
+            else None
+        )
+        self._startup_has_limited_scope = self._startup_load_options is not None
         self._startup_has_explicit_target = bool(
-            self._startup_directory is not None or self._startup_select_path
+            self._startup_directory is not None
+            or self._startup_select_path
         )
         self._relay_server_name = str(relay_server_name or '').strip()
         self._session_settings_prefix = self._build_session_settings_prefix(self._startup_directory)
@@ -547,6 +563,8 @@ class MainWindow(QMainWindow):
         self._context_switch_manager: ContextSwitchManager | None = None
         self._restore_target_global_rank = -1
         self._directory_restore_selection_path = None
+        self._current_directory_load_options: LimitedLoadOptions | None = None
+        self._startup_limited_scope_remaining = 2 if self._startup_load_options is not None else 0
         self._preserve_restored_dock_layout_until = 0.0
         self._workspace_apply_pending_id = None
         self._workspace_apply_timer_active = False
@@ -567,12 +585,14 @@ class MainWindow(QMainWindow):
         app.aboutToQuit.connect(lambda: setattr(self, 'is_running', False))
 
         # Initialize models
+        self._log_startup_perf("init-start")
         image_list_image_width = settings.value(
             'image_list_image_width',
             defaultValue=DEFAULT_SETTINGS['image_list_image_width'], type=int)
         tag_separator = get_tag_separator()
         self.image_list_model = ImageListModel(image_list_image_width, tag_separator)
-        tokenizer = AutoTokenizer.from_pretrained(get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        tokenizer = LazyTokenizer(get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        self._shared_tokenizer = tokenizer
         self.proxy_image_list_model = ProxyImageListModel(
             self.image_list_model, tokenizer, tag_separator)
         self.image_list_model.proxy_image_list_model = self.proxy_image_list_model
@@ -584,12 +604,14 @@ class MainWindow(QMainWindow):
         )
         self.tag_counter_model = TagCounterModel()
         self.image_tag_list_model = ImageTagListModel()
+        self._log_startup_perf("models-ready")
 
         # Initialize controllers and managers
         self.video_editing_controller = VideoEditingController(self)
         self.toolbar_manager = ToolbarManager(self)
         self.menu_manager = MenuManager(self)
         self.signal_manager = SignalManager(self)
+        self._log_startup_perf("controllers-ready")
 
         # Setup window
         self.setWindowIcon(taggui_icon())
@@ -682,6 +704,7 @@ class MainWindow(QMainWindow):
         )
         self.create_central_widget()
         self._update_main_window_title()
+        self._log_startup_perf("central-widget-ready")
 
         # Create toolbar and menus
         self.toolbar_manager.create_toolbar()
@@ -754,6 +777,7 @@ class MainWindow(QMainWindow):
         self.toolbar_manager.reset_toolbars_layout()
         self._default_window_state = self.saveState()
         self._sync_perf_hud_menu_action()
+        self._log_startup_perf("menus-ready")
         rating_toolbar = self.toolbar_manager.toolbars.get('rating')
         if rating_toolbar is not None:
             rating_toolbar.topLevelChanged.connect(
@@ -6813,10 +6837,28 @@ class MainWindow(QMainWindow):
 
     def load_directory(self, path: Path, select_index: int = 0,
                        save_path_to_settings: bool = False,
-                       select_path: str | None = None):
+                       select_path: str | None = None,
+                       load_options: LimitedLoadOptions | None = None):
         self._load_session_id += 1
         load_session_id = self._load_session_id
         self.directory_path = path.resolve()
+        effective_load_options = load_options
+        if (
+            effective_load_options is None
+            and self._startup_limited_scope_remaining > 0
+            and self._startup_load_options is not None
+        ):
+            effective_load_options = self._startup_load_options
+            self._startup_limited_scope_remaining = max(0, self._startup_limited_scope_remaining - 1)
+            print(
+                "[STARTUP] Applying startup limited folder view to restored browser: "
+                f"{self._startup_load_options.describe()}"
+            )
+        self._current_directory_load_options = (
+            effective_load_options.normalized()
+            if isinstance(effective_load_options, LimitedLoadOptions)
+            else None
+        )
         if save_path_to_settings:
             self._session_settings_set_value('directory_path', str(self.directory_path))
             self._add_to_recent_directories(str(self.directory_path))
@@ -6830,7 +6872,10 @@ class MainWindow(QMainWindow):
                 select_path = folder_saved_path
         self._directory_restore_selection_path = str(select_path) if select_path else None
 
-        self.image_list_model.load_directory(path)
+        self.image_list_model.load_directory(
+            path,
+            load_options=self._current_directory_load_options,
+        )
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
 
@@ -6858,10 +6903,24 @@ class MainWindow(QMainWindow):
             print(f"[MEDIA] Persisted filter '{media_type}' returned 0 items on folder load; resetting to 'All'")
             self.image_list.media_type_combo_box.setCurrentText('All')
 
-        # Apply saved sort order after loading
-        saved_sort = self.image_list.sort_combo_box.currentText()
-        if saved_sort:
-            self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
+        # Apply saved sort order after loading unless the startup load explicitly
+        # requested one.
+        if (
+            self._current_directory_load_options is not None
+            and self._current_directory_load_options.ui_sort_label
+        ):
+            self.image_list.set_sort_state(
+                self._current_directory_load_options.ui_sort_label,
+                self._current_directory_load_options.sort_dir,
+                preserve_selection=False,
+                apply_sort=True,
+                emit_signal=False,
+                reapply_sort=True,
+            )
+        else:
+            saved_sort = self.image_list.sort_combo_box.currentText()
+            if saved_sort:
+                self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
         self._save_folder_view_preferences()
             
         # Try to restore selection by path (more robust)
@@ -7163,6 +7222,7 @@ class MainWindow(QMainWindow):
             self.directory_path,
             select_index=select_index,
             select_path=select_path,
+            load_options=self._current_directory_load_options,
         )
         self.image_list.filter_line_edit.setText(filter_text)
         self._restore_directory_selection(
@@ -7207,7 +7267,12 @@ class MainWindow(QMainWindow):
                     select_path=restore_path,
                 )
 
-        QTimer.singleShot(0, _replay_current_sort)
+        replay_delay_ms = (
+            350
+            if getattr(self.image_list_model, '_active_load_options', None) is not None
+            else 0
+        )
+        QTimer.singleShot(replay_delay_ms, _replay_current_sort)
 
     def _log_new_media_refresh_message(self, message: str):
         """Emit refresh diagnostics without creating UI chrome."""
@@ -9178,13 +9243,16 @@ class MainWindow(QMainWindow):
                 def _restore_secondary_directory():
                     try:
                         diagnostic_print(f"[RESTORE][Browser2] loading folder '{saved_secondary_dir}'", detail="verbose")
-                        self._secondary_browser.load_directory(Path(saved_secondary_dir))
+                        self._secondary_browser.load_directory(
+                            Path(saved_secondary_dir),
+                            load_options=self._startup_load_options,
+                        )
                     except Exception as e:
                         diagnostic_print(
                             f"[RESTORE][Browser2] failed loading folder '{saved_secondary_dir}': {e}",
                             detail="verbose",
                         )
-                QTimer.singleShot(0, _restore_secondary_directory)
+                QTimer.singleShot(450, _restore_secondary_directory)
             else:
                 diagnostic_print("[RESTORE][Browser2] no valid saved folder to load", detail="verbose")
 
@@ -9235,11 +9303,12 @@ class MainWindow(QMainWindow):
                         directory_path,
                         select_index=image_index,
                         select_path=select_path,
+                        load_options=self._startup_load_options,
                     )
                 except Exception as e:
                     print(f"[RESTORE] Failed to restore directory '{directory_path}': {e}")
 
-            QTimer.singleShot(0, _restore_directory)
+            QTimer.singleShot(350, _restore_directory)
 
     def reset_toolbar_layout(self):
         """Restore toolbar groups to their default docked layout."""

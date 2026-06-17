@@ -1,6 +1,7 @@
 import random
 import re
 import hashlib
+import heapq
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,7 @@ from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, s
 from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
 from utils.thumbnail_cache import get_thumbnail_cache
+from utils.load_options import LimitedLoadOptions
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
 
@@ -501,6 +503,68 @@ def natural_sort_key(path: Path):
         else:
             parts.append(part.lower())
     return parts
+
+
+def _normalize_limited_load_options(
+    load_options: LimitedLoadOptions | None,
+) -> LimitedLoadOptions | None:
+    if not isinstance(load_options, LimitedLoadOptions):
+        return None
+    return load_options.normalized()
+
+
+def _select_limited_paths_from_files(
+    directory_path: Path,
+    file_paths: set[Path],
+    image_suffixes: set[str],
+    load_options: LimitedLoadOptions | None,
+) -> list[str]:
+    """Choose one limited subset directly from filesystem paths."""
+    normalized = _normalize_limited_load_options(load_options)
+    if normalized is None:
+        return []
+
+    candidate_paths = [
+        path for path in file_paths
+        if path.suffix.lower() in image_suffixes
+    ]
+    if not candidate_paths:
+        return []
+
+    limit_value = max(1, int(normalized.limit))
+    sort_by = normalized.sort_by
+    reverse = normalized.sort_dir == 'DESC'
+
+    if sort_by == 'name':
+        candidate_paths.sort(
+            key=lambda path: str(path.relative_to(directory_path)).lower(),
+            reverse=reverse,
+        )
+        return [str(path.relative_to(directory_path)) for path in candidate_paths[:limit_value]]
+
+    if sort_by == 'rating':
+        print("[LIMIT] Rating-limited scan requires an existing folder DB; falling back to modified time")
+        sort_by = 'mtime'
+
+    if sort_by == 'mtime':
+        ranked_paths: list[tuple[float, str]] = []
+        for path in candidate_paths:
+            try:
+                mtime = float(path.stat().st_mtime)
+            except OSError:
+                continue
+            rel_path = str(path.relative_to(directory_path))
+            ranked_paths.append((mtime, rel_path))
+        if not ranked_paths:
+            return []
+        top_ranked = (
+            heapq.nlargest(limit_value, ranked_paths, key=lambda item: (item[0], item[1]))
+            if reverse
+            else heapq.nsmallest(limit_value, ranked_paths, key=lambda item: (item[0], item[1]))
+        )
+        return [rel_path for _mtime, rel_path in top_ranked]
+
+    return []
 
 def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
     """
@@ -1646,6 +1710,37 @@ class ImageListModel(QAbstractListModel):
             if self._db is None:
                 return -1
 
+            if self._active_load_options is not None:
+                try:
+                    base_dir = Path(self._directory_path)
+
+                    def _norm_rel(candidate_path: Path) -> str:
+                        try:
+                            rel = candidate_path.relative_to(base_dir)
+                        except Exception:
+                            rel = candidate_path
+                        return str(rel).replace('\\', '/').casefold()
+
+                    target_norm = _norm_rel(path)
+                    target_name = path.name.casefold()
+                    with self._page_load_lock:
+                        row = 0
+                        for page_num in sorted(self._pages.keys()):
+                            for image in self._pages.get(page_num, []):
+                                image_path = getattr(image, 'path', None)
+                                if image_path is None:
+                                    row += 1
+                                    continue
+                                if (
+                                    _norm_rel(Path(image_path)) == target_norm
+                                    or Path(image_path).name.casefold() == target_name
+                                ):
+                                    global_index = self.get_global_index_for_row(row)
+                                    return int(global_index) if global_index >= 0 else row
+                                row += 1
+                except Exception:
+                    pass
+
             normalized = self._restore_rel_path_candidates(path)
             print(f"[RESTORE] Checking rank for rel_path candidates: {normalized[:3]}")
 
@@ -2151,6 +2246,10 @@ class ImageListModel(QAbstractListModel):
         self._scan_process_disabled = False
         self._sort_field = 'mtime'
         self._sort_dir = 'DESC'
+        self._active_load_options: LimitedLoadOptions | None = None
+        self._scope_sql = ""
+        self._scope_bindings = ()
+        self._scope_rel_paths: tuple[str, ...] = ()
         self._filter_sql = ""       # Combined SQL passed to DB calls
         self._filter_bindings = ()  # Combined bindings
         self._text_filter_sql = ""  # Text filter portion only
@@ -2911,13 +3010,37 @@ class ImageListModel(QAbstractListModel):
         """Rebuild _filter_sql/_filter_bindings from text + media type parts."""
         parts = []
         bindings = ()
+        if self._scope_sql:
+            parts.append(f"({self._scope_sql})")
+            bindings = tuple(self._scope_bindings)
         if self._media_type_sql:
             parts.append(self._media_type_sql)
         if self._text_filter_sql:
             parts.append(f"({self._text_filter_sql})")
-            bindings = self._text_filter_bindings
+            bindings = tuple(bindings) + tuple(self._text_filter_bindings)
         self._filter_sql = " AND ".join(parts)
         self._filter_bindings = bindings
+
+    def _set_scope_from_rel_paths(self, rel_paths: list[str] | set[str] | tuple[str, ...] | None):
+        """Restrict the visible model to one explicit set of relative paths."""
+        normalized_paths = []
+        seen_paths = set()
+        for rel_path in list(rel_paths or []):
+            normalized = _normalize_relative_path(str(rel_path))
+            if not normalized or normalized in seen_paths:
+                continue
+            seen_paths.add(normalized)
+            normalized_paths.append(normalized)
+
+        self._scope_rel_paths = tuple(normalized_paths)
+        if not normalized_paths:
+            self._scope_sql = ""
+            self._scope_bindings = ()
+        else:
+            placeholders = ",".join("?" for _ in normalized_paths)
+            self._scope_sql = f"replace(file_name, '\\\\', '/') IN ({placeholders})"
+            self._scope_bindings = tuple(normalized_paths)
+        self._rebuild_combined_filter()
 
     def set_media_type_filter(self, media_type: str):
         """Set media type filter for paginated mode."""
@@ -5478,7 +5601,11 @@ class ImageListModel(QAbstractListModel):
             except Exception:
                 continue
 
-        if self._paginated_mode and bool(result.get('db_synced')):
+        if (
+            self._paginated_mode
+            and bool(result.get('db_synced'))
+            and self._active_load_options is None
+        ):
             if self._db is not None:
                 try:
                     self._db.close()
@@ -5507,6 +5634,7 @@ class ImageListModel(QAbstractListModel):
             precomputed_rel_paths=result.get('precomputed_rel_paths'),
             skip_background_validation=True,
             db_synced=bool(result.get('db_synced')),
+            load_options=self._active_load_options,
         )
         self.background_validation_applied.emit({
             'directory_path': str(directory_path),
@@ -5699,7 +5827,8 @@ class ImageListModel(QAbstractListModel):
 
     def load_directory(self, directory_path: Path, *, precomputed_rel_paths=None,
                        skip_background_validation: bool = False,
-                       db_synced: bool = False):
+                       db_synced: bool = False,
+                       load_options: LimitedLoadOptions | None = None):
         from PySide6.QtWidgets import QProgressDialog, QApplication, QMessageBox
         from PySide6.QtCore import Qt
         from utils.settings import settings, DEFAULT_SETTINGS
@@ -5708,6 +5837,13 @@ class ImageListModel(QAbstractListModel):
         # Load all metadata first, THEN reset the model (keeps old images visible during loading)
         error_messages: list[str] = []
         new_images = []  # Build new image list without clearing old one
+        normalized_load_options = _normalize_limited_load_options(load_options)
+        self._active_load_options = normalized_load_options
+        self._set_scope_from_rel_paths(None)
+        if normalized_load_options is not None:
+            print(f"[LIMIT] Requested limited folder view: {normalized_load_options.describe()}")
+            self._sort_field = normalized_load_options.db_sort_field
+            self._sort_dir = normalized_load_options.sort_dir
         self._directory_path = directory_path
         with self._sidecar_meta_cache_lock:
             self._sidecar_meta_cache.clear()
@@ -5741,6 +5877,28 @@ class ImageListModel(QAbstractListModel):
             type=bool,
         )
 
+        def _schedule_background_validation(delay_ms: int = 0):
+            if skip_background_validation:
+                return
+
+            def _start_validation():
+                if load_generation != self._path_validation_generation:
+                    return
+                print("[CACHE] Starting background validation...")
+                self._load_executor.submit(
+                    self._validate_cached_paths_in_background,
+                    directory_path,
+                    list(cached_paths),
+                    list(image_suffixes),
+                    load_generation,
+                )
+
+            if delay_ms > 0:
+                print(f"[CACHE] Deferring background validation by {delay_ms}ms")
+                QTimer.singleShot(int(delay_ms), _start_validation)
+            else:
+                _start_validation()
+
         def _ensure_scan_progress():
             nonlocal scan_progress
             if scan_progress is not None:
@@ -5772,6 +5930,31 @@ class ImageListModel(QAbstractListModel):
 
         cached_count = len({_normalize_relative_path(rel_path) for rel_path in cached_paths})
         precomputed_count = len(precomputed_rel_paths) if precomputed_rel_paths is not None else None
+        if normalized_load_options is not None and precomputed_rel_paths is not None:
+            limited_precomputed_rel_paths = db.get_limited_paths(normalized_load_options)
+            if not limited_precomputed_rel_paths:
+                file_path_candidates = {directory_path / rel_path for rel_path in precomputed_rel_paths}
+                limited_precomputed_rel_paths = _select_limited_paths_from_files(
+                    directory_path,
+                    file_path_candidates,
+                    set(image_suffixes),
+                    normalized_load_options,
+                )
+            if limited_precomputed_rel_paths:
+                precomputed_rel_paths = list(limited_precomputed_rel_paths)
+                precomputed_count = len(precomputed_rel_paths)
+                print(
+                    "[LIMIT] Resolved precomputed limited folder view "
+                    f"({precomputed_count:,} items, {normalized_load_options.describe()})"
+                )
+            else:
+                print(
+                    "[LIMIT] No items matched the precomputed limited folder view; "
+                    "falling back to normal folder load"
+                )
+                self._active_load_options = None
+                normalized_load_options = None
+
         threshold_value = int(pagination_threshold)
         paginated_from_precomputed = (
             precomputed_count is not None
@@ -5787,28 +5970,50 @@ class ImageListModel(QAbstractListModel):
                 file_paths=None,
                 db_synced=True,
                 preindexed_count=precomputed_count,
+                scoped_rel_paths=list(precomputed_rel_paths or []),
+                load_options=normalized_load_options,
             )
             return
 
-        if cached_count > 1000 and self._should_use_cached_paginated_bootstrap(cached_count):
-            print(f"[CACHE] Using {cached_count:,} cached file paths (background validation scheduled)")
+        limited_cached_rel_paths = []
+        if normalized_load_options is not None and cached_count > 0:
+            limited_cached_rel_paths = db.get_limited_paths(normalized_load_options)
+            if limited_cached_rel_paths:
+                print(
+                    "[LIMIT] Using cached limited folder view "
+                    f"({len(limited_cached_rel_paths):,} items, {normalized_load_options.describe()})"
+                )
+
+        effective_cached_count = (
+            len(limited_cached_rel_paths)
+            if limited_cached_rel_paths
+            else cached_count
+        )
+
+        should_use_limited_cached_bootstrap = (
+            normalized_load_options is not None
+            and bool(limited_cached_rel_paths)
+        )
+        if (
+            should_use_limited_cached_bootstrap
+            or (
+                effective_cached_count > 1000
+                and self._should_use_cached_paginated_bootstrap(effective_cached_count)
+            )
+        ):
+            print(f"[CACHE] Using {effective_cached_count:,} cached file paths (background validation scheduled)")
             db.close()
             self._load_directory_paginated(
                 directory_path,
                 image_paths=None,
                 file_paths=None,
                 db_synced=True,
-                preindexed_count=cached_count,
+                preindexed_count=effective_cached_count,
+                scoped_rel_paths=limited_cached_rel_paths or None,
+                load_options=normalized_load_options,
             )
-            if not skip_background_validation:
-                print("[CACHE] Starting background validation...")
-                self._load_executor.submit(
-                    self._validate_cached_paths_in_background,
-                    directory_path,
-                    list(cached_paths),
-                    list(image_suffixes),
-                    load_generation,
-                )
+            validation_delay_ms = 15000 if normalized_load_options is not None else 0
+            _schedule_background_validation(delay_ms=validation_delay_ms)
             return
 
         try:
@@ -5887,6 +6092,44 @@ class ImageListModel(QAbstractListModel):
                 scan_progress.close()
                 scan_progress.deleteLater()
                 scan_progress = None
+
+        if normalized_load_options is not None:
+            limited_rel_paths = []
+            if precomputed_rel_paths is not None:
+                limited_rel_paths = db.get_limited_paths(normalized_load_options)
+                if not limited_rel_paths:
+                    file_path_candidates = {directory_path / rel_path for rel_path in precomputed_rel_paths}
+                    limited_rel_paths = _select_limited_paths_from_files(
+                        directory_path,
+                        file_path_candidates,
+                        set(image_suffixes),
+                        normalized_load_options,
+                    )
+            else:
+                limited_rel_paths = db.get_limited_paths(normalized_load_options)
+                if not limited_rel_paths and 'file_paths' in locals():
+                    limited_rel_paths = _select_limited_paths_from_files(
+                        directory_path,
+                        file_paths,
+                        set(image_suffixes),
+                        normalized_load_options,
+                    )
+
+            if limited_rel_paths:
+                file_paths = {directory_path / rel_path for rel_path in limited_rel_paths}
+                precomputed_rel_paths = list(limited_rel_paths)
+                print(
+                    "[LIMIT] Resolved limited folder view "
+                    f"({len(limited_rel_paths):,} items, {normalized_load_options.describe()})"
+                )
+            else:
+                print(
+                    "[LIMIT] No cached items matched the requested limited folder view; "
+                    "falling back to normal folder load"
+                )
+                self._active_load_options = None
+                normalized_load_options = None
+
         image_paths = list(path for path in file_paths
                            if path.suffix.lower() in image_suffixes)
 
@@ -5919,14 +6162,42 @@ class ImageListModel(QAbstractListModel):
                 image_paths,
                 file_paths,
                 db_synced=db_synced,
+                scoped_rel_paths=list(precomputed_rel_paths or []) if normalized_load_options is not None else None,
+                load_options=normalized_load_options,
             )
             return
 
         # Normal folder - reset pagination flag
         self._paginated_mode = False
 
-        # Sort paths early for consistent ordering
-        image_paths.sort(key=natural_sort_key)
+        # Sort paths early for consistent ordering.
+        if normalized_load_options is not None:
+            if normalized_load_options.sort_by == 'mtime':
+                image_paths.sort(
+                    key=lambda path: (
+                        float(path.stat().st_mtime) if path.exists() else 0.0,
+                        str(path.relative_to(directory_path)).lower(),
+                    ),
+                    reverse=normalized_load_options.sort_dir == 'DESC',
+                )
+            elif normalized_load_options.sort_by == 'rating' and precomputed_rel_paths is not None:
+                scope_order = {
+                    _normalize_relative_path(str(rel_path)): index
+                    for index, rel_path in enumerate(precomputed_rel_paths)
+                }
+                image_paths.sort(
+                    key=lambda path: scope_order.get(
+                        _normalize_relative_path(str(path.relative_to(directory_path))),
+                        len(scope_order),
+                    ),
+                )
+            else:
+                image_paths.sort(
+                    key=lambda path: str(path.relative_to(directory_path)).lower(),
+                    reverse=normalized_load_options.sort_dir == 'DESC',
+                )
+        else:
+            image_paths.sort(key=natural_sort_key)
 
         # Comparing paths is slow on some systems, so convert the paths to
         # strings.
@@ -6156,7 +6427,6 @@ class ImageListModel(QAbstractListModel):
             print(f"[ENRICH {timestamp}] Starting background enrichment for {cache_misses} images...")
 
             # Start timer to process enrichment queue on main thread
-            from PySide6.QtCore import QTimer
             self._enrichment_timer = QTimer()
             self._enrichment_timer.timeout.connect(self._process_enrichment_queue)
             self._enrichment_timer.start(100)  # Check queue every 100ms
@@ -6395,7 +6665,9 @@ class ImageListModel(QAbstractListModel):
                                   image_paths: list[Path] | None,
                                   file_paths: set[Path] | None,
                                   db_synced: bool = False,
-                                  preindexed_count: int | None = None):
+                                  preindexed_count: int | None = None,
+                                  scoped_rel_paths: list[str] | None = None,
+                                  load_options: LimitedLoadOptions | None = None):
         """Load a large directory using buffered virtual pagination (1M+ images).
 
         Strategy: Don't load ANY Image objects upfront. Pages (1000 images each) are loaded
@@ -6460,6 +6732,7 @@ class ImageListModel(QAbstractListModel):
 
         self._db = ImageIndexDB(directory_path)
         self._paginated_mode = True
+        self._active_load_options = _normalize_limited_load_options(load_options)
 
         # CRITICAL: Ensure DB is populated with files for paginated access
         # Skip the pass when a background validation already synchronized the DB.
@@ -6477,10 +6750,22 @@ class ImageListModel(QAbstractListModel):
 
         # Don't load Image objects - keep self.images empty for paginated mode
         self.images = []
+        self._set_scope_from_rel_paths(scoped_rel_paths)
         # Prefer authoritative preindexed count (from cache snapshot/refresh)
         # over raw DB COUNT(*), which may include stale duplicate path variants.
-        db_count = int(self._db.get_image_count())
-        if preindexed_count is not None:
+        db_count = int(self._db.count(
+            filter_sql=self._filter_sql,
+            bindings=self._filter_bindings,
+        ) or 0)
+        if preindexed_count is not None and scoped_rel_paths is not None:
+            expected_count = max(0, int(preindexed_count))
+            self._total_count = expected_count
+            if db_count != expected_count:
+                print(
+                    "[PAGINATION] Count mismatch detected "
+                    f"(DB={db_count:,}, index={expected_count:,}); using index count"
+                )
+        elif preindexed_count is not None and self._active_load_options is None:
             expected_count = max(0, int(preindexed_count))
             self._total_count = expected_count
             if db_count != expected_count:
@@ -6500,7 +6785,7 @@ class ImageListModel(QAbstractListModel):
 
         # Bootstrap: Load first 3 pages immediately so UI has something to show
         print(f"[PAGINATION] Loading first 3 pages to bootstrap UI...")
-        for page_num in range(min(3, (total_images + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
+        for page_num in range(min(3, (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
             self._load_page_sync(page_num)
         print(f"[PAGINATION] Loaded {len(self._pages)} pages initially")
 
@@ -6599,7 +6884,6 @@ class ImageListModel(QAbstractListModel):
 
         # Start/restart timer if not already running
         if not self._enrichment_timer:
-            from PySide6.QtCore import QTimer
             self._enrichment_timer = QTimer()
             self._enrichment_timer.timeout.connect(self._process_enrichment_queue)
         if not self._enrichment_timer.isActive():

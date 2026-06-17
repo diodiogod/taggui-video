@@ -21,6 +21,7 @@ from PySide6.QtCore import (
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
+from utils.load_options import LimitedLoadOptions
 from utils.settings import settings, DEFAULT_SETTINGS, get_tag_separator
 from widgets.image_list import ImageList
 
@@ -355,10 +356,10 @@ class SecondaryBrowser(QObject):
     # Public API
     # ─────────────────────────────────────────────────────────────────────────
 
-    def load_directory(self, path: Path):
+    def load_directory(self, path: Path, load_options: LimitedLoadOptions | None = None):
         resolved = path.resolve()
         settings.setValue(self._settings_key('directory_path'), str(resolved))
-        self.image_list_model.load_directory(resolved)
+        self.image_list_model.load_directory(resolved, load_options=load_options)
         self._folder_name = resolved.name
         self._update_title()
         self.dock.filter_line_edit.clear()

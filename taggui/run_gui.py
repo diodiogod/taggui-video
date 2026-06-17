@@ -20,9 +20,31 @@ try:
 except ImportError:
     from .version import APP_DISPLAY_NAME, APP_NAME, __version__
 
+
+def _early_cli_has_flag(flag: str) -> bool:
+    return any(str(arg).strip().lower() == flag for arg in sys.argv[1:])
+
+
 # Suppress ffmpeg verbose output BEFORE any OpenCV imports
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
+os.environ.setdefault('QT_LOGGING_RULES', '*.debug=false;qt.multimedia*=false')
+if _early_cli_has_flag('--fast-qt-startup'):
+    os.environ['TAGGUI_FAST_QT_STARTUP'] = '1'
+elif _early_cli_has_flag('--no-fast-qt-startup'):
+    os.environ['TAGGUI_FAST_QT_STARTUP'] = '0'
+if _early_cli_has_flag('--qt-system-colors'):
+    os.environ['TAGGUI_DESKTOP_SETTINGS_AWARE'] = '1'
+elif _early_cli_has_flag('--qt-plain-colors'):
+    os.environ['TAGGUI_DESKTOP_SETTINGS_AWARE'] = '0'
+
+if os.getenv('TAGGUI_FAST_QT_STARTUP', '1') != '0':
+    os.environ.setdefault('QT_STYLE_OVERRIDE', 'Fusion')
+    if (
+        sys.platform.startswith('win')
+        and os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '0') != '1'
+    ):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'windows:darkmode=0')
 
 # Bootstrap optional bundled media runtimes before UI imports.
 try:
@@ -43,12 +65,12 @@ except Exception:
     pass
 
 try:
-    import transformers
     from PySide6.QtGui import QImageReader, QSurfaceFormat
     from PySide6.QtWidgets import QApplication, QMessageBox
-    from PySide6.QtCore import Qt, qInstallMessageHandler
+    from PySide6.QtCore import Qt, QLibraryInfo, QTimer, qInstallMessageHandler
 
     from utils.settings import settings
+    from utils.load_options import LimitedLoadOptions
     from utils.diagnostic_logging import append_text_log
     from utils.instance_relay import (
         OpenRequestRelay,
@@ -183,7 +205,12 @@ def suppress_warnings():
     logging.getLogger('exifread').setLevel(logging.ERROR)
     logging.basicConfig(level=logging.ERROR)
     warnings.simplefilter('ignore')
-    transformers.logging.set_verbosity_error()
+    try:
+        transformers_module = sys.modules.get('transformers')
+        if transformers_module is not None:
+            transformers_module.logging.set_verbosity_error()
+    except Exception:
+        pass
     try:
         import auto_gptq
         auto_gptq_logger = logging.getLogger(auto_gptq.modeling._base.__name__)
@@ -217,19 +244,40 @@ def _configure_qt_graphics_stack():
         pass
 
 
-def _parse_startup_launch_args(argv: list[str] | None = None) -> tuple[Path | None, str | None, bool]:
+def _parse_startup_launch_args(
+    argv: list[str] | None = None,
+) -> tuple[Path | None, str | None, bool, LimitedLoadOptions | None]:
     """Resolve an optional startup folder/file target and reuse mode from CLI args."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('target', nargs='?')
     parser.add_argument('--open', dest='open_target')
     parser.add_argument('--reuse-instance', action='store_true')
+    parser.add_argument('--fast-qt-startup', action='store_true')
+    parser.add_argument('--no-fast-qt-startup', action='store_true')
+    parser.add_argument('--qt-system-colors', action='store_true')
+    parser.add_argument('--qt-plain-colors', action='store_true')
+    parser.add_argument('--limit', type=int)
+    parser.add_argument('--sort-by', choices=['mtime', 'name', 'rating'])
+    parser.add_argument('--sort-dir', choices=['asc', 'desc', 'ASC', 'DESC'])
     parsed, extras = parser.parse_known_args(list(argv or []))
+
+    load_options = None
+    if parsed.limit is not None:
+        load_options = LimitedLoadOptions(
+            limit=int(parsed.limit),
+            sort_by=str(parsed.sort_by or 'mtime'),
+            sort_dir=str(parsed.sort_dir or ''),
+        ).normalized()
+        if load_options is None:
+            print(f"[STARTUP] Ignoring invalid --limit value: {parsed.limit}")
+        else:
+            print(f"[STARTUP] Limited folder view requested: {load_options.describe()}")
 
     raw_target = parsed.open_target or parsed.target
     if raw_target is None and extras:
-        raw_target = extras[0]
+        raw_target = next((extra for extra in extras if not str(extra).startswith('--')), None)
     if not raw_target:
-        return None, None, bool(parsed.reuse_instance)
+        return None, None, bool(parsed.reuse_instance), load_options
 
     candidate = Path(raw_target).expanduser()
     try:
@@ -238,39 +286,62 @@ def _parse_startup_launch_args(argv: list[str] | None = None) -> tuple[Path | No
         candidate = candidate.absolute()
 
     if candidate.is_dir():
-        return candidate, None, bool(parsed.reuse_instance)
+        return candidate, None, bool(parsed.reuse_instance), load_options
     if candidate.is_file():
-        return candidate.parent, str(candidate), bool(parsed.reuse_instance)
+        return candidate.parent, str(candidate), bool(parsed.reuse_instance), load_options
 
     print(f"[STARTUP] Ignoring missing startup target: {raw_target}")
-    return None, None, bool(parsed.reuse_instance)
+    return None, None, bool(parsed.reuse_instance), load_options
 
 
 def run_gui(argv: list[str] | None = None):
-    # Suppress Qt multimedia ffmpeg output
-    os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.multimedia*=false'
+    startup_origin = time.perf_counter()
+
+    def _log_startup(label: str):
+        elapsed_ms = (time.perf_counter() - startup_origin) * 1000.0
+        print(f"[STARTUP] {label}: {elapsed_ms:.0f}ms")
+
     _configure_qt_graphics_stack()
-    startup_directory, startup_select_path, reuse_instance = _parse_startup_launch_args(argv)
+    startup_directory, startup_select_path, reuse_instance, startup_load_options = _parse_startup_launch_args(argv)
+    _log_startup("args-ready")
+    print(
+        "[STARTUP] Qt startup env: "
+        f"fast_qt_startup={os.getenv('TAGGUI_FAST_QT_STARTUP', '1')}, "
+        f"QT_QPA_PLATFORM={os.getenv('QT_QPA_PLATFORM', '') or '<default>'}, "
+        f"QT_STYLE_OVERRIDE={os.getenv('QT_STYLE_OVERRIDE', '') or '<default>'}, "
+        f"desktop_settings_aware={os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '0')}"
+    )
+
+    try:
+        if os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '0') != '1':
+            QApplication.setDesktopSettingsAware(False)
+    except Exception:
+        pass
+
+    if os.getenv('TAGGUI_CONSTRAIN_QT_PLUGIN_PATH', '0') == '1':
+        try:
+            plugin_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)
+            if plugin_path:
+                QApplication.setLibraryPaths([plugin_path])
+                print(f"[STARTUP] Qt plugin path: {plugin_path}")
+        except Exception as plugin_error:
+            print(f"[STARTUP] Qt plugin path setup failed: {plugin_error}")
 
     app = QApplication([])
+    _log_startup("qapplication-created")
     # The application name is shown in the taskbar.
     app.setApplicationName(APP_NAME)
     # The application display name is shown in the title bar.
     app.setApplicationDisplayName(APP_DISPLAY_NAME)
     app.setApplicationVersion(__version__)
+    _log_startup("app-metadata-ready")
     app.setStyle('Fusion')
+    _log_startup("app-style-ready")
     # Disable the allocation limit to allow loading large images.
     QImageReader.setAllocationLimit(0)
+    _log_startup("image-reader-ready")
 
-    # Warm thumbnail cache singleton on UI thread before worker threads start.
-    # This avoids concurrent first-time cache initialization in background loaders.
-    try:
-        from utils.thumbnail_cache import get_thumbnail_cache
-        get_thumbnail_cache()
-    except Exception as cache_error:
-        print(f"[CACHE INIT] Warmup failed: {cache_error}")
-
-    if reuse_instance and startup_directory is not None:
+    if reuse_instance and startup_directory is not None and startup_load_options is None:
         target_server_name = preferred_server_name()
         if send_open_request(
             server_name=target_server_name,
@@ -283,18 +354,32 @@ def run_gui(argv: list[str] | None = None):
     relay_server_name = build_instance_server_name()
     relay = OpenRequestRelay(relay_server_name, parent=app)
     relay_started = relay.start()
+    _log_startup("relay-ready")
 
     main_window = MainWindow(
         app,
         startup_directory=startup_directory,
         startup_select_path=startup_select_path,
+        startup_load_options=startup_load_options,
         relay_server_name=relay_server_name if relay_started else '',
     )
+    _log_startup("main-window-ready")
     if relay_started:
         relay.open_request_received.connect(main_window.handle_instance_open_request)
         app.aboutToQuit.connect(lambda: forget_preferred_server_name(relay_server_name))
         app.aboutToQuit.connect(relay.stop)
     main_window.show()
+    _log_startup("main-window-shown")
+
+    def _warm_thumbnail_cache():
+        # Warm after first paint so cache setup never delays window visibility.
+        try:
+            from utils.thumbnail_cache import get_thumbnail_cache
+            get_thumbnail_cache()
+        except Exception as cache_error:
+            print(f"[CACHE INIT] Warmup failed: {cache_error}")
+
+    QTimer.singleShot(50, _warm_thumbnail_cache)
 
     # Install signal handler for console close (Windows Ctrl+C, terminal close, etc.)
     def signal_handler(signum, frame):

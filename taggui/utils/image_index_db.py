@@ -16,6 +16,7 @@ from utils.review_marks import (
 )
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.sidecar import preferred_taggui_sidecar_read_path
+from utils.load_options import LimitedLoadOptions
 
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
@@ -2825,6 +2826,39 @@ class ImageIndexDB:
 
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
+            return []
+
+    def get_limited_paths(self, load_options: LimitedLoadOptions | None) -> List[str]:
+        """Return one ordered subset of relative paths for a limited folder view."""
+        normalized = (
+            load_options.normalized()
+            if isinstance(load_options, LimitedLoadOptions)
+            else None
+        )
+        if normalized is None or not self._ensure_connection():
+            return []
+
+        sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
+            normalized.db_sort_field,
+            normalized.sort_dir,
+        )
+        limit_value = max(1, int(normalized.limit))
+
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    f'''
+                    SELECT file_name
+                    FROM images
+                    ORDER BY {order_clause}
+                    LIMIT ?
+                    ''',
+                    (limit_value,),
+                )
+                return [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+        except sqlite3.Error as e:
+            print(f'Database limited-path query error: {e}')
             return []
 
     def get_image_by_id(self, image_id: int) -> Optional[Dict[str, Any]]:
