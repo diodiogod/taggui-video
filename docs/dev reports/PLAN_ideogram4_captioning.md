@@ -10,16 +10,20 @@
 - Draw read-only numbered overlays in the main viewer.
 - Show an error badge without modifying invalid JSON.
 - Provide a persistent `I4` toolbar visibility toggle.
-
-## Next Phase: Editor
-
 - Add an Ideogram caption dock showing the complete JSON caption.
+- Save valid edits atomically to the detected caption or preferred sidecar path.
+- Preserve temporarily invalid edits as per-image in-memory drafts.
+- Support creating a caption from existing TagGUI markings.
+- Add reload, copy, validation, and readable formatting actions.
+
+## Next Phase: Visual Editor
+
 - Synchronize background, high-level description, style, and element fields.
 - Make the Ideogram overlay layer selectable and editable without reusing mask
   marking semantics.
-- Save edits atomically to the detected caption or preferred sidecar path.
-- Support creating a caption from existing TagGUI markings.
-- Add import, copy, validation, compact/pretty view, and JSONL export actions.
+- Add element reordering, object/text conversion, and palette editing.
+- Add explicit import and compact/pretty output controls.
+- Add dataset-level JSONL export.
 
 ## Generation Phase
 

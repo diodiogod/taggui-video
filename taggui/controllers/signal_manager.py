@@ -186,6 +186,7 @@ class SignalManager:
         image_list_model = self.main_window.image_list_model
         proxy_image_list_model = self.main_window.proxy_image_list_model
         image_tags_editor = self.main_window.image_tags_editor
+        ideogram_caption_editor = self.main_window.ideogram_caption_editor
         tag_counter_model = self.main_window.tag_counter_model
         image_list_selection_model = self.main_window.image_list_selection_model
         image_viewer = self.main_window.image_viewer
@@ -233,6 +234,15 @@ class SignalManager:
                 return
             image_tags_editor.load_image_tags(current)
         image_list_selection_model.currentChanged.connect(safe_load_tags)
+        def safe_load_ideogram_caption(current, previous):
+            if self.main_window._should_suppress_transient_restore_index(current):
+                return
+            if self.main_window._should_suppress_transient_drag_selection(current):
+                return
+            ideogram_caption_editor.load_image(current)
+        image_list_selection_model.currentChanged.connect(
+            safe_load_ideogram_caption
+        )
         image_list_selection_model.selectionChanged.connect(
             lambda *_: self.main_window._sync_rating_controls_from_context()
         )
@@ -375,6 +385,19 @@ class SignalManager:
         auto_markings.visibilityChanged.connect(
             lambda: menu_manager.toggle_auto_markings_action.setChecked(
                 auto_markings.isVisible()))
+        self.main_window.ideogram_caption_editor.visibilityChanged.connect(
+            lambda:
+            menu_manager.toggle_ideogram_caption_editor_action.setChecked(
+                self.main_window.ideogram_caption_editor.isVisible()
+            )
+        )
+        self.main_window.ideogram_caption_editor.visibilityChanged.connect(
+            lambda visible:
+            self.main_window.ideogram_caption_editor.load_image(
+                self.main_window.image_list_selection_model.currentIndex()
+            )
+            if visible else None
+        )
 
     def connect_video_controls_signals(self):
         """Connect video player and controls signals."""

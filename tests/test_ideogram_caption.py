@@ -8,6 +8,7 @@ from taggui.utils.ideogram_caption import (
     discover_ideogram_caption,
     ideogram_caption_path,
     load_ideogram_caption,
+    pixel_rect_to_bbox,
     save_ideogram_caption,
 )
 
@@ -103,4 +104,13 @@ def test_save_uses_preferred_name_and_normalizes_palette(tmp_path):
     assert saved_path == tmp_path / "sample.ideogram.json"
     assert '"color_palette":["#FFFFFF","#CC0000"]' in saved_path.read_text(
         encoding="utf-8"
+    )
+
+
+def test_converts_pixel_rect_to_yx_bbox():
+    assert pixel_rect_to_bbox(400, 100, 1000, 500, 2000, 1000) == (
+        100,
+        200,
+        600,
+        700,
     )

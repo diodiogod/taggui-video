@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 
@@ -225,7 +227,24 @@ def save_ideogram_caption(
 ) -> Path:
     """Save a structured caption, defaulting to the unambiguous sidecar name."""
     destination = Path(path) if path is not None else ideogram_caption_path(media_path)
-    destination.write_text(caption.to_json(pretty=pretty), encoding="utf-8")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    serialized = caption.to_json(pretty=pretty)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(serialized)
+            temporary_path = Path(temporary_file.name)
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
     caption.source_path = destination
     return destination
 
@@ -244,6 +263,34 @@ def bbox_to_pixel_rect(
         y,
         max(0.0, (x2 - x1) * width / IDEOGRAM_BBOX_SCALE),
         max(0.0, (y2 - y1) * height / IDEOGRAM_BBOX_SCALE),
+    )
+
+
+def pixel_rect_to_bbox(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int, int, int]:
+    """Convert pixel x/y/w/h into normalized Ideogram y/x coordinates."""
+    if image_width <= 0 or image_height <= 0:
+        raise IdeogramCaptionError("Image dimensions must be positive.")
+    x1 = _normalized_coordinate(x, image_width)
+    y1 = _normalized_coordinate(y, image_height)
+    x2 = _normalized_coordinate(x + max(0.0, width), image_width)
+    y2 = _normalized_coordinate(y + max(0.0, height), image_height)
+    return y1, x1, y2, x2
+
+
+def _normalized_coordinate(value: float, extent: int) -> int:
+    return max(
+        0,
+        min(
+            IDEOGRAM_BBOX_SCALE,
+            round(float(value) * IDEOGRAM_BBOX_SCALE / extent),
+        ),
     )
 
 

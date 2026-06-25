@@ -3895,6 +3895,14 @@ class ImageViewer(QWidget):
         """Show or hide structured-caption overlays without affecting markings."""
         settings.setValue('show_ideogram_caption_overlays', bool(visible))
 
+    def refresh_ideogram_caption_overlays(self):
+        """Reload structured-caption overlays for the current media item."""
+        if not self.proxy_image_index.isValid():
+            self._clear_ideogram_caption_overlays()
+            return
+        image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        self._load_ideogram_caption_overlays(image)
+
     def _clear_ideogram_caption_overlays(self):
         for item in self.ideogram_overlay_items:
             try:
