@@ -73,6 +73,10 @@ class IdeogramCaptionEditor(QDockWidget):
 
         self.new_button = QPushButton("New")
         self.from_markings_button = QPushButton("From Markings")
+        self.from_markings_button.setToolTip(
+            "Replace Ideogram elements with the current image's TagGUI "
+            "hint/include/exclude markings. Crop markings are ignored."
+        )
         self.save_button = QPushButton("Save")
         self.reload_button = QPushButton("Reload")
         self.format_button = QPushButton("Format")
@@ -210,8 +214,6 @@ class IdeogramCaptionEditor(QDockWidget):
     def create_caption_from_markings(self):
         if self.current_image is None:
             return
-        if not self._confirm_replacement():
-            return
         dimensions = self.current_image.valid_dimensions()
         if dimensions is None:
             self._set_status(
@@ -221,7 +223,17 @@ class IdeogramCaptionEditor(QDockWidget):
             return
         image_width, image_height = dimensions
         elements = []
-        for marking in self.current_image.markings:
+        markings = self._current_convertible_markings()
+        if not markings:
+            self._set_status(
+                "No TagGUI hint/include/exclude markings were found. "
+                "Crop boxes and Ideogram overlay boxes are not converted.",
+                error=True,
+            )
+            return
+        if not self._confirm_elements_replacement(len(markings)):
+            return
+        for marking in markings:
             if marking.type == ImageMarking.CROP:
                 continue
             rect = marking.rect.normalized()
@@ -236,13 +248,20 @@ class IdeogramCaptionEditor(QDockWidget):
             elements.append(
                 IdeogramElement(
                     type="obj",
-                    desc=str(marking.label or ""),
+                    desc=self._marking_description(marking),
                     bbox=bbox,
                 )
             )
-        caption = self._empty_caption(elements=elements)
+        try:
+            caption = self._caption_from_editor()
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            caption = self._empty_caption()
+        caption.elements = elements
         self._replace_text(caption.to_json(pretty=True), dirty=True)
-        self.current_caption_path = ideogram_caption_path(self.current_path)
+        self.current_caption_path = (
+            self.current_caption_path
+            or ideogram_caption_path(self.current_path)
+        )
         self.path_label.setText(str(self.current_caption_path))
         self.save_caption()
 
@@ -362,6 +381,80 @@ class IdeogramCaptionEditor(QDockWidget):
             return caption.source_path
         return ideogram_caption_path(self.current_path)
 
+    def _current_convertible_markings(self):
+        """Prefer live viewer rectangles when they belong to the current image."""
+        live_markings = []
+        try:
+            viewer_index = self.image_viewer.proxy_image_index
+            viewer_image = viewer_index.data(Qt.ItemDataRole.UserRole)
+            viewer_path = Path(viewer_image.path) if viewer_image is not None else None
+            if viewer_path == self.current_path:
+                for item in self.image_viewer.marking_items:
+                    marking_type = getattr(item, "rect_type", ImageMarking.NONE)
+                    if marking_type in {ImageMarking.CROP, ImageMarking.NONE}:
+                        continue
+                    label = str(item.data(0) or "")
+                    try:
+                        confidence = float(item.data(1))
+                    except (TypeError, ValueError):
+                        confidence = 1.0
+                    live_markings.append(
+                        _ConvertibleMarking(
+                            label=label,
+                            type=marking_type,
+                            rect=item.rect().toRect(),
+                            confidence=confidence,
+                        )
+                    )
+        except (AttributeError, RuntimeError):
+            live_markings = []
+        if live_markings:
+            return live_markings
+        return [
+            marking
+            for marking in self.current_image.markings
+            if marking.type not in {ImageMarking.CROP, ImageMarking.NONE}
+        ]
+
+    @staticmethod
+    def _marking_description(marking) -> str:
+        type_text = {
+            ImageMarking.HINT: "hint",
+            ImageMarking.INCLUDE: "include-mask",
+            ImageMarking.EXCLUDE: "exclude-mask",
+        }.get(marking.type, str(marking.type))
+        label = str(marking.label or "").strip()
+        if label:
+            description = (
+                f'A region labeled "{label}", imported from a TagGUI '
+                f"{type_text} marking."
+            )
+        else:
+            description = f"A region imported from a TagGUI {type_text} marking."
+        confidence = float(getattr(marking, "confidence", 1.0) or 1.0)
+        if confidence < 0.999:
+            description += f" Detection confidence: {confidence:.3f}."
+        return description
+
+    def _confirm_elements_replacement(self, marking_count: int) -> bool:
+        try:
+            existing_count = len(self._caption_from_editor().elements)
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            existing_count = 0
+        if existing_count == 0:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Replace Ideogram Elements",
+            f"Replace {existing_count} existing Ideogram element(s) with "
+            f"{marking_count} TagGUI marking(s)? Background and style fields "
+            "will be preserved.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _confirm_replacement(self) -> bool:
         if not self.editor.toPlainText().strip():
             return True
@@ -414,3 +507,11 @@ def _greatest_common_divisor(a: int, b: int) -> int:
     while b:
         a, b = b, a % b
     return max(1, abs(a))
+
+
+class _ConvertibleMarking:
+    def __init__(self, *, label, type, rect, confidence):
+        self.label = label
+        self.type = type
+        self.rect = rect
+        self.confidence = confidence
