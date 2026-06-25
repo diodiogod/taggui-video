@@ -133,6 +133,9 @@ class SignalManager:
         toolbar_manager.add_show_marking_action.toggled.connect(toolbar_manager.add_show_marking_latent_action.setEnabled)
         toolbar_manager.add_toggle_marking_action.triggered.connect(lambda: image_viewer.change_marking())
         toolbar_manager.add_show_labels_action.toggled.connect(image_viewer.show_label)
+        toolbar_manager.show_ideogram_caption_action.toggled.connect(
+            image_viewer.set_ideogram_caption_overlays_visible
+        )
         toolbar_manager.add_show_marking_latent_action.toggled.connect(image_viewer.show_marking_latent)
 
         # Rating stars

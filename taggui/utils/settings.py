@@ -68,6 +68,7 @@ DEFAULT_SETTINGS = {
     'video_volume': 1.0,
     'auto_marking_merge_overlaps': False,
     'auto_marking_merge_overlap_threshold': 0.6,
+    'show_ideogram_caption_overlays': True,
     'disable_thinking': True,
     # GPU preferences
     'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving

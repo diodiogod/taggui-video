@@ -1,0 +1,106 @@
+import json
+
+import pytest
+
+from taggui.utils.ideogram_caption import (
+    IdeogramCaptionError,
+    bbox_to_pixel_rect,
+    discover_ideogram_caption,
+    ideogram_caption_path,
+    load_ideogram_caption,
+    save_ideogram_caption,
+)
+
+
+def _caption_payload():
+    return {
+        "high_level_description": "A poster with a red bicycle.",
+        "style_description": {
+            "aesthetics": "clean",
+            "lighting": "even",
+            "medium": "graphic_design",
+            "art_style": "flat vector",
+            "color_palette": ["#FFFFFF", "#CC0000"],
+        },
+        "compositional_deconstruction": {
+            "background": "An off-white poster background.",
+            "elements": [
+                {
+                    "type": "obj",
+                    "bbox": [100, 200, 800, 900],
+                    "desc": "A red bicycle shown from the side.",
+                },
+                {
+                    "type": "text",
+                    "bbox": [40, 100, 140, 900],
+                    "text": "RIDE",
+                    "desc": "Large black headline.",
+                },
+            ],
+        },
+    }
+
+
+def test_discovers_preferred_ideogram_sidecar(tmp_path):
+    media_path = tmp_path / "sample.png"
+    media_path.write_bytes(b"")
+    caption_path = ideogram_caption_path(media_path)
+    caption_path.write_text(json.dumps(_caption_payload()), encoding="utf-8")
+
+    caption = discover_ideogram_caption(media_path)
+
+    assert caption is not None
+    assert caption.source_path == caption_path
+    assert caption.elements[1].text == "RIDE"
+    assert caption.to_json().startswith('{"high_level_description":')
+
+
+def test_legacy_json_is_loaded_only_when_it_matches_schema(tmp_path):
+    media_path = tmp_path / "sample.png"
+    workflow_path = tmp_path / "sample.json"
+    workflow_path.write_text('{"nodes":[]}', encoding="utf-8")
+
+    assert discover_ideogram_caption(media_path) is None
+
+    workflow_path.write_text(json.dumps(_caption_payload()), encoding="utf-8")
+    assert discover_ideogram_caption(media_path) is not None
+
+
+def test_rejects_invalid_ideogram_bbox(tmp_path):
+    payload = _caption_payload()
+    payload["compositional_deconstruction"]["elements"][0]["bbox"] = [
+        100,
+        200,
+        1100,
+        900,
+    ]
+    caption_path = tmp_path / "sample.ideogram.json"
+    caption_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IdeogramCaptionError, match="between 0 and 1000"):
+        load_ideogram_caption(caption_path)
+
+
+def test_converts_yx_bbox_to_pixel_rect():
+    assert bbox_to_pixel_rect((100, 200, 600, 700), 2000, 1000) == (
+        400.0,
+        100.0,
+        1000.0,
+        500.0,
+    )
+
+
+def test_save_uses_preferred_name_and_normalizes_palette(tmp_path):
+    media_path = tmp_path / "sample.png"
+    payload = _caption_payload()
+    payload["style_description"]["color_palette"] = ["#ffffff", "#cc0000"]
+    caption_path = tmp_path / "input.json"
+    caption_path.write_text(json.dumps(payload), encoding="utf-8")
+    caption = load_ideogram_caption(caption_path)
+
+    saved_path = save_ideogram_caption(media_path, caption)
+
+    assert saved_path == tmp_path / "sample.ideogram.json"
+    assert '"color_palette":["#FFFFFF","#CC0000"]' in saved_path.read_text(
+        encoding="utf-8"
+    )

@@ -4,7 +4,7 @@ from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint, 
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
-                               QGraphicsScene, QGraphicsView,
+                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
 from PIL import Image as pilimage
 from models.image_list_model import fallback_decode_qimage, repair_mismatched_image_extension_path
@@ -20,6 +20,12 @@ from utils.settings import (
 )
 from models.proxy_image_list_model import ProxyImageListModel
 from utils.image import Image, ImageMarking, Marking
+from utils.ideogram_caption import (
+    IdeogramCaptionError,
+    bbox_to_pixel_rect,
+    discover_ideogram_caption,
+    ideogram_caption_path,
+)
 from utils.rect import RectPosition
 from widgets.video_player import VideoPlayerWidget
 from widgets.video_controls import VideoControlsWidget
@@ -367,6 +373,11 @@ class ImageViewer(QWidget):
         self.show_marking_state = True
         self.show_label_state = True
         self.show_marking_latent_state = True
+        self.show_ideogram_caption_state = settings.value(
+            'show_ideogram_caption_overlays',
+            defaultValue=DEFAULT_SETTINGS['show_ideogram_caption_overlays'],
+            type=bool,
+        )
         self.marking_to_add = ImageMarking.NONE
         self.scene = QGraphicsScene()
         self._scene_padding_px = 0
@@ -386,6 +397,7 @@ class ImageViewer(QWidget):
         self.proxy_image_index: QPersistentModelIndex = QPersistentModelIndex()
         self._viewer_model_resetting = False
         self.marking_items: list[MarkingItem] = []
+        self.ideogram_overlay_items: list[QGraphicsItem] = []
 
         self.view.wheelEvent = self.wheelEvent
 
@@ -3592,6 +3604,7 @@ class ImageViewer(QWidget):
 
         if is_complete:
             self.marking_items.clear()
+            self.ideogram_overlay_items.clear()
             self.view.clear_scene()
             auto_play_after_layout = False
             was_video_loaded = bool(self._is_video_loaded)
@@ -3811,6 +3824,7 @@ class ImageViewer(QWidget):
             for item in self.marking_items:
                 self.scene.removeItem(item)
             self.marking_items.clear()
+            self._clear_ideogram_caption_overlays()
 
         self.marking_to_add = ImageMarking.NONE
         self.marking.emit(ImageMarking.NONE)
@@ -3824,6 +3838,7 @@ class ImageViewer(QWidget):
         for marking in image.markings:
             self.add_rectangle(marking.rect, marking.type, interactive=False,
                                name=marking.label, confidence=marking.confidence)
+        self._load_ideogram_caption_overlays(image)
 
     def rating_change(self, rating: float):
         if self.proxy_image_index.isValid():
@@ -3859,6 +3874,12 @@ class ImageViewer(QWidget):
 
     @Slot()
     def setting_change(self, key, value):
+        if key == 'show_ideogram_caption_overlays':
+            self.show_ideogram_caption_state = bool(value)
+            if self.proxy_image_index.isValid():
+                image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+                self._load_ideogram_caption_overlays(image)
+            return
         if key in ['video_controls_visibility_mode', 'video_always_show_controls']:
             self.set_video_controls_visibility_mode(
                 load_video_controls_visibility_mode(),
@@ -3869,6 +3890,131 @@ class ImageViewer(QWidget):
                    'export_latent_size', 'export_upscaling',
                    'export_bucket_strategy']:
             self.recalculate_markings()
+
+    def set_ideogram_caption_overlays_visible(self, visible: bool):
+        """Show or hide structured-caption overlays without affecting markings."""
+        settings.setValue('show_ideogram_caption_overlays', bool(visible))
+
+    def _clear_ideogram_caption_overlays(self):
+        for item in self.ideogram_overlay_items:
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
+        self.ideogram_overlay_items.clear()
+
+    def _add_ideogram_badge(
+        self,
+        text: str,
+        *,
+        color: QColor,
+        tooltip: str = '',
+    ):
+        badge = QGraphicsSimpleTextItem(text)
+        badge.setFont(QFont('DejaVu Sans', 10, QFont.Weight.Bold))
+        badge.setBrush(color)
+        badge.setPen(QPen(QColor('#101820'), 2))
+        badge.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+            True,
+        )
+        badge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        badge.setZValue(40)
+        badge.setPos(8, 8)
+        if tooltip:
+            badge.setToolTip(tooltip)
+        self.scene.addItem(badge)
+        self.ideogram_overlay_items.append(badge)
+
+    def _load_ideogram_caption_overlays(self, image: Image):
+        self._clear_ideogram_caption_overlays()
+        if image is None or not self.show_ideogram_caption_state:
+            return
+
+        try:
+            caption = discover_ideogram_caption(image.path)
+        except IdeogramCaptionError as exc:
+            preferred_path = ideogram_caption_path(image.path)
+            self._add_ideogram_badge(
+                'IDEOGRAM JSON ERROR',
+                color=QColor('#FF6B6B'),
+                tooltip=f'{preferred_path}\n{exc}',
+            )
+            return
+
+        if caption is None:
+            return
+        image_rect = MarkingItem.image_size
+        width, height = image_rect.width(), image_rect.height()
+        if width <= 0 or height <= 0:
+            dimensions = image.valid_dimensions()
+            if dimensions is None:
+                return
+            width, height = dimensions
+        if width <= 0 or height <= 0:
+            return
+
+        object_color = QColor('#34D6C7')
+        text_color = QColor('#FFB454')
+        for index, element in enumerate(caption.elements, start=1):
+            if element.bbox is None:
+                continue
+            x, y, rect_width, rect_height = bbox_to_pixel_rect(
+                element.bbox,
+                width,
+                height,
+            )
+            color = text_color if element.type == 'text' else object_color
+            rect_item = QGraphicsRectItem(QRectF(x, y, rect_width, rect_height))
+            pen = QPen(color, 2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            rect_item.setPen(pen)
+            fill = QColor(color)
+            fill.setAlpha(28)
+            rect_item.setBrush(fill)
+            rect_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            rect_item.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+                False,
+            )
+            rect_item.setZValue(30)
+
+            label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
+            label_text = f'{index:02d} {label_kind}'
+            if element.type == 'text' and element.text:
+                label_text += f' "{element.text}"'
+            label = QGraphicsSimpleTextItem(label_text)
+            label.setFont(QFont('DejaVu Sans', 9, QFont.Weight.Bold))
+            label.setBrush(color)
+            label.setPen(QPen(QColor('#101820'), 2))
+            label.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+                True,
+            )
+            label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            label.setZValue(31)
+            label.setPos(x + 3, y + 3)
+
+            tooltip_parts = [element.desc]
+            if element.color_palette:
+                tooltip_parts.append(
+                    f'Palette: {", ".join(element.color_palette)}'
+                )
+            tooltip = '\n'.join(part for part in tooltip_parts if part)
+            rect_item.setToolTip(tooltip)
+            label.setToolTip(tooltip)
+            self.scene.addItem(rect_item)
+            self.scene.addItem(label)
+            self.ideogram_overlay_items.extend((rect_item, label))
+
+        source_name = caption.source_path.name if caption.source_path else 'caption'
+        self._add_ideogram_badge(
+            f'IDEOGRAM 4 - {len(caption.elements)} ELEMENTS',
+            color=QColor('#7FE7DD'),
+            tooltip=f'Loaded from {source_name}',
+        )
 
     def recalculate_markings(self, ignore: MarkingItem | None = None):
         from widgets.marking import grid

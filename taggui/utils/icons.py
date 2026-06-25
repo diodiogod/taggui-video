@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter, QPen, Qt, QPainterPath, QImage
+from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter, QPen, Qt, QPainterPath, QImage, QFont
 from PySide6.QtCore import QRect
 
 from utils.utils import get_resource_path
@@ -25,6 +25,23 @@ def show_labels_icon():
 
 def show_marking_latent_icon():
     return QIcon(str(get_resource_path(SHOW_MARKING_LATENT_ICON_PATH)))
+
+
+def create_ideogram_caption_icon() -> QIcon:
+    """Create a compact I4 icon for structured-caption overlays."""
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(QColor('transparent'))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor('#34D6C7'), 2))
+    painter.setBrush(QColor(20, 35, 40, 190))
+    painter.drawRoundedRect(QRect(2, 2, 28, 28), 5, 5)
+    painter.setPen(QColor('#E8FFFC'))
+    painter.setFont(QFont('DejaVu Sans', 10, QFont.Weight.Bold))
+    painter.drawText(QRect(2, 2, 28, 28), Qt.AlignmentFlag.AlignCenter, 'I4')
+    painter.end()
+    return QIcon(pixmap)
+
 
 def create_fullscreen_icon(*, exit_fullscreen: bool = False) -> QIcon:
     """Create fullscreen icons with diagonal arrows independent of theme."""

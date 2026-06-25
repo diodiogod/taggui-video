@@ -12,8 +12,10 @@ from utils.icons import (
     show_markings_icon,
     show_labels_icon,
     show_marking_latent_icon,
+    create_ideogram_caption_icon,
 )
 from utils.settings import (
+    DEFAULT_SETTINGS,
     settings,
     load_video_controls_visibility_mode,
     normalize_video_controls_visibility_mode,
@@ -65,6 +67,7 @@ class ToolbarManager:
         self.add_toggle_marking_action = None
         self.add_show_marking_action = None
         self.add_show_labels_action = None
+        self.show_ideogram_caption_action = None
         self.add_show_marking_latent_action = None
         self.always_show_controls_action = None
         self.zoom_follow_mode_action = None
@@ -538,6 +541,21 @@ class ToolbarManager:
         self.add_show_labels_action.setCheckable(True)
         self.add_show_labels_action.setChecked(True)
         toolbar.addAction(self.add_show_labels_action)
+
+        self.show_ideogram_caption_action = QAction(
+            create_ideogram_caption_icon(),
+            'Show Ideogram 4 caption overlays',
+            self.main_window,
+        )
+        self.show_ideogram_caption_action.setCheckable(True)
+        self.show_ideogram_caption_action.setChecked(
+            settings.value(
+                'show_ideogram_caption_overlays',
+                defaultValue=DEFAULT_SETTINGS['show_ideogram_caption_overlays'],
+                type=bool,
+            )
+        )
+        toolbar.addAction(self.show_ideogram_caption_action)
 
         self.add_show_marking_latent_action = QAction(
             show_marking_latent_icon(),
