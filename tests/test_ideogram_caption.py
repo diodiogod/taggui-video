@@ -3,7 +3,9 @@ import json
 import pytest
 
 from taggui.utils.ideogram_caption import (
+    IdeogramElement,
     IdeogramCaptionError,
+    append_unique_elements,
     bbox_to_pixel_rect,
     discover_ideogram_caption,
     ideogram_caption_path,
@@ -114,3 +116,33 @@ def test_converts_pixel_rect_to_yx_bbox():
         600,
         700,
     )
+
+
+def test_unique_element_merge_skips_same_label_and_coordinates():
+    existing = [
+        IdeogramElement(type="obj", desc="watermark", bbox=(900, 840, 980, 990))
+    ]
+    candidates = [
+        IdeogramElement(type="obj", desc="Watermark", bbox=(901, 839, 979, 991)),
+        IdeogramElement(type="obj", desc="face", bbox=(100, 100, 400, 400)),
+    ]
+
+    merged, added_count = append_unique_elements(existing, candidates)
+
+    assert added_count == 1
+    assert [element.desc for element in merged] == ["watermark", "face"]
+
+
+def test_unique_element_merge_preserves_overlapping_regions():
+    existing = [
+        IdeogramElement(type="obj", desc="face", bbox=(100, 100, 500, 500))
+    ]
+    candidates = [
+        IdeogramElement(type="obj", desc="face", bbox=(120, 120, 480, 480)),
+        IdeogramElement(type="obj", desc="person", bbox=(80, 80, 700, 700)),
+    ]
+
+    merged, added_count = append_unique_elements(existing, candidates)
+
+    assert added_count == 2
+    assert len(merged) == 3

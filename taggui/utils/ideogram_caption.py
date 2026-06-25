@@ -13,6 +13,7 @@ from typing import Any
 
 IDEOGRAM_CAPTION_SUFFIX = ".ideogram.json"
 IDEOGRAM_BBOX_SCALE = 1000
+IDEOGRAM_DUPLICATE_BBOX_TOLERANCE = 2
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-F]{6}$", re.IGNORECASE)
 
 
@@ -282,6 +283,58 @@ def pixel_rect_to_bbox(
     x2 = _normalized_coordinate(x + max(0.0, width), image_width)
     y2 = _normalized_coordinate(y + max(0.0, height), image_height)
     return y1, x1, y2, x2
+
+
+def elements_are_same_region(
+    first: IdeogramElement,
+    second: IdeogramElement,
+    *,
+    coordinate_tolerance: int = IDEOGRAM_DUPLICATE_BBOX_TOLERANCE,
+) -> bool:
+    """Return whether two elements identify the same labeled region."""
+    if first.type != second.type:
+        return False
+    if _normalized_element_label(first) != _normalized_element_label(second):
+        return False
+    if first.bbox is None or second.bbox is None:
+        return first.bbox is None and second.bbox is None
+    tolerance = max(0, int(coordinate_tolerance))
+    return all(
+        abs(first_coord - second_coord) <= tolerance
+        for first_coord, second_coord in zip(first.bbox, second.bbox)
+    )
+
+
+def append_unique_elements(
+    existing: list[IdeogramElement],
+    candidates: list[IdeogramElement],
+    *,
+    coordinate_tolerance: int = IDEOGRAM_DUPLICATE_BBOX_TOLERANCE,
+) -> tuple[list[IdeogramElement], int]:
+    """Append candidates that are not coordinate-equivalent labeled regions."""
+    merged = list(existing)
+    added_count = 0
+    for candidate in candidates:
+        if any(
+            elements_are_same_region(
+                current,
+                candidate,
+                coordinate_tolerance=coordinate_tolerance,
+            )
+            for current in merged
+        ):
+            continue
+        merged.append(candidate)
+        added_count += 1
+    return merged, added_count
+
+
+def _normalized_element_label(element: IdeogramElement) -> str:
+    if element.type == "text":
+        label = element.text or element.desc
+    else:
+        label = element.desc
+    return " ".join(str(label or "").casefold().split())
 
 
 def _normalized_coordinate(value: float, extent: int) -> int:

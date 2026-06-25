@@ -23,6 +23,7 @@ from utils.ideogram_caption import (
     IdeogramCaption,
     IdeogramCaptionError,
     IdeogramElement,
+    append_unique_elements,
     discover_ideogram_caption,
     ideogram_caption_path,
     pixel_rect_to_bbox,
@@ -222,7 +223,7 @@ class IdeogramCaptionEditor(QDockWidget):
             )
             return
         image_width, image_height = dimensions
-        elements = []
+        candidates = []
         markings = self._current_convertible_markings()
         if not markings:
             self._set_status(
@@ -230,8 +231,6 @@ class IdeogramCaptionEditor(QDockWidget):
                 "Crop boxes and Ideogram overlay boxes are not converted.",
                 error=True,
             )
-            return
-        if not self._confirm_elements_replacement(len(markings)):
             return
         for marking in markings:
             if marking.type == ImageMarking.CROP:
@@ -245,7 +244,7 @@ class IdeogramCaptionEditor(QDockWidget):
                 image_width,
                 image_height,
             )
-            elements.append(
+            candidates.append(
                 IdeogramElement(
                     type="obj",
                     desc=self._marking_description(marking),
@@ -256,14 +255,30 @@ class IdeogramCaptionEditor(QDockWidget):
             caption = self._caption_from_editor()
         except (IdeogramCaptionError, json.JSONDecodeError):
             caption = self._empty_caption()
-        caption.elements = elements
+        caption.elements, added_count = append_unique_elements(
+            caption.elements,
+            candidates,
+        )
+        skipped_count = len(candidates) - added_count
+        if added_count == 0:
+            self._set_status(
+                f"No regions added; all {skipped_count} marking(s) already "
+                "exist in the Ideogram caption.",
+                success=True,
+            )
+            return
         self._replace_text(caption.to_json(pretty=True), dirty=True)
         self.current_caption_path = (
             self.current_caption_path
             or ideogram_caption_path(self.current_path)
         )
         self.path_label.setText(str(self.current_caption_path))
-        self.save_caption()
+        if self.save_caption():
+            self._set_status(
+                f"Added {added_count} region(s); skipped {skipped_count} "
+                "existing duplicate(s).",
+                success=True,
+            )
 
     def save_caption(self) -> bool:
         if self.current_path is None:
@@ -422,25 +437,6 @@ class IdeogramCaptionEditor(QDockWidget):
         if label:
             return label
         return "region"
-
-    def _confirm_elements_replacement(self, marking_count: int) -> bool:
-        try:
-            existing_count = len(self._caption_from_editor().elements)
-        except (IdeogramCaptionError, json.JSONDecodeError):
-            existing_count = 0
-        if existing_count == 0:
-            return True
-        reply = QMessageBox.question(
-            self,
-            "Replace Ideogram Elements",
-            f"Replace {existing_count} existing Ideogram element(s) with "
-            f"{marking_count} TagGUI marking(s)? Background and style fields "
-            "will be preserved.",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return reply == QMessageBox.StandardButton.Yes
 
     def _confirm_replacement(self) -> bool:
         if not self.editor.toPlainText().strip():
