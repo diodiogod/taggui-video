@@ -420,8 +420,8 @@ class IdeogramCaptionEditor(QDockWidget):
     def _marking_description(marking) -> str:
         label = str(marking.label or "").strip()
         if label:
-            return f"A {label.rstrip('.')}."
-        return "A marked region."
+            return label
+        return "region"
 
     def _confirm_elements_replacement(self, marking_count: int) -> bool:
         try:
