@@ -15,7 +15,8 @@ from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar, QSlider, QFrame,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
-                               QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu)
+                               QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu,
+                               QGraphicsView, QGraphicsTextItem)
 
 from controllers.video_editing_controller import VideoEditingController
 from controllers.toolbar_manager import ToolbarManager
@@ -2776,10 +2777,32 @@ class MainWindow(QMainWindow):
         focus_widget = QApplication.focusWidget()
         if focus_widget is None:
             return False
-        return isinstance(
+        if isinstance(
             focus_widget,
             (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox),
+        ):
+            return True
+
+        graphics_view = (
+            focus_widget
+            if isinstance(focus_widget, QGraphicsView)
+            else focus_widget.parentWidget()
         )
+        while graphics_view is not None and not isinstance(
+            graphics_view,
+            QGraphicsView,
+        ):
+            graphics_view = graphics_view.parentWidget()
+        if isinstance(graphics_view, QGraphicsView):
+            focused_item = graphics_view.scene().focusItem()
+            return (
+                isinstance(focused_item, QGraphicsTextItem)
+                and bool(
+                    focused_item.textInteractionFlags()
+                    & Qt.TextInteractionFlag.TextEditorInteraction
+                )
+            )
+        return False
 
     def _resolve_active_video_viewer(self) -> ImageViewer | None:
         """Return the active viewer when it currently owns a loaded video."""
@@ -4891,6 +4914,45 @@ class MainWindow(QMainWindow):
             return
         self._remember_instance_as_preferred_target()
         self._refresh_selection_wall_speed_overlay()
+        QTimer.singleShot(0, self._restore_active_browser_context_after_activation)
+
+    def _restore_active_browser_context_after_activation(self):
+        """Re-sync the anchored viewer after minimize/restore activation."""
+        manager = getattr(self, '_context_switch_manager', None)
+        if manager is None:
+            return
+
+        if getattr(manager, 'active_context', 'primary') == 'secondary':
+            secondary = getattr(self, '_secondary_browser', None)
+            secondary_dock = getattr(secondary, 'dock', None)
+            selection_model = getattr(secondary, '_sel', None)
+            if (
+                secondary is not None
+                and secondary_dock is not None
+                and secondary_dock.isVisible()
+                and selection_model is not None
+            ):
+                current = selection_model.currentIndex()
+                if current.isValid():
+                    secondary.commit_thumbnail_click_selection(current)
+                    return
+
+        current = self.image_list_selection_model.currentIndex()
+        if current.isValid():
+            try:
+                self.image_list.update_image_index_label(current)
+            except Exception:
+                pass
+            try:
+                self.ideogram_caption_editor.load_media(
+                    current.data(Qt.ItemDataRole.UserRole)
+                )
+            except Exception:
+                pass
+            try:
+                self.get_selection_target_viewer().load_image(current, False)
+            except Exception:
+                pass
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -8247,6 +8309,24 @@ class MainWindow(QMainWindow):
         self._update_refresh_new_media_action_state()
 
     def _on_secondary_browser_visibility_changed(self, visible: bool):
+        app_state = QApplication.applicationState()
+        window_minimized = bool(self.windowState() & Qt.WindowState.WindowMinimized)
+        transient_window_hide = (
+            not bool(visible)
+            and not bool(getattr(self, '_main_window_closing', False))
+            and (
+                window_minimized
+                or not self.isVisible()
+                or app_state != Qt.ApplicationState.ApplicationActive
+            )
+        )
+        if transient_window_hide:
+            diagnostic_print(
+                "[RESTORE][Browser2] visibility false ignored during window/app deactivation "
+                f"minimized={window_minimized} app_state={app_state} main_visible={self.isVisible()}",
+                detail="verbose",
+            )
+            return
         if (
             not bool(getattr(self, '_secondary_browser_restore_in_progress', False))
             and not bool(getattr(self, '_main_window_closing', False))

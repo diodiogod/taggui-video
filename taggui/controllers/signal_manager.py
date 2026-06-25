@@ -211,15 +211,18 @@ class SignalManager:
                     return
                 if self.main_window._should_suppress_transient_drag_selection(current):
                     return
+                if current.isValid():
+                    # Keep lightweight metadata panels synchronized even while
+                    # the viewer ignores post-click masonry remap churn.
+                    self.main_window.ideogram_caption_editor.load_media(
+                        current.data(Qt.ItemDataRole.UserRole)
+                    )
                 # Post-click freeze: ignore recalc-driven selection mutations.
                 import time as _t
                 view = self.main_window.image_list.list_view
                 if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
                     return
                 if current.isValid():
-                    self.main_window.ideogram_caption_editor.load_media(
-                        current.data(Qt.ItemDataRole.UserRole)
-                    )
                     self.main_window.get_selection_target_viewer().load_image(current)
             except Exception as e:
                 print(f"[SIGNAL] ERROR in currentChanged->load_image: {e}")

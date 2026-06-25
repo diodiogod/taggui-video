@@ -3954,6 +3954,54 @@ class ImageViewer(QWidget):
         self.scene.addItem(badge)
         self.ideogram_overlay_items.append(badge)
 
+    def _add_ideogram_label_chip(
+        self,
+        text: str,
+        *,
+        x: float,
+        y: float,
+        base_z: float,
+        color: QColor,
+        tooltip: str = '',
+    ):
+        label = QGraphicsSimpleTextItem(text)
+        label.setFont(QFont('DejaVu Sans', 9, QFont.Weight.Bold))
+        label.setBrush(QColor('#F7FBFC'))
+        label.setPen(QPen(QColor('#101820'), 1))
+        label.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+            True,
+        )
+        label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        label.setZValue(base_z + 2)
+
+        background = QGraphicsRectItem()
+        background.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        background.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+            True,
+        )
+        background.setZValue(base_z + 1)
+        background_color = QColor('#0C1116')
+        background_color.setAlpha(220)
+        background.setBrush(background_color)
+        background.setPen(QPen(color, 1.5))
+
+        padding_x = 6
+        padding_y = 3
+        text_rect = label.boundingRect()
+        background.setRect(
+            text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+        )
+        background.setPos(x, y)
+        label.setPos(x + padding_x, y + padding_y)
+        if tooltip:
+            background.setToolTip(tooltip)
+            label.setToolTip(tooltip)
+        self.scene.addItem(background)
+        self.scene.addItem(label)
+        self.ideogram_overlay_items.extend((background, label))
+
     def _load_ideogram_caption_overlays(self, image: Image):
         self._clear_ideogram_caption_overlays()
         if image is None or not self.show_ideogram_caption_state:
@@ -3979,6 +4027,7 @@ class ImageViewer(QWidget):
 
         object_color = QColor('#34D6C7')
         text_color = QColor('#FFB454')
+        overlay_entries = []
         for index, element in enumerate(caption.elements, start=1):
             if element.bbox is None:
                 continue
@@ -3988,23 +4037,70 @@ class ImageViewer(QWidget):
                 height,
             )
             color = text_color if element.type == 'text' else object_color
+
+            label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
+            label_text = f'{index:02d} {label_kind}'
+            if element.type == 'text' and element.text:
+                label_text += f' "{element.text}"'
+            tooltip_parts = [element.desc]
+            if element.color_palette:
+                tooltip_parts.append(
+                    f'Palette: {", ".join(element.color_palette)}'
+                )
+            tooltip = '\n'.join(part for part in tooltip_parts if part)
+            overlay_entries.append(
+                {
+                    'index': index,
+                    'element_index': index - 1,
+                    'area': max(1.0, rect_width * rect_height),
+                    'x': x,
+                    'y': y,
+                    'rect_width': rect_width,
+                    'rect_height': rect_height,
+                    'color': color,
+                    'tooltip': tooltip,
+                    'label_text': label_text,
+                }
+            )
+
+        # Smaller regions stack above larger overlapping regions so they remain
+        # directly selectable without relying on creation order.
+        for layer, entry in enumerate(
+            sorted(
+                overlay_entries,
+                key=lambda item: (item['area'], item['index']),
+                reverse=True,
+            ),
+            start=30,
+        ):
+            base_z = float(layer * 3)
             if self.ideogram_editing_enabled:
                 rect_item = IdeogramRegionItem(
-                    QRectF(x, y, rect_width, rect_height),
-                    element_index=index - 1,
-                    color=color,
+                    QRectF(
+                        entry['x'],
+                        entry['y'],
+                        entry['rect_width'],
+                        entry['rect_height'],
+                    ),
+                    element_index=entry['element_index'],
+                    color=entry['color'],
                     on_selected=self.ideogram_element_selected.emit,
                     on_geometry_changed=self.ideogram_geometry_changed.emit,
                 )
             else:
                 rect_item = QGraphicsRectItem(
-                    QRectF(x, y, rect_width, rect_height)
+                    QRectF(
+                        entry['x'],
+                        entry['y'],
+                        entry['rect_width'],
+                        entry['rect_height'],
+                    )
                 )
-                pen = QPen(color, 2)
+                pen = QPen(entry['color'], 2)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 pen.setCosmetic(True)
                 rect_item.setPen(pen)
-                fill = QColor(color)
+                fill = QColor(entry['color'])
                 fill.setAlpha(28)
                 rect_item.setBrush(fill)
                 rect_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
@@ -4012,35 +4108,18 @@ class ImageViewer(QWidget):
                     QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
                     False,
                 )
-                rect_item.setZValue(30)
-
-            label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
-            label_text = f'{index:02d} {label_kind}'
-            if element.type == 'text' and element.text:
-                label_text += f' "{element.text}"'
-            label = QGraphicsSimpleTextItem(label_text)
-            label.setFont(QFont('DejaVu Sans', 9, QFont.Weight.Bold))
-            label.setBrush(color)
-            label.setPen(QPen(QColor('#101820'), 2))
-            label.setFlag(
-                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
-                True,
-            )
-            label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            label.setZValue(31)
-            label.setPos(x + 3, y + 3)
-
-            tooltip_parts = [element.desc]
-            if element.color_palette:
-                tooltip_parts.append(
-                    f'Palette: {", ".join(element.color_palette)}'
-                )
-            tooltip = '\n'.join(part for part in tooltip_parts if part)
-            rect_item.setToolTip(tooltip)
-            label.setToolTip(tooltip)
+            rect_item.setZValue(base_z)
+            rect_item.setToolTip(entry['tooltip'])
             self.scene.addItem(rect_item)
-            self.scene.addItem(label)
-            self.ideogram_overlay_items.extend((rect_item, label))
+            self.ideogram_overlay_items.append(rect_item)
+            self._add_ideogram_label_chip(
+                entry['label_text'],
+                x=entry['x'] + 3,
+                y=entry['y'] + 3,
+                base_z=base_z,
+                color=entry['color'],
+                tooltip=entry['tooltip'],
+            )
 
         source_name = caption.source_path.name if caption.source_path else 'caption'
         self._add_ideogram_badge(

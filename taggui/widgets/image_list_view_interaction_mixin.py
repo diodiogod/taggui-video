@@ -1686,6 +1686,10 @@ class ImageListViewInteractionMixin:
                 event.accept()
         else:
             # Use default behavior in list mode
+            # A previous click's anti-churn window must not suppress this new
+            # deliberate selection's synchronous currentChanged handlers.
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._user_click_selection_frozen_until = 0.0
             super().mousePressEvent(event)
 
 

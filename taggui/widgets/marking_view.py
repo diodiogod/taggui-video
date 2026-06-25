@@ -8,6 +8,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from utils.image import ImageMarking
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.rect import RectPosition, map_rect_position_to_cursor
+from widgets.ideogram_region_item import IdeogramRegionItem
 from widgets.marking import MarkingItem, MarkingLabel, grid
 
 
@@ -58,6 +59,15 @@ class ImageGraphicsView(QGraphicsView):
         self._manual_pan_last_global_pos = None
         self.clear_scene()
 
+    def _interactive_region_at(self, scene_pos):
+        for item in self.scene().items(scene_pos):
+            current = item
+            while current is not None:
+                if isinstance(current, (MarkingItem, IdeogramRegionItem)):
+                    return current
+                current = current.parentItem()
+        return None
+
     def _should_start_manual_pan(self, event: QMouseEvent) -> bool:
         """Check pan gestures that should move viewport instead of editing marks."""
         if self.insertion_mode or MarkingItem.handle_selected != RectPosition.NONE:
@@ -66,11 +76,8 @@ class ImageGraphicsView(QGraphicsView):
             return False
 
         scene_pos = self.mapToScene(event.pos())
-        item = self.scene().itemAt(scene_pos, self.transform())
-        while item is not None:
-            if isinstance(item, MarkingItem):
-                return False
-            item = item.parentItem()
+        if self._interactive_region_at(scene_pos) is not None:
+            return False
 
         return True
 
@@ -188,16 +195,9 @@ class ImageGraphicsView(QGraphicsView):
 
         # Check if clicking on an existing marking item first
         scene_pos = self.mapToScene(event.pos())
-        item_at_pos = self.scene().itemAt(scene_pos, self.transform())
-
-        # Walk up the parent chain to find if we're clicking on a MarkingItem
-        current_item = item_at_pos
-        while current_item:
-            if isinstance(current_item, MarkingItem):
-                # Let the MarkingItem handle this event
-                super().mousePressEvent(event)
-                return
-            current_item = current_item.parentItem()
+        if self._interactive_region_at(scene_pos) is not None:
+            super().mousePressEvent(event)
+            return
 
         if self.insertion_mode and event.button() == Qt.MouseButton.LeftButton:
             rect_type = self.image_viewer.marking_to_add
@@ -263,6 +263,9 @@ class ImageGraphicsView(QGraphicsView):
             cursor = map_rect_position_to_cursor(MarkingItem.handle_selected)
         else:
             for item in items:
+                if isinstance(item, IdeogramRegionItem):
+                    cursor = item.cursor().shape()
+                    break
                 if isinstance(item, MarkingItem):
                     handle = item.handleAt(scene_pos)
                     if handle == RectPosition.NONE:

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -838,7 +838,11 @@ class IdeogramCaptionEditor(QDockWidget):
         *,
         refresh_overlays: bool = True,
     ):
-        self._replace_text(caption.to_json(pretty=True), dirty=True)
+        self._replace_text(
+            caption.to_json(pretty=True),
+            dirty=True,
+            preserve_viewport=True,
+        )
         self._update_summary(caption=caption, draft=True)
         if self.save_caption(refresh_overlays=refresh_overlays):
             if not refresh_overlays:
@@ -981,12 +985,30 @@ class IdeogramCaptionEditor(QDockWidget):
     def _editor_uses_pretty_json(self) -> bool:
         return "\n" in self.editor.toPlainText().strip()
 
-    def _replace_text(self, text: str, *, dirty: bool = False):
+    def _replace_text(
+        self,
+        text: str,
+        *,
+        dirty: bool = False,
+        preserve_viewport: bool = False,
+    ):
+        cursor = self.editor.textCursor()
+        vertical_value = self.editor.verticalScrollBar().value()
+        horizontal_value = self.editor.horizontalScrollBar().value()
         self._loading = True
         try:
             self.editor.setPlainText(text)
         finally:
             self._loading = False
+        if preserve_viewport:
+            restored_cursor = self.editor.textCursor()
+            restored_cursor.setPosition(
+                min(cursor.position(), len(self.editor.toPlainText())),
+                QTextCursor.MoveMode.MoveAnchor,
+            )
+            self.editor.setTextCursor(restored_cursor)
+            self.editor.verticalScrollBar().setValue(vertical_value)
+            self.editor.horizontalScrollBar().setValue(horizontal_value)
         self._dirty = dirty
 
     def _populate_detail_fields(self, caption: IdeogramCaption):

@@ -32,6 +32,7 @@ class IdeogramRegionItem(QGraphicsRectItem):
             QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
             True,
         )
+        self.setAcceptHoverEvents(True)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         pen = QPen(color, 2)
         pen.setCosmetic(True)
@@ -45,12 +46,30 @@ class IdeogramRegionItem(QGraphicsRectItem):
     def _handle_rect(self) -> QRectF:
         rect = self.rect()
         size = self.HANDLE_SIZE
+        scene = self.scene()
+        if scene is not None and scene.views():
+            scale = abs(scene.views()[0].transform().m11())
+            if scale > 0:
+                size = self.HANDLE_SIZE / scale
+        size = min(size, rect.width(), rect.height())
         return QRectF(
             rect.right() - size,
             rect.bottom() - size,
             size,
             size,
         )
+
+    def hoverMoveEvent(self, event):
+        self.setCursor(
+            Qt.CursorShape.SizeFDiagCursor
+            if self._handle_rect().contains(event.pos())
+            else Qt.CursorShape.SizeAllCursor
+        )
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event):
         self._on_selected(self.element_index)
