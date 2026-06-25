@@ -60,11 +60,11 @@ class SignalManager:
             lambda: self.main_window.image_viewer.zoom_out())
         if getattr(toolbar_manager, 'previous_media_action', None) is not None:
             toolbar_manager.previous_media_action.triggered.connect(
-                self.main_window.image_list.go_to_previous_image
+                self.main_window.go_to_previous_image
             )
         if getattr(toolbar_manager, 'next_media_action', None) is not None:
             toolbar_manager.next_media_action.triggered.connect(
-                self.main_window.image_list.go_to_next_image
+                self.main_window.go_to_next_image
             )
         if getattr(toolbar_manager, 'main_viewer_fullscreen_action', None) is not None:
             toolbar_manager.main_viewer_fullscreen_action.triggered.connect(

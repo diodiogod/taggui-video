@@ -359,6 +359,13 @@ class SecondaryBrowser(QObject):
     def load_directory(self, path: Path, load_options: LimitedLoadOptions | None = None):
         resolved = path.resolve()
         settings.setValue(self._settings_key('directory_path'), str(resolved))
+        parent = self.parent()
+        persist = getattr(parent, '_session_settings_set_value', None)
+        if callable(persist):
+            try:
+                persist('secondary_browser_directory_path', str(resolved))
+            except Exception:
+                pass
         self.image_list_model.load_directory(resolved, load_options=load_options)
         self._folder_name = resolved.name
         self._update_title()

@@ -930,10 +930,10 @@ class MainWindow(QMainWindow):
         go_to_previous_image_shortcut = QShortcut(QKeySequence('Ctrl+Up'),
                                                   self)
         go_to_previous_image_shortcut.activated.connect(
-            self.image_list.go_to_previous_image)
+            self.go_to_previous_image)
         go_to_next_image_shortcut = QShortcut(QKeySequence('Ctrl+Down'), self)
         go_to_next_image_shortcut.activated.connect(
-            self.image_list.go_to_next_image)
+            self.go_to_next_image)
         self.toggle_floating_hold_shortcut = QShortcut(QKeySequence('H'), self)
         self.toggle_floating_hold_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.toggle_floating_hold_shortcut.activated.connect(self._toggle_floating_hold_shortcut)
@@ -1237,17 +1237,121 @@ class MainWindow(QMainWindow):
 
     def _navigate_media_by_direction(self, *, forward: bool) -> bool:
         """Navigate media list in the requested direction."""
+        target_dock = self._resolve_navigation_image_list()
+        if target_dock is None:
+            return False
+        if not self._prepare_navigation_context(target_dock):
+            return False
         try:
-            row_count = self.proxy_image_list_model.rowCount()
+            proxy_model = getattr(target_dock, 'proxy_image_list_model', None)
+            row_count = proxy_model.rowCount() if proxy_model is not None else 0
         except Exception:
             row_count = 0
         if row_count <= 0:
             return False
         if forward:
-            self.image_list.go_to_next_image()
+            target_dock.go_to_next_image()
         else:
-            self.image_list.go_to_previous_image()
+            target_dock.go_to_previous_image()
+        self._commit_navigation_selection(target_dock)
         return True
+
+    def _resolve_navigation_image_list(self):
+        """Resolve which browser should own next/previous navigation."""
+        secondary = getattr(self, '_secondary_browser', None)
+        secondary_dock = getattr(secondary, 'dock', None)
+        focus_widget = QApplication.focusWidget()
+
+        try:
+            if (
+                secondary_dock is not None
+                and secondary_dock.isVisible()
+                and focus_widget is not None
+                and (
+                    focus_widget is secondary_dock
+                    or secondary_dock.isAncestorOf(focus_widget)
+                )
+            ):
+                return secondary_dock
+        except Exception:
+            pass
+
+        try:
+            primary_dock = getattr(self, 'image_list', None)
+            if (
+                primary_dock is not None
+                and focus_widget is not None
+                and (
+                    focus_widget is primary_dock
+                    or primary_dock.isAncestorOf(focus_widget)
+                )
+            ):
+                return primary_dock
+        except Exception:
+            pass
+
+        manager = getattr(self, '_context_switch_manager', None)
+        if (
+            manager is not None
+            and getattr(manager, 'active_context', 'primary') == 'secondary'
+            and secondary_dock is not None
+            and secondary_dock.isVisible()
+        ):
+            return secondary_dock
+        return getattr(self, 'image_list', None)
+
+    def _prepare_navigation_context(self, target_dock) -> bool:
+        """Ensure viewer/model context matches the browser being navigated."""
+        manager = getattr(self, '_context_switch_manager', None)
+        if manager is None:
+            return target_dock is not None
+        if target_dock is getattr(self, 'image_list', None):
+            if getattr(manager, 'active_context', 'primary') != 'primary':
+                manager.restore_primary()
+            return True
+
+        secondary = getattr(self, '_secondary_browser', None)
+        secondary_dock = getattr(secondary, 'dock', None)
+        if target_dock is not secondary_dock or secondary is None:
+            return False
+
+        if getattr(manager, 'active_context', 'primary') != 'secondary':
+            current = getattr(secondary, '_sel', None)
+            current_index = current.currentIndex() if current is not None else QModelIndex()
+            if current_index.isValid():
+                secondary.commit_thumbnail_click_selection(current_index)
+        return True
+
+    def _commit_navigation_selection(self, target_dock) -> None:
+        """Persist and load the post-navigation selection explicitly."""
+        if target_dock is None:
+            return
+        if target_dock is getattr(self, 'image_list', None):
+            try:
+                self.commit_thumbnail_click_selection(
+                    self.image_list_selection_model.currentIndex()
+                )
+            except Exception:
+                pass
+            return
+
+        secondary = getattr(self, '_secondary_browser', None)
+        secondary_dock = getattr(secondary, 'dock', None)
+        if target_dock is secondary_dock and secondary is not None:
+            try:
+                selection_model = getattr(secondary, '_sel', None)
+                index = selection_model.currentIndex() if selection_model is not None else QModelIndex()
+                secondary.commit_thumbnail_click_selection(index)
+            except Exception:
+                pass
+
+    @Slot()
+    def go_to_previous_image(self):
+        self._navigate_media_by_direction(forward=False)
+
+    @Slot()
+    def go_to_next_image(self):
+        self._navigate_media_by_direction(forward=True)
 
     def _handle_global_media_mouse_button(self, event, event_type) -> bool:
         """Map browser mouse buttons to previous/next media app-wide."""
@@ -1418,15 +1522,27 @@ class MainWindow(QMainWindow):
     def _save_main_window_layout_settings(self):
         """Persist main-window geometry, dock state, and window mode flags."""
         secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
-        saved_secondary_dir = self._session_settings_value(
-            'secondary_browser_directory_path',
-            '',
-            value_type=str,
-        )
+        live_primary_dir = ''
+        try:
+            live_primary_dir = str(getattr(self, 'directory_path', '') or '')
+        except Exception:
+            live_primary_dir = ''
+        if live_primary_dir:
+            self._session_settings_set_value('directory_path', live_primary_dir)
+
+        live_secondary_dir = ''
+        try:
+            secondary_model = getattr(getattr(self, '_secondary_browser', None), 'image_list_model', None)
+            live_secondary_dir = str(getattr(secondary_model, '_directory_path', '') or '')
+        except Exception:
+            live_secondary_dir = ''
+        if live_secondary_dir:
+            self._session_settings_set_value('secondary_browser_directory_path', live_secondary_dir)
+
         secondary_restore = bool(
             secondary_dock is not None
             and not secondary_dock.isHidden()
-            and str(saved_secondary_dir or '').strip()
+            and str(live_secondary_dir or '').strip()
         )
         self._session_settings_set_value('secondary_browser_visible', secondary_restore)
         self._session_settings_set_value('secondary_browser_restore_on_startup', secondary_restore)
@@ -1435,7 +1551,8 @@ class MainWindow(QMainWindow):
             f"exists={secondary_dock is not None} "
             f"hidden={secondary_dock.isHidden() if secondary_dock is not None else 'n/a'} "
             f"visible={secondary_dock.isVisible() if secondary_dock is not None else 'n/a'} "
-            f"folder='{saved_secondary_dir}' restore={secondary_restore}",
+            f"folder='{live_secondary_dir}' restore={secondary_restore} "
+            f"primary='{live_primary_dir}'",
             detail="verbose",
         )
         self._session_settings_set_value('geometry', self.saveGeometry())
@@ -2204,6 +2321,18 @@ class MainWindow(QMainWindow):
 
     def _session_settings_set_value(self, key: str, value):
         settings.setValue(self._session_settings_key(key), value)
+        if (
+            bool(getattr(self, '_session_settings_prefix', ''))
+            and not bool(getattr(self, '_startup_has_explicit_target', False))
+            and key in {
+                'directory_path',
+                'secondary_browser_directory_path',
+                'secondary_browser_visible',
+                'secondary_browser_restore_on_startup',
+                'last_selected_path',
+            }
+        ):
+            settings.setValue(key, value)
 
     def install_file_manager_integration(self):
         self._run_file_manager_integration_script('register')
@@ -2941,9 +3070,9 @@ class MainWindow(QMainWindow):
                 return True
             if event_type == QEvent.Type.KeyPress:
                 if key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
-                    self.image_list.go_to_previous_image()
+                    self.go_to_previous_image()
                 else:
-                    self.image_list.go_to_next_image()
+                    self.go_to_next_image()
                 event.accept()
                 return True
             return False
@@ -8134,6 +8263,41 @@ class MainWindow(QMainWindow):
             pass
         return 'primary'
 
+    def _resolve_directory_target_browser_name(self) -> str:
+        """Resolve which browser a directory load should target."""
+        focus_widget = QApplication.focusWidget()
+        secondary = getattr(self, '_secondary_browser', None)
+        secondary_dock = getattr(secondary, 'dock', None)
+        try:
+            if (
+                secondary_dock is not None
+                and secondary_dock.isVisible()
+                and focus_widget is not None
+                and (
+                    focus_widget is secondary_dock
+                    or secondary_dock.isAncestorOf(focus_widget)
+                )
+            ):
+                return 'secondary'
+        except Exception:
+            pass
+
+        primary_dock = getattr(self, 'image_list', None)
+        try:
+            if (
+                primary_dock is not None
+                and focus_widget is not None
+                and (
+                    focus_widget is primary_dock
+                    or primary_dock.isAncestorOf(focus_widget)
+                )
+            ):
+                return 'primary'
+        except Exception:
+            pass
+
+        return self._active_directory_browser_name()
+
     def _resolve_refresh_new_media_target(self) -> dict | None:
         browser_name = self._active_directory_browser_name()
         if browser_name == 'secondary':
@@ -8220,7 +8384,11 @@ class MainWindow(QMainWindow):
         save_path_to_settings: bool = True,
         target_browser: str | None = None,
     ):
-        target = target_browser if target_browser in {'primary', 'secondary'} else self._active_directory_browser_name()
+        target = (
+            target_browser
+            if target_browser in {'primary', 'secondary'}
+            else self._resolve_directory_target_browser_name()
+        )
         if target == 'secondary' and self._secondary_browser is not None:
             resolved = path.resolve()
             self._secondary_browser.load_directory(resolved)
@@ -8233,7 +8401,11 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def select_and_load_directory(self, target_browser: str | None = None):
-        target = target_browser if target_browser in {'primary', 'secondary'} else self._active_directory_browser_name()
+        target = (
+            target_browser
+            if target_browser in {'primary', 'secondary'}
+            else self._resolve_directory_target_browser_name()
+        )
         if target == 'secondary':
             initial_directory = str(
                 self._session_settings_value('secondary_browser_directory_path', '', value_type=str) or ''
