@@ -217,10 +217,10 @@ class SignalManager:
                 if _t.time() < float(getattr(view, '_user_click_selection_frozen_until', 0.0) or 0.0):
                     return
                 if current.isValid():
-                    self.main_window.get_selection_target_viewer().load_image(current)
                     self.main_window.ideogram_caption_editor.load_media(
                         current.data(Qt.ItemDataRole.UserRole)
                     )
+                    self.main_window.get_selection_target_viewer().load_image(current)
             except Exception as e:
                 print(f"[SIGNAL] ERROR in currentChanged->load_image: {e}")
                 import traceback

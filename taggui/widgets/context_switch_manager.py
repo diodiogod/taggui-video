@@ -85,10 +85,10 @@ class ContextSwitchManager:
             if proxy_index.isValid():
                 # proxy_index is from new_proxy (SecondaryBrowser emits current
                 # from its own selection model, which owns new_proxy).
-                target_viewer.load_image(proxy_index)
                 mw.ideogram_caption_editor.load_media(
                     proxy_index.data(Qt.ItemDataRole.UserRole)
                 )
+                target_viewer.load_image(proxy_index)
         except Exception as exc:
             print(f'[ContextSwitchManager] viewer error: {exc}')
             _traceback.print_exc()
