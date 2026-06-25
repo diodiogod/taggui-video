@@ -76,6 +76,7 @@ DEFAULT_SETTINGS = {
     'video_ffmpeg_cuda_device': 0,
     'video_controls_visibility_mode': 'auto',  # always, auto, off (main viewer)
     'auto_captioner_layout_mode': 'compact',  # compact, classic
+    'caption_output_format': 'Plain caption',
     'review_badge_schema': '',
     'review_badge_text_color': '#FFFFFF',
     'review_badge_font_size': 9,

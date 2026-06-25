@@ -21,6 +21,7 @@ Current code indicates support for:
 - WD tagger-style tag generation
 - prompt history
 - crop-limited captioning
+- Ideogram 4 structured JSON captions with normalized bounding boxes
 
 GPU use requires compatible hardware and model support, but CPU generation is also supported for some workflows.
 
@@ -40,6 +41,34 @@ GPU use requires compatible hardware and model support, but CPU generation is al
 </p>
 
 The app also supports loading previously downloaded local models through the models directory setting in `File -> Settings`.
+
+## Ideogram 4 Structured Captions
+
+Set `Output format` to `Ideogram 4 JSON` to ask a local vision-language
+model or the remote backend for a validated structured caption. TagGUI writes
+the result beside each image as `<name>.ideogram.json`; it does not replace the
+normal `.txt` caption.
+
+Existing Ideogram regions are sent to the captioning model as locked hints.
+Their order and bounding boxes are preserved while the model expands their
+labels into visual descriptions and adds other visible objects or text. If no
+Ideogram sidecar exists, current TagGUI markings are used as the initial locked
+regions. WD Tagger is not compatible with this output format.
+
+Open `View -> Ideogram 4 Caption` to:
+
+- paste, import, format, and save a complete structured caption
+- add current TagGUI markings without duplicating the same labeled coordinates
+- add object or text regions and drag or resize them in the main viewer
+- edit exact text, descriptions, palettes, scene background, and style fields
+- export all valid sidecars in the current folder to a JSONL manifest
+
+The JSONL manifest stores each structured caption as a JSON string in its
+`caption` field, matching Ideogram's string prompt input.
+
+The raw JSON editor is collapsed by default. Selecting a different image loads
+its preferred `.ideogram.json` sidecar immediately; a legacy sibling `.json`
+is accepted only when it matches the Ideogram schema.
 
 ## Main Fields
 

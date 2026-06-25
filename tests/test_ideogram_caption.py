@@ -3,14 +3,19 @@ import json
 import pytest
 
 from taggui.utils.ideogram_caption import (
+    IdeogramCaption,
     IdeogramElement,
     IdeogramCaptionError,
     append_unique_elements,
     bbox_to_pixel_rect,
+    build_ideogram_caption_prompt,
     discover_ideogram_caption,
+    export_ideogram_jsonl,
     ideogram_caption_path,
     load_ideogram_caption,
+    parse_ideogram_caption_text,
     pixel_rect_to_bbox,
+    preserve_seed_bboxes,
     save_ideogram_caption,
 )
 
@@ -146,3 +151,177 @@ def test_unique_element_merge_preserves_overlapping_regions():
 
     assert added_count == 2
     assert len(merged) == 3
+
+
+def test_parses_fenced_model_json_with_trailing_comma():
+    text = """```json
+    {"compositional_deconstruction":{"background":"","elements":[
+      {"type":"obj","bbox":[1,2,3,4],"desc":"face"},
+    ]}}
+    ```"""
+
+    caption = parse_ideogram_caption_text(text)
+
+    assert caption.elements[0].desc == "face"
+
+
+def test_preserves_and_appends_locked_regions():
+    seeds = [
+        IdeogramElement(type="obj", desc="watermark", bbox=(900, 800, 990, 990)),
+        IdeogramElement(type="obj", desc="face", bbox=(100, 200, 500, 600)),
+    ]
+    caption = IdeogramCaption(
+        compositional_background="",
+        elements=[
+            IdeogramElement(type="obj", desc="logo", bbox=(1, 2, 3, 4))
+        ],
+    )
+
+    result = preserve_seed_bboxes(caption, seeds)
+
+    assert result.elements[0].bbox == seeds[0].bbox
+    assert result.elements[1] == seeds[1]
+
+
+def test_locked_regions_match_by_label_when_model_reorders_elements():
+    seeds = [
+        IdeogramElement(type="obj", desc="watermark", bbox=(900, 800, 990, 990)),
+        IdeogramElement(type="obj", desc="face", bbox=(100, 200, 500, 600)),
+    ]
+    caption = IdeogramCaption(
+        compositional_background="",
+        elements=[
+            IdeogramElement(
+                type="obj",
+                desc="A clearly visible human face.",
+                bbox=(10, 20, 30, 40),
+            ),
+            IdeogramElement(
+                type="obj",
+                desc="watermark",
+                bbox=(1, 2, 3, 4),
+            ),
+            IdeogramElement(
+                type="obj",
+                desc="A red bicycle.",
+                bbox=(200, 200, 700, 800),
+            ),
+        ],
+    )
+
+    result = preserve_seed_bboxes(caption, seeds)
+
+    assert result.elements[0].desc == "watermark"
+    assert result.elements[0].bbox == seeds[0].bbox
+    assert result.elements[1].desc == "A clearly visible human face."
+    assert result.elements[1].bbox == seeds[1].bbox
+    assert result.elements[2].desc == "A red bicycle."
+
+
+def test_locked_region_merge_removes_only_exact_duplicate_regions():
+    seed = IdeogramElement(
+        type="obj",
+        desc="watermark",
+        bbox=(900, 800, 990, 990),
+    )
+    caption = IdeogramCaption(
+        compositional_background="",
+        elements=[
+            IdeogramElement(
+                type="obj",
+                desc="watermark",
+                bbox=(900, 800, 990, 990),
+            ),
+            IdeogramElement(
+                type="obj",
+                desc="watermark",
+                bbox=(901, 799, 989, 991),
+            ),
+            IdeogramElement(
+                type="obj",
+                desc="watermark",
+                bbox=(100, 100, 300, 300),
+            ),
+        ],
+    )
+
+    result = preserve_seed_bboxes(caption, [seed])
+
+    assert len(result.elements) == 2
+    assert result.elements[0].bbox == seed.bbox
+    assert result.elements[1].bbox == (100, 100, 300, 300)
+
+
+def test_exports_only_valid_ideogram_captions_to_jsonl(tmp_path):
+    valid_media = tmp_path / "valid.png"
+    invalid_media = tmp_path / "invalid.png"
+    missing_media = tmp_path / "missing.png"
+    for path in (valid_media, invalid_media, missing_media):
+        path.write_bytes(b"")
+    ideogram_caption_path(valid_media).write_text(
+        json.dumps(_caption_payload()),
+        encoding="utf-8",
+    )
+    ideogram_caption_path(invalid_media).write_text("{bad", encoding="utf-8")
+    destination = tmp_path / "captions.jsonl"
+
+    count = export_ideogram_jsonl(
+        [valid_media, invalid_media, missing_media],
+        destination,
+        base_directory=tmp_path,
+    )
+
+    assert count == 1
+    row = json.loads(destination.read_text(encoding="utf-8"))
+    assert row["file_name"] == "valid.png"
+    exported_caption = json.loads(row["caption"])
+    assert exported_caption["compositional_deconstruction"]["elements"]
+
+
+class _FakeRect:
+    def __init__(self, x, y, width, height):
+        self._values = x, y, width, height
+
+    def normalized(self):
+        return self
+
+    def x(self):
+        return self._values[0]
+
+    def y(self):
+        return self._values[1]
+
+    def width(self):
+        return self._values[2]
+
+    def height(self):
+        return self._values[3]
+
+
+class _FakeMarkingType:
+    value = "hint"
+
+
+class _FakeMarking:
+    label = "face"
+    type = _FakeMarkingType()
+    rect = _FakeRect(100, 200, 300, 400)
+
+
+class _FakeImage:
+    def __init__(self, path):
+        self.path = path
+        self.markings = [_FakeMarking()]
+
+    def valid_dimensions(self):
+        return 1000, 1000
+
+
+def test_build_prompt_seeds_taggui_markings(tmp_path):
+    image = _FakeImage(tmp_path / "sample.png")
+
+    prompt, seeds = build_ideogram_caption_prompt(image)
+
+    assert seeds[0].desc == "face"
+    assert seeds[0].bbox == (200, 100, 600, 400)
+    assert "Preserve these locked regions" in prompt

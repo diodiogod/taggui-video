@@ -201,6 +201,219 @@ def load_ideogram_caption(path: Path) -> IdeogramCaption:
     return IdeogramCaption.from_dict(payload, source_path=Path(path))
 
 
+def parse_ideogram_caption_text(text: str) -> IdeogramCaption:
+    """Parse model output, tolerating fences and trailing commas."""
+    source = str(text or "").strip()
+    start = source.find("{")
+    end = source.rfind("}")
+    if start < 0 or end <= start:
+        raise IdeogramCaptionError("Model output did not contain a JSON object.")
+    source = source[start:end + 1]
+    source = re.sub(r",(\s*[}\]])", r"\1", source)
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError as exc:
+        raise IdeogramCaptionError(f"Invalid model JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise IdeogramCaptionError("Ideogram caption root must be an object.")
+    return IdeogramCaption.from_dict(payload)
+
+
+def build_ideogram_caption_prompt(
+    image: Any,
+    *,
+    user_prompt: str = "",
+) -> tuple[str, list[IdeogramElement]]:
+    """Build a strict image-analysis prompt with optional locked regions."""
+    try:
+        existing = discover_ideogram_caption(Path(image.path))
+    except IdeogramCaptionError:
+        existing = None
+    seed_elements = list(existing.elements) if existing is not None else []
+    dimensions = image.valid_dimensions()
+    aspect_ratio = None
+    if dimensions:
+        width, height = dimensions
+        divisor = _gcd(width, height)
+        aspect_ratio = f"{width // divisor}:{height // divisor}"
+        if not seed_elements:
+            for marking in getattr(image, "markings", []):
+                marking_type = getattr(
+                    getattr(marking, "type", None),
+                    "value",
+                    str(getattr(marking, "type", "")),
+                )
+                if marking_type in {"crop", "no marking"}:
+                    continue
+                rect = marking.rect.normalized()
+                seed_elements.append(
+                    IdeogramElement(
+                        type="obj",
+                        desc=str(getattr(marking, "label", "") or "region"),
+                        bbox=pixel_rect_to_bbox(
+                            rect.x(),
+                            rect.y(),
+                            rect.width(),
+                            rect.height(),
+                            width,
+                            height,
+                        ),
+                    )
+                )
+    locked = [
+        {
+            "order": index + 1,
+            "type": element.type,
+            "bbox": list(element.bbox) if element.bbox else None,
+            "label": element.text or element.desc,
+        }
+        for index, element in enumerate(seed_elements)
+    ]
+    extra = user_prompt.strip()
+    prompt = (
+        "Analyze the supplied image and return only one compact JSON object for "
+        "Ideogram 4 training. Use bbox coordinates on a 0-1000 grid ordered "
+        "[y1,x1,y2,x2]. Keep keys in schema order. The top-level keys may be "
+        "aspect_ratio, high_level_description, style_description, and "
+        "compositional_deconstruction, in that order. high_level_description "
+        "should be a one- or two-sentence summary. "
+        "compositional_deconstruction must contain "
+        "background and elements. Every element must be type obj or text, may "
+        "contain bbox, must contain desc, and text elements must contain exact "
+        "visible text in text. An element color_palette may contain at most five "
+        "uppercase #RRGGBB values. Include all prominent readable text. "
+        "style_description must be omitted or contain exactly one of photo or "
+        "art_style plus string fields aesthetics, lighting, and medium; its "
+        "optional color_palette may contain at most sixteen uppercase #RRGGBB "
+        "values. Describe visible content, not annotation workflow metadata. "
+        "Do not use markdown or commentary."
+    )
+    if aspect_ratio:
+        prompt += f" Use aspect_ratio {aspect_ratio}."
+    if locked:
+        prompt += (
+            " Preserve these locked regions in this exact order and preserve "
+            "their bbox coordinates exactly; expand their labels into visual "
+            f"descriptions when possible: {json.dumps(locked, ensure_ascii=False)}."
+        )
+    if extra:
+        prompt += f" Additional user guidance: {extra}"
+    return prompt, seed_elements
+
+
+def preserve_seed_bboxes(
+    caption: IdeogramCaption,
+    seed_elements: list[IdeogramElement],
+) -> IdeogramCaption:
+    """Keep locked regions first while retaining model-expanded descriptions."""
+    generated = list(caption.elements)
+    used_indices: set[int] = set()
+    locked_elements = []
+
+    for seed_index, seed in enumerate(seed_elements):
+        match_index = _find_seed_match(
+            seed,
+            seed_index,
+            generated,
+            used_indices,
+        )
+        if match_index is None:
+            locked_elements.append(seed)
+            continue
+
+        matched = generated[match_index]
+        used_indices.add(match_index)
+        matched.bbox = seed.bbox
+        if seed.type == "text" and seed.text:
+            matched.text = seed.text
+        locked_elements.append(matched)
+
+    merged_elements = locked_elements + [
+        element
+        for index, element in enumerate(generated)
+        if index not in used_indices
+    ]
+    caption.elements, _ = append_unique_elements([], merged_elements)
+    return caption
+
+
+def _find_seed_match(
+    seed: IdeogramElement,
+    seed_index: int,
+    generated: list[IdeogramElement],
+    used_indices: set[int],
+) -> int | None:
+    available = [
+        index
+        for index, element in enumerate(generated)
+        if index not in used_indices and element.type == seed.type
+    ]
+    if seed.bbox is not None:
+        for index in available:
+            if generated[index].bbox == seed.bbox:
+                return index
+
+    seed_label = _normalized_element_label(seed)
+    if seed_label:
+        for index in available:
+            if _normalized_element_label(generated[index]) == seed_label:
+                return index
+
+    if (
+        seed_index < len(generated)
+        and seed_index not in used_indices
+        and generated[seed_index].type == seed.type
+    ):
+        return seed_index
+    return available[0] if available else None
+
+
+def export_ideogram_jsonl(
+    media_paths: list[Path],
+    destination: Path,
+    *,
+    base_directory: Path | None = None,
+) -> int:
+    """Write validated sibling captions as one JSONL training manifest."""
+    rows = []
+    base = Path(base_directory) if base_directory is not None else None
+    for media_path in sorted(
+        (Path(path) for path in media_paths),
+        key=lambda path: str(path).casefold(),
+    ):
+        try:
+            caption = discover_ideogram_caption(media_path)
+        except IdeogramCaptionError:
+            continue
+        if caption is None:
+            continue
+        try:
+            file_name = (
+                str(media_path.relative_to(base))
+                if base is not None
+                else media_path.name
+            )
+        except ValueError:
+            file_name = media_path.name
+        rows.append(
+            json.dumps(
+                {
+                    "file_name": file_name.replace("\\", "/"),
+                    "caption": caption.to_json(),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        "\n".join(rows) + ("\n" if rows else ""),
+        encoding="utf-8",
+    )
+    return len(rows)
+
+
 def discover_ideogram_caption(media_path: Path) -> IdeogramCaption | None:
     """Load the preferred valid caption beside media, if one exists."""
     preferred_path = ideogram_caption_path(media_path)
@@ -345,6 +558,12 @@ def _normalized_coordinate(value: float, extent: int) -> int:
             round(float(value) * IDEOGRAM_BBOX_SCALE / extent),
         ),
     )
+
+
+def _gcd(a: int, b: int) -> int:
+    while b:
+        a, b = b, a % b
+    return max(1, abs(a))
 
 
 def _parse_bbox(value: Any, context: str) -> tuple[int, int, int, int] | None:

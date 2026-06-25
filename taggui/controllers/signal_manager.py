@@ -362,6 +362,15 @@ class SignalManager:
         auto_captioner.caption_generated.connect(
             lambda image_index, *_:
             image_tags_editor.reload_image_tags_if_changed(image_index, image_index))
+        auto_captioner.structured_caption_generated.connect(
+            lambda image_index, _caption:
+            self.main_window.ideogram_caption_editor.reload_generated_caption(
+                image_index.data(Qt.ItemDataRole.UserRole)
+            )
+        )
+        auto_captioner.structured_caption_generated.connect(
+            lambda *_: self.main_window.image_viewer.refresh_ideogram_caption_overlays()
+        )
         auto_captioner.visibilityChanged.connect(
             lambda: menu_manager.toggle_auto_captioner_action.setChecked(
                 auto_captioner.isVisible()))

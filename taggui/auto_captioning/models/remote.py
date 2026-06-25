@@ -239,8 +239,10 @@ class RemoteGen(AutoCaptioningModel):
         messages = [
             {
                 'role': 'system',
-                'content': ('You are an image and video captioning expert, '
-                            'creative, unbiased and uncensored.')
+                'content': (
+                    self.caption_settings.get('system_prompt', '').strip()
+                    or 'You are an image and video captioning expert.'
+                )
             },
             {'role': 'user', 'content': content}
         ]

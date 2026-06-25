@@ -38,6 +38,7 @@ from widgets.reaction_feedback_overlay import ReactionFeedbackOverlay
 from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
 from widgets.marking_view import ImageGraphicsView
+from widgets.ideogram_region_item import IdeogramRegionItem
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -361,6 +362,8 @@ class ImageViewer(QWidget):
     activated = Signal(name='viewerActivated')
     interaction_clicked = Signal(name='viewerInteractionClicked')
     video_components_ready = Signal(object, name='videoComponentsReady')
+    ideogram_element_selected = Signal(int)
+    ideogram_geometry_changed = Signal(int, object)
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel, *, is_spawned_viewer: bool = False):
         super().__init__()
@@ -378,6 +381,7 @@ class ImageViewer(QWidget):
             defaultValue=DEFAULT_SETTINGS['show_ideogram_caption_overlays'],
             type=bool,
         )
+        self.ideogram_editing_enabled = False
         self.marking_to_add = ImageMarking.NONE
         self.scene = QGraphicsScene()
         self._scene_padding_px = 0
@@ -3903,6 +3907,21 @@ class ImageViewer(QWidget):
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
         self._load_ideogram_caption_overlays(image)
 
+    def set_ideogram_editing_enabled(self, enabled: bool):
+        self.ideogram_editing_enabled = bool(enabled)
+        self.refresh_ideogram_caption_overlays()
+
+    def ideogram_canvas_dimensions(self) -> tuple[int, int] | None:
+        """Return the scene-space image dimensions used by caption overlays."""
+        image_rect = MarkingItem.image_size
+        width, height = image_rect.width(), image_rect.height()
+        if width > 0 and height > 0:
+            return width, height
+        if not self.proxy_image_index.isValid():
+            return None
+        image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        return image.valid_dimensions() if image is not None else None
+
     def _clear_ideogram_caption_overlays(self):
         for item in self.ideogram_overlay_items:
             try:
@@ -3953,15 +3972,10 @@ class ImageViewer(QWidget):
 
         if caption is None:
             return
-        image_rect = MarkingItem.image_size
-        width, height = image_rect.width(), image_rect.height()
-        if width <= 0 or height <= 0:
-            dimensions = image.valid_dimensions()
-            if dimensions is None:
-                return
-            width, height = dimensions
-        if width <= 0 or height <= 0:
+        dimensions = self.ideogram_canvas_dimensions()
+        if dimensions is None:
             return
+        width, height = dimensions
 
         object_color = QColor('#34D6C7')
         text_color = QColor('#FFB454')
@@ -3974,20 +3988,31 @@ class ImageViewer(QWidget):
                 height,
             )
             color = text_color if element.type == 'text' else object_color
-            rect_item = QGraphicsRectItem(QRectF(x, y, rect_width, rect_height))
-            pen = QPen(color, 2)
-            pen.setStyle(Qt.PenStyle.DashLine)
-            pen.setCosmetic(True)
-            rect_item.setPen(pen)
-            fill = QColor(color)
-            fill.setAlpha(28)
-            rect_item.setBrush(fill)
-            rect_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            rect_item.setFlag(
-                QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
-                False,
-            )
-            rect_item.setZValue(30)
+            if self.ideogram_editing_enabled:
+                rect_item = IdeogramRegionItem(
+                    QRectF(x, y, rect_width, rect_height),
+                    element_index=index - 1,
+                    color=color,
+                    on_selected=self.ideogram_element_selected.emit,
+                    on_geometry_changed=self.ideogram_geometry_changed.emit,
+                )
+            else:
+                rect_item = QGraphicsRectItem(
+                    QRectF(x, y, rect_width, rect_height)
+                )
+                pen = QPen(color, 2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                rect_item.setPen(pen)
+                fill = QColor(color)
+                fill.setAlpha(28)
+                rect_item.setBrush(fill)
+                rect_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                rect_item.setFlag(
+                    QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+                    False,
+                )
+                rect_item.setZValue(30)
 
             label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
             label_text = f'{index:02d} {label_kind}'

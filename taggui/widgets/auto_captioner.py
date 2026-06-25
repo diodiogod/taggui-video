@@ -392,6 +392,17 @@ class CaptionSettingsForm:
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
             key='caption_position')
         self.caption_position_combo_box.addItems(list(CaptionPosition))
+        self.output_format_combo_box = FocusedScrollSettingsComboBox(
+            key='caption_output_format'
+        )
+        self.output_format_combo_box.addItems(
+            ['Plain caption', 'Ideogram 4 JSON']
+        )
+        self.output_format_combo_box.setToolTip(
+            'Plain caption updates the normal TagGUI caption.\n'
+            'Ideogram 4 JSON writes a validated .ideogram.json sidecar and '
+            'preserves existing structured regions.'
+        )
 
         self.skip_hash_check_box = self._make_boolean_checkbox(
             'skip_hash', True, self.use_compact_style)
@@ -565,6 +576,9 @@ class CaptionSettingsForm:
         self.model_combo_box.currentTextChanged.connect(
             lambda _text: self.refresh_selected_model_status()
         )
+        self.output_format_combo_box.currentTextChanged.connect(
+            self._apply_output_format_mode
+        )
         self.device_combo_box.currentTextChanged.connect(self.set_load_in_4_bit_visibility)
         self.toggle_advanced_settings_form_button.clicked.connect(self.toggle_advanced_settings_form)
         self.min_new_token_count_spin_box.valueChanged.connect(self.max_new_token_count_spin_box.setMinimum)
@@ -572,6 +586,9 @@ class CaptionSettingsForm:
 
         if not self.is_bitsandbytes_available:
             self.load_in_4_bit_check_box.setChecked(False)
+        self._apply_output_format_mode(
+            self.output_format_combo_box.currentText()
+        )
 
     def _make_form(self, *, wrap_all_rows: bool = True, label_right: bool = False) -> QFormLayout:
         form = QFormLayout()
@@ -850,6 +867,7 @@ class CaptionSettingsForm:
         container.setLayout(form)
         self.basic_settings_form = form
         form.addRow('Model', self._make_model_selector_row())
+        form.addRow('Output format', self.output_format_combo_box)
         form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
@@ -875,6 +893,7 @@ class CaptionSettingsForm:
         container.setLayout(form)
         self.basic_settings_form = form
         form.addRow('Model', self._make_model_selector_row())
+        form.addRow('Output format', self.output_format_combo_box)
         form.addRow('OAI Compatible Endpoint', self.remote_address_line_edit)
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
@@ -1365,6 +1384,30 @@ class CaptionSettingsForm:
                                       and device == CaptionDevice.GPU)
         self.load_in_4_bit_container.setVisible(is_load_in_4_bit_available)
 
+    @Slot(str)
+    def _apply_output_format_mode(self, output_format: str):
+        structured = output_format == 'Ideogram 4 JSON'
+        ignored_controls = (
+            self.caption_start_container,
+            self.caption_position_combo_box,
+            self.remove_tag_separators_container,
+            self.remove_new_lines_container,
+            self.limit_to_crop_container,
+            self.bad_words_container,
+            self.forced_words_container,
+        )
+        for widget in ignored_controls:
+            widget.setEnabled(not structured)
+
+        explanation = (
+            'Ignored for Ideogram 4 JSON output. The structured caption uses '
+            'the full image and is saved as a sibling .ideogram.json file.'
+            if structured
+            else ''
+        )
+        for widget in ignored_controls:
+            widget.setToolTip(explanation)
+
     @Slot()
     def toggle_advanced_settings_form(self):
         if self.advanced_settings_form_container.isHidden():
@@ -1387,6 +1430,7 @@ class CaptionSettingsForm:
             'video_max_frames': self.video_max_frames_spin_box.value(),
             'disable_thinking': self.disable_thinking_check_box.isChecked(),
             'system_prompt': self.system_prompt_text_edit.toPlainText(),
+            'output_format': self.output_format_combo_box.currentText(),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),
@@ -1431,6 +1475,7 @@ def restore_stdout_and_stderr():
 
 class AutoCaptioner(QDockWidget):
     caption_generated = Signal(QModelIndex, str, list)
+    structured_caption_generated = Signal(QModelIndex, object)
     layout_mode_changed = Signal(str)
 
     def __init__(self, image_list_model: ImageListModel,
@@ -2403,7 +2448,10 @@ class AutoCaptioner(QDockWidget):
         self.set_is_captioning(True)
         self._update_unload_button_state()
         caption_settings = self.caption_settings_form.get_caption_settings()
-        if caption_settings['caption_position'] != CaptionPosition.DO_NOT_ADD:
+        if (
+            caption_settings.get('output_format') != 'Ideogram 4 JSON'
+            and caption_settings['caption_position'] != CaptionPosition.DO_NOT_ADD
+        ):
             self.image_list_model.add_to_undo_stack(
                 action_name=f'Generate '
                             f'{pluralize("Caption", selected_image_count)}',
@@ -2428,6 +2476,9 @@ class AutoCaptioner(QDockWidget):
             self.console_text_edit.clear)
         self.captioning_thread.caption_generated.connect(
             self.caption_generated)
+        self.captioning_thread.structured_caption_generated.connect(
+            self.structured_caption_generated
+        )
         self.captioning_thread.progress_bar_update_requested.connect(
             self.progress_bar.setValue)
         self.captioning_thread.finished.connect(
