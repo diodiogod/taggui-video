@@ -10,7 +10,7 @@ proxy reference. Everything is fully reversible.
 
 import traceback as _traceback
 
-from PySide6.QtCore import QModelIndex, QPersistentModelIndex
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex, Qt
 
 
 class ContextSwitchManager:
@@ -86,6 +86,9 @@ class ContextSwitchManager:
                 # proxy_index is from new_proxy (SecondaryBrowser emits current
                 # from its own selection model, which owns new_proxy).
                 target_viewer.load_image(proxy_index)
+                mw.ideogram_caption_editor.load_media(
+                    proxy_index.data(Qt.ItemDataRole.UserRole)
+                )
         except Exception as exc:
             print(f'[ContextSwitchManager] viewer error: {exc}')
             _traceback.print_exc()

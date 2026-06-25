@@ -186,7 +186,6 @@ class SignalManager:
         image_list_model = self.main_window.image_list_model
         proxy_image_list_model = self.main_window.proxy_image_list_model
         image_tags_editor = self.main_window.image_tags_editor
-        ideogram_caption_editor = self.main_window.ideogram_caption_editor
         tag_counter_model = self.main_window.tag_counter_model
         image_list_selection_model = self.main_window.image_list_selection_model
         image_viewer = self.main_window.image_viewer
@@ -219,6 +218,9 @@ class SignalManager:
                     return
                 if current.isValid():
                     self.main_window.get_selection_target_viewer().load_image(current)
+                    self.main_window.ideogram_caption_editor.load_media(
+                        current.data(Qt.ItemDataRole.UserRole)
+                    )
             except Exception as e:
                 print(f"[SIGNAL] ERROR in currentChanged->load_image: {e}")
                 import traceback
@@ -234,15 +236,6 @@ class SignalManager:
                 return
             image_tags_editor.load_image_tags(current)
         image_list_selection_model.currentChanged.connect(safe_load_tags)
-        def safe_load_ideogram_caption(current, previous):
-            if self.main_window._should_suppress_transient_restore_index(current):
-                return
-            if self.main_window._should_suppress_transient_drag_selection(current):
-                return
-            ideogram_caption_editor.load_image(current)
-        image_list_selection_model.currentChanged.connect(
-            safe_load_ideogram_caption
-        )
         image_list_selection_model.selectionChanged.connect(
             lambda *_: self.main_window._sync_rating_controls_from_context()
         )
@@ -393,8 +386,12 @@ class SignalManager:
         )
         self.main_window.ideogram_caption_editor.visibilityChanged.connect(
             lambda visible:
-            self.main_window.ideogram_caption_editor.load_image(
-                self.main_window.image_list_selection_model.currentIndex()
+            self.main_window.ideogram_caption_editor.load_media(
+                self.main_window.image_viewer.proxy_image_index.data(
+                    Qt.ItemDataRole.UserRole
+                )
+                if self.main_window.image_viewer.proxy_image_index.isValid()
+                else None
             )
             if visible else None
         )

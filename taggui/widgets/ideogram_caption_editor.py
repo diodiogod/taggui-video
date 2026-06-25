@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QTimer, Qt, Signal
+from PySide6.QtCore import QModelIndex, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +33,7 @@ from utils.ideogram_caption import (
     save_ideogram_caption,
 )
 from utils.image import Image, ImageMarking
+from widgets.auto_captioner import InlineEditorResizeGrip
 
 
 class IdeogramCaptionEditor(QDockWidget):
@@ -55,12 +59,16 @@ class IdeogramCaptionEditor(QDockWidget):
         )
 
         self.path_label = QLabel("No media selected")
+        self.path_label.setObjectName("ideogramCaptionFile")
         self.path_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self.path_label.setWordWrap(True)
+        self.summary_label = QLabel("Select an image to inspect its caption.")
+        self.summary_label.setObjectName("ideogramCaptionSummary")
+        self.summary_label.setWordWrap(True)
 
         self.editor = QPlainTextEdit()
+        self.editor.setObjectName("ideogramCaptionJson")
         self.editor.setPlaceholderText(
             "Select an image, then create or load an Ideogram 4 caption."
         )
@@ -68,40 +76,134 @@ class IdeogramCaptionEditor(QDockWidget):
         editor_font.setStyleHint(QFont.StyleHint.Monospace)
         self.editor.setFont(editor_font)
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.editor.setMinimumHeight(96)
+        self.editor.setMaximumHeight(420)
+        self.editor.setFixedHeight(210)
+        self.editor.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.editor._inline_resize_grip = InlineEditorResizeGrip(
+            self.editor,
+            minimum_height=96,
+            maximum_height=420,
+        )
 
         self.status_label = QLabel()
+        self.status_label.setObjectName("ideogramCaptionStatus")
         self.status_label.setWordWrap(True)
 
-        self.new_button = QPushButton("New")
-        self.from_markings_button = QPushButton("From Markings")
+        self.from_markings_button = QPushButton("Add markings")
+        self.from_markings_button.setObjectName("ideogramCaptionPrimaryButton")
         self.from_markings_button.setToolTip(
-            "Replace Ideogram elements with the current image's TagGUI "
-            "hint/include/exclude markings. Crop markings are ignored."
+            "Add unique TagGUI hint/include/exclude markings as Ideogram "
+            "elements. Crop markings are ignored."
         )
-        self.save_button = QPushButton("Save")
-        self.reload_button = QPushButton("Reload")
-        self.format_button = QPushButton("Format")
-        self.copy_button = QPushButton("Copy")
 
-        button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(0, 0, 0, 0)
-        for button in (
-            self.new_button,
-            self.from_markings_button,
-            self.save_button,
-            self.reload_button,
-            self.format_button,
-            self.copy_button,
-        ):
-            button_layout.addWidget(button)
+        self.json_toggle_button = QPushButton("JSON")
+        self.json_toggle_button.setObjectName("ideogramCaptionSecondaryButton")
+        self.json_toggle_button.setCheckable(True)
+        self.json_toggle_button.setToolTip("Show or hide the raw structured JSON.")
+
+        self.more_button = QToolButton()
+        self.more_button.setObjectName("ideogramCaptionMoreButton")
+        self.more_button.setText("More")
+        self.more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        actions_menu = QMenu(self.more_button)
+        self.new_action = actions_menu.addAction("New caption")
+        self.save_action = actions_menu.addAction("Save now")
+        self.reload_action = actions_menu.addAction("Reload from disk")
+        actions_menu.addSeparator()
+        self.format_action = actions_menu.addAction("Format JSON")
+        self.copy_action = actions_menu.addAction("Copy JSON")
+        self.paste_action = actions_menu.addAction("Paste JSON")
+        self.more_button.setMenu(actions_menu)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+        controls_layout.addWidget(self.from_markings_button, 1)
+        controls_layout.addWidget(self.json_toggle_button)
+        controls_layout.addWidget(self.more_button)
+
+        self.json_container = QWidget()
+        json_layout = QVBoxLayout(self.json_container)
+        json_layout.setContentsMargins(0, 0, 0, 0)
+        json_layout.setSpacing(4)
+        json_header = QLabel("Structured JSON")
+        json_header.setObjectName("ideogramCaptionSectionLabel")
+        json_layout.addWidget(json_header)
+        json_layout.addWidget(self.editor)
+        self.json_container.hide()
 
         container = QWidget()
+        container.setObjectName("ideogramCaptionRoot")
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
         layout.addWidget(self.path_label)
-        layout.addLayout(button_layout)
-        layout.addWidget(self.editor, stretch=1)
+        layout.addWidget(self.summary_label)
+        layout.addLayout(controls_layout)
+        layout.addWidget(self.json_container)
         layout.addWidget(self.status_label)
+        layout.addStretch(1)
         self.setWidget(container)
+        self.setStyleSheet(
+            """
+            QWidget#ideogramCaptionRoot {
+                background: #202326;
+            }
+            QLabel#ideogramCaptionFile {
+                color: #f0f3f5;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QLabel#ideogramCaptionSummary {
+                color: #aeb8c1;
+                background: #292e33;
+                border: 1px solid #343b42;
+                border-radius: 6px;
+                padding: 8px;
+            }
+            QLabel#ideogramCaptionSectionLabel {
+                color: #8eddd4;
+                font-weight: 600;
+            }
+            QPushButton#ideogramCaptionPrimaryButton {
+                background: #247f78;
+                border: 1px solid #339d94;
+                border-radius: 6px;
+                color: white;
+                font-weight: 600;
+                min-height: 28px;
+                padding: 3px 10px;
+            }
+            QPushButton#ideogramCaptionPrimaryButton:hover {
+                background: #2d9188;
+            }
+            QPushButton#ideogramCaptionSecondaryButton,
+            QToolButton#ideogramCaptionMoreButton {
+                background: #30363c;
+                border: 1px solid #444d55;
+                border-radius: 6px;
+                color: #dbe2e8;
+                min-height: 28px;
+                padding: 3px 9px;
+            }
+            QPushButton#ideogramCaptionSecondaryButton:checked {
+                border-color: #45b8ae;
+                color: #8eddd4;
+            }
+            QPlainTextEdit#ideogramCaptionJson {
+                background: #171a1d;
+                border: 1px solid #3a4249;
+                border-radius: 6px;
+                color: #d9e2e8;
+                padding: 6px;
+                selection-background-color: #286f69;
+            }
+            """
+        )
 
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setSingleShot(True)
@@ -109,26 +211,34 @@ class IdeogramCaptionEditor(QDockWidget):
         self.autosave_timer.timeout.connect(self._autosave_if_valid)
 
         self.editor.textChanged.connect(self._on_text_changed)
-        self.new_button.clicked.connect(self.create_new_caption)
         self.from_markings_button.clicked.connect(
             self.create_caption_from_markings
         )
-        self.save_button.clicked.connect(self.save_caption)
-        self.reload_button.clicked.connect(self.reload_caption)
-        self.format_button.clicked.connect(self.format_caption)
-        self.copy_button.clicked.connect(self.copy_caption)
+        self.json_toggle_button.toggled.connect(
+            self.json_container.setVisible
+        )
+        self.new_action.triggered.connect(self.create_new_caption)
+        self.save_action.triggered.connect(self.save_caption)
+        self.reload_action.triggered.connect(self.reload_caption)
+        self.format_action.triggered.connect(self.format_caption)
+        self.copy_action.triggered.connect(self.copy_caption)
+        self.paste_action.triggered.connect(self.paste_caption)
         self._set_controls_enabled(False)
 
     def load_image(self, index: QModelIndex):
-        """Load the selected image's caption or preserved in-memory draft."""
-        if self.current_path is not None and self._dirty:
-            self._drafts[self.current_path] = self.editor.toPlainText()
-
+        """Backward-compatible index loader."""
         image = (
             index.data(Qt.ItemDataRole.UserRole)
             if index is not None and index.isValid()
             else None
         )
+        self.load_media(image)
+
+    def load_media(self, image):
+        """Load the displayed media item's caption or preserved draft."""
+        if self.current_path is not None and self._dirty:
+            self._drafts[self.current_path] = self.editor.toPlainText()
+
         self.current_image = image if isinstance(image, Image) else None
         self.current_path = (
             Path(self.current_image.path) if self.current_image is not None else None
@@ -139,21 +249,31 @@ class IdeogramCaptionEditor(QDockWidget):
         if self.current_path is None:
             self._replace_text("")
             self.path_label.setText("No media selected")
+            self.path_label.setToolTip("")
+            self.summary_label.setText(
+                "Select an image to inspect its caption."
+            )
             self._set_status("")
             self._set_controls_enabled(False)
             return
 
         self._set_controls_enabled(True)
+        self.path_label.setText(self.current_path.name)
+        self.path_label.setToolTip(str(self.current_path))
         draft = self._drafts.get(self.current_path)
         if draft is not None:
             self.current_caption_path = self._resolve_caption_path()
             self._replace_text(draft, dirty=True)
-            self.path_label.setText(
-                f"{self.current_caption_path} (unsaved draft)"
-            )
+            self.path_label.setText(f"{self.current_path.name}  •  draft")
             self._validate_editor_text()
             return
         self.reload_caption()
+
+    def minimumSizeHint(self):
+        return QSize(180, 112)
+
+    def sizeHint(self):
+        return QSize(300, 240)
 
     def reload_caption(self):
         if self.current_path is None:
@@ -168,9 +288,11 @@ class IdeogramCaptionEditor(QDockWidget):
             except OSError as exc:
                 self._replace_text("")
                 self._set_status(f"Failed to read caption: {exc}", error=True)
+                self._update_summary()
                 return
             self._replace_text(raw_text)
-            self.path_label.setText(str(preferred_path))
+            self.path_label.setText(self.current_path.name)
+            self.path_label.setToolTip(str(preferred_path))
             self._validate_editor_text()
             return
 
@@ -179,15 +301,19 @@ class IdeogramCaptionEditor(QDockWidget):
         except IdeogramCaptionError as exc:
             self.current_caption_path = preferred_path
             self._replace_text("")
-            self.path_label.setText(str(preferred_path))
+            self.path_label.setText(self.current_path.name)
+            self.path_label.setToolTip(str(preferred_path))
             self._set_status(str(exc), error=True)
+            self._update_summary(error=True)
             return
 
         if caption is None:
             self.current_caption_path = preferred_path
             self._replace_text("")
-            self.path_label.setText(f"{preferred_path} (not created)")
+            self.path_label.setText(self.current_path.name)
+            self.path_label.setToolTip(str(preferred_path))
             self._set_status("No Ideogram caption found.")
+            self._update_summary()
             return
 
         self.current_caption_path = caption.source_path
@@ -196,10 +322,12 @@ class IdeogramCaptionEditor(QDockWidget):
         except OSError:
             raw_text = caption.to_json(pretty=True)
         self._replace_text(raw_text)
-        self.path_label.setText(str(caption.source_path))
+        self.path_label.setText(self.current_path.name)
+        self.path_label.setToolTip(str(caption.source_path))
         self._set_status(
-            f"Valid caption with {len(caption.elements)} element(s)."
+            ""
         )
+        self._update_summary(caption=caption)
 
     def create_new_caption(self):
         if self.current_image is None:
@@ -209,7 +337,7 @@ class IdeogramCaptionEditor(QDockWidget):
         caption = self._empty_caption()
         self._replace_text(caption.to_json(pretty=True), dirty=True)
         self.current_caption_path = ideogram_caption_path(self.current_path)
-        self.path_label.setText(str(self.current_caption_path))
+        self.path_label.setToolTip(str(self.current_caption_path))
         self.save_caption()
 
     def create_caption_from_markings(self):
@@ -272,7 +400,7 @@ class IdeogramCaptionEditor(QDockWidget):
             self.current_caption_path
             or ideogram_caption_path(self.current_path)
         )
-        self.path_label.setText(str(self.current_caption_path))
+        self.path_label.setToolTip(str(self.current_caption_path))
         if self.save_caption():
             self._set_status(
                 f"Added {added_count} region(s); skipped {skipped_count} "
@@ -300,11 +428,13 @@ class IdeogramCaptionEditor(QDockWidget):
         self.current_caption_path = destination
         self._dirty = False
         self._drafts.pop(self.current_path, None)
-        self.path_label.setText(str(destination))
+        self.path_label.setText(self.current_path.name)
+        self.path_label.setToolTip(str(destination))
         self._set_status(
             f"Saved valid caption with {len(caption.elements)} element(s).",
             success=True,
         )
+        self._update_summary(caption=caption)
         self.image_viewer.refresh_ideogram_caption_overlays()
         self.caption_saved.emit(destination)
         return True
@@ -322,6 +452,30 @@ class IdeogramCaptionEditor(QDockWidget):
     def copy_caption(self):
         QApplication.clipboard().setText(self.editor.toPlainText())
         self._set_status("Caption copied to clipboard.", success=True)
+
+    def paste_caption(self):
+        clipboard_text = QApplication.clipboard().text()
+        if not clipboard_text.strip():
+            self._set_status("Clipboard does not contain JSON.", error=True)
+            return
+        try:
+            payload = json.loads(clipboard_text)
+            if not isinstance(payload, dict):
+                raise IdeogramCaptionError(
+                    "Ideogram caption root must be a JSON object."
+                )
+            caption = IdeogramCaption.from_dict(
+                payload,
+                source_path=self.current_caption_path,
+            )
+        except (IdeogramCaptionError, json.JSONDecodeError) as exc:
+            self._set_status(f"Clipboard JSON rejected: {exc}", error=True)
+            return
+        self._replace_text(caption.to_json(pretty=True), dirty=True)
+        self.json_toggle_button.setChecked(True)
+        self._update_summary(caption=caption, draft=True)
+        self._set_status("Pasted valid JSON. Autosave pending.", success=True)
+        self.autosave_timer.start()
 
     def _autosave_if_valid(self):
         if not self._dirty or self.current_path is None:
@@ -351,11 +505,13 @@ class IdeogramCaptionEditor(QDockWidget):
             caption = self._caption_from_editor()
         except (IdeogramCaptionError, json.JSONDecodeError) as exc:
             self._set_status(f"Invalid draft: {exc}", error=True)
+            self._update_summary(error=True)
             return False
-        self._set_status(
-            f"Valid caption with {len(caption.elements)} element(s).",
-            success=True,
-        )
+        if self._dirty:
+            self._set_status("Valid JSON. Autosave pending.", success=True)
+        else:
+            self._set_status("")
+        self._update_summary(caption=caption, draft=self._dirty)
         return True
 
     def _caption_from_editor(self) -> IdeogramCaption:
@@ -464,15 +620,54 @@ class IdeogramCaptionEditor(QDockWidget):
 
     def _set_controls_enabled(self, enabled: bool):
         self.editor.setEnabled(enabled)
-        for button in (
-            self.new_button,
-            self.from_markings_button,
-            self.save_button,
-            self.reload_button,
-            self.format_button,
-            self.copy_button,
+        self.from_markings_button.setEnabled(enabled)
+        self.json_toggle_button.setEnabled(enabled)
+        self.more_button.setEnabled(enabled)
+        for action in (
+            self.new_action,
+            self.save_action,
+            self.reload_action,
+            self.format_action,
+            self.copy_action,
+            self.paste_action,
         ):
-            button.setEnabled(enabled)
+            action.setEnabled(enabled)
+
+    def _update_summary(
+        self,
+        *,
+        caption: IdeogramCaption | None = None,
+        draft: bool = False,
+        error: bool = False,
+    ):
+        if self.current_path is None:
+            self.summary_label.setText(
+                "Select an image to inspect its caption."
+            )
+            return
+        if error:
+            self.summary_label.setText(
+                "Caption JSON needs attention. The file on disk was not "
+                "overwritten."
+            )
+            return
+        if caption is None:
+            self.summary_label.setText(
+                "No structured caption yet. Add current markings or create "
+                "a blank caption from More."
+            )
+            return
+        object_count = sum(
+            element.type == "obj" for element in caption.elements
+        )
+        text_count = sum(
+            element.type == "text" for element in caption.elements
+        )
+        state = "Unsaved draft" if draft else "Caption ready"
+        self.summary_label.setText(
+            f"{state}  •  {len(caption.elements)} elements  •  "
+            f"{object_count} objects  •  {text_count} text"
+        )
 
     def _set_status(
         self,
@@ -484,6 +679,7 @@ class IdeogramCaptionEditor(QDockWidget):
         color = "#FF6B6B" if error else "#68D391" if success else "#AAB2BD"
         self.status_label.setStyleSheet(f"color: {color};")
         self.status_label.setText(text)
+        self.status_label.setVisible(bool(text))
 
 
 def _greatest_common_divisor(a: int, b: int) -> int:
