@@ -1,9 +1,11 @@
-from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal
-from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient, QPainterPath
+from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal, QRectF, QPointF
+from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient, QPainterPath, QFont
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
-                               QApplication, QGroupBox, QProgressDialog)
+                               QApplication, QGroupBox, QProgressDialog, QGraphicsItem,
+                               QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem,
+                               QGraphicsView)
 
 from pathlib import Path
 import sys
@@ -54,6 +56,7 @@ from utils.review_marks import (
     save_review_badge_schema,
 )
 from utils.thumbnail_cache import get_thumbnail_cache
+from widgets.ideogram_label_item import IdeogramLabelItem
 
 
 class ExtensionlessRepairThread(QThread):
@@ -660,6 +663,109 @@ class ThumbnailOverlayPreviewWidget(QWidget):
                 )
 
 
+class IdeogramOverlayPreviewWidget(QWidget):
+    """Live preview of Ideogram overlay label appearance."""
+
+    _SETTINGS_KEYS = {
+        'ideogram_overlay_font_size',
+        'ideogram_overlay_font_weight',
+        'ideogram_overlay_text_outline_px',
+        'ideogram_overlay_chip_padding_x',
+        'ideogram_overlay_chip_padding_y',
+        'ideogram_overlay_border_px',
+        'ideogram_overlay_background_alpha',
+        'ideogram_overlay_text_color',
+        'ideogram_overlay_outline_color',
+        'ideogram_overlay_background_color',
+    }
+
+    _FONT_WEIGHTS = {
+        'Normal': QFont.Weight.Normal,
+        'Medium': QFont.Weight.Medium,
+        'Bold': QFont.Weight.Bold,
+        'Black': QFont.Weight.Black,
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(320, 190)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._scene = QGraphicsScene(self)
+        self._view = QGraphicsView(self._scene, self)
+        self._view.setFrameShape(QGraphicsView.Shape.NoFrame)
+        self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._view.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._view.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._view.setStyleSheet('background: #11161C; border: 0;')
+        layout.addWidget(self._view)
+        settings.change.connect(self._on_setting_changed)
+        self._rebuild_scene()
+
+    @Slot(str, object)
+    def _on_setting_changed(self, key: str, _value):
+        if key in self._SETTINGS_KEYS:
+            self._rebuild_scene()
+
+    @staticmethod
+    def _setting_int(key: str) -> int:
+        return int(settings.value(key, defaultValue=DEFAULT_SETTINGS[key], type=int))
+
+    @staticmethod
+    def _setting_text(key: str) -> str:
+        return str(settings.value(key, defaultValue=DEFAULT_SETTINGS[key], type=str) or DEFAULT_SETTINGS[key])
+
+    @classmethod
+    def _setting_color(cls, key: str) -> QColor:
+        return QColor(cls._setting_text(key))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rebuild_scene()
+
+    def _rebuild_scene(self):
+        self._scene.clear()
+        viewport_rect = QRectF(0.0, 0.0, max(280.0, float(self.width())), max(160.0, float(self.height())))
+        self._scene.setSceneRect(viewport_rect)
+        preview_rect = viewport_rect.adjusted(16.0, 16.0, -16.0, -16.0)
+
+        panel = QGraphicsRectItem(preview_rect)
+        panel.setPen(QPen(QColor('#2B3340'), 1.0))
+        panel.setBrush(QColor('#1A212B'))
+        self._scene.addItem(panel)
+
+        self._draw_preview_region(
+            QRectF(preview_rect.left() + 22.0, preview_rect.top() + 36.0, 110.0, 64.0),
+            '03 OBJ',
+            QColor('#34D6C7'),
+        )
+        self._draw_preview_region(
+            QRectF(preview_rect.left() + 158.0, preview_rect.top() + 58.0, 112.0, 52.0),
+            '04 TEXT',
+            QColor('#FFB454'),
+        )
+        self._view.fitInView(preview_rect.adjusted(-8.0, -8.0, 8.0, 8.0), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _draw_preview_region(self, rect: QRectF, text: str, accent: QColor):
+        border_width = max(1.0, float(self._setting_int('ideogram_overlay_border_px')))
+        border_pen = QPen(accent, border_width, Qt.PenStyle.DashLine)
+        border_pen.setCosmetic(True)
+
+        fill = QColor(accent)
+        fill.setAlpha(28)
+        region = QGraphicsRectItem(rect)
+        region.setPen(border_pen)
+        region.setBrush(fill)
+        self._scene.addItem(region)
+        self._add_label_chip(rect.left() + 3.0, rect.top() + 3.0, text, accent)
+
+    def _add_label_chip(self, x: float, y: float, text: str, accent: QColor):
+        label = IdeogramLabelItem(text, accent)
+        label.setPos(x, y)
+        self._scene.addItem(label)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -677,6 +783,7 @@ class SettingsDialog(QDialog):
         # Create tabs
         tab_widget.addTab(self._create_general_tab(), 'General')
         tab_widget.addTab(self._create_badges_tab(), 'Badges')
+        tab_widget.addTab(self._create_ideogram_tab(), 'Ideogram')
         tab_widget.addTab(self._create_models_tab(), 'Models')
         tab_widget.addTab(self._create_cache_tab(), 'Cache')
         tab_widget.addTab(self._create_spell_check_tab(), 'Spell Check')
@@ -1202,6 +1309,183 @@ class SettingsDialog(QDialog):
             entry['shortcuts_edit'].setText(', '.join(spec.shortcuts))
             entry['color'] = spec.color
             self._apply_badge_color_button_style(entry['color_button'], spec.color)
+
+    def _create_ideogram_tab(self):
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(18)
+
+        preview_group = QGroupBox('Overlay Preview')
+        preview_layout = QVBoxLayout(preview_group)
+        preview_layout.setContentsMargins(14, 14, 14, 14)
+        preview_layout.setSpacing(10)
+        preview_layout.addWidget(IdeogramOverlayPreviewWidget(self), 0, Qt.AlignmentFlag.AlignTop)
+        preview_note = QLabel('Changes apply live to the preview and to Ideogram overlays in the main viewer.')
+        preview_note.setWordWrap(True)
+        preview_layout.addWidget(preview_note)
+        layout.addWidget(preview_group)
+
+        controls_group = QGroupBox('Label Style')
+        controls_layout = QGridLayout(controls_group)
+        controls_layout.setHorizontalSpacing(12)
+        controls_layout.setVerticalSpacing(10)
+
+        font_size_spin = SettingsSpinBox(
+            key='ideogram_overlay_font_size',
+            minimum=6,
+            maximum=28,
+            default=DEFAULT_SETTINGS['ideogram_overlay_font_size'],
+        )
+        font_weight_combo = SettingsComboBox(
+            key='ideogram_overlay_font_weight',
+            default=DEFAULT_SETTINGS['ideogram_overlay_font_weight'],
+        )
+        font_weight_combo.addItems(['Normal', 'Medium', 'Bold', 'Black'])
+        outline_width_spin = SettingsSpinBox(
+            key='ideogram_overlay_text_outline_px',
+            minimum=0,
+            maximum=8,
+            default=DEFAULT_SETTINGS['ideogram_overlay_text_outline_px'],
+        )
+        border_width_spin = SettingsSpinBox(
+            key='ideogram_overlay_border_px',
+            minimum=1,
+            maximum=8,
+            default=DEFAULT_SETTINGS['ideogram_overlay_border_px'],
+        )
+        padding_x_spin = SettingsSpinBox(
+            key='ideogram_overlay_chip_padding_x',
+            minimum=1,
+            maximum=20,
+            default=DEFAULT_SETTINGS['ideogram_overlay_chip_padding_x'],
+        )
+        padding_y_spin = SettingsSpinBox(
+            key='ideogram_overlay_chip_padding_y',
+            minimum=1,
+            maximum=16,
+            default=DEFAULT_SETTINGS['ideogram_overlay_chip_padding_y'],
+        )
+        alpha_slider = SettingsSlider(
+            key='ideogram_overlay_background_alpha',
+            minimum=0,
+            maximum=255,
+            default=DEFAULT_SETTINGS['ideogram_overlay_background_alpha'],
+        )
+        alpha_value_label = QLabel(str(alpha_slider.value()))
+        alpha_slider.valueChanged.connect(lambda value: alpha_value_label.setText(str(int(value))))
+
+        controls_layout.addWidget(QLabel('Font size'), 0, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(font_size_spin, 0, 1)
+        controls_layout.addWidget(QLabel('Font weight'), 0, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(font_weight_combo, 0, 3)
+
+        controls_layout.addWidget(QLabel('Text outline'), 1, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(outline_width_spin, 1, 1)
+        controls_layout.addWidget(QLabel('Border width'), 1, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(border_width_spin, 1, 3)
+
+        controls_layout.addWidget(QLabel('Horizontal padding'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(padding_x_spin, 2, 1)
+        controls_layout.addWidget(QLabel('Vertical padding'), 2, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(padding_y_spin, 2, 3)
+
+        controls_layout.addWidget(QLabel('Background alpha'), 3, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(alpha_slider, 3, 1, 1, 2)
+        controls_layout.addWidget(alpha_value_label, 3, 3, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(controls_group)
+
+        colors_group = QGroupBox('Colors')
+        colors_layout = QGridLayout(colors_group)
+        colors_layout.setHorizontalSpacing(12)
+        colors_layout.setVerticalSpacing(10)
+
+        self._ideogram_text_color = settings.value(
+            'ideogram_overlay_text_color',
+            DEFAULT_SETTINGS['ideogram_overlay_text_color'],
+            type=str,
+        )
+        self._ideogram_outline_color = settings.value(
+            'ideogram_overlay_outline_color',
+            DEFAULT_SETTINGS['ideogram_overlay_outline_color'],
+            type=str,
+        )
+        self._ideogram_background_color = settings.value(
+            'ideogram_overlay_background_color',
+            DEFAULT_SETTINGS['ideogram_overlay_background_color'],
+            type=str,
+        )
+
+        self.ideogram_text_color_button = QPushButton()
+        self.ideogram_outline_color_button = QPushButton()
+        self.ideogram_background_color_button = QPushButton()
+        self._apply_badge_color_button_style(self.ideogram_text_color_button, self._ideogram_text_color)
+        self._apply_badge_color_button_style(self.ideogram_outline_color_button, self._ideogram_outline_color)
+        self._apply_badge_color_button_style(self.ideogram_background_color_button, self._ideogram_background_color)
+        self.ideogram_text_color_button.clicked.connect(lambda: self._pick_ideogram_color('text'))
+        self.ideogram_outline_color_button.clicked.connect(lambda: self._pick_ideogram_color('outline'))
+        self.ideogram_background_color_button.clicked.connect(lambda: self._pick_ideogram_color('background'))
+
+        colors_layout.addWidget(QLabel('Text color'), 0, 0, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(self.ideogram_text_color_button, 0, 1)
+        colors_layout.addWidget(QLabel('Outline color'), 0, 2, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(self.ideogram_outline_color_button, 0, 3)
+        colors_layout.addWidget(QLabel('Background color'), 1, 0, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(self.ideogram_background_color_button, 1, 1)
+        layout.addWidget(colors_group)
+
+        reset_button = QPushButton('Reset Ideogram Label Defaults')
+        reset_button.clicked.connect(self._reset_ideogram_overlay_settings)
+        layout.addWidget(reset_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
+
+        scroll_area.setWidget(widget)
+        return scroll_area
+
+    def _pick_ideogram_color(self, role: str):
+        selected_color = QColorDialog.getColor(parent=self)
+        if not selected_color.isValid():
+            return
+        color_hex = selected_color.name().upper()
+        if role == 'text':
+            self._ideogram_text_color = color_hex
+            self._apply_badge_color_button_style(self.ideogram_text_color_button, color_hex)
+            settings.setValue('ideogram_overlay_text_color', color_hex)
+            return
+        if role == 'outline':
+            self._ideogram_outline_color = color_hex
+            self._apply_badge_color_button_style(self.ideogram_outline_color_button, color_hex)
+            settings.setValue('ideogram_overlay_outline_color', color_hex)
+            return
+        self._ideogram_background_color = color_hex
+        self._apply_badge_color_button_style(self.ideogram_background_color_button, color_hex)
+        settings.setValue('ideogram_overlay_background_color', color_hex)
+
+    def _reset_ideogram_overlay_settings(self):
+        reset_values = {
+            'ideogram_overlay_font_size': DEFAULT_SETTINGS['ideogram_overlay_font_size'],
+            'ideogram_overlay_font_weight': DEFAULT_SETTINGS['ideogram_overlay_font_weight'],
+            'ideogram_overlay_text_outline_px': DEFAULT_SETTINGS['ideogram_overlay_text_outline_px'],
+            'ideogram_overlay_chip_padding_x': DEFAULT_SETTINGS['ideogram_overlay_chip_padding_x'],
+            'ideogram_overlay_chip_padding_y': DEFAULT_SETTINGS['ideogram_overlay_chip_padding_y'],
+            'ideogram_overlay_border_px': DEFAULT_SETTINGS['ideogram_overlay_border_px'],
+            'ideogram_overlay_background_alpha': DEFAULT_SETTINGS['ideogram_overlay_background_alpha'],
+            'ideogram_overlay_text_color': DEFAULT_SETTINGS['ideogram_overlay_text_color'],
+            'ideogram_overlay_outline_color': DEFAULT_SETTINGS['ideogram_overlay_outline_color'],
+            'ideogram_overlay_background_color': DEFAULT_SETTINGS['ideogram_overlay_background_color'],
+        }
+        for key, value in reset_values.items():
+            settings.setValue(key, value)
+        self._ideogram_text_color = reset_values['ideogram_overlay_text_color']
+        self._ideogram_outline_color = reset_values['ideogram_overlay_outline_color']
+        self._ideogram_background_color = reset_values['ideogram_overlay_background_color']
+        self._apply_badge_color_button_style(self.ideogram_text_color_button, self._ideogram_text_color)
+        self._apply_badge_color_button_style(self.ideogram_outline_color_button, self._ideogram_outline_color)
+        self._apply_badge_color_button_style(self.ideogram_background_color_button, self._ideogram_background_color)
 
     def _create_models_tab(self):
         """Create Models settings tab."""

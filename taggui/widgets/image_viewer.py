@@ -38,6 +38,7 @@ from widgets.reaction_feedback_overlay import ReactionFeedbackOverlay
 from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
 from widgets.marking_view import ImageGraphicsView
+from widgets.ideogram_label_item import IdeogramLabelItem
 from widgets.ideogram_region_item import IdeogramRegionItem
 
 try:
@@ -3884,6 +3885,10 @@ class ImageViewer(QWidget):
                 image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
                 self._load_ideogram_caption_overlays(image)
             return
+        if str(key).startswith('ideogram_overlay_'):
+            if self.show_ideogram_caption_state:
+                self.refresh_ideogram_caption_overlays()
+            return
         if key in ['video_controls_visibility_mode', 'video_always_show_controls']:
             self.set_video_controls_visibility_mode(
                 load_video_controls_visibility_mode(),
@@ -3962,45 +3967,17 @@ class ImageViewer(QWidget):
         y: float,
         base_z: float,
         color: QColor,
+        parent_item: QGraphicsItem | None = None,
         tooltip: str = '',
     ):
-        label = QGraphicsSimpleTextItem(text)
-        label.setFont(QFont('DejaVu Sans', 9, QFont.Weight.Bold))
-        label.setBrush(QColor('#F7FBFC'))
-        label.setPen(QPen(QColor('#101820'), 1))
-        label.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
-            True,
-        )
-        label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        label.setZValue(base_z + 2)
-
-        background = QGraphicsRectItem()
-        background.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        background.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
-            True,
-        )
-        background.setZValue(base_z + 1)
-        background_color = QColor('#0C1116')
-        background_color.setAlpha(220)
-        background.setBrush(background_color)
-        background.setPen(QPen(color, 1.5))
-
-        padding_x = 6
-        padding_y = 3
-        text_rect = label.boundingRect()
-        background.setRect(
-            text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
-        )
-        background.setPos(x, y)
-        label.setPos(x + padding_x, y + padding_y)
+        label_item = IdeogramLabelItem(text, color, parent=parent_item)
+        label_item.setZValue(base_z + 2)
+        label_item.setPos(x, y)
         if tooltip:
-            background.setToolTip(tooltip)
-            label.setToolTip(tooltip)
-        self.scene.addItem(background)
-        self.scene.addItem(label)
-        self.ideogram_overlay_items.extend((background, label))
+            label_item.setToolTip(tooltip)
+        if parent_item is None:
+            self.scene.addItem(label_item)
+        self.ideogram_overlay_items.append(label_item)
 
     def _load_ideogram_caption_overlays(self, image: Image):
         self._clear_ideogram_caption_overlays()
@@ -4040,9 +4017,9 @@ class ImageViewer(QWidget):
 
             label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
             label_text = f'{index:02d} {label_kind}'
+            tooltip_parts = [element.desc]
             if element.type == 'text' and element.text:
                 label_text += f' "{element.text}"'
-            tooltip_parts = [element.desc]
             if element.color_palette:
                 tooltip_parts.append(
                     f'Palette: {", ".join(element.color_palette)}'
@@ -4114,10 +4091,11 @@ class ImageViewer(QWidget):
             self.ideogram_overlay_items.append(rect_item)
             self._add_ideogram_label_chip(
                 entry['label_text'],
-                x=entry['x'] + 3,
-                y=entry['y'] + 3,
+                x=rect_item.rect().left() + 3,
+                y=rect_item.rect().top() + 3,
                 base_z=base_z,
                 color=entry['color'],
+                parent_item=rect_item,
                 tooltip=entry['tooltip'],
             )
 

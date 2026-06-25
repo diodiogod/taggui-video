@@ -9198,6 +9198,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.ideogram_caption_editor.load_media(
+                index.data(Qt.ItemDataRole.UserRole)
+            )
+        except Exception:
+            pass
+        try:
             self.get_selection_target_viewer().load_image(index)
         except Exception:
             pass

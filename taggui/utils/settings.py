@@ -69,6 +69,16 @@ DEFAULT_SETTINGS = {
     'auto_marking_merge_overlaps': False,
     'auto_marking_merge_overlap_threshold': 0.6,
     'show_ideogram_caption_overlays': True,
+    'ideogram_overlay_font_size': 11,
+    'ideogram_overlay_font_weight': 'Black',
+    'ideogram_overlay_text_outline_px': 2,
+    'ideogram_overlay_chip_padding_x': 7,
+    'ideogram_overlay_chip_padding_y': 4,
+    'ideogram_overlay_border_px': 2,
+    'ideogram_overlay_background_alpha': 235,
+    'ideogram_overlay_text_color': '#FFFFFF',
+    'ideogram_overlay_outline_color': '#000000',
+    'ideogram_overlay_background_color': '#040608',
     'disable_thinking': True,
     # GPU preferences
     'video_playback_gpu_preference': 'system_default',  # system_default, high_performance, power_saving
