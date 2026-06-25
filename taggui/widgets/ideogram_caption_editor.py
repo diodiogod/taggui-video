@@ -418,23 +418,10 @@ class IdeogramCaptionEditor(QDockWidget):
 
     @staticmethod
     def _marking_description(marking) -> str:
-        type_text = {
-            ImageMarking.HINT: "hint",
-            ImageMarking.INCLUDE: "include-mask",
-            ImageMarking.EXCLUDE: "exclude-mask",
-        }.get(marking.type, str(marking.type))
         label = str(marking.label or "").strip()
         if label:
-            description = (
-                f'A region labeled "{label}", imported from a TagGUI '
-                f"{type_text} marking."
-            )
-        else:
-            description = f"A region imported from a TagGUI {type_text} marking."
-        confidence = float(getattr(marking, "confidence", 1.0) or 1.0)
-        if confidence < 0.999:
-            description += f" Detection confidence: {confidence:.3f}."
-        return description
+            return f"A {label.rstrip('.')}."
+        return "A marked region."
 
     def _confirm_elements_replacement(self, marking_count: int) -> bool:
         try:
