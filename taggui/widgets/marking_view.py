@@ -302,6 +302,10 @@ class ImageGraphicsView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
+        item = self.scene().itemAt(self.mapToScene(event.pos()), self.transform())
+        if isinstance(item, MarkingLabel):
+            super().mouseDoubleClickEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self.insertion_mode:
             zoom_handler = getattr(self.image_viewer, "apply_floating_double_click_zoom", None)
             if callable(zoom_handler):
@@ -343,17 +347,24 @@ class ImageGraphicsView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        edited_item = self.scene().focusItem()
+        is_editing_label = (
+            isinstance(edited_item, MarkingLabel)
+            and bool(
+                edited_item.textInteractionFlags()
+                & Qt.TextInteractionFlag.TextEditorInteraction
+            )
+        )
+        if is_editing_label:
+            super().keyPressEvent(event)
+            return
+
         if event.key() == Qt.Key.Key_Space:
             self._space_pan_active = True
             if not self._manual_pan_active:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
             return
-        edited_item = self.scene().focusItem()
-        is_editing_label = (
-            isinstance(edited_item, MarkingLabel)
-            and edited_item.textInteractionFlags() == Qt.TextEditorInteraction
-        )
         selected = self.scene().selectedItems()
         ideogram_indices = [
             int(item.element_index)

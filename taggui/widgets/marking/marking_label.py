@@ -1,6 +1,6 @@
 """Editable text labels for marking items."""
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import QGraphicsTextItem
 
 
@@ -26,6 +26,12 @@ class MarkingLabel(QGraphicsTextItem):
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self.editingFinished.emit()
+
+    def sceneEvent(self, event):
+        if event.type() == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+        return super().sceneEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Enter, Qt.Key_Return):
