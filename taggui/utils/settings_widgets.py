@@ -25,14 +25,18 @@ class SettingsComboBox(QComboBox):
         self.key = key
         if not settings.contains(key):
             settings.setValue(key, default or DEFAULT_SETTINGS.get(key))
+        self.currentTextChanged.connect(
+            lambda text: settings.setValue(self.key, text))
 
     def addItems(self, texts: list[str]):
         setting: str = settings.value(self.key, type=str)
-        super().addItems(texts)
-        self.currentTextChanged.connect(
-            lambda text: settings.setValue(self.key, text))
-        if setting:
-            self.setCurrentText(setting)
+        signals_were_blocked = self.blockSignals(True)
+        try:
+            super().addItems(texts)
+            if setting:
+                self.setCurrentText(setting)
+        finally:
+            self.blockSignals(signals_were_blocked)
 
 
 class FocusedScrollSettingsComboBox(FocusedScrollMixin, SettingsComboBox):

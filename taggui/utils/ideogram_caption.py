@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import json
 import os
@@ -226,6 +227,7 @@ def parse_ideogram_caption_text(text: str) -> IdeogramCaption:
         raise IdeogramCaptionError(f"Invalid model JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise IdeogramCaptionError("Ideogram caption root must be an object.")
+    payload = _normalize_ideogram_caption_payload(payload)
     return IdeogramCaption.from_dict(payload)
 
 
@@ -288,10 +290,12 @@ def build_ideogram_caption_prompt(
         "compositional_deconstruction, in that order. high_level_description "
         "should be a one- or two-sentence summary. "
         "compositional_deconstruction must contain "
-        "background and elements. Every element must be type obj or text, may "
-        "contain bbox, must contain desc, and text elements must contain exact "
-        "visible text in text. An element color_palette may contain at most five "
-        "uppercase #RRGGBB values. Include all prominent readable text. "
+        "background and elements. background must be one concise string, not "
+        "an array or object; put boxed background regions in elements. Every "
+        "element must be type obj or text, may contain bbox, must contain "
+        "desc, and text elements must contain exact visible text in text. An "
+        "element color_palette may contain at most five uppercase #RRGGBB "
+        "values. Include all prominent readable text. "
         "style_description must be omitted or contain exactly one of photo or "
         "art_style plus string fields aesthetics, lighting, and medium; its "
         "optional color_palette may contain at most sixteen uppercase #RRGGBB "
@@ -309,6 +313,112 @@ def build_ideogram_caption_prompt(
     if extra:
         prompt += f" Additional user guidance: {extra}"
     return prompt, seed_elements
+
+
+def _normalize_ideogram_caption_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Repair common LLM schema drift before strict validation."""
+    normalized = copy.deepcopy(payload)
+    _normalize_style_description_payload(normalized)
+    _normalize_deconstruction_payload(normalized)
+    _normalize_elements_payload(normalized)
+    return normalized
+
+
+def _normalize_style_description_payload(payload: dict[str, Any]) -> None:
+    style = payload.get("style_description")
+    if not isinstance(style, dict):
+        return
+    has_photo = "photo" in style
+    has_art_style = "art_style" in style
+    if has_photo == has_art_style:
+        if has_photo:
+            style.pop("art_style", None)
+            return
+        medium = str(style.get("medium", "") or "")
+        aesthetics = str(style.get("aesthetics", "") or "")
+        style_text = f"{medium} {aesthetics}".casefold()
+        if "photo" in style_text or "camera" in style_text:
+            style["photo"] = medium or aesthetics or "photograph"
+        else:
+            style["art_style"] = aesthetics or medium or "naturalistic"
+
+
+def _normalize_deconstruction_payload(payload: dict[str, Any]) -> None:
+    deconstruction = payload.get("compositional_deconstruction")
+    if not isinstance(deconstruction, dict):
+        return
+    background = deconstruction.get("background")
+    if isinstance(background, str):
+        return
+
+    descriptions: list[str] = []
+    promoted_elements: list[dict[str, Any]] = []
+    if isinstance(background, list):
+        background_items = background
+    else:
+        background_items = [background]
+
+    for item in background_items:
+        if isinstance(item, str):
+            if item.strip():
+                descriptions.append(item.strip())
+            continue
+        if not isinstance(item, dict):
+            continue
+        desc = item.get("desc") or item.get("description") or item.get("label")
+        if isinstance(desc, str) and desc.strip():
+            descriptions.append(desc.strip())
+            item_type = item.get("type")
+            promoted = {
+                "type": item_type if item_type in {"obj", "text"} else "obj",
+                "desc": desc.strip(),
+            }
+            if isinstance(item.get("bbox"), list):
+                promoted["bbox"] = item["bbox"]
+            if promoted["type"] == "text" and isinstance(item.get("text"), str):
+                promoted["text"] = item["text"]
+            if isinstance(item.get("color_palette"), list):
+                promoted["color_palette"] = item["color_palette"]
+            promoted_elements.append(promoted)
+
+    deconstruction["background"] = "; ".join(descriptions)
+    elements = deconstruction.get("elements")
+    if isinstance(elements, list):
+        deconstruction["elements"] = promoted_elements + elements
+    else:
+        deconstruction["elements"] = promoted_elements
+
+
+def _normalize_elements_payload(payload: dict[str, Any]) -> None:
+    deconstruction = payload.get("compositional_deconstruction")
+    if not isinstance(deconstruction, dict):
+        return
+    elements = deconstruction.get("elements")
+    if not isinstance(elements, list):
+        return
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        desc = element.get("desc")
+        if not isinstance(desc, str):
+            label = element.get("label")
+            if isinstance(label, str):
+                element["desc"] = label
+                desc = label
+        if element.get("type") == "text" and not isinstance(element.get("text"), str):
+            inferred_text = _infer_text_element_text(desc)
+            if inferred_text:
+                element["text"] = inferred_text
+
+
+def _infer_text_element_text(desc: Any) -> str:
+    if not isinstance(desc, str):
+        return ""
+    for pattern in (r"['\"]([^'\"]+)['\"]", r"\breading\s+([^,.;]+)"):
+        match = re.search(pattern, desc, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return desc.strip()
 
 
 def preserve_seed_bboxes(
