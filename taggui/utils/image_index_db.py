@@ -17,7 +17,12 @@ from utils.review_marks import (
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.sidecar import preferred_taggui_sidecar_read_path
 from utils.load_options import LimitedLoadOptions
-from utils.ideogram_caption import discover_ideogram_search_text
+from utils.ideogram_caption import (
+    IdeogramCaptionError,
+    discover_ideogram_caption,
+    discover_ideogram_search_text,
+    ideogram_caption_chips,
+)
 
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
@@ -2323,8 +2328,33 @@ class ImageIndexDB:
             'CREATE INDEX IF NOT EXISTS idx_ideogram_caption_image_id '
             'ON image_ideogram_captions(image_id)'
         )
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS image_ideogram_terms (
+                image_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                value TEXT NOT NULL,
+                element_index INTEGER,
+                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_ideogram_terms_value '
+            'ON image_ideogram_terms(value)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_ideogram_terms_kind_value '
+            'ON image_ideogram_terms(kind, value)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_ideogram_terms_image_id '
+            'ON image_ideogram_terms(image_id)'
+        )
 
-    def _ideogram_sidecar_index_state(self, media_path: Path) -> tuple[float | None, str]:
+    def _ideogram_sidecar_index_state(
+        self,
+        media_path: Path,
+    ) -> tuple[float | None, str, list[tuple[str, str, str, int | None]]]:
         preferred_path = Path(media_path).with_suffix('.ideogram.json')
         legacy_path = Path(media_path).with_suffix('.json')
         sidecar_path = preferred_path if preferred_path.exists() else legacy_path
@@ -2335,7 +2365,45 @@ class ImageIndexDB:
         except OSError:
             sidecar_mtime = None
         search_text = discover_ideogram_search_text(Path(media_path))
-        return sidecar_mtime, search_text
+        terms: list[tuple[str, str, str, int | None]] = []
+        try:
+            caption = discover_ideogram_caption(Path(media_path))
+        except IdeogramCaptionError:
+            caption = None
+        if caption is not None:
+            for chip in ideogram_caption_chips(caption):
+                value = str(chip.text or '').strip()
+                if value:
+                    terms.append((
+                        str(chip.kind),
+                        str(chip.label),
+                        value,
+                        chip.element_index,
+                    ))
+        return sidecar_mtime, search_text, terms
+
+    def _replace_ideogram_terms(
+        self,
+        cursor,
+        image_id: int,
+        terms: list[tuple[str, str, str, int | None]],
+    ):
+        cursor.execute(
+            'DELETE FROM image_ideogram_terms WHERE image_id = ?',
+            (image_id,),
+        )
+        if terms:
+            cursor.executemany(
+                '''
+                INSERT INTO image_ideogram_terms
+                    (image_id, kind, label, value, element_index)
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                [
+                    (image_id, kind, label, value, element_index)
+                    for kind, label, value, element_index in terms
+                ],
+            )
 
     def set_ideogram_caption_text_for_file(
         self,
@@ -2345,7 +2413,7 @@ class ImageIndexDB:
         """Refresh flattened Ideogram search text for one indexed file."""
         if not self.enabled or not self.conn:
             return
-        sidecar_mtime, search_text = self._ideogram_sidecar_index_state(media_path)
+        sidecar_mtime, search_text, terms = self._ideogram_sidecar_index_state(media_path)
         try:
             with self._db_lock:
                 cursor = self.conn.cursor()
@@ -2362,6 +2430,7 @@ class ImageIndexDB:
                         'DELETE FROM image_ideogram_captions WHERE image_id = ?',
                         (image_id,),
                     )
+                    self._replace_ideogram_terms(cursor, image_id, [])
                 else:
                     cursor.execute(
                         '''
@@ -2374,6 +2443,7 @@ class ImageIndexDB:
                         ''',
                         (image_id, search_text, sidecar_mtime),
                     )
+                    self._replace_ideogram_terms(cursor, image_id, terms)
                 self.conn.commit()
         except sqlite3.Error as e:
             print(f'Database Ideogram caption update error: {e}')
@@ -2589,7 +2659,7 @@ class ImageIndexDB:
         batch_size = max(1, int(batch_size))
         for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
-            upserts: list[tuple[int, str, float | None]] = []
+            upserts: list[tuple[int, str, float | None, list[tuple[str, str, str, int | None]]]] = []
             deletes: list[int] = []
             for row in batch:
                 try:
@@ -2600,7 +2670,7 @@ class ImageIndexDB:
                 except Exception:
                     continue
 
-                current_mtime, current_text = self._ideogram_sidecar_index_state(
+                current_mtime, current_text, current_terms = self._ideogram_sidecar_index_state(
                     directory_path / rel_path
                 )
                 normalized_stored_mtime = (
@@ -2619,7 +2689,7 @@ class ImageIndexDB:
                 if not current_text and current_mtime is None:
                     deletes.append(image_id)
                 else:
-                    upserts.append((image_id, current_text, current_mtime))
+                    upserts.append((image_id, current_text, current_mtime, current_terms))
 
             if not upserts and not deletes:
                 continue
@@ -2630,6 +2700,10 @@ class ImageIndexDB:
                         placeholders = ','.join('?' for _ in deletes)
                         cursor.execute(
                             f'DELETE FROM image_ideogram_captions WHERE image_id IN ({placeholders})',
+                            deletes,
+                        )
+                        cursor.execute(
+                            f'DELETE FROM image_ideogram_terms WHERE image_id IN ({placeholders})',
                             deletes,
                         )
                         updated_total += len(deletes)
@@ -2643,8 +2717,13 @@ class ImageIndexDB:
                                 search_text = excluded.search_text,
                                 sidecar_mtime = excluded.sidecar_mtime
                             ''',
-                            upserts,
+                            [
+                                (image_id, search_text, sidecar_mtime)
+                                for image_id, search_text, sidecar_mtime, _terms in upserts
+                            ],
                         )
+                        for image_id, _search_text, _sidecar_mtime, terms in upserts:
+                            self._replace_ideogram_terms(cursor, image_id, terms)
                         updated_total += len(upserts)
                     self.conn.commit()
             except sqlite3.Error:
@@ -3752,6 +3831,7 @@ class ImageIndexDB:
                 cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
                 cursor.execute(f'DELETE FROM image_markings WHERE image_id IN ({id_ph})', ids)
                 cursor.execute(f'DELETE FROM image_ideogram_captions WHERE image_id IN ({id_ph})', ids)
+                cursor.execute(f'DELETE FROM image_ideogram_terms WHERE image_id IN ({id_ph})', ids)
             cursor.execute(
                 f'DELETE FROM images WHERE file_name IN ({placeholders})',
                 rel_paths
@@ -3796,6 +3876,33 @@ class ImageIndexDB:
             return [{'tag': row[0], 'count': row[1]} for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f'Database tag query error: {e}')
+            return []
+
+    def get_all_ideogram_terms(self) -> List[Dict[str, Any]]:
+        """Get structured Ideogram caption terms with usage counts."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT kind, label, value, COUNT(DISTINCT image_id) as count
+                FROM image_ideogram_terms
+                WHERE value != ''
+                GROUP BY kind, label, value
+                ORDER BY count DESC, value COLLATE NOCASE ASC
+            ''')
+            return [
+                {
+                    'kind': row[0],
+                    'label': row[1],
+                    'value': row[2],
+                    'count': row[3],
+                }
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.Error as e:
+            print(f'Database Ideogram term query error: {e}')
             return []
 
     # ... (get_images_with_tag skipped) ...
