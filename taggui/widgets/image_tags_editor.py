@@ -253,12 +253,44 @@ class ImageTagsList(QListView):
             self.closePersistentEditor(self.model().index(row, 0))
 
 
+class IdeogramCaptionList(ImageTagsList):
+    element_drop_requested = Signal(int, int)
+
+    def dropEvent(self, event):
+        selected_indexes = self.selectedIndexes()
+        if len(selected_indexes) != 1:
+            event.ignore()
+            return
+        source_row = selected_indexes[0].row()
+        target_row = self._drop_target_row(event)
+        self.element_drop_requested.emit(source_row, target_row)
+        event.acceptProposedAction()
+
+    def _drop_target_row(self, event) -> int:
+        try:
+            position = event.position().toPoint()
+        except AttributeError:
+            position = event.pos()
+        index = self.indexAt(position)
+        if not index.isValid():
+            return self.model().rowCount()
+
+        row = index.row()
+        indicator = self.dropIndicatorPosition()
+        if indicator == QAbstractItemView.DropIndicatorPosition.BelowItem:
+            return row + 1
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnViewport:
+            return self.model().rowCount()
+        return row
+
+
 class ImageTagsEditor(QDockWidget):
     ideogram_element_selected = Signal(int)
     ideogram_caption_create_requested = Signal()
     ideogram_region_add_requested = Signal(str, str)
     ideogram_element_text_changed = Signal(int, str, str)
     ideogram_element_type_change_requested = Signal(int, str)
+    ideogram_element_move_requested = Signal(int, int)
     ideogram_elements_delete_requested = Signal(list)
     ideogram_json_text_changed = Signal(str)
     ideogram_global_field_changed = Signal(str, str)
@@ -386,7 +418,7 @@ class ImageTagsEditor(QDockWidget):
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
         self.ideogram_tag_list_model = QStringListModel()
-        self.ideogram_caption_list = ImageTagsList(
+        self.ideogram_caption_list = IdeogramCaptionList(
             self.ideogram_tag_list_model,
             deletion_requested=self._request_ideogram_rows_delete,
             lightweight_zoom=True,
@@ -394,7 +426,9 @@ class ImageTagsEditor(QDockWidget):
         )
         self.ideogram_caption_list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        self.ideogram_caption_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.ideogram_caption_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.ideogram_caption_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.ideogram_caption_list.setDropIndicatorShown(True)
         self.ideogram_caption_list.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -462,6 +496,9 @@ class ImageTagsEditor(QDockWidget):
         )
         self.ideogram_caption_list.customContextMenuRequested.connect(
             self._show_ideogram_caption_row_menu
+        )
+        self.ideogram_caption_list.element_drop_requested.connect(
+            self._request_ideogram_element_move
         )
 
         # Now connect descriptive mode signals and load persistent state
@@ -712,6 +749,59 @@ class ImageTagsEditor(QDockWidget):
                 int(element_index),
                 target_type,
             )
+
+    def _request_ideogram_element_move(self, source_row: int, target_row: int):
+        if source_row < 0 or source_row >= len(self._ideogram_entries):
+            return
+        kind, source_element_index, source_field = self._ideogram_entries[source_row]
+        if source_field is not None or source_element_index is None or kind not in {'object', 'text'}:
+            return
+
+        target_row = max(0, min(int(target_row), len(self._ideogram_entries)))
+        target_element_index = self._element_insert_index_for_row(
+            target_row,
+            moving_element_index=int(source_element_index),
+        )
+        if target_element_index is None:
+            return
+        self.ideogram_element_move_requested.emit(
+            int(source_element_index),
+            int(target_element_index),
+        )
+
+    def _element_insert_index_for_row(
+        self,
+        row: int,
+        *,
+        moving_element_index: int,
+    ) -> int | None:
+        if not self._ideogram_entries:
+            return None
+        if row <= 0:
+            return 0
+
+        element_rows = [
+            entry for entry in self._ideogram_entries
+            if entry[1] is not None and entry[2] is None
+        ]
+        if not element_rows:
+            return None
+
+        if row >= len(self._ideogram_entries):
+            target = max(int(entry[1]) for entry in element_rows) + 1
+        else:
+            target = None
+            for candidate_row in range(row, len(self._ideogram_entries)):
+                _kind, element_index, field = self._ideogram_entries[candidate_row]
+                if element_index is not None and field is None:
+                    target = int(element_index)
+                    break
+            if target is None:
+                target = max(int(entry[1]) for entry in element_rows) + 1
+
+        if moving_element_index < target:
+            target -= 1
+        return max(0, target)
 
     def _request_ideogram_object_add(self, tags: list[str]):
         for tag in tags:

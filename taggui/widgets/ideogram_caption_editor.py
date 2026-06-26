@@ -938,20 +938,23 @@ class IdeogramCaptionEditor(QDockWidget):
         index = self._selected_element_index
         if index is None:
             return
+        self.move_element_from_caption_panel(index, index + delta)
+
+    def move_element_from_caption_panel(self, source_index: int, target_index: int):
         try:
             caption = self._caption_from_editor()
         except (IdeogramCaptionError, json.JSONDecodeError):
             return
-        target = index + delta
-        if target < 0 or target >= len(caption.elements):
+        if source_index < 0 or source_index >= len(caption.elements):
             return
-        caption.elements[index], caption.elements[target] = (
-            caption.elements[target],
-            caption.elements[index],
-        )
-        self._selected_element_index = target
+        target_index = max(0, min(int(target_index), len(caption.elements) - 1))
+        if source_index == target_index:
+            return
+        element = caption.elements.pop(source_index)
+        caption.elements.insert(target_index, element)
+        self._selected_element_index = target_index
         self._apply_caption_edit(caption)
-        self.select_element(target)
+        self.select_element(target_index)
 
     def _delete_selected_element(self):
         index = self._selected_element_index

@@ -326,6 +326,9 @@ class SignalManager:
         image_tags_editor.ideogram_element_type_change_requested.connect(
             self.main_window.ideogram_caption_editor.change_element_type_from_overlay
         )
+        image_tags_editor.ideogram_element_move_requested.connect(
+            self.main_window.ideogram_caption_editor.move_element_from_caption_panel
+        )
         image_tags_editor.ideogram_elements_delete_requested.connect(
             self.main_window.ideogram_caption_editor.delete_elements_from_caption_panel
         )
