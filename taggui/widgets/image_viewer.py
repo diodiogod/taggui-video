@@ -2,7 +2,7 @@ import re
 import time
 from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
-from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTransform
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
@@ -366,6 +366,11 @@ class ImageViewer(QWidget):
     ideogram_element_selected = Signal(int)
     ideogram_geometry_changed = Signal(int, object)
     ideogram_element_type_change_requested = Signal(int, str)
+    ideogram_elements_delete_requested = Signal(list)
+    ideogram_elements_copy_requested = Signal(list)
+    ideogram_elements_paste_requested = Signal()
+    ideogram_elements_duplicate_requested = Signal(list)
+    ideogram_palette_color_selected = Signal(int, str)
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel, *, is_spawned_viewer: bool = False):
         super().__init__()
@@ -383,16 +388,38 @@ class ImageViewer(QWidget):
             defaultValue=DEFAULT_SETTINGS['show_ideogram_caption_overlays'],
             type=bool,
         )
-        self.ideogram_editing_enabled = False
+        self.ideogram_editing_enabled = True
         self.marking_to_add = ImageMarking.NONE
         self.scene = QGraphicsScene()
         self._scene_padding_px = 0
+        self._last_selected_ideogram_index: int | None = None
 
         self.view = ImageGraphicsView(self.scene, self)
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
+        self._ideogram_edit_shortcuts = []
+        for key_sequence in (
+            QKeySequence(QKeySequence.StandardKey.Delete),
+            QKeySequence(Qt.Key.Key_Backspace),
+        ):
+            shortcut = QShortcut(key_sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self.delete_selected_ideogram_regions)
+            self._ideogram_edit_shortcuts.append(shortcut)
+        for key_sequence, handler in (
+            (QKeySequence(QKeySequence.StandardKey.Copy), self.copy_selected_ideogram_regions),
+            (QKeySequence(QKeySequence.StandardKey.Paste), self.paste_ideogram_regions),
+            (QKeySequence('Ctrl+D'), self.duplicate_selected_ideogram_regions),
+        ):
+            shortcut = QShortcut(key_sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(handler)
+            self._ideogram_edit_shortcuts.append(shortcut)
         self._compare_saved_viewport_update_mode = self.view.viewportUpdateMode()
         self._compare_forced_full_viewport_update = False
         self.crop_marking: ImageMarking | None = None
+        self.ideogram_element_selected.connect(
+            self._remember_selected_ideogram_element
+        )
         settings.change.connect(self.setting_change)
 
         layout = QVBoxLayout()
@@ -682,6 +709,95 @@ class ImageViewer(QWidget):
         self._static_source_size = QSize()
         self._static_mipmap_pixmaps = {}
         self._static_current_mip_divisor = 1
+
+    def dominant_ideogram_colors_for_rect(
+        self,
+        rect: QRectF,
+        *,
+        maximum: int = 5,
+    ) -> list[str]:
+        """Return dominant colors from an image-space rect as #RRGGBB values."""
+        qimage = getattr(self, "_static_source_qimage", None)
+        if qimage is None or qimage.isNull():
+            if self.current_image_item is None:
+                return []
+            try:
+                pixmap = self.current_image_item.pixmap()
+            except Exception:
+                return []
+            if pixmap is None or pixmap.isNull():
+                return []
+            qimage = pixmap.toImage()
+        if qimage is None or qimage.isNull():
+            return []
+
+        bounds = QRectF(0, 0, qimage.width(), qimage.height())
+        sample_rect = QRectF(rect).normalized().intersected(bounds).toAlignedRect()
+        if sample_rect.width() <= 0 or sample_rect.height() <= 0:
+            return []
+
+        center_rect = self._center_sample_rect(sample_rect)
+        center_colors = self._dominant_colors_from_image(qimage.copy(center_rect), maximum=1)
+        full_colors = self._dominant_colors_from_image(qimage.copy(sample_rect), maximum=maximum)
+
+        colors = []
+        for color in [*center_colors, *full_colors]:
+            if color not in colors:
+                colors.append(color)
+            if len(colors) >= maximum:
+                break
+        return colors
+
+    @staticmethod
+    def _center_sample_rect(rect) -> QRect:
+        width = max(1, int(rect.width() * 0.5))
+        height = max(1, int(rect.height() * 0.5))
+        x = int(rect.x() + (rect.width() - width) / 2)
+        y = int(rect.y() + (rect.height() - height) / 2)
+        return QRect(x, y, width, height)
+
+    @staticmethod
+    def _dominant_colors_from_image(sample, *, maximum: int) -> list[str]:
+        if sample.isNull():
+            return []
+        if sample.width() > 64 or sample.height() > 64:
+            sample = sample.scaled(
+                64,
+                64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        if sample.isNull():
+            return []
+        bins: dict[tuple[int, int, int], list[int]] = {}
+        for y in range(sample.height()):
+            for x in range(sample.width()):
+                color = sample.pixelColor(x, y)
+                if color.alpha() < 16:
+                    continue
+                r, g, b = color.red(), color.green(), color.blue()
+                key = (r >> 4, g >> 4, b >> 4)
+                bucket = bins.setdefault(key, [0, 0, 0, 0])
+                bucket[0] += 1
+                bucket[1] += r
+                bucket[2] += g
+                bucket[3] += b
+
+        ranked = sorted(bins.values(), key=lambda bucket: bucket[0], reverse=True)
+        colors = []
+        for count, total_r, total_g, total_b in ranked:
+            if count <= 0:
+                continue
+            color = (
+                f"#{round(total_r / count):02X}"
+                f"{round(total_g / count):02X}"
+                f"{round(total_b / count):02X}"
+            )
+            if color not in colors:
+                colors.append(color)
+            if len(colors) >= maximum:
+                break
+        return colors
 
     def _effective_static_source_size(self) -> QSize:
         size = getattr(self, "_static_source_size", QSize())
@@ -3927,6 +4043,7 @@ class ImageViewer(QWidget):
         self.refresh_ideogram_caption_overlays()
 
     def select_ideogram_element(self, element_index: int):
+        self._last_selected_ideogram_index = int(element_index)
         target_item = None
         for item in self.ideogram_overlay_items:
             item_index = getattr(item, 'element_index', None)
@@ -3950,6 +4067,9 @@ class ImageViewer(QWidget):
             except Exception:
                 pass
 
+    def _remember_selected_ideogram_element(self, element_index: int):
+        self._last_selected_ideogram_index = int(element_index)
+
     def ideogram_canvas_dimensions(self) -> tuple[int, int] | None:
         """Return the scene-space image dimensions used by caption overlays."""
         image_rect = MarkingItem.image_size
@@ -3962,6 +4082,7 @@ class ImageViewer(QWidget):
         return image.valid_dimensions() if image is not None else None
 
     def _clear_ideogram_caption_overlays(self):
+        self._last_selected_ideogram_index = None
         for item in self.ideogram_overlay_items:
             try:
                 if item.scene() is self.scene:
@@ -4063,7 +4184,29 @@ class ImageViewer(QWidget):
                 width,
                 height,
             )
-            color = text_color if element.type == 'text' else object_color
+            saved_color_hex = (
+                str(element.color_palette[0]).upper()
+                if element.color_palette
+                else ''
+            )
+            auto_palette = self.dominant_ideogram_colors_for_rect(
+                QRectF(x, y, rect_width, rect_height),
+                maximum=5,
+            )
+            selected_color_hex = saved_color_hex or (
+                auto_palette[0]
+                if auto_palette
+                else '#FFB454' if element.type == 'text' else '#34D6C7'
+            )
+            color = QColor(selected_color_hex)
+            palette_hexes = [selected_color_hex]
+            for candidate in auto_palette:
+                candidate = str(candidate).upper()
+                if candidate not in palette_hexes:
+                    palette_hexes.append(candidate)
+                if len(palette_hexes) >= 5:
+                    break
+            palette_colors = [QColor(candidate) for candidate in palette_hexes]
 
             label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
             label_text = f'{index:02d} {label_kind}'
@@ -4072,7 +4215,7 @@ class ImageViewer(QWidget):
                 label_text += f' "{element.text}"'
             if element.color_palette:
                 tooltip_parts.append(
-                    f'Palette: {", ".join(element.color_palette)}'
+                    f'Selected color: {element.color_palette[0]}'
                 )
             tooltip = '\n'.join(part for part in tooltip_parts if part)
             overlay_entries.append(
@@ -4088,6 +4231,7 @@ class ImageViewer(QWidget):
                     'tooltip': tooltip,
                     'label_text': label_text,
                     'element_type': element.type,
+                    'palette_colors': palette_colors,
                 }
             )
 
@@ -4115,6 +4259,8 @@ class ImageViewer(QWidget):
                     on_selected=self.ideogram_element_selected.emit,
                     on_geometry_changed=self.ideogram_geometry_changed.emit,
                     on_type_change=self.ideogram_element_type_change_requested.emit,
+                    on_palette_color_selected=self.ideogram_palette_color_selected.emit,
+                    palette_colors=entry['palette_colors'],
                 )
             else:
                 rect_item = QGraphicsRectItem(
@@ -4153,13 +4299,6 @@ class ImageViewer(QWidget):
                 element_index=entry['element_index'],
                 tooltip=entry['tooltip'],
             )
-
-        source_name = caption.source_path.name if caption.source_path else 'caption'
-        self._add_ideogram_badge(
-            f'IDEOGRAM 4 - {len(caption.elements)} ELEMENTS',
-            color=QColor('#7FE7DD'),
-            tooltip=f'Loaded from {source_name}',
-        )
 
     def recalculate_markings(self, ignore: MarkingItem | None = None):
         from widgets.marking import grid
@@ -4689,6 +4828,59 @@ class ImageViewer(QWidget):
                 return rect_type
         return ImageMarking.NONE
 
+    def selected_ideogram_region_indices(self) -> list[int]:
+        selected = sorted({
+            int(item.element_index)
+            for item in self.scene.selectedItems()
+            if isinstance(item, IdeogramRegionItem)
+        })
+        if selected:
+            self._last_selected_ideogram_index = selected[-1]
+            return selected
+        fallback = self._last_selected_ideogram_index
+        if fallback is None:
+            return []
+        for item in self.ideogram_overlay_items:
+            if (
+                isinstance(item, IdeogramRegionItem)
+                and int(item.element_index) == int(fallback)
+            ):
+                item.setSelected(True)
+                return [int(fallback)]
+        return []
+
+    def has_selected_ideogram_regions(self) -> bool:
+        return bool(self.selected_ideogram_region_indices())
+
+    @Slot()
+    def delete_selected_ideogram_regions(self) -> bool:
+        indices = self.selected_ideogram_region_indices()
+        if not indices:
+            return False
+        self.ideogram_elements_delete_requested.emit(indices)
+        return True
+
+    @Slot()
+    def copy_selected_ideogram_regions(self) -> bool:
+        indices = self.selected_ideogram_region_indices()
+        if not indices:
+            return False
+        self.ideogram_elements_copy_requested.emit(indices)
+        return True
+
+    @Slot()
+    def paste_ideogram_regions(self) -> bool:
+        self.ideogram_elements_paste_requested.emit()
+        return True
+
+    @Slot()
+    def duplicate_selected_ideogram_regions(self) -> bool:
+        indices = self.selected_ideogram_region_indices()
+        if not indices:
+            return False
+        self.ideogram_elements_duplicate_requested.emit(indices)
+        return True
+
     @Slot()
     def delete_markings(self, items: list[MarkingItem] | None = None):
         """Slot to delete the list of items or when items = None all currently
@@ -4701,6 +4893,12 @@ class ImageViewer(QWidget):
         )
         if items is None:
             items = self.scene.selectedItems()
+        items = [
+            item for item in items
+            if isinstance(item, MarkingItem)
+        ]
+        if not items:
+            return
         for item in items:
             if item.rect_type == ImageMarking.CROP:
                 self.crop_marking = None

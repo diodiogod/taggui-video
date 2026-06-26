@@ -179,6 +179,12 @@ class ProxyImageListModel(QSortFilterProxyModel):
                     discover_ideogram_search_text(image.path),
                     f'*{filter_[1]}*',
                 )
+            if filter_[0] == 'ideogram_color':
+                needle = str(filter_[1]).strip().upper()
+                return fnmatchcase(
+                    discover_ideogram_search_text(image.path).upper(),
+                    f'*{needle}*',
+                )
             if filter_[0] == 'marking':
                 last_colon_index = filter_[1].rfind(':')
                 if last_colon_index < 0:

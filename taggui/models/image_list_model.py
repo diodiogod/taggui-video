@@ -47,6 +47,11 @@ from utils.sidecar import (
     preferred_taggui_sidecar_read_path,
     taggui_sidecar_path,
 )
+from utils.ideogram_caption import (
+    ideogram_caption_path,
+    is_ideogram_caption_dict,
+    legacy_ideogram_caption_path,
+)
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
@@ -1490,6 +1495,7 @@ class HistoryItem:
     should_ask_for_confirmation: bool
     paginated_snapshot: dict[str, list[str]] | None = None
     image_snapshots: list[dict[str, Any]] | None = None
+    ideogram_sidecar_snapshots: list[dict[str, Any]] | None = None
 
 
 class Scope(str, Enum):
@@ -1500,6 +1506,7 @@ class Scope(str, Enum):
 
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
+    ideogram_sidecars_restored = Signal(list)
 
     @staticmethod
     def _parse_viewer_loop_markers(raw_markers) -> dict[str, dict[str, int | None]]:
@@ -3264,6 +3271,20 @@ class ImageListModel(QAbstractListModel):
                         "EXISTS(SELECT 1 FROM image_ideogram_captions "
                         "WHERE image_id=images.id AND search_text LIKE ?)",
                         (pattern,),
+                    )
+
+                if op == 'ideogram_color':
+                    color_value = str(val).strip().upper()
+                    if '*' in color_value or '?' in color_value:
+                        color_value = color_value.replace('*', '%').replace('?', '_')
+                    else:
+                        color_value = f"%{color_value}%"
+                    return (
+                        "EXISTS(SELECT 1 FROM image_ideogram_terms "
+                        "WHERE image_id=images.id "
+                        "AND kind = 'palette' "
+                        "AND UPPER(value) LIKE ?)",
+                        (color_value,),
                     )
                 
                 if op == 'name':
@@ -7240,6 +7261,41 @@ class ImageListModel(QAbstractListModel):
             'markings': image.markings.copy(),
             'loop_start_frame': image.loop_start_frame,
             'loop_end_frame': image.loop_end_frame,
+            'ideogram_caption': self._capture_ideogram_history_state(image),
+        }
+
+    @staticmethod
+    def _legacy_path_is_ideogram_caption(path: Path) -> bool:
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        return is_ideogram_caption_dict(payload)
+
+    @classmethod
+    def _capture_ideogram_history_state(cls, image: Image) -> dict[str, Any]:
+        preferred_path = ideogram_caption_path(image.path)
+        legacy_path = legacy_ideogram_caption_path(image.path)
+        sidecar_path = (
+            preferred_path
+            if preferred_path.exists()
+            else legacy_path
+            if legacy_path.exists() and cls._legacy_path_is_ideogram_caption(legacy_path)
+            else preferred_path
+        )
+        try:
+            if sidecar_path.exists():
+                return {
+                    'exists': True,
+                    'path': str(sidecar_path),
+                    'text': sidecar_path.read_text(encoding='utf-8'),
+                }
+        except OSError:
+            pass
+        return {
+            'exists': False,
+            'path': str(preferred_path),
+            'text': '',
         }
 
     def _history_image_key(self, image: Image) -> str:
@@ -7297,6 +7353,50 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    def _capture_ideogram_sidecar_snapshot(self, media_path: Path) -> dict[str, Any]:
+        preferred_path = ideogram_caption_path(media_path)
+        legacy_path = legacy_ideogram_caption_path(media_path)
+        sidecar_path = (
+            preferred_path
+            if preferred_path.exists()
+            else legacy_path
+            if legacy_path.exists() and self._legacy_path_is_ideogram_caption(legacy_path)
+            else preferred_path
+        )
+        try:
+            if sidecar_path.exists():
+                return {
+                    'media_path': str(media_path),
+                    'path': str(sidecar_path),
+                    'exists': True,
+                    'text': sidecar_path.read_text(encoding='utf-8'),
+                }
+        except OSError:
+            pass
+        return {
+            'media_path': str(media_path),
+            'path': str(preferred_path),
+            'exists': False,
+            'text': '',
+        }
+
+    def add_ideogram_sidecar_to_undo_stack(
+        self,
+        media_path: Path,
+        action_name: str,
+        should_ask_for_confirmation: bool,
+    ):
+        self.undo_stack.append(HistoryItem(
+            action_name,
+            [],
+            should_ask_for_confirmation,
+            ideogram_sidecar_snapshots=[
+                self._capture_ideogram_sidecar_snapshot(Path(media_path))
+            ],
+        ))
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+
     def _resolve_history_snapshot_image(self, snapshot: dict[str, Any]) -> tuple[Image | None, int | None]:
         target_image = snapshot.get('image')
         target_path = str(snapshot.get('path') or '')
@@ -7335,6 +7435,77 @@ class ImageListModel(QAbstractListModel):
         image.markings = state['markings']
         image.loop_start_frame = state.get('loop_start_frame')
         image.loop_end_frame = state.get('loop_end_frame')
+        self._restore_ideogram_history_state(image, state.get('ideogram_caption'))
+
+    def _restore_ideogram_history_state(
+        self,
+        image: Image,
+        ideogram_state: dict[str, Any] | None,
+    ):
+        if not ideogram_state:
+            return
+        preferred_path = ideogram_caption_path(image.path)
+        legacy_path = legacy_ideogram_caption_path(image.path)
+        paths_to_clear = [preferred_path]
+        if legacy_path.exists() and self._legacy_path_is_ideogram_caption(legacy_path):
+            paths_to_clear.append(legacy_path)
+        for path in paths_to_clear:
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        if bool(ideogram_state.get('exists', False)):
+            target_path = Path(str(ideogram_state.get('path') or preferred_path))
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(
+                    str(ideogram_state.get('text') or ''),
+                    encoding='utf-8',
+                )
+            except OSError as exc:
+                print(f"Failed to restore Ideogram caption sidecar: {exc}")
+        self.refresh_ideogram_caption_index_for_image(image)
+
+    def _image_index_for_media_path(self, media_path: Path) -> tuple[Image | None, int | None]:
+        target_path = str(media_path)
+        for image_index, image in enumerate(self.images):
+            try:
+                if str(getattr(image, 'path', '') or '') == target_path:
+                    return image, image_index
+            except Exception:
+                continue
+        return None, None
+
+    def _restore_ideogram_sidecar_snapshot(self, snapshot: dict[str, Any]) -> int | None:
+        media_path_text = str(snapshot.get('media_path') or '')
+        if not media_path_text:
+            return None
+        media_path = Path(media_path_text)
+        preferred_path = ideogram_caption_path(media_path)
+        legacy_path = legacy_ideogram_caption_path(media_path)
+        paths_to_clear = [preferred_path]
+        snapshot_path = Path(str(snapshot.get('path') or preferred_path))
+        if snapshot_path == legacy_path:
+            paths_to_clear.append(legacy_path)
+        elif legacy_path.exists() and self._legacy_path_is_ideogram_caption(legacy_path):
+            paths_to_clear.append(legacy_path)
+        for path in paths_to_clear:
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        if bool(snapshot.get('exists', False)):
+            try:
+                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_path.write_text(str(snapshot.get('text') or ''), encoding='utf-8')
+            except OSError as exc:
+                print(f"Failed to restore Ideogram sidecar snapshot: {exc}")
+        image, image_index = self._image_index_for_media_path(media_path)
+        if image is not None:
+            self.refresh_ideogram_caption_index_for_image(image)
+        return image_index
 
     def _capture_paginated_tag_snapshot(self) -> dict[str, list[str]]:
         """Capture current tag state for all paths in paginated mode."""
@@ -7778,6 +7949,37 @@ class ImageListModel(QAbstractListModel):
                 paginated_snapshot=self._capture_paginated_tag_snapshot(),
             ))
             self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
+            self.update_undo_and_redo_actions_requested.emit()
+            return
+        if history_item.ideogram_sidecar_snapshots is not None:
+            reverse_snapshots = []
+            changed_image_indices = []
+            restored_paths = []
+            for snapshot in history_item.ideogram_sidecar_snapshots:
+                media_path_text = str(snapshot.get('media_path') or '')
+                if media_path_text:
+                    reverse_snapshots.append(
+                        self._capture_ideogram_sidecar_snapshot(Path(media_path_text))
+                    )
+                    restored_paths.append(media_path_text)
+                image_index = self._restore_ideogram_sidecar_snapshot(snapshot)
+                if isinstance(image_index, int):
+                    changed_image_indices.append(image_index)
+            if reverse_snapshots:
+                destination_stack.append(HistoryItem(
+                    history_item.action_name,
+                    [],
+                    history_item.should_ask_for_confirmation,
+                    ideogram_sidecar_snapshots=reverse_snapshots,
+                ))
+            if changed_image_indices:
+                changed_image_indices = sorted(set(changed_image_indices))
+                self.dataChanged.emit(
+                    self.index(changed_image_indices[0]),
+                    self.index(changed_image_indices[-1]),
+                )
+            if restored_paths:
+                self.ideogram_sidecars_restored.emit(restored_paths)
             self.update_undo_and_redo_actions_requested.emit()
             return
         if history_item.image_snapshots is not None:

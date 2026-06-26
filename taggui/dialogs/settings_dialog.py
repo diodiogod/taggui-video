@@ -673,6 +673,8 @@ class IdeogramOverlayPreviewWidget(QWidget):
         'ideogram_overlay_chip_padding_x',
         'ideogram_overlay_chip_padding_y',
         'ideogram_overlay_border_px',
+        'ideogram_overlay_line_halo_px',
+        'ideogram_overlay_line_halo_alpha',
         'ideogram_overlay_background_alpha',
         'ideogram_overlay_text_color',
         'ideogram_overlay_outline_color',
@@ -749,15 +751,29 @@ class IdeogramOverlayPreviewWidget(QWidget):
 
     def _draw_preview_region(self, rect: QRectF, text: str, accent: QColor):
         border_width = max(1.0, float(self._setting_int('ideogram_overlay_border_px')))
-        border_pen = QPen(accent, border_width, Qt.PenStyle.DashLine)
-        border_pen.setCosmetic(True)
-
         fill = QColor(accent)
         fill.setAlpha(28)
+
         region = QGraphicsRectItem(rect)
-        region.setPen(border_pen)
+        halo_width = max(0.0, float(self._setting_int('ideogram_overlay_line_halo_px')))
+        halo = QColor('#FFFFFF' if accent.lightness() < 128 else '#05070A')
+        halo.setAlpha(max(0, min(255, self._setting_int('ideogram_overlay_line_halo_alpha'))))
+        region.setPen(QPen(halo, border_width + halo_width, Qt.PenStyle.SolidLine))
         region.setBrush(fill)
         self._scene.addItem(region)
+
+        strip_height = min(10.0, max(2.0, rect.height() * 0.16))
+        strip = QGraphicsRectItem(
+            QRectF(rect.left(), rect.top(), rect.width(), strip_height)
+        )
+        strip.setPen(QPen(Qt.PenStyle.NoPen))
+        strip.setBrush(accent)
+        self._scene.addItem(strip)
+
+        inner = QGraphicsRectItem(rect)
+        inner.setPen(QPen(accent, border_width, Qt.PenStyle.SolidLine))
+        inner.setBrush(Qt.BrushStyle.NoBrush)
+        self._scene.addItem(inner)
         self._add_label_chip(rect.left() + 3.0, rect.top() + 3.0, text, accent)
 
     def _add_label_chip(self, x: float, y: float, text: str, accent: QColor):
@@ -1358,6 +1374,22 @@ class SettingsDialog(QDialog):
             maximum=8,
             default=DEFAULT_SETTINGS['ideogram_overlay_border_px'],
         )
+        halo_width_spin = SettingsSpinBox(
+            key='ideogram_overlay_line_halo_px',
+            minimum=0,
+            maximum=8,
+            default=DEFAULT_SETTINGS['ideogram_overlay_line_halo_px'],
+        )
+        halo_alpha_slider = SettingsSlider(
+            key='ideogram_overlay_line_halo_alpha',
+            minimum=0,
+            maximum=255,
+            default=DEFAULT_SETTINGS['ideogram_overlay_line_halo_alpha'],
+        )
+        halo_alpha_value_label = QLabel(str(halo_alpha_slider.value()))
+        halo_alpha_slider.valueChanged.connect(
+            lambda value: halo_alpha_value_label.setText(str(int(value)))
+        )
         padding_x_spin = SettingsSpinBox(
             key='ideogram_overlay_chip_padding_x',
             minimum=1,
@@ -1386,17 +1418,23 @@ class SettingsDialog(QDialog):
 
         controls_layout.addWidget(QLabel('Text outline'), 1, 0, Qt.AlignmentFlag.AlignRight)
         controls_layout.addWidget(outline_width_spin, 1, 1)
-        controls_layout.addWidget(QLabel('Border width'), 1, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(QLabel('Line width'), 1, 2, Qt.AlignmentFlag.AlignRight)
         controls_layout.addWidget(border_width_spin, 1, 3)
 
-        controls_layout.addWidget(QLabel('Horizontal padding'), 2, 0, Qt.AlignmentFlag.AlignRight)
-        controls_layout.addWidget(padding_x_spin, 2, 1)
-        controls_layout.addWidget(QLabel('Vertical padding'), 2, 2, Qt.AlignmentFlag.AlignRight)
-        controls_layout.addWidget(padding_y_spin, 2, 3)
+        controls_layout.addWidget(QLabel('Line halo'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(halo_width_spin, 2, 1)
+        controls_layout.addWidget(QLabel('Halo alpha'), 2, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(halo_alpha_slider, 2, 3)
+        controls_layout.addWidget(halo_alpha_value_label, 2, 4, Qt.AlignmentFlag.AlignLeft)
 
-        controls_layout.addWidget(QLabel('Background alpha'), 3, 0, Qt.AlignmentFlag.AlignRight)
-        controls_layout.addWidget(alpha_slider, 3, 1, 1, 2)
-        controls_layout.addWidget(alpha_value_label, 3, 3, Qt.AlignmentFlag.AlignLeft)
+        controls_layout.addWidget(QLabel('Horizontal padding'), 3, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(padding_x_spin, 3, 1)
+        controls_layout.addWidget(QLabel('Vertical padding'), 3, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(padding_y_spin, 3, 3)
+
+        controls_layout.addWidget(QLabel('Background alpha'), 4, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(alpha_slider, 4, 1, 1, 2)
+        controls_layout.addWidget(alpha_value_label, 4, 3, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(controls_group)
 
         colors_group = QGroupBox('Colors')
@@ -1473,6 +1511,8 @@ class SettingsDialog(QDialog):
             'ideogram_overlay_chip_padding_x': DEFAULT_SETTINGS['ideogram_overlay_chip_padding_x'],
             'ideogram_overlay_chip_padding_y': DEFAULT_SETTINGS['ideogram_overlay_chip_padding_y'],
             'ideogram_overlay_border_px': DEFAULT_SETTINGS['ideogram_overlay_border_px'],
+            'ideogram_overlay_line_halo_px': DEFAULT_SETTINGS['ideogram_overlay_line_halo_px'],
+            'ideogram_overlay_line_halo_alpha': DEFAULT_SETTINGS['ideogram_overlay_line_halo_alpha'],
             'ideogram_overlay_background_alpha': DEFAULT_SETTINGS['ideogram_overlay_background_alpha'],
             'ideogram_overlay_text_color': DEFAULT_SETTINGS['ideogram_overlay_text_color'],
             'ideogram_overlay_outline_color': DEFAULT_SETTINGS['ideogram_overlay_outline_color'],

@@ -2371,7 +2371,7 @@ class ImageIndexDB:
         except IdeogramCaptionError:
             caption = None
         if caption is not None:
-            for chip in ideogram_caption_chips(caption):
+            for chip in ideogram_caption_chips(caption, include_palette=True):
                 value = str(chip.text or '').strip()
                 if value:
                     terms.append((

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import QModelIndex, QRectF, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -30,6 +31,7 @@ from utils.ideogram_caption import (
     IdeogramCaptionError,
     IdeogramElement,
     append_unique_elements,
+    bbox_to_pixel_rect,
     discover_ideogram_caption,
     export_ideogram_jsonl,
     ideogram_caption_path,
@@ -56,6 +58,8 @@ class IdeogramCaptionEditor(QDockWidget):
         self._dirty = False
         self._drafts: dict[Path, str] = {}
         self._selected_element_index: int | None = None
+        self._region_clipboard: list[IdeogramElement] = []
+        self._manual_palette_indices: set[int] = set()
 
         self.setObjectName("ideogram_caption_editor")
         self.setWindowTitle("Ideogram 4 Caption")
@@ -113,6 +117,8 @@ class IdeogramCaptionEditor(QDockWidget):
         self.edit_boxes_button = QPushButton("Edit boxes")
         self.edit_boxes_button.setObjectName("ideogramCaptionSecondaryButton")
         self.edit_boxes_button.setCheckable(True)
+        self.edit_boxes_button.setChecked(True)
+        self.edit_boxes_button.hide()
 
         self.more_button = QToolButton()
         self.more_button.setObjectName("ideogramCaptionMoreButton")
@@ -139,7 +145,6 @@ class IdeogramCaptionEditor(QDockWidget):
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(6)
         controls_layout.addWidget(self.from_markings_button, 1)
-        controls_layout.addWidget(self.edit_boxes_button)
         controls_layout.addWidget(self.json_toggle_button)
         controls_layout.addWidget(self.more_button)
 
@@ -167,7 +172,38 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_text_edit = QLineEdit()
         self.element_text_edit.setPlaceholderText("Exact visible text")
         self.element_palette_edit = QLineEdit()
-        self.element_palette_edit.setPlaceholderText("#RRGGBB, #RRGGBB")
+        self.element_palette_edit.setPlaceholderText("Selected #RRGGBB")
+        self.auto_palette_button = QPushButton("Auto palette")
+        self.auto_palette_button.setObjectName("ideogramCaptionSecondaryButton")
+        self.auto_palette_button.setToolTip(
+            "Return this element to live automatic palette picking."
+        )
+        palette_layout = QHBoxLayout()
+        palette_layout.setContentsMargins(0, 0, 0, 0)
+        palette_layout.setSpacing(6)
+        palette_layout.addWidget(self.element_palette_edit, 1)
+        palette_layout.addWidget(self.auto_palette_button)
+        self.palette_candidates_container = QWidget()
+        self.palette_candidates_layout = QHBoxLayout(
+            self.palette_candidates_container
+        )
+        self.palette_candidates_layout.setContentsMargins(0, 0, 0, 0)
+        self.palette_candidates_layout.setSpacing(4)
+        self.palette_candidate_buttons: list[QPushButton] = []
+        for candidate_index in range(5):
+            button = QPushButton("")
+            button.setObjectName("ideogramPaletteCandidate")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(
+                "Click to save this candidate as the selected JSON color."
+            )
+            button.clicked.connect(
+                lambda _checked=False, idx=candidate_index: (
+                    self._select_palette_candidate(idx)
+                )
+            )
+            self.palette_candidate_buttons.append(button)
+            self.palette_candidates_layout.addWidget(button, 1)
         element_actions = QHBoxLayout()
         self.move_up_button = QPushButton("Up")
         self.move_down_button = QPushButton("Down")
@@ -179,7 +215,8 @@ class IdeogramCaptionEditor(QDockWidget):
         element_layout.addWidget(self.element_type_combo)
         element_layout.addWidget(self.element_desc_edit)
         element_layout.addWidget(self.element_text_edit)
-        element_layout.addWidget(self.element_palette_edit)
+        element_layout.addLayout(palette_layout)
+        element_layout.addWidget(self.palette_candidates_container)
         element_layout.addLayout(element_actions)
         self.element_container.hide()
 
@@ -349,14 +386,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.json_toggle_button.toggled.connect(
             self.json_container.setVisible
         )
-        self.edit_boxes_button.toggled.connect(
-            self.image_viewer.set_ideogram_editing_enabled
-        )
-        self.edit_boxes_button.toggled.connect(
-            lambda enabled: self.element_container.setVisible(
-                enabled and self._selected_element_index is not None
-            )
-        )
+        self.image_viewer.set_ideogram_editing_enabled(True)
         self.image_viewer.ideogram_element_selected.connect(
             self.select_element
         )
@@ -365,6 +395,21 @@ class IdeogramCaptionEditor(QDockWidget):
         )
         self.image_viewer.ideogram_element_type_change_requested.connect(
             self.change_element_type_from_overlay
+        )
+        self.image_viewer.ideogram_elements_delete_requested.connect(
+            self.delete_elements_from_caption_panel
+        )
+        self.image_viewer.ideogram_elements_copy_requested.connect(
+            self.copy_elements_from_overlay
+        )
+        self.image_viewer.ideogram_elements_paste_requested.connect(
+            self.paste_elements_from_overlay
+        )
+        self.image_viewer.ideogram_elements_duplicate_requested.connect(
+            self.duplicate_elements_from_overlay
+        )
+        self.image_viewer.ideogram_palette_color_selected.connect(
+            self.promote_palette_color_from_overlay
         )
         self.element_type_combo.currentTextChanged.connect(
             self._update_selected_element_fields
@@ -376,7 +421,10 @@ class IdeogramCaptionEditor(QDockWidget):
             self._update_selected_element_fields
         )
         self.element_palette_edit.editingFinished.connect(
-            self._update_selected_element_fields
+            lambda: self._update_selected_element_fields(manual_palette=True)
+        )
+        self.auto_palette_button.clicked.connect(
+            self.reset_selected_element_palette_auto
         )
         self.move_up_button.clicked.connect(lambda: self._move_element(-1))
         self.move_down_button.clicked.connect(lambda: self._move_element(1))
@@ -436,6 +484,7 @@ class IdeogramCaptionEditor(QDockWidget):
         )
         self.current_caption_path = None
         self._selected_element_index = None
+        self._manual_palette_indices.clear()
         self.element_container.hide()
         self.autosave_timer.stop()
         self.details_timer.stop()
@@ -566,13 +615,13 @@ class IdeogramCaptionEditor(QDockWidget):
                 image_width,
                 image_height,
             )
-            candidates.append(
-                IdeogramElement(
-                    type="obj",
-                    desc=self._marking_description(marking),
-                    bbox=bbox,
-                )
+            element = IdeogramElement(
+                type="obj",
+                desc=self._marking_description(marking),
+                bbox=bbox,
             )
+            self._apply_auto_palette_to_element(element)
+            candidates.append(element)
         try:
             caption = self._caption_from_editor()
         except (IdeogramCaptionError, json.JSONDecodeError):
@@ -677,8 +726,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.reload_caption()
 
     def _on_visibility_changed(self, visible: bool):
-        if not visible and self.edit_boxes_button.isChecked():
-            self.edit_boxes_button.setChecked(False)
+        return
 
     def import_caption_file(self):
         if self.current_path is None:
@@ -704,13 +752,13 @@ class IdeogramCaptionEditor(QDockWidget):
         self.save_caption()
 
     def focus_element_from_caption_panel(self, index: int):
-        self.edit_boxes_button.setChecked(True)
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
 
     def create_caption_from_caption_panel(self):
         if self.current_image is None:
             return
+        self._add_ideogram_undo("Create Ideogram caption")
         caption = self._empty_caption()
         self._replace_text(caption.to_json(pretty=True), dirty=True)
         self.current_caption_path = ideogram_caption_path(self.current_path)
@@ -728,7 +776,7 @@ class IdeogramCaptionEditor(QDockWidget):
             caption.compositional_background = str(value or '')
         else:
             return
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Edit Ideogram scene")
 
     def update_element_text_from_caption_panel(self, index: int, kind: str, value: str):
         try:
@@ -745,7 +793,7 @@ class IdeogramCaptionEditor(QDockWidget):
                 element.desc = value
         else:
             element.desc = value
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Edit Ideogram element")
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
 
@@ -756,6 +804,7 @@ class IdeogramCaptionEditor(QDockWidget):
             caption = parse_ideogram_caption_text(text)
         except (IdeogramCaptionError, json.JSONDecodeError):
             return
+        self._add_ideogram_undo("Edit Ideogram JSON")
         self._replace_text(caption.to_json(pretty=True), dirty=True)
         self._update_summary(caption=caption, draft=True)
         self.save_caption()
@@ -766,15 +815,120 @@ class IdeogramCaptionEditor(QDockWidget):
         except (IdeogramCaptionError, json.JSONDecodeError):
             return
         deleted = False
-        for index in sorted({int(index) for index in indices}, reverse=True):
+        deleted_indices = sorted({int(index) for index in indices}, reverse=True)
+        for index in deleted_indices:
             if 0 <= index < len(caption.elements):
                 caption.elements.pop(index)
                 deleted = True
         if not deleted:
             return
+        for index in deleted_indices:
+            self._remove_manual_palette_index(index)
         self._selected_element_index = None
         self.element_container.hide()
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Delete Ideogram region")
+
+    def copy_elements_from_overlay(self, indices: list[int]):
+        try:
+            caption = self._caption_from_editor()
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            return
+        copied = []
+        for index in sorted({int(index) for index in indices}):
+            if 0 <= index < len(caption.elements):
+                copied.append(deepcopy(caption.elements[index]))
+        if not copied:
+            return
+        self._region_clipboard = copied
+        self._set_status(
+            f"Copied {len(copied)} Ideogram region(s).",
+            success=True,
+        )
+
+    def paste_elements_from_overlay(self):
+        if self.current_image is None or not self._region_clipboard:
+            return
+        try:
+            caption = self._caption_from_editor()
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            caption = self._empty_caption()
+        start_index = len(caption.elements)
+        caption.elements.extend(
+            self._pasted_element_copy(element)
+            for element in self._region_clipboard
+        )
+        if len(caption.elements) == start_index:
+            return
+        selected_index = len(caption.elements) - 1
+        self._apply_caption_edit(caption, action_name="Paste Ideogram region")
+        self.select_element(selected_index)
+        self.image_viewer.select_ideogram_element(selected_index)
+        self._set_status(
+            f"Pasted {len(caption.elements) - start_index} Ideogram region(s).",
+            success=True,
+        )
+
+    def duplicate_elements_from_overlay(self, indices: list[int]):
+        self.copy_elements_from_overlay(indices)
+        self.paste_elements_from_overlay()
+
+    def promote_palette_color_from_overlay(self, index: int, color: str):
+        try:
+            caption = self._caption_from_editor()
+            element = caption.elements[index]
+        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
+            return
+        color = str(color or "").strip().upper()
+        if not color:
+            return
+        if not color.startswith("#"):
+            color = f"#{color}"
+        if len(color) != 7 or any(
+            char not in "0123456789ABCDEF" for char in color[1:]
+        ):
+            return
+        element.color_palette = [color]
+        self._manual_palette_indices.add(int(index))
+        self._apply_caption_edit(caption, action_name="Edit Ideogram color")
+        self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
+
+    def reset_selected_element_palette_auto(self):
+        index = self._selected_element_index
+        if index is None:
+            return
+        try:
+            caption = self._caption_from_editor()
+            element = caption.elements[index]
+        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
+            return
+        self._manual_palette_indices.discard(int(index))
+        if not self._apply_auto_palette_to_element(element):
+            return
+        self._apply_caption_edit(caption, action_name="Auto Ideogram color")
+        self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
+        self._set_status("Automatic palette restored for selected region.", success=True)
+
+    def _pasted_element_copy(self, element: IdeogramElement) -> IdeogramElement:
+        pasted = deepcopy(element)
+        if pasted.bbox is not None:
+            pasted.bbox = self._offset_bbox(pasted.bbox)
+        return pasted
+
+    @staticmethod
+    def _offset_bbox(
+        bbox: tuple[int, int, int, int],
+        amount: int = 20,
+    ) -> tuple[int, int, int, int]:
+        y1, x1, y2, x2 = bbox
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        max_x1 = max(0, 1000 - width)
+        max_y1 = max(0, 1000 - height)
+        new_x1 = min(max_x1, max(0, x1 + amount))
+        new_y1 = min(max_y1, max(0, y1 + amount))
+        return new_y1, new_x1, new_y1 + height, new_x1 + width
 
     def add_region_from_caption_panel(self, element_type: str, description: str):
         self.add_region(element_type, description=description)
@@ -792,10 +946,10 @@ class IdeogramCaptionEditor(QDockWidget):
             bbox=(250, 250, 750, 750),
             text=(description.strip() if element_type == "text" else None),
         )
+        self._apply_auto_palette_to_element(element)
         caption.elements.append(element)
         index = len(caption.elements) - 1
-        self.edit_boxes_button.setChecked(True)
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Add Ideogram region")
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
 
@@ -813,7 +967,7 @@ class IdeogramCaptionEditor(QDockWidget):
             element.text = element.text or element.desc or ''
         else:
             element.text = None
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Change Ideogram region type")
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
 
@@ -862,7 +1016,8 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_text_edit.setText(element.text or "")
         self.element_palette_edit.setText(", ".join(element.color_palette))
         self.element_text_edit.setVisible(element.type == "text")
-        self.element_container.setVisible(self.edit_boxes_button.isChecked())
+        self._refresh_palette_candidates(element)
+        self.element_container.show()
 
     def update_element_geometry(self, index: int, rect):
         if self.current_image is None:
@@ -879,9 +1034,18 @@ class IdeogramCaptionEditor(QDockWidget):
         element.bbox = pixel_rect_to_bbox(
             rect.x(), rect.y(), rect.width(), rect.height(), width, height
         )
-        self._apply_caption_edit(caption, refresh_overlays=False)
+        if self._should_auto_update_palette(index):
+            self._apply_auto_palette_to_element(element)
+        self._apply_caption_edit(
+            caption,
+            refresh_overlays=False,
+            action_name="Move Ideogram region",
+        )
+        if self._selected_element_index == index:
+            self.element_palette_edit.setText(", ".join(element.color_palette))
+            self._refresh_palette_candidates(element)
 
-    def _update_selected_element_fields(self):
+    def _update_selected_element_fields(self, *_, manual_palette: bool = False):
         index = self._selected_element_index
         if index is None:
             return
@@ -900,9 +1064,112 @@ class IdeogramCaptionEditor(QDockWidget):
         element.color_palette = self._parse_palette_text(
             self.element_palette_edit.text(),
             maximum=5,
-        )
+        )[:1]
+        if manual_palette:
+            self._manual_palette_indices.add(index)
         self.element_text_edit.setVisible(element.type == "text")
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Edit Ideogram element")
+        self._refresh_palette_candidates(element)
+
+    def _select_palette_candidate(self, candidate_index: int):
+        index = self._selected_element_index
+        if index is None:
+            return
+        try:
+            caption = self._caption_from_editor()
+            element = caption.elements[index]
+        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
+            return
+        candidates = self._palette_candidates_for_element(element)
+        if candidate_index < 0 or candidate_index >= len(candidates):
+            return
+        selected = candidates[candidate_index]
+        element.color_palette = [selected]
+        self._manual_palette_indices.add(index)
+        self.element_palette_edit.setText(selected)
+        self._apply_caption_edit(caption, action_name="Edit Ideogram color")
+        self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
+
+    def _refresh_palette_candidates(self, element: IdeogramElement):
+        candidates = self._palette_candidates_for_element(element)
+        selected = (
+            str(element.color_palette[0]).upper()
+            if element.color_palette
+            else (candidates[0] if candidates else "")
+        )
+        for index, button in enumerate(self.palette_candidate_buttons):
+            if index >= len(candidates):
+                button.hide()
+                continue
+            color = candidates[index]
+            active = color == selected
+            button.setText(color)
+            button.setVisible(True)
+            button.setEnabled(True)
+            button.setStyleSheet(
+                self._palette_candidate_style(color, active=active)
+            )
+            button.setToolTip(
+                "Selected JSON color"
+                if active
+                else "Candidate color. Click to save it as the JSON color."
+            )
+
+    def _palette_candidates_for_element(self, element: IdeogramElement) -> list[str]:
+        candidates = []
+        if element.color_palette:
+            selected = str(element.color_palette[0]).strip().upper()
+            if selected:
+                candidates.append(selected)
+        if element.bbox is not None:
+            dimensions = self.image_viewer.ideogram_canvas_dimensions()
+            sampler = getattr(
+                self.image_viewer,
+                "dominant_ideogram_colors_for_rect",
+                None,
+            )
+            if dimensions is not None and callable(sampler):
+                width, height = dimensions
+                x, y, rect_width, rect_height = bbox_to_pixel_rect(
+                    element.bbox,
+                    width,
+                    height,
+                )
+                for color in sampler(
+                    QRectF(x, y, rect_width, rect_height),
+                    maximum=5,
+                ):
+                    color = str(color).strip().upper()
+                    if color and color not in candidates:
+                        candidates.append(color)
+                    if len(candidates) >= 5:
+                        break
+        return candidates[:5]
+
+    @staticmethod
+    def _palette_candidate_style(color: str, *, active: bool) -> str:
+        swatch = QColor(color)
+        text_color = "#FFFFFF" if swatch.lightness() < 135 else "#101318"
+        opacity_color = color if active else "#363A40"
+        border_color = color if active else "#555B66"
+        font_weight = "700" if active else "500"
+        return (
+            "QPushButton#ideogramPaletteCandidate {"
+            f" background-color: {opacity_color};"
+            f" color: {text_color if active else '#B8C0CC'};"
+            f" border: 1px solid {border_color};"
+            " border-radius: 4px;"
+            " padding: 3px 4px;"
+            " min-height: 20px;"
+            " font-size: 10px;"
+            f" font-weight: {font_weight};"
+            "}"
+            "QPushButton#ideogramPaletteCandidate:hover {"
+            f" border-color: {color};"
+            " color: #FFFFFF;"
+            "}"
+        )
 
     def _schedule_scene_details(self, *_args):
         if not self._loading and self.current_path is not None:
@@ -932,7 +1199,7 @@ class IdeogramCaptionEditor(QDockWidget):
             if palette:
                 style["color_palette"] = palette
             caption.style_description = style
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Edit Ideogram scene")
 
     def _move_element(self, delta: int):
         index = self._selected_element_index
@@ -952,8 +1219,9 @@ class IdeogramCaptionEditor(QDockWidget):
             return
         element = caption.elements.pop(source_index)
         caption.elements.insert(target_index, element)
+        self._move_manual_palette_index(source_index, target_index)
         self._selected_element_index = target_index
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Reorder Ideogram region")
         self.select_element(target_index)
 
     def _delete_selected_element(self):
@@ -965,16 +1233,74 @@ class IdeogramCaptionEditor(QDockWidget):
             caption.elements.pop(index)
         except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
             return
+        self._remove_manual_palette_index(index)
         self._selected_element_index = None
         self.element_container.hide()
-        self._apply_caption_edit(caption)
+        self._apply_caption_edit(caption, action_name="Delete Ideogram region")
+
+    def _should_auto_update_palette(self, index: int) -> bool:
+        return int(index) not in self._manual_palette_indices
+
+    def _apply_auto_palette_to_element(self, element: IdeogramElement) -> bool:
+        if element.bbox is None:
+            return False
+        dimensions = self.image_viewer.ideogram_canvas_dimensions()
+        if dimensions is None:
+            return False
+        width, height = dimensions
+        x, y, rect_width, rect_height = bbox_to_pixel_rect(
+            element.bbox,
+            width,
+            height,
+        )
+        sampler = getattr(
+            self.image_viewer,
+            "dominant_ideogram_colors_for_rect",
+            None,
+        )
+        if not callable(sampler):
+            return False
+        palette = sampler(QRectF(x, y, rect_width, rect_height), maximum=5)
+        if not palette:
+            return False
+        element.color_palette = [palette[0]]
+        return True
+
+    def _remove_manual_palette_index(self, removed_index: int):
+        removed_index = int(removed_index)
+        self._manual_palette_indices = {
+            index if index < removed_index else index - 1
+            for index in self._manual_palette_indices
+            if index != removed_index
+        }
+
+    def _move_manual_palette_index(self, source_index: int, target_index: int):
+        source_index = int(source_index)
+        target_index = int(target_index)
+        moved_was_manual = source_index in self._manual_palette_indices
+        adjusted = set()
+        for index in self._manual_palette_indices:
+            if index == source_index:
+                continue
+            if source_index < target_index and source_index < index <= target_index:
+                adjusted.add(index - 1)
+            elif target_index < source_index and target_index <= index < source_index:
+                adjusted.add(index + 1)
+            else:
+                adjusted.add(index)
+        if moved_was_manual:
+            adjusted.add(target_index)
+        self._manual_palette_indices = adjusted
 
     def _apply_caption_edit(
         self,
         caption: IdeogramCaption,
         *,
         refresh_overlays: bool = True,
+        action_name: str | None = None,
     ):
+        if action_name:
+            self._add_ideogram_undo(action_name)
         self._replace_text(
             caption.to_json(pretty=True),
             dirty=True,
@@ -987,6 +1313,33 @@ class IdeogramCaptionEditor(QDockWidget):
                     0,
                     self.image_viewer.refresh_ideogram_caption_overlays,
                 )
+
+    def _add_ideogram_undo(self, action_name: str):
+        if self.current_image is None or self.current_path is None:
+            return
+        source_model = None
+        try:
+            proxy_index = self.image_viewer.proxy_image_index
+            proxy_model = proxy_index.model() if proxy_index.isValid() else None
+            source_model = proxy_model.sourceModel() if proxy_model is not None else None
+        except RuntimeError:
+            source_model = None
+        if source_model is None:
+            proxy_model = getattr(self.image_viewer, 'proxy_image_list_model', None)
+            source_model = (
+                proxy_model.sourceModel()
+                if proxy_model is not None and hasattr(proxy_model, 'sourceModel')
+                else None
+            )
+        if source_model is None:
+            return
+        add_undo = getattr(source_model, 'add_ideogram_sidecar_to_undo_stack', None)
+        if callable(add_undo):
+            add_undo(
+                self.current_path,
+                action_name=action_name,
+                should_ask_for_confirmation=False,
+            )
 
     def _autosave_if_valid(self):
         if not self._dirty or self.current_path is None:
@@ -1198,7 +1551,6 @@ class IdeogramCaptionEditor(QDockWidget):
     def _set_controls_enabled(self, enabled: bool):
         self.editor.setEnabled(enabled)
         self.from_markings_button.setEnabled(enabled)
-        self.edit_boxes_button.setEnabled(enabled)
         self.json_toggle_button.setEnabled(enabled)
         self.more_button.setEnabled(enabled)
         for action in (

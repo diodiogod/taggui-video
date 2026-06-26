@@ -1,5 +1,7 @@
 """Manager for connecting signals in main window."""
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Slot, QModelIndex
 from widgets.image_viewer import ImageMarking
 from utils.settings import settings
@@ -266,7 +268,10 @@ class SignalManager:
                     return
                 current_row = current.row()
                 if start.isValid() and end.isValid() and start.row() <= current_row <= end.row():
+                    image = current.data(Qt.ItemDataRole.UserRole)
                     target_viewer.load_image(current, False)
+                    self.main_window.ideogram_caption_editor.load_media(image)
+                    self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
             except Exception as e:
                 print(f"[SIGNAL] ERROR in dataChanged->load_image: {e}")
 
@@ -276,6 +281,9 @@ class SignalManager:
         )
         image_list_model.update_undo_and_redo_actions_requested.connect(
             menu_manager.update_undo_and_redo_actions)
+        image_list_model.ideogram_sidecars_restored.connect(
+            self._refresh_current_ideogram_after_history_restore
+        )
         image_list_model.total_count_changed.connect(
             lambda _count: image_list.update_image_index_label(
                 image_list.list_view.currentIndex()))
@@ -610,6 +618,22 @@ class SignalManager:
         else:
             count = 0
         self.main_window.menu_manager.update_delete_marked_menu(count)
+
+    def _refresh_current_ideogram_after_history_restore(self, media_paths: list[str]):
+        """Refresh active Ideogram UI after undo/redo restores sidecar files."""
+        restored_paths = {str(Path(path)) for path in media_paths}
+        target_viewer = self.main_window.get_selection_target_viewer()
+        if target_viewer is None:
+            target_viewer = self.main_window.image_viewer
+        proxy_index = getattr(target_viewer, 'proxy_image_index', None)
+        if proxy_index is None or not proxy_index.isValid():
+            return
+        image = proxy_index.data(Qt.ItemDataRole.UserRole)
+        if image is None or str(getattr(image, 'path', '') or '') not in restored_paths:
+            return
+        target_viewer.refresh_ideogram_caption_overlays()
+        self.main_window.ideogram_caption_editor.load_media(image)
+        self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
 
     def _update_tag_counts(self):
         """Update tag counts based on current model mode (paginated (DB) vs normal)."""

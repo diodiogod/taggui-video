@@ -248,6 +248,9 @@ class RemoteGen(AutoCaptioningModel):
         ]
 
         max_tokens = self.caption_settings.get('api_max_tokens', 8192)
+        timeout_seconds = int(
+            self.caption_settings.get('api_timeout_seconds', 300) or 300
+        )
         temperature = self.generation_parameters.get('temperature', 1.0)
         top_p = self.generation_parameters.get('top_p', 1.0)
 
@@ -264,7 +267,7 @@ class RemoteGen(AutoCaptioningModel):
                     'top_p': top_p,
                 },
                 headers=self.headers,
-                timeout=120,
+                timeout=max(10, timeout_seconds),
             )
             generation_duration = perf_counter() - generation_start
 
@@ -293,7 +296,10 @@ class RemoteGen(AutoCaptioningModel):
             caption = raw_output
 
         except requests.exceptions.Timeout:
-            error_msg = 'Skipped: request timed out (API server may be busy or unreachable).'
+            error_msg = (
+                f'Skipped: request timed out after {max(10, timeout_seconds)}s '
+                '(API server may be busy or unreachable).'
+            )
             print(error_msg)
             return '', error_msg
         except requests.exceptions.ConnectionError:

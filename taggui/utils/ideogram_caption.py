@@ -473,7 +473,11 @@ def save_ideogram_caption(
     return destination
 
 
-def ideogram_caption_chips(caption: IdeogramCaption) -> list[IdeogramCaptionChip]:
+def ideogram_caption_chips(
+    caption: IdeogramCaption,
+    *,
+    include_palette: bool = False,
+) -> list[IdeogramCaptionChip]:
     """Return caption fields as UI-friendly typed chips without losing structure."""
     chips: list[IdeogramCaptionChip] = []
     if caption.aspect_ratio:
@@ -496,6 +500,16 @@ def ideogram_caption_chips(caption: IdeogramCaption) -> list[IdeogramCaptionChip
         )
     if caption.style_description:
         for key, value in caption.style_description.items():
+            if key == "color_palette":
+                if include_palette and isinstance(value, list):
+                    chips.append(
+                        IdeogramCaptionChip(
+                            "palette",
+                            "Style Colors",
+                            ", ".join(str(item) for item in value),
+                        )
+                    )
+                continue
             if isinstance(value, list):
                 value = ", ".join(str(item) for item in value)
             chips.append(
@@ -527,7 +541,7 @@ def ideogram_caption_chips(caption: IdeogramCaption) -> list[IdeogramCaptionChip
                     element_index=index - 1,
                 )
             )
-        if element.color_palette:
+        if include_palette and element.color_palette:
             chips.append(
                 IdeogramCaptionChip(
                     "palette",
@@ -544,7 +558,7 @@ def flatten_ideogram_caption_text(caption: IdeogramCaption | None) -> str:
     if caption is None:
         return ""
     parts: list[str] = []
-    for chip in ideogram_caption_chips(caption):
+    for chip in ideogram_caption_chips(caption, include_palette=True):
         parts.extend((chip.label, chip.text))
     return " ".join(part for part in parts if part)
 

@@ -66,6 +66,33 @@ def set_text_edit_height(text_edit: QPlainTextEdit, line_count: int):
     text_edit.setFixedHeight(height)
 
 
+PLAIN_CAPTION_SYSTEM_PROMPT = (
+    'You are a media captioning assistant. Your reasoning is private and will '
+    'not be shown to the user. Your response must contain the complete, '
+    'detailed caption — do not summarize or abbreviate what you described in '
+    'your reasoning. Write the full description in your response.'
+)
+
+IDEOGRAM_JSON_SYSTEM_PROMPT = (
+    'You convert visual media into an Ideogram 4 structured JSON caption. '
+    'Return only a valid JSON object, with no markdown and no commentary. '
+    'Use normalized bbox coordinates on a 0-1000 grid ordered [y1,x1,y2,x2]. '
+    'Describe visible content for training data: high-level scene summary, '
+    'background shell, and object/text elements. Preserve readable text '
+    'verbatim in text elements. Use concrete colors/materials/positions. '
+    'Do not describe annotation workflow metadata.'
+)
+
+PLAIN_CAPTION_PROMPT = ''
+
+IDEOGRAM_JSON_PROMPT = (
+    'Create or refine an Ideogram 4 structured JSON caption for this image. '
+    'The per-image prompt may include the current aspect ratio and existing '
+    'locked regions from the sidecar or markings; preserve those regions and '
+    'expand them into useful training descriptions. Return complete JSON only.'
+)
+
+
 class HorizontalLine(QFrame):
     def __init__(self):
         super().__init__()
@@ -232,6 +259,8 @@ class CaptionSettingsForm:
         self.use_compact_style = use_compact_style
         self.layout_mode = load_auto_captioner_layout_mode()
         self._page_cache = {}
+        self._prompting_loading = False
+        self._active_prompting_mode: str | None = None
         self.basic_settings_form = None
         self.advanced_settings_form_container = None
         self.wd_tagger_settings_form_container = None
@@ -317,6 +346,12 @@ class CaptionSettingsForm:
         )
         self.api_max_tokens_spin_box = FocusedScrollSettingsSpinBox(
             key='api_max_tokens', default=8192, minimum=100, maximum=200000)
+        self.api_timeout_spin_box = FocusedScrollSettingsSpinBox(
+            key='api_timeout_seconds', default=300, minimum=10, maximum=7200)
+        self.api_timeout_spin_box.setToolTip(
+            'Remote API request timeout in seconds.\n'
+            'Increase this for slow local servers or large Ideogram JSON outputs.'
+        )
         self.video_fps_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='video_fps', default=1.0, minimum=0.1, maximum=8.0)
         self.video_fps_spin_box.setSingleStep(0.5)
@@ -354,7 +389,7 @@ class CaptionSettingsForm:
         self.system_prompt_label = QLabel('System Prompt')
         self.system_prompt_text_edit = SettingsPlainTextEdit(
             key='system_prompt',
-            default='You are a media captioning assistant. Your reasoning is private and will not be shown to the user. Your response must contain the complete, detailed caption — do not summarize or abbreviate what you described in your reasoning. Write the full description in your response.'
+            default=PLAIN_CAPTION_SYSTEM_PROMPT,
         )
         set_text_edit_height(self.system_prompt_text_edit, 3)
         self.system_prompt_history_button = QPushButton('📜')
@@ -578,6 +613,12 @@ class CaptionSettingsForm:
         )
         self.output_format_combo_box.currentTextChanged.connect(
             self._apply_output_format_mode
+        )
+        self.system_prompt_text_edit.textChanged.connect(
+            self._persist_active_prompting_fields
+        )
+        self.prompt_text_edit.textChanged.connect(
+            self._persist_active_prompting_fields
         )
         self.device_combo_box.currentTextChanged.connect(self.set_load_in_4_bit_visibility)
         self.toggle_advanced_settings_form_button.clicked.connect(self.toggle_advanced_settings_form)
@@ -872,6 +913,7 @@ class CaptionSettingsForm:
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
         form.addRow('Max output tokens', self.api_max_tokens_spin_box)
+        form.addRow('Remote timeout', self.api_timeout_spin_box)
         form.addRow('Video FPS', self.video_fps_spin_box)
         form.addRow('Max video frames', self.video_max_frames_spin_box)
         form.addRow(self.disable_thinking_container)
@@ -898,6 +940,7 @@ class CaptionSettingsForm:
         form.addRow('API Key', self.api_key_line_edit)
         form.addRow('API Model Name', self.api_model_line_edit)
         form.addRow('Max output tokens', self.api_max_tokens_spin_box)
+        form.addRow('Remote timeout', self.api_timeout_spin_box)
         self.compact_video_controls_row = self._make_dual_field_row(
             'Video FPS',
             self.video_fps_spin_box,
@@ -1348,6 +1391,7 @@ class CaptionSettingsForm:
             self.basic_settings_form.setRowVisible(self.api_key_line_edit, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_max_tokens_spin_box, is_remote_model)
+            self.basic_settings_form.setRowVisible(self.api_timeout_spin_box, is_remote_model)
             if self.use_compact_style:
                 if self.compact_video_controls_row is not None:
                     self.compact_video_controls_row.setVisible(
@@ -1387,6 +1431,7 @@ class CaptionSettingsForm:
     @Slot(str)
     def _apply_output_format_mode(self, output_format: str):
         structured = output_format == 'Ideogram 4 JSON'
+        self._switch_prompting_mode('ideogram' if structured else 'plain')
         ignored_controls = (
             self.caption_start_container,
             self.caption_position_combo_box,
@@ -1408,6 +1453,82 @@ class CaptionSettingsForm:
         for widget in ignored_controls:
             widget.setToolTip(explanation)
 
+    @staticmethod
+    def _prompting_keys_for_mode(mode: str) -> tuple[str, str]:
+        return (
+            ('ideogram_system_prompt', 'ideogram_prompt')
+            if mode == 'ideogram'
+            else ('plain_system_prompt', 'plain_prompt')
+        )
+
+    @staticmethod
+    def _default_prompting_values_for_mode(mode: str) -> tuple[str, str]:
+        return (
+            (IDEOGRAM_JSON_SYSTEM_PROMPT, IDEOGRAM_JSON_PROMPT)
+            if mode == 'ideogram'
+            else (PLAIN_CAPTION_SYSTEM_PROMPT, PLAIN_CAPTION_PROMPT)
+        )
+
+    @staticmethod
+    def _legacy_prompting_values_for_mode(mode: str) -> tuple[str | None, str | None]:
+        if mode != 'plain':
+            return None, None
+        return (
+            settings.value('system_prompt', type=str)
+            if settings.contains('system_prompt')
+            else None,
+            settings.value('prompt', type=str)
+            if settings.contains('prompt')
+            else None,
+        )
+
+    def _prompting_values_for_mode(self, mode: str) -> tuple[str, str]:
+        system_key, prompt_key = self._prompting_keys_for_mode(mode)
+        default_system, default_prompt = self._default_prompting_values_for_mode(mode)
+        legacy_system, legacy_prompt = self._legacy_prompting_values_for_mode(mode)
+        if not settings.contains(system_key):
+            settings.setValue(system_key, legacy_system if legacy_system is not None else default_system)
+        if not settings.contains(prompt_key):
+            settings.setValue(prompt_key, legacy_prompt if legacy_prompt is not None else default_prompt)
+        return (
+            settings.value(system_key, type=str) or default_system,
+            settings.value(prompt_key, type=str) or default_prompt,
+        )
+
+    def _persist_active_prompting_fields(self):
+        if self._prompting_loading or self._active_prompting_mode is None:
+            return
+        system_key, prompt_key = self._prompting_keys_for_mode(
+            self._active_prompting_mode
+        )
+        settings.setValue(system_key, self.system_prompt_text_edit.toPlainText())
+        settings.setValue(prompt_key, self.prompt_text_edit.toPlainText())
+
+    def _switch_prompting_mode(self, mode: str):
+        if mode == self._active_prompting_mode:
+            return
+        self._persist_active_prompting_fields()
+        self._active_prompting_mode = mode
+        system_prompt, prompt = self._prompting_values_for_mode(mode)
+        self._prompting_loading = True
+        try:
+            self.system_prompt_text_edit.setPlainText(system_prompt)
+            self.prompt_text_edit.setPlainText(prompt)
+        finally:
+            self._prompting_loading = False
+        if mode == 'ideogram':
+            self.system_prompt_label.setText('System Prompt (Ideogram JSON)')
+            self.prompt_label.setText('Prompt (Ideogram JSON)')
+            self.prompt_text_edit.setToolTip(
+                'Extra instruction appended to each per-image Ideogram prompt. '
+                'The actual generation prompt is built dynamically with aspect '
+                'ratio and existing sidecar/marking regions.'
+            )
+        else:
+            self.system_prompt_label.setText('System Prompt')
+            self.prompt_label.setText('Prompt')
+            self.prompt_text_edit.setToolTip('')
+
     @Slot()
     def toggle_advanced_settings_form(self):
         if self.advanced_settings_form_container.isHidden():
@@ -1420,12 +1541,14 @@ class CaptionSettingsForm:
                 'Show Advanced Settings')
 
     def get_caption_settings(self) -> dict:
+        self._persist_active_prompting_fields()
         return {
             'model_id': self.model_combo_box.currentText(),
             'api_url': self.remote_address_line_edit.currentText(),
             'api_key': self.api_key_line_edit.text(),
             'api_model': self.api_model_line_edit.text(),
             'api_max_tokens': self.api_max_tokens_spin_box.value(),
+            'api_timeout_seconds': self.api_timeout_spin_box.value(),
             'video_fps': self.video_fps_spin_box.value(),
             'video_max_frames': self.video_max_frames_spin_box.value(),
             'disable_thinking': self.disable_thinking_check_box.isChecked(),

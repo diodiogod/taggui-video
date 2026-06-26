@@ -1118,6 +1118,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             try:
+                if self._handle_global_ideogram_key(event, event_type):
+                    return True
+            except Exception:
+                pass
+            try:
                 if not event.isAutoRepeat() and event.key() == Qt.Key.Key_J:
                     mods = event.modifiers()
                     has_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
@@ -2802,6 +2807,82 @@ class MainWindow(QMainWindow):
                     & Qt.TextInteractionFlag.TextEditorInteraction
                 )
             )
+        return False
+
+    def _handle_global_ideogram_key(self, event, event_type) -> bool:
+        """Route Ideogram region edit keys even when the graphics view lacks focus."""
+        if event.isAutoRepeat() or self._focus_widget_accepts_text():
+            return False
+
+        viewer = self.get_active_viewer()
+        if viewer is None:
+            viewer = getattr(self, 'image_viewer', None)
+        if viewer is None or not bool(getattr(viewer, 'ideogram_editing_enabled', False)):
+            return False
+
+        mods = event.modifiers()
+        key = event.key()
+        no_mods = mods == Qt.KeyboardModifier.NoModifier
+        ctrl_only = bool(mods & Qt.KeyboardModifier.ControlModifier) and not bool(
+            mods & (
+                Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        )
+
+        if no_mods and key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if event_type == event.Type.ShortcutOverride:
+                if viewer.has_selected_ideogram_regions():
+                    event.accept()
+                    return True
+                return False
+            if viewer.delete_selected_ideogram_regions():
+                event.accept()
+                return True
+            return False
+
+        if not ctrl_only:
+            return False
+
+        if key == Qt.Key.Key_C:
+            if event_type == event.Type.ShortcutOverride:
+                if viewer.has_selected_ideogram_regions():
+                    event.accept()
+                    return True
+                return False
+            if viewer.copy_selected_ideogram_regions():
+                event.accept()
+                return True
+            return False
+
+        if key == Qt.Key.Key_D:
+            if event_type == event.Type.ShortcutOverride:
+                if viewer.has_selected_ideogram_regions():
+                    event.accept()
+                    return True
+                return False
+            if viewer.duplicate_selected_ideogram_regions():
+                event.accept()
+                return True
+            return False
+
+        if key == Qt.Key.Key_V:
+            clipboard = getattr(
+                getattr(self, 'ideogram_caption_editor', None),
+                '_region_clipboard',
+                None,
+            )
+            if not clipboard:
+                return False
+            if event_type == event.Type.ShortcutOverride:
+                event.accept()
+                return True
+            if viewer.paste_ideogram_regions():
+                event.accept()
+                return True
+            return False
+
         return False
 
     def _resolve_active_video_viewer(self) -> ImageViewer | None:

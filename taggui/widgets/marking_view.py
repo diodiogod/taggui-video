@@ -1,7 +1,7 @@
 """Graphics view for image marking with insertion mode and context menus."""
 
 from PySide6.QtCore import QSize, Qt, QRect
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QMouseEvent, QPainter
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QIcon, QMouseEvent, QPainter
 from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu, QWidget
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
@@ -64,6 +64,15 @@ class ImageGraphicsView(QGraphicsView):
             current = item
             while current is not None:
                 if isinstance(current, (MarkingItem, IdeogramRegionItem)):
+                    return current
+                current = current.parentItem()
+        return None
+
+    def _ideogram_region_at(self, scene_pos):
+        for item in self.scene().items(scene_pos):
+            current = item
+            while current is not None:
+                if isinstance(current, IdeogramRegionItem):
                     return current
                 current = current.parentItem()
         return None
@@ -195,7 +204,10 @@ class ImageGraphicsView(QGraphicsView):
 
         # Check if clicking on an existing marking item first
         scene_pos = self.mapToScene(event.pos())
-        if self._interactive_region_at(scene_pos) is not None:
+        interactive_item = self._interactive_region_at(scene_pos)
+        if interactive_item is not None:
+            if isinstance(interactive_item, IdeogramRegionItem) and self.insertion_mode:
+                self.set_insertion_mode(ImageMarking.NONE)
             super().mousePressEvent(event)
             return
 
@@ -337,17 +349,54 @@ class ImageGraphicsView(QGraphicsView):
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
             return
-        if event.key() == Qt.Key.Key_Delete:
-            edited_item = self.scene().focusItem()
-            if not (isinstance(edited_item, MarkingLabel) and
-                edited_item.textInteractionFlags() == Qt.TextEditorInteraction):
+        edited_item = self.scene().focusItem()
+        is_editing_label = (
+            isinstance(edited_item, MarkingLabel)
+            and edited_item.textInteractionFlags() == Qt.TextEditorInteraction
+        )
+        selected = self.scene().selectedItems()
+        ideogram_indices = [
+            int(item.element_index)
+            for item in selected
+            if isinstance(item, IdeogramRegionItem)
+        ]
+        ctrl_pressed = bool(
+            event.modifiers()
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        )
+        if ctrl_pressed and not is_editing_label:
+            if event.key() == Qt.Key.Key_C and ideogram_indices:
+                self.image_viewer.ideogram_elements_copy_requested.emit(
+                    sorted(set(ideogram_indices))
+                )
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_V:
+                self.image_viewer.ideogram_elements_paste_requested.emit()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_D and ideogram_indices:
+                self.image_viewer.ideogram_elements_duplicate_requested.emit(
+                    sorted(set(ideogram_indices))
+                )
+                event.accept()
+                return
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if not is_editing_label:
                 # Delete marking only when not editing the label
                 # Get selected items from scene
-                selected = self.scene().selectedItems()
+                if ideogram_indices:
+                    self.image_viewer.delete_selected_ideogram_regions()
+                    event.accept()
+                    return
                 if selected:
                     self.image_viewer.delete_markings(selected)
                 else:
                     self.image_viewer.delete_markings()
+            event.accept()
             return
         elif event.key() in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]:
             # Shift + arrow key scrolling when zoomed (avoids conflict with Ctrl+hint binding)
@@ -388,6 +437,12 @@ class ImageGraphicsView(QGraphicsView):
         if MarkingItem.handle_selected == RectPosition.NONE:
             if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier) ==
                     Qt.KeyboardModifier.ControlModifier):
+                cursor_pos = self.viewport().mapFromGlobal(QCursor.pos())
+                if self.viewport().rect().contains(cursor_pos):
+                    scene_pos = self.mapToScene(cursor_pos)
+                    if self._ideogram_region_at(scene_pos) is not None:
+                        event.accept()
+                        return
                 if ((event.modifiers() & Qt.KeyboardModifier.AltModifier) ==
                         Qt.KeyboardModifier.AltModifier):
                     self.image_viewer.marking_to_add = ImageMarking.EXCLUDE
