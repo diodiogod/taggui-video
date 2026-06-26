@@ -24,10 +24,13 @@ class IdeogramRegionItem(QGraphicsRectItem):
         self._on_selected = on_selected
         self._on_geometry_changed = on_geometry_changed
         self._resizing = False
+        self._label_item = None
+        self._base_color = QColor(color)
         self._press_pos = QPointF()
         self._start_rect = QRectF(rect)
         self._start_item_pos = QPointF()
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(
             QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
             True,
@@ -42,6 +45,15 @@ class IdeogramRegionItem(QGraphicsRectItem):
         fill.setAlpha(34)
         self.setBrush(QBrush(fill))
         self.setZValue(30)
+
+    def set_highlighted(self, highlighted: bool):
+        pen = QPen(self._base_color, 4 if highlighted else 2)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.SolidLine if highlighted else Qt.PenStyle.DashLine)
+        self.setPen(pen)
+        fill = QColor(self._base_color)
+        fill.setAlpha(58 if highlighted else 34)
+        self.setBrush(QBrush(fill))
 
     def _handle_rect(self) -> QRectF:
         rect = self.rect()
@@ -58,6 +70,16 @@ class IdeogramRegionItem(QGraphicsRectItem):
             size,
             size,
         )
+
+    def set_label_item(self, label_item):
+        self._label_item = label_item
+        self._relayout_label()
+
+    def _relayout_label(self):
+        if self._label_item is not None:
+            self._label_item.set_anchor_rect(
+                self.mapRectToScene(self.rect())
+            )
 
     def hoverMoveEvent(self, event):
         self.setCursor(
@@ -97,10 +119,12 @@ class IdeogramRegionItem(QGraphicsRectItem):
             )
         else:
             self.setPos(self._start_item_pos + delta)
+        self._relayout_label()
         event.accept()
 
     def mouseReleaseEvent(self, event):
         self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._relayout_label()
         scene_rect = self.mapRectToScene(self.rect()).normalized()
         self._on_geometry_changed(self.element_index, scene_rect)
         event.accept()

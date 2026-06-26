@@ -5,7 +5,8 @@ from PySide6.QtCore import (QEvent, QItemSelectionModel, QModelIndex, QStringLis
 from PySide6.QtGui import QCloseEvent, QKeyEvent, QIcon, QFont, QWheelEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
-                               QPushButton, QStyle, QToolButton, QVBoxLayout, QWidget)
+                               QPushButton, QStackedWidget, QStyle, QToolButton,
+                               QVBoxLayout, QWidget)
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -15,6 +16,12 @@ else:
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.image import Image
+from utils.ideogram_caption import (
+    IdeogramCaptionError,
+    discover_ideogram_caption,
+    ideogram_caption_chips,
+    ideogram_caption_path,
+)
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.text_edit_item_delegate import TextEditItemDelegate
 from utils.utils import get_confirmation_dialog_reply
@@ -27,6 +34,7 @@ INTERNAL_HIDDEN_TAGS = {"__no_tags__"}
 
 class TagInputBox(QLineEdit):
     tags_addition_requested = Signal(list, list)
+    ideogram_tags_addition_requested = Signal(list)
 
     def __init__(self, image_tag_list_model: QStringListModel,
                  tag_counter_model: TagCounterModel, image_list: ImageList,
@@ -35,6 +43,7 @@ class TagInputBox(QLineEdit):
         self.image_tag_list_model = image_tag_list_model
         self.image_list = image_list
         self.tag_separator = tag_separator
+        self.caption_mode = 'tags'
 
         self.setPlaceholderText('Add Tag')
         self.setStyleSheet('padding: 8px;')
@@ -50,6 +59,13 @@ class TagInputBox(QLineEdit):
                 lambda: QTimer.singleShot(0, self.clear))
         else:
             self.completer = None
+
+    def set_caption_mode(self, caption_mode: str):
+        self.caption_mode = caption_mode
+        if caption_mode == 'ideogram':
+            self.setPlaceholderText('Add Ideogram object caption')
+        else:
+            self.setPlaceholderText('Add Tag')
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -74,6 +90,11 @@ class TagInputBox(QLineEdit):
         if not tag:
             return
         tags = tag.split(self.tag_separator)
+        if self.caption_mode == 'ideogram':
+            normalized_tags = [tag.strip() for tag in tags if tag.strip()]
+            if normalized_tags:
+                self.ideogram_tags_addition_requested.emit(normalized_tags)
+            return
         selected_image_indices = self.image_list.get_selected_image_indices()
         selected_image_count = len(selected_image_indices)
         if len(tags) == 1 and selected_image_count == 1:
@@ -99,9 +120,17 @@ class TagInputBox(QLineEdit):
 
 
 class ImageTagsList(QListView):
-    def __init__(self, image_tag_list_model: QStringListModel):
+    def __init__(
+        self,
+        image_tag_list_model: QStringListModel,
+        deletion_requested=None,
+        *,
+        lightweight_zoom: bool = False,
+    ):
         super().__init__()
         self.image_tag_list_model = image_tag_list_model
+        self.deletion_requested = deletion_requested
+        self.lightweight_zoom = lightweight_zoom
         self.setModel(self.image_tag_list_model)
         self.delegate = TextEditItemDelegate(self)
         self.setItemDelegate(self.delegate)
@@ -131,6 +160,9 @@ class ImageTagsList(QListView):
             return
         rows_to_remove = [index.row() for index in self.selectedIndexes()]
         if not rows_to_remove:
+            return
+        if self.deletion_requested is not None:
+            self.deletion_requested(sorted(set(rows_to_remove)))
             return
         remaining_tags = [tag for i, tag
                           in enumerate(self.image_tag_list_model.stringList())
@@ -187,6 +219,11 @@ class ImageTagsList(QListView):
         # Update delegate's zoom multiplier for row height scaling
         self.delegate.set_zoom_multiplier(zoom_percent)
 
+        if self.lightweight_zoom:
+            self.doItemsLayout()
+            self.viewport().update()
+            return
+
         # Reset all row heights to trigger recalculation with new zoom
         for row in range(self.model().rowCount()):
             self.openPersistentEditor(self.model().index(row, 0))
@@ -194,6 +231,12 @@ class ImageTagsList(QListView):
 
 
 class ImageTagsEditor(QDockWidget):
+    ideogram_element_selected = Signal(int)
+    ideogram_object_add_requested = Signal(str)
+    ideogram_element_text_changed = Signal(int, str, str)
+    ideogram_elements_delete_requested = Signal(list)
+    ideogram_json_text_changed = Signal(str)
+
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_counter_model: TagCounterModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
@@ -207,6 +250,11 @@ class ImageTagsEditor(QDockWidget):
         self._pending_descriptive_tags: list[str] | None = None
         self._descriptive_dirty = False
         self._descriptive_sync_delay_ms = 450
+        self._loading_ideogram_chips = False
+        self._ideogram_entries: list[tuple[str, int | None]] = []
+        self._caption_mode = 'tags'
+        self._ideogram_available = False
+        self._ideogram_json_dirty = False
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
@@ -220,7 +268,16 @@ class ImageTagsEditor(QDockWidget):
         title_layout.setContentsMargins(6, 2, 6, 2)
         title_layout.setSpacing(4)
 
-        title_label = QLabel('Image Tags')
+        self.tags_mode_button = QPushButton('Image Tags')
+        self.tags_mode_button.setCheckable(True)
+        self.tags_mode_button.setChecked(True)
+        self.tags_mode_button.setFlat(True)
+        self.tags_mode_button.setCursor(Qt.CursorShape.ArrowCursor)
+        self.ideogram_mode_button = QPushButton('Ideogram')
+        self.ideogram_mode_button.setCheckable(True)
+        self.ideogram_mode_button.setFlat(True)
+        self.ideogram_mode_button.hide()
+        self._apply_caption_mode_title_style()
         self.descriptive_mode_checkbox = QCheckBox('Desc')
         self.descriptive_mode_checkbox.setToolTip('Descriptive Mode')
 
@@ -264,7 +321,8 @@ class ImageTagsEditor(QDockWidget):
         close_button.setMaximumSize(16, 16)
         close_button.clicked.connect(self.close)
 
-        title_layout.addWidget(title_label)
+        title_layout.addWidget(self.tags_mode_button)
+        title_layout.addWidget(self.ideogram_mode_button)
         title_layout.addStretch()
         title_layout.addWidget(self.descriptive_mode_checkbox)
         title_layout.addWidget(self.grammar_check_button)
@@ -277,6 +335,18 @@ class ImageTagsEditor(QDockWidget):
                                          tag_counter_model, image_list,
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
+        self.ideogram_tag_list_model = QStringListModel()
+        self.ideogram_caption_list = ImageTagsList(
+            self.ideogram_tag_list_model,
+            deletion_requested=self._request_ideogram_rows_delete,
+            lightweight_zoom=True,
+        )
+        self.ideogram_caption_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.ideogram_caption_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.ideogram_tag_list_model.dataChanged.connect(
+            self._on_ideogram_caption_model_changed
+        )
 
         # Descriptive text editor with spell/grammar checking (hidden by default)
         self.descriptive_text_edit = DescriptiveTextEdit()
@@ -287,14 +357,26 @@ class ImageTagsEditor(QDockWidget):
         self._descriptive_sync_timer = QTimer(self)
         self._descriptive_sync_timer.setSingleShot(True)
         self._descriptive_sync_timer.timeout.connect(self._apply_pending_descriptive_sync)
+        self.ideogram_json_text_edit = DescriptiveTextEdit()
+        self.ideogram_json_text_edit.setPlaceholderText('Ideogram JSON caption')
+        self.ideogram_json_text_edit.textChanged.connect(self.on_ideogram_json_text_changed)
+        self.ideogram_json_text_edit.installEventFilter(self)
+        self._ideogram_json_sync_timer = QTimer(self)
+        self._ideogram_json_sync_timer.setSingleShot(True)
+        self._ideogram_json_sync_timer.timeout.connect(self._apply_pending_ideogram_json_sync)
+
+        self.caption_stack = QStackedWidget()
+        self.caption_stack.addWidget(self.image_tags_list)
+        self.caption_stack.addWidget(self.descriptive_text_edit)
+        self.caption_stack.addWidget(self.ideogram_caption_list)
+        self.caption_stack.addWidget(self.ideogram_json_text_edit)
 
         self.token_count_label = QLabel()
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.tag_input_box)
-        layout.addWidget(self.image_tags_list)
-        layout.addWidget(self.descriptive_text_edit)
+        layout.addWidget(self.caption_stack)
         layout.addWidget(self.token_count_label)
         self.setWidget(container)
 
@@ -310,6 +392,14 @@ class ImageTagsEditor(QDockWidget):
         # is emitted when a tag is added.
         self.image_tag_list_model.modelReset.connect(self.count_tokens)
         self.image_tag_list_model.dataChanged.connect(self.count_tokens)
+        self.tag_input_box.ideogram_tags_addition_requested.connect(
+            self._request_ideogram_object_add
+        )
+        self.tags_mode_button.clicked.connect(lambda: self.set_caption_mode('tags'))
+        self.ideogram_mode_button.clicked.connect(lambda: self.set_caption_mode('ideogram'))
+        self.ideogram_caption_list.selectionModel().currentChanged.connect(
+            self._on_ideogram_caption_current_changed
+        )
 
         # Now connect descriptive mode signals and load persistent state
         self.descriptive_mode_checkbox.toggled.connect(self.toggle_display_mode)
@@ -366,6 +456,179 @@ class ImageTagsEditor(QDockWidget):
         except OSError:
             return None
 
+    def _read_ideogram_json_text_from_disk(self, image: Image) -> str:
+        try:
+            caption = discover_ideogram_caption(image.path)
+        except IdeogramCaptionError:
+            path = ideogram_caption_path(image.path)
+            if path.exists():
+                try:
+                    return path.read_text(encoding='utf-8', errors='replace')
+                except OSError:
+                    return ''
+            return ''
+        if caption is None:
+            return ''
+        return caption.to_json(pretty=True)
+
+    def _set_ideogram_caption_chips_for_image(self, image: Image | None):
+        self._loading_ideogram_chips = True
+        self._ideogram_entries = []
+        self.ideogram_tag_list_model.setStringList([])
+        self.ideogram_json_text_edit.blockSignals(True)
+        self.ideogram_json_text_edit.setPlainText('')
+        self.ideogram_json_text_edit.blockSignals(False)
+        if image is None:
+            self._set_ideogram_available(False)
+            self._loading_ideogram_chips = False
+            return
+
+        try:
+            caption = discover_ideogram_caption(image.path)
+        except IdeogramCaptionError as exc:
+            self.ideogram_tag_list_model.setStringList([f'Invalid Ideogram JSON: {exc}'])
+            self.ideogram_json_text_edit.blockSignals(True)
+            self.ideogram_json_text_edit.setPlainText(self._read_ideogram_json_text_from_disk(image))
+            self.ideogram_json_text_edit.blockSignals(False)
+            self._set_ideogram_available(True)
+            self._loading_ideogram_chips = False
+            return
+
+        if caption is None:
+            self._set_ideogram_available(False)
+            self._loading_ideogram_chips = False
+            return
+
+        rows: list[str] = []
+        for chip in ideogram_caption_chips(caption):
+            rows.append(chip.text)
+            self._ideogram_entries.append((chip.kind, chip.element_index))
+        self.ideogram_tag_list_model.setStringList(rows)
+        self.ideogram_json_text_edit.blockSignals(True)
+        self.ideogram_json_text_edit.setPlainText(caption.to_json(pretty=True))
+        self.ideogram_json_text_edit.blockSignals(False)
+        self._set_ideogram_available(True)
+        self._loading_ideogram_chips = False
+
+    def _set_ideogram_available(self, available: bool):
+        self._ideogram_available = bool(available)
+        self.ideogram_mode_button.setVisible(self._ideogram_available)
+        self._apply_caption_mode_title_style()
+        if not self._ideogram_available and self._caption_mode == 'ideogram':
+            self.set_caption_mode('tags')
+        else:
+            self._sync_caption_mode_widgets()
+
+    def _apply_caption_mode_title_style(self):
+        if not getattr(self, '_ideogram_available', False):
+            self.tags_mode_button.setStyleSheet("""
+                QPushButton {
+                    padding: 0 2px;
+                    border: none;
+                    background: transparent;
+                    font-weight: 600;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background: transparent;
+                }
+            """)
+            self.tags_mode_button.setCursor(Qt.CursorShape.ArrowCursor)
+            self.ideogram_mode_button.setStyleSheet("")
+            return
+
+        tab_style = """
+            QPushButton {
+                padding: 2px 8px;
+                border: none;
+                border-bottom: 2px solid transparent;
+                background: transparent;
+                font-weight: 600;
+            }
+            QPushButton:checked {
+                border-bottom-color: #7a7a7a;
+            }
+            QPushButton:hover {
+                background: #2d2d2d;
+            }
+        """
+        self.tags_mode_button.setStyleSheet(tab_style)
+        self.ideogram_mode_button.setStyleSheet(tab_style)
+        self.tags_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ideogram_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_caption_mode(self, caption_mode: str):
+        if caption_mode == 'ideogram' and not self._ideogram_available:
+            caption_mode = 'tags'
+        self._caption_mode = caption_mode
+        self.tags_mode_button.setChecked(caption_mode == 'tags')
+        self.ideogram_mode_button.setChecked(caption_mode == 'ideogram')
+        self.tag_input_box.set_caption_mode(caption_mode)
+        self._sync_caption_mode_widgets()
+
+    def _sync_caption_mode_widgets(self):
+        descriptive_mode = self.descriptive_mode_checkbox.isChecked()
+        if self._caption_mode == 'ideogram':
+            self.descriptive_mode_checkbox.setText('JSON')
+            self.descriptive_mode_checkbox.setToolTip('Show raw Ideogram JSON')
+            self.caption_stack.setCurrentWidget(
+                self.ideogram_json_text_edit
+                if descriptive_mode
+                else self.ideogram_caption_list
+            )
+            self.grammar_check_button.setVisible(False)
+            return
+        self.descriptive_mode_checkbox.setText('Desc')
+        self.descriptive_mode_checkbox.setToolTip('Descriptive Mode')
+        self.caption_stack.setCurrentWidget(
+            self.descriptive_text_edit
+            if descriptive_mode
+            else self.image_tags_list
+        )
+        self.grammar_check_button.setVisible(descriptive_mode)
+
+    def _on_ideogram_caption_current_changed(self, current: QModelIndex, _previous: QModelIndex):
+        if not current.isValid():
+            return
+        if current.row() >= len(self._ideogram_entries):
+            return
+        _, element_index = self._ideogram_entries[current.row()]
+        if element_index is not None:
+            self.ideogram_element_selected.emit(int(element_index))
+
+    def _on_ideogram_caption_model_changed(self, top_left: QModelIndex, bottom_right: QModelIndex):
+        if self._loading_ideogram_chips:
+            return
+        rows = self.ideogram_tag_list_model.stringList()
+        for row in range(top_left.row(), bottom_right.row() + 1):
+            if row < 0 or row >= len(self._ideogram_entries) or row >= len(rows):
+                continue
+            kind, element_index = self._ideogram_entries[row]
+            if element_index is None or kind not in {'object', 'text'}:
+                continue
+            self.ideogram_element_text_changed.emit(
+                int(element_index),
+                str(kind),
+                rows[row].strip(),
+            )
+
+    def _request_ideogram_object_add(self, tags: list[str]):
+        for tag in tags:
+            text = str(tag).strip()
+            if text:
+                self.ideogram_object_add_requested.emit(text)
+
+    def _request_ideogram_rows_delete(self, rows: list[int]):
+        element_indices = []
+        for row in rows:
+            if row < 0 or row >= len(self._ideogram_entries):
+                continue
+            _, element_index = self._ideogram_entries[row]
+            if element_index is not None and element_index not in element_indices:
+                element_indices.append(element_index)
+        if element_indices:
+            self.ideogram_elements_delete_requested.emit(element_indices)
+
     def _emit_source_row_data_changed(self, source_model):
         """Refresh the current row after a passive sidecar sync."""
         if source_model is None or not self.image_index.isValid():
@@ -395,6 +658,19 @@ class ImageTagsEditor(QDockWidget):
             self._descriptive_sync_timer.stop()
         self._apply_pending_descriptive_sync()
 
+    def _apply_pending_ideogram_json_sync(self):
+        if not self._ideogram_json_dirty:
+            return
+        self._ideogram_json_dirty = False
+        self.ideogram_json_text_changed.emit(
+            self.ideogram_json_text_edit.toPlainText()
+        )
+
+    def _flush_ideogram_json_sync(self):
+        if self._ideogram_json_sync_timer.isActive():
+            self._ideogram_json_sync_timer.stop()
+        self._apply_pending_ideogram_json_sync()
+
     @Slot()
     def select_first_tag(self):
         if self.image_tag_list_model.rowCount() == 0:
@@ -411,6 +687,7 @@ class ImageTagsEditor(QDockWidget):
     def load_image_tags(self, proxy_image_index: QModelIndex):
         # Persist pending edits for the previous image before switching index.
         self._flush_descriptive_sync()
+        self._flush_ideogram_json_sync()
         self.image_index = self.proxy_image_list_model.mapToSource(
             proxy_image_index)
         source_model = self.proxy_image_list_model.sourceModel()
@@ -419,7 +696,9 @@ class ImageTagsEditor(QDockWidget):
         # Safety check: if no image is selected or available, clear the tags
         if image is None:
             self.image_tag_list_model.setStringList([])
+            self._set_ideogram_caption_chips_for_image(None)
             return
+        self._set_ideogram_caption_chips_for_image(image)
         caption_text = self._read_caption_text_from_disk(image)
         tags_from_source = (
             self._tags_from_descriptive_text(caption_text)
@@ -493,6 +772,17 @@ class ImageTagsEditor(QDockWidget):
                 self.image_index)
             self.load_image_tags(proxy_image_index)
 
+    def reload_ideogram_caption_for_current_image(self):
+        if not self.image_index or not self.image_index.isValid():
+            self._set_ideogram_caption_chips_for_image(None)
+            return
+        proxy_index = self.proxy_image_list_model.mapFromSource(self.image_index)
+        image: Image = self.proxy_image_list_model.data(
+            proxy_index,
+            Qt.ItemDataRole.UserRole,
+        )
+        self._set_ideogram_caption_chips_for_image(image)
+
     @Slot(bool)
     def save_descriptive_mode_state(self, enabled: bool):
         """Save descriptive mode state to settings."""
@@ -520,33 +810,23 @@ class ImageTagsEditor(QDockWidget):
             self.descriptive_text_edit.blockSignals(True)
             self.descriptive_text_edit.setPlainText(tags_text)
             self.descriptive_text_edit.blockSignals(False)
-            # Hide tag list and input, show text edit
-            self.tag_input_box.hide()
-            self.image_tags_list.hide()
-            self.descriptive_text_edit.show()
-
-            # Always show grammar check button in descriptive mode
-            # (will show error if grammar checker not available when clicked)
-            self.grammar_check_button.show()
         else:
             # Switch to tag mode
             # Sync descriptive text back to tags before hiding
             self._flush_descriptive_sync()
+            self._flush_ideogram_json_sync()
             tags = self._tags_from_descriptive_text(
                 self.descriptive_text_edit.toPlainText()
             )
             if tags != self.image_tag_list_model.stringList():
                 self.image_tag_list_model.setStringList(tags)
-            # Hide text edit and grammar button, show tag list and input
-            self.descriptive_text_edit.hide()
-            self.grammar_check_button.hide()
-            self.tag_input_box.show()
-            self.image_tags_list.show()
+        self._sync_caption_mode_widgets()
 
     @Slot()
     def on_descriptive_text_changed(self):
         """Stage descriptive text changes for later sync."""
-        if not self.descriptive_mode_checkbox.isChecked():
+        if (not self.descriptive_mode_checkbox.isChecked()
+                or self._caption_mode != 'tags'):
             return
         text = self.descriptive_text_edit.toPlainText()
         tags = self._tags_from_descriptive_text(text)
@@ -555,12 +835,24 @@ class ImageTagsEditor(QDockWidget):
         # Keep other caption views coherent while avoiding per-keystroke churn.
         self._descriptive_sync_timer.start(self._descriptive_sync_delay_ms)
 
+    @Slot()
+    def on_ideogram_json_text_changed(self):
+        if (not self.descriptive_mode_checkbox.isChecked()
+                or self._caption_mode != 'ideogram'):
+            return
+        self._ideogram_json_dirty = True
+        self._ideogram_json_sync_timer.start(self._descriptive_sync_delay_ms)
+
     def eventFilter(self, watched, event):
         if (watched is self.descriptive_text_edit
                 and event.type() == QEvent.Type.FocusOut):
             self._flush_descriptive_sync()
+        if (watched is self.ideogram_json_text_edit
+                and event.type() == QEvent.Type.FocusOut):
+            self._flush_ideogram_json_sync()
         return super().eventFilter(watched, event)
 
     def closeEvent(self, event: QCloseEvent):
         self._flush_descriptive_sync()
+        self._flush_ideogram_json_sync()
         super().closeEvent(event)

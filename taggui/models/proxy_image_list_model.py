@@ -13,6 +13,7 @@ else:
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
+from utils.ideogram_caption import discover_ideogram_search_text
 from utils.review_marks import parse_review_flag_token
 import utils.target_dimension as target_dimension
 
@@ -156,8 +157,11 @@ class ProxyImageListModel(QSortFilterProxyModel):
         if filter_ is None:
             return True
         if isinstance(filter_, str):
-            return (fnmatchcase(self.tag_separator.join(image.tags),
+            caption = self.tag_separator.join(image.tags)
+            ideogram_text = discover_ideogram_search_text(image.path)
+            return (fnmatchcase(caption,
                                 f'*{filter_}*')
+                    or fnmatchcase(ideogram_text, f'*{filter_}*')
                     or fnmatchcase(str(image.path), f'*{filter_}*'))
         if len(filter_) == 1:
             return self.does_image_match_filter(image, filter_[0])
@@ -167,8 +171,14 @@ class ProxyImageListModel(QSortFilterProxyModel):
             if filter_[0] == 'tag':
                 return any(fnmatchcase(tag, filter_[1]) for tag in image.tags)
             if filter_[0] == 'caption':
-                caption = self.tag_separator.join(image.tags)
+                ideogram_text = discover_ideogram_search_text(image.path)
+                caption = f"{self.tag_separator.join(image.tags)} {ideogram_text}"
                 return fnmatchcase(caption, f'*{filter_[1]}*')
+            if filter_[0] == 'ideogram':
+                return fnmatchcase(
+                    discover_ideogram_search_text(image.path),
+                    f'*{filter_[1]}*',
+                )
             if filter_[0] == 'marking':
                 last_colon_index = filter_[1].rfind(':')
                 if last_colon_index < 0:

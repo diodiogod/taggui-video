@@ -3165,8 +3165,10 @@ class ImageListModel(QAbstractListModel):
             # Simple string search: tag OR filename
             pattern = f"%{filter_node}%"
             return (
-                "(file_name LIKE ? OR EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?))",
-                (pattern, pattern)
+                "(file_name LIKE ? "
+                "OR EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?) "
+                "OR EXISTS(SELECT 1 FROM image_ideogram_captions WHERE image_id=images.id AND search_text LIKE ?))",
+                (pattern, pattern, pattern)
             )
             
         if isinstance(filter_node, list):
@@ -3236,6 +3238,22 @@ class ImageListModel(QAbstractListModel):
                         return "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?)", (val,)
                     else:
                         return "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag = ?)", (val,)
+
+                if op == 'caption':
+                    pattern = f"%{val}%"
+                    return (
+                        "(EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?) "
+                        "OR EXISTS(SELECT 1 FROM image_ideogram_captions WHERE image_id=images.id AND search_text LIKE ?))",
+                        (pattern, pattern),
+                    )
+
+                if op == 'ideogram':
+                    pattern = f"%{val}%"
+                    return (
+                        "EXISTS(SELECT 1 FROM image_ideogram_captions "
+                        "WHERE image_id=images.id AND search_text LIKE ?)",
+                        (pattern,),
+                    )
                 
                 if op == 'name':
                      # Contains match by default
@@ -3741,6 +3759,7 @@ class ImageListModel(QAbstractListModel):
                 )
 
             tag_updates_count = 0
+            ideogram_updates_count = 0
             if added_db_paths:
                 tag_updates_count = int(
                     self._index_tags_for_relative_paths(
@@ -3749,7 +3768,15 @@ class ImageListModel(QAbstractListModel):
                         directory_path=directory_path,
                     ) or 0
                 )
+                ideogram_updates_count = int(
+                    self._index_ideogram_captions_for_relative_paths(
+                        added_db_paths,
+                        db=db,
+                        directory_path=directory_path,
+                    ) or 0
+                )
             result['tag_updates_count'] = tag_updates_count
+            result['ideogram_updates_count'] = ideogram_updates_count
 
             if not added_db_paths:
                 print("[REFRESH_NEW] No new media detected")
@@ -3945,6 +3972,30 @@ class ImageListModel(QAbstractListModel):
             active_db.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
             updated_count += 1
 
+        return updated_count
+
+    def _index_ideogram_captions_for_relative_paths(
+        self,
+        rel_paths: list[str],
+        *,
+        db: ImageIndexDB | None = None,
+        directory_path: Path | None = None,
+    ) -> int:
+        """Index Ideogram structured-caption search text for relative media paths."""
+        active_db = db or self._db
+        base_dir = directory_path or self._directory_path
+        if not active_db or not base_dir or not rel_paths:
+            return 0
+
+        updated_count = 0
+        for rel_path in rel_paths:
+            if not rel_path:
+                continue
+            active_db.set_ideogram_caption_text_for_file(
+                str(rel_path),
+                base_dir / rel_path,
+            )
+            updated_count += 1
         return updated_count
 
     def _reload_paginated_model_after_db_update(
@@ -5546,6 +5597,10 @@ class ImageListModel(QAbstractListModel):
                                        # Mark as scanned with special tag to prevent reprocessing
                                        db_bg.add_tag_to_image(image_id, '__no_tags__')
                                    db_bg.set_txt_sidecar_mtime(image_id, txt_sidecar_mtime)
+                                   db_bg.set_ideogram_caption_text_for_file(
+                                       str(rel_path),
+                                       full_path,
+                                   )
                                    
                            enriched_count += 1
 
@@ -5701,7 +5756,8 @@ class ImageListModel(QAbstractListModel):
             return
 
         tag_updates = int(result.get('tag_updates_count', 0) or 0)
-        if not result.get('changes_detected') and tag_updates <= 0:
+        ideogram_updates = int(result.get('ideogram_updates_count', 0) or 0)
+        if not result.get('changes_detected') and tag_updates <= 0 and ideogram_updates <= 0:
             return
 
         added_count = int(result.get('added_count', 0) or 0)
@@ -5709,9 +5765,12 @@ class ImageListModel(QAbstractListModel):
         if result.get('changes_detected'):
             print(f"[CACHE] Applying background refresh (+{added_count:,} / -{removed_count:,})")
             self.background_validation_progress.emit("Applying folder refresh...", 0, 0, False)
-        elif tag_updates > 0:
-            print(f"[CACHE] Applying background tag refresh ({tag_updates:,} image sidecar change(s))")
-            self.background_validation_progress.emit("Applying tag refresh...", 0, 0, False)
+        elif tag_updates > 0 or ideogram_updates > 0:
+            print(
+                "[CACHE] Applying background caption refresh "
+                f"({tag_updates:,} tag sidecar(s), {ideogram_updates:,} Ideogram sidecar(s))"
+            )
+            self.background_validation_progress.emit("Applying caption refresh...", 0, 0, False)
             self.enrichment_complete.emit()
             self.background_validation_progress.emit("", -1, 0, True)
             return
@@ -5765,6 +5824,7 @@ class ImageListModel(QAbstractListModel):
                 'added_count': added_count,
                 'removed_count': removed_count,
                 'tag_updates_count': tag_updates,
+                'ideogram_updates_count': ideogram_updates,
                 'reloaded_page_count': len(reloaded_pages),
             })
             self.background_validation_progress.emit("", -1, 0, True)
@@ -5782,6 +5842,7 @@ class ImageListModel(QAbstractListModel):
             'added_count': added_count,
             'removed_count': removed_count,
             'tag_updates_count': tag_updates,
+            'ideogram_updates_count': ideogram_updates,
         })
         self.background_validation_progress.emit("", -1, 0, True)
 
@@ -6711,10 +6772,14 @@ class ImageListModel(QAbstractListModel):
                 tag_migrated_total = 0
                 loaded_tag_updates = 0
                 incremental_tag_updates = 0
+                ideogram_migrated_total = 0
+                loaded_ideogram_updates = 0
+                incremental_ideogram_updates = 0
                 migrated_total = 0
                 review_migrated_total = 0
                 deadline = time.monotonic() + 20.0
                 tag_done = False
+                ideogram_done = False
                 reaction_done = False
                 review_done = False
                 while time.monotonic() < deadline and not tag_done:
@@ -6760,6 +6825,46 @@ class ImageListModel(QAbstractListModel):
                         "[DB] Tag reconcile: refreshed "
                         f"{incremental_tag_updates} image sidecar(s) from {processed_tag_rows} indexed row(s)."
                     )
+                while time.monotonic() < deadline and not ideogram_done:
+                    migrated_ideogram, scanned_ideogram_sidecars, ideogram_done = db_bg.migrate_ideogram_captions_from_sidecars(
+                        directory_path,
+                        batch_size=8000,
+                        max_seconds=1.5,
+                    )
+                    ideogram_migrated_total += int(migrated_ideogram or 0)
+                    if migrated_ideogram > 0:
+                        print(
+                            "[DB] Ideogram migration: imported "
+                            f"{migrated_ideogram} structured caption sidecar(s) from {scanned_ideogram_sidecars} candidate sidecar(s)."
+                        )
+                    elif not ideogram_done and scanned_ideogram_sidecars > 0:
+                        print(
+                            "[DB] Ideogram migration: scanned "
+                            f"{scanned_ideogram_sidecars} candidate sidecar(s) (no new caption index rows yet)."
+                        )
+                if loaded_rel_paths_snapshot:
+                    loaded_ideogram_updates = int(
+                        db_bg.reconcile_ideogram_captions_for_relative_paths(
+                            directory_path,
+                            loaded_rel_paths_snapshot,
+                            batch_size=1000,
+                        ) or 0
+                    )
+                    if loaded_ideogram_updates > 0:
+                        print(
+                            "[DB] Ideogram reconcile: refreshed "
+                            f"{loaded_ideogram_updates} loaded structured caption sidecar(s)."
+                        )
+                incremental_ideogram_updates, processed_ideogram_rows, wrapped_ideogram_cursor = db_bg.reconcile_ideogram_captions_incremental(
+                    directory_path,
+                    batch_size=4000,
+                    max_seconds=1.0,
+                )
+                if incremental_ideogram_updates > 0:
+                    print(
+                        "[DB] Ideogram reconcile: refreshed "
+                        f"{incremental_ideogram_updates} structured caption sidecar(s) from {processed_ideogram_rows} indexed row(s)."
+                    )
                 while time.monotonic() < deadline and not reaction_done:
                     migrated, scanned, reaction_done = db_bg.migrate_reactions_from_sidecars(
                         directory_path,
@@ -6783,8 +6888,21 @@ class ImageListModel(QAbstractListModel):
                     elif not review_done and scanned > 0:
                         print(f"[DB] Review migration: scanned {scanned} candidate sidecar(s) (no new review data yet).")
                 total_tag_updates = int(tag_migrated_total + loaded_tag_updates + incremental_tag_updates)
+                total_ideogram_updates = int(
+                    ideogram_migrated_total
+                    + loaded_ideogram_updates
+                    + incremental_ideogram_updates
+                )
                 if total_tag_updates > 0 and directory_path == self._directory_path:
                     self.sidecar_tag_migration_applied.emit(total_tag_updates)
+                if total_ideogram_updates > 0 and directory_path == self._directory_path:
+                    self.background_validation_applied.emit({
+                        'directory_path': str(directory_path),
+                        'added_count': 0,
+                        'removed_count': 0,
+                        'tag_updates_count': 0,
+                        'ideogram_updates_count': total_ideogram_updates,
+                    })
                 if migrated_total > 0:
                     self.sidecar_reaction_migration_applied.emit(int(migrated_total))
                 if review_migrated_total > 0:
@@ -8480,6 +8598,16 @@ class ImageListModel(QAbstractListModel):
         self.write_image_tags_to_disk(image)
         self.dataChanged.emit(image_index, image_index)
 
+    def refresh_ideogram_caption_index_for_image(self, image: Image | None):
+        """Refresh DB-searchable Ideogram text for a saved structured caption."""
+        if image is None or not self._db or not self._directory_path:
+            return
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+        self._db.set_ideogram_caption_text_for_file(rel_path, image.path)
+
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
         """Add one or more tags to one or more images."""
@@ -8874,6 +9002,11 @@ class ImageListModel(QAbstractListModel):
                         db=self._db,
                         directory_path=self._directory_path,
                     )
+                    self._index_ideogram_captions_for_relative_paths(
+                        rel_paths,
+                        db=self._db,
+                        directory_path=self._directory_path,
+                    )
                     self._db.commit()
             return len(inserted_paths)
 
@@ -8899,6 +9032,11 @@ class ImageListModel(QAbstractListModel):
 
         self._db.bulk_insert_relative_paths(rel_paths, self._directory_path)
         self._index_tags_for_relative_paths(
+            rel_paths,
+            db=self._db,
+            directory_path=self._directory_path,
+        )
+        self._index_ideogram_captions_for_relative_paths(
             rel_paths,
             db=self._db,
             directory_path=self._directory_path,

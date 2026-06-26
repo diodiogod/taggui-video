@@ -3916,6 +3916,30 @@ class ImageViewer(QWidget):
         self.ideogram_editing_enabled = bool(enabled)
         self.refresh_ideogram_caption_overlays()
 
+    def select_ideogram_element(self, element_index: int):
+        target_item = None
+        for item in self.ideogram_overlay_items:
+            item_index = getattr(item, 'element_index', None)
+            if item_index is None:
+                item_index = item.data(0) if hasattr(item, 'data') else None
+            is_target = item_index == element_index
+            if hasattr(item, 'set_highlighted'):
+                item.set_highlighted(is_target)
+            if hasattr(item, 'setSelected'):
+                item.setSelected(is_target)
+            if is_target:
+                target_item = item
+                item.setZValue(max(item.zValue(), 1000.0))
+            elif item_index is not None and hasattr(item, 'data'):
+                base_z = item.data(1)
+                if base_z is not None:
+                    item.setZValue(float(base_z))
+        if target_item is not None:
+            try:
+                self.view.centerOn(target_item)
+            except Exception:
+                pass
+
     def ideogram_canvas_dimensions(self) -> tuple[int, int] | None:
         """Return the scene-space image dimensions used by caption overlays."""
         image_rect = MarkingItem.image_size
@@ -3935,6 +3959,11 @@ class ImageViewer(QWidget):
             except RuntimeError:
                 pass
         self.ideogram_overlay_items.clear()
+
+    def _relayout_ideogram_labels(self):
+        for item in self.ideogram_overlay_items:
+            if isinstance(item, IdeogramLabelItem):
+                item.relayout()
 
     def _add_ideogram_badge(
         self,
@@ -3970,13 +3999,19 @@ class ImageViewer(QWidget):
         parent_item: QGraphicsItem | None = None,
         tooltip: str = '',
     ):
-        label_item = IdeogramLabelItem(text, color, parent=parent_item)
+        label_item = IdeogramLabelItem(text, color)
         label_item.setZValue(base_z + 2)
-        label_item.setPos(x, y)
         if tooltip:
             label_item.setToolTip(tooltip)
-        if parent_item is None:
-            self.scene.addItem(label_item)
+        self.scene.addItem(label_item)
+        if parent_item is not None and hasattr(parent_item, 'set_label_item'):
+            parent_item.set_label_item(label_item)
+        elif parent_item is not None and hasattr(parent_item, 'rect'):
+            label_item.set_anchor_rect(
+                parent_item.mapRectToScene(parent_item.rect())
+            )
+        else:
+            label_item.setPos(x, y)
         self.ideogram_overlay_items.append(label_item)
 
     def _load_ideogram_caption_overlays(self, image: Image):
@@ -4086,6 +4121,8 @@ class ImageViewer(QWidget):
                     False,
                 )
             rect_item.setZValue(base_z)
+            rect_item.setData(0, entry['element_index'])
+            rect_item.setData(1, base_z)
             rect_item.setToolTip(entry['tooltip'])
             self.scene.addItem(rect_item)
             self.ideogram_overlay_items.append(rect_item)
@@ -4215,6 +4252,7 @@ class ImageViewer(QWidget):
         self._apply_static_image_quality_for_scale(MarkingItem.zoom_factor)
         for marking in self.marking_items:
             marking.adjust_layout()
+        self._relayout_ideogram_labels()
         if self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
             self._capture_zoom_follow_state_from_current_view()
         if self.is_zoom_to_fit:

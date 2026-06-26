@@ -67,6 +67,7 @@ def replace_filter_wildcards(filter_: str | list) -> str | list:
 FILTER_TEMPLATE_SPECS = [
     ('Tag', 'Filter by tag', 'tag:"{cursor}"', True),
     ('Caption', 'Filter by caption text', 'caption:"{cursor}"', True),
+    ('Ideogram', 'Filter by Ideogram JSON caption text', 'ideogram:"{cursor}"', True),
     ('Marking', 'Filter by marking label', 'marking:"{cursor}"', True),
     ('Marking Type', 'Filter by marking kind', 'marking_type:hint', False),
     ('Stars', 'Filter by star rating', 'stars:>={cursor}', True),
@@ -292,7 +293,7 @@ class FilterLineEdit(QLineEdit):
                                     | QuotedString(quote_char="'",
                                                    esc_char='\\')
                                     | Word(printables, exclude_chars='()'))
-        string_filter_keys = ['tag', 'caption', 'marking', 'marking_type', 'crops', 'visible',
+        string_filter_keys = ['tag', 'caption', 'ideogram', 'marking', 'marking_type', 'crops', 'visible',
                               'name', 'path', 'size', 'target', 'love', 'bomb', 'review']
         string_filter_expressions = [Group(CaselessLiteral(key) + Suppress(':')
                                            + optionally_quoted_string)

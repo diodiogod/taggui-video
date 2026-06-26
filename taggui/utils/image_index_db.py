@@ -17,6 +17,7 @@ from utils.review_marks import (
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.sidecar import preferred_taggui_sidecar_read_path
 from utils.load_options import LimitedLoadOptions
+from utils.ideogram_caption import discover_ideogram_search_text
 
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
@@ -260,6 +261,9 @@ class ImageIndexDB:
     SIDECAR_REVIEW_MIGRATION_LAST_ID_KEY = 'sidecar_review_migration_v1_last_id'
     MARKING_MIGRATION_DONE_KEY = 'marking_migration_v1_done'
     MARKING_MIGRATION_LAST_ID_KEY = 'marking_migration_v1_last_id'
+    IDEOGRAM_MIGRATION_DONE_KEY = 'ideogram_caption_migration_v1_done'
+    IDEOGRAM_MIGRATION_LAST_ID_KEY = 'ideogram_caption_migration_v1_last_id'
+    IDEOGRAM_RECONCILE_LAST_ID_KEY = 'ideogram_caption_reconcile_v1_last_id'
     TAG_MIGRATION_DONE_KEY = 'tag_migration_v1_done'
     TAG_MIGRATION_LAST_ID_KEY = 'tag_migration_v1_last_id'
     TAG_RECONCILE_LAST_ID_KEY = 'tag_reconcile_v1_last_id'
@@ -498,6 +502,7 @@ class ImageIndexDB:
                         scanned_at REAL NOT NULL
                     )
                 ''')
+                self._create_ideogram_caption_schema(cursor)
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS ordered_image_cache (
                         cache_key TEXT NOT NULL,
@@ -634,6 +639,7 @@ class ImageIndexDB:
                             )
                         ''')
                         self._create_image_markings_schema(cursor)
+                        self._create_ideogram_caption_schema(cursor)
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_filename ON images(file_name)')
                         cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_aspect_ratio ON images(aspect_ratio)')
@@ -714,6 +720,7 @@ class ImageIndexDB:
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
                     self._create_image_markings_schema(cursor)
+                    self._create_ideogram_caption_schema(cursor)
                     self.conn.commit()
 
         except sqlite3.Error as e:
@@ -2303,6 +2310,348 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database bulk insert error: {e}')
 
+    def _create_ideogram_caption_schema(self, cursor):
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS image_ideogram_captions (
+                image_id INTEGER PRIMARY KEY,
+                search_text TEXT NOT NULL,
+                sidecar_mtime REAL,
+                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_ideogram_caption_image_id '
+            'ON image_ideogram_captions(image_id)'
+        )
+
+    def _ideogram_sidecar_index_state(self, media_path: Path) -> tuple[float | None, str]:
+        preferred_path = Path(media_path).with_suffix('.ideogram.json')
+        legacy_path = Path(media_path).with_suffix('.json')
+        sidecar_path = preferred_path if preferred_path.exists() else legacy_path
+        sidecar_mtime = None
+        try:
+            if sidecar_path.exists():
+                sidecar_mtime = float(sidecar_path.stat().st_mtime)
+        except OSError:
+            sidecar_mtime = None
+        search_text = discover_ideogram_search_text(Path(media_path))
+        return sidecar_mtime, search_text
+
+    def set_ideogram_caption_text_for_file(
+        self,
+        file_name: str,
+        media_path: Path,
+    ) -> None:
+        """Refresh flattened Ideogram search text for one indexed file."""
+        if not self.enabled or not self.conn:
+            return
+        sidecar_mtime, search_text = self._ideogram_sidecar_index_state(media_path)
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT id FROM images WHERE file_name = ?',
+                    (file_name,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return
+                image_id = int(row[0])
+                if not search_text and sidecar_mtime is None:
+                    cursor.execute(
+                        'DELETE FROM image_ideogram_captions WHERE image_id = ?',
+                        (image_id,),
+                    )
+                else:
+                    cursor.execute(
+                        '''
+                        INSERT INTO image_ideogram_captions
+                            (image_id, search_text, sidecar_mtime)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(image_id) DO UPDATE SET
+                            search_text = excluded.search_text,
+                            sidecar_mtime = excluded.sidecar_mtime
+                        ''',
+                        (image_id, search_text, sidecar_mtime),
+                    )
+                self.conn.commit()
+        except sqlite3.Error as e:
+            print(f'Database Ideogram caption update error: {e}')
+
+    def migrate_ideogram_captions_from_sidecars(
+        self,
+        directory_path: Path,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 2.5,
+    ) -> tuple[int, int, bool]:
+        """Incrementally backfill Ideogram caption search text from sidecars."""
+        if not self.enabled or not self.conn or not directory_path:
+            return 0, 0, True
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 2.5
+
+        try:
+            done_value = self.get_meta_value(self.IDEOGRAM_MIGRATION_DONE_KEY)
+            if done_value == '1':
+                return 0, 0, True
+            last_id = int(self.get_meta_value(self.IDEOGRAM_MIGRATION_LAST_ID_KEY, '0') or 0)
+        except Exception:
+            last_id = 0
+
+        updated_total = 0
+        scanned_sidecars = 0
+        done = False
+        start_ts = time.monotonic()
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT images.id, images.file_name,
+                               image_ideogram_captions.sidecar_mtime,
+                               image_ideogram_captions.search_text
+                        FROM images
+                        LEFT JOIN image_ideogram_captions
+                            ON image_ideogram_captions.image_id = images.id
+                        WHERE images.id > ?
+                        ORDER BY images.id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                done = True
+                break
+
+            updated_total += self._reconcile_ideogram_rows(rows, directory_path)
+            for row in rows:
+                try:
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                    last_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                except Exception:
+                    continue
+                media_path = directory_path / rel_path
+                if media_path.with_suffix('.ideogram.json').exists() or media_path.with_suffix('.json').exists():
+                    scanned_sidecars += 1
+
+            self.set_meta_value(self.IDEOGRAM_MIGRATION_LAST_ID_KEY, str(int(last_id)))
+            if len(rows) < batch_size:
+                done = True
+                break
+
+        if done:
+            self.set_meta_value(self.IDEOGRAM_MIGRATION_DONE_KEY, '1')
+        return updated_total, scanned_sidecars, done
+
+    def reconcile_ideogram_captions_for_relative_paths(
+        self,
+        directory_path: Path,
+        rel_paths: list[str],
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        """Reconcile Ideogram caption rows for specific relative media paths."""
+        if not self.enabled or not self.conn or not directory_path or not rel_paths:
+            return 0
+
+        normalized_paths = []
+        for rel_path in rel_paths:
+            path_text = str(rel_path or '').strip()
+            if path_text and path_text not in normalized_paths:
+                normalized_paths.append(path_text)
+        if not normalized_paths:
+            return 0
+
+        rows = []
+        query_batch = 500
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                for start in range(0, len(normalized_paths), query_batch):
+                    batch_paths = normalized_paths[start:start + query_batch]
+                    placeholders = ','.join('?' for _ in batch_paths)
+                    cursor.execute(
+                        f'''
+                        SELECT images.id, images.file_name,
+                               image_ideogram_captions.sidecar_mtime,
+                               image_ideogram_captions.search_text
+                        FROM images
+                        LEFT JOIN image_ideogram_captions
+                            ON image_ideogram_captions.image_id = images.id
+                        WHERE images.file_name IN ({placeholders})
+                        ORDER BY images.id
+                        ''',
+                        tuple(batch_paths),
+                    )
+                    rows.extend(cursor.fetchall())
+        except sqlite3.Error:
+            return 0
+
+        return self._reconcile_ideogram_rows(
+            rows,
+            directory_path,
+            batch_size=batch_size,
+        )
+
+    def reconcile_ideogram_captions_incremental(
+        self,
+        directory_path: Path,
+        *,
+        batch_size: int = 2000,
+        max_seconds: float = 1.5,
+    ) -> tuple[int, int, bool]:
+        """Reconcile one bounded batch of Ideogram caption rows."""
+        if not self.enabled or not self.conn or not directory_path:
+            return 0, 0, False
+        if batch_size <= 0:
+            batch_size = 2000
+        if max_seconds <= 0:
+            max_seconds = 1.5
+
+        try:
+            last_id = int(self.get_meta_value(self.IDEOGRAM_RECONCILE_LAST_ID_KEY, '0') or 0)
+        except Exception:
+            last_id = 0
+
+        updated_total = 0
+        processed_total = 0
+        wrapped = False
+        start_ts = time.monotonic()
+
+        while (time.monotonic() - start_ts) < max_seconds:
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        '''
+                        SELECT images.id, images.file_name,
+                               image_ideogram_captions.sidecar_mtime,
+                               image_ideogram_captions.search_text
+                        FROM images
+                        LEFT JOIN image_ideogram_captions
+                            ON image_ideogram_captions.image_id = images.id
+                        WHERE images.id > ?
+                        ORDER BY images.id
+                        LIMIT ?
+                        ''',
+                        (int(last_id), int(batch_size)),
+                    )
+                    rows = cursor.fetchall()
+            except sqlite3.Error:
+                break
+
+            if not rows:
+                if last_id != 0:
+                    self.set_meta_value(self.IDEOGRAM_RECONCILE_LAST_ID_KEY, '0')
+                    wrapped = True
+                break
+
+            updated_total += self._reconcile_ideogram_rows(
+                rows,
+                directory_path,
+                batch_size=batch_size,
+            )
+            processed_total += len(rows)
+            try:
+                last_row = rows[-1]
+                last_id = int(last_row['id'] if isinstance(last_row, sqlite3.Row) else last_row[0])
+            except Exception:
+                break
+
+            if len(rows) < batch_size:
+                self.set_meta_value(self.IDEOGRAM_RECONCILE_LAST_ID_KEY, '0')
+                wrapped = True
+                break
+            self.set_meta_value(self.IDEOGRAM_RECONCILE_LAST_ID_KEY, str(int(last_id)))
+
+        return updated_total, processed_total, wrapped
+
+    def _reconcile_ideogram_rows(
+        self,
+        rows,
+        directory_path: Path,
+        *,
+        batch_size: int = 1000,
+    ) -> int:
+        if not rows:
+            return 0
+
+        updated_total = 0
+        batch_size = max(1, int(batch_size))
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            upserts: list[tuple[int, str, float | None]] = []
+            deletes: list[int] = []
+            for row in batch:
+                try:
+                    image_id = int(row['id'] if isinstance(row, sqlite3.Row) else row[0])
+                    rel_path = str(row['file_name'] if isinstance(row, sqlite3.Row) else row[1])
+                    stored_mtime = row['sidecar_mtime'] if isinstance(row, sqlite3.Row) else row[2]
+                    stored_text = row['search_text'] if isinstance(row, sqlite3.Row) else row[3]
+                except Exception:
+                    continue
+
+                current_mtime, current_text = self._ideogram_sidecar_index_state(
+                    directory_path / rel_path
+                )
+                normalized_stored_mtime = (
+                    float(stored_mtime) if stored_mtime is not None else None
+                )
+                if (
+                    current_mtime is not None
+                    and normalized_stored_mtime is not None
+                    and abs(current_mtime - normalized_stored_mtime) <= 0.001
+                    and str(stored_text or '') == current_text
+                ):
+                    continue
+                if current_mtime is None and normalized_stored_mtime is None and not current_text and not stored_text:
+                    continue
+
+                if not current_text and current_mtime is None:
+                    deletes.append(image_id)
+                else:
+                    upserts.append((image_id, current_text, current_mtime))
+
+            if not upserts and not deletes:
+                continue
+            try:
+                with self._db_lock:
+                    cursor = self.conn.cursor()
+                    if deletes:
+                        placeholders = ','.join('?' for _ in deletes)
+                        cursor.execute(
+                            f'DELETE FROM image_ideogram_captions WHERE image_id IN ({placeholders})',
+                            deletes,
+                        )
+                        updated_total += len(deletes)
+                    if upserts:
+                        cursor.executemany(
+                            '''
+                            INSERT INTO image_ideogram_captions
+                                (image_id, search_text, sidecar_mtime)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(image_id) DO UPDATE SET
+                                search_text = excluded.search_text,
+                                sidecar_mtime = excluded.sidecar_mtime
+                            ''',
+                            upserts,
+                        )
+                        updated_total += len(upserts)
+                    self.conn.commit()
+            except sqlite3.Error:
+                continue
+
+        return updated_total
+
     def set_markings_for_image(self, image_id: int, markings: List[Dict[str, Any]]):
         """Replace searchable markings for one image."""
         if not self.enabled or not self.conn:
@@ -3402,6 +3751,7 @@ class ImageIndexDB:
                 id_ph = ','.join('?' for _ in ids)
                 cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
                 cursor.execute(f'DELETE FROM image_markings WHERE image_id IN ({id_ph})', ids)
+                cursor.execute(f'DELETE FROM image_ideogram_captions WHERE image_id IN ({id_ph})', ids)
             cursor.execute(
                 f'DELETE FROM images WHERE file_name IN ({placeholders})',
                 rel_paths

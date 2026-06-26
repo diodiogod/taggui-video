@@ -21,6 +21,16 @@ class IdeogramCaptionError(ValueError):
     """Raised when an Ideogram caption cannot be parsed or validated."""
 
 
+@dataclass(frozen=True)
+class IdeogramCaptionChip:
+    """Small display/search unit extracted from a structured caption."""
+
+    kind: str
+    label: str
+    text: str
+    element_index: int | None = None
+
+
 @dataclass
 class IdeogramElement:
     type: str
@@ -461,6 +471,90 @@ def save_ideogram_caption(
             temporary_path.unlink()
     caption.source_path = destination
     return destination
+
+
+def ideogram_caption_chips(caption: IdeogramCaption) -> list[IdeogramCaptionChip]:
+    """Return caption fields as UI-friendly typed chips without losing structure."""
+    chips: list[IdeogramCaptionChip] = []
+    if caption.aspect_ratio:
+        chips.append(IdeogramCaptionChip("meta", "Aspect", caption.aspect_ratio))
+    if caption.high_level_description:
+        chips.append(
+            IdeogramCaptionChip(
+                "high_level",
+                "High",
+                caption.high_level_description,
+            )
+        )
+    if caption.compositional_background:
+        chips.append(
+            IdeogramCaptionChip(
+                "background",
+                "Background",
+                caption.compositional_background,
+            )
+        )
+    if caption.style_description:
+        for key, value in caption.style_description.items():
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value)
+            chips.append(
+                IdeogramCaptionChip(
+                    "style",
+                    key.replace("_", " ").title(),
+                    str(value),
+                )
+            )
+    for index, element in enumerate(caption.elements, start=1):
+        if element.type == "text":
+            text_value = element.text or ""
+            desc = element.desc or ""
+            chip_text = text_value if text_value == desc or not desc else f"{text_value} - {desc}"
+            chips.append(
+                IdeogramCaptionChip(
+                    "text",
+                    f"{index:02d} Text",
+                    chip_text,
+                    element_index=index - 1,
+                )
+            )
+        else:
+            chips.append(
+                IdeogramCaptionChip(
+                    "object",
+                    f"{index:02d} Object",
+                    element.desc,
+                    element_index=index - 1,
+                )
+            )
+        if element.color_palette:
+            chips.append(
+                IdeogramCaptionChip(
+                    "palette",
+                    f"{index:02d} Colors",
+                    ", ".join(element.color_palette),
+                    element_index=index - 1,
+                )
+            )
+    return [chip for chip in chips if chip.text.strip()]
+
+
+def flatten_ideogram_caption_text(caption: IdeogramCaption | None) -> str:
+    """Return searchable prose for an Ideogram caption."""
+    if caption is None:
+        return ""
+    parts: list[str] = []
+    for chip in ideogram_caption_chips(caption):
+        parts.extend((chip.label, chip.text))
+    return " ".join(part for part in parts if part)
+
+
+def discover_ideogram_search_text(media_path: Path) -> str:
+    """Load and flatten an Ideogram sidecar, returning empty text on absence/error."""
+    try:
+        return flatten_ideogram_caption_text(discover_ideogram_caption(media_path))
+    except IdeogramCaptionError:
+        return ""
 
 
 def bbox_to_pixel_rect(

@@ -317,6 +317,21 @@ class SignalManager:
                 image_tags_editor.isVisible()))
         image_tags_editor.tag_input_box.tags_addition_requested.connect(
             image_list_model.add_tags)
+        image_tags_editor.ideogram_element_selected.connect(
+            self.main_window.ideogram_caption_editor.focus_element_from_caption_panel
+        )
+        image_tags_editor.ideogram_element_text_changed.connect(
+            self.main_window.ideogram_caption_editor.update_element_text_from_caption_panel
+        )
+        image_tags_editor.ideogram_elements_delete_requested.connect(
+            self.main_window.ideogram_caption_editor.delete_elements_from_caption_panel
+        )
+        image_tags_editor.ideogram_json_text_changed.connect(
+            self.main_window.ideogram_caption_editor.update_json_from_caption_panel
+        )
+        image_tags_editor.ideogram_object_add_requested.connect(
+            self.main_window.ideogram_caption_editor.add_object_from_caption_panel
+        )
 
     def connect_all_tags_editor_signals(self):
         """Connect all tags editor-related signals."""
@@ -374,6 +389,15 @@ class SignalManager:
         auto_captioner.structured_caption_generated.connect(
             lambda *_: self.main_window.image_viewer.refresh_ideogram_caption_overlays()
         )
+        auto_captioner.structured_caption_generated.connect(
+            lambda *_: image_tags_editor.reload_ideogram_caption_for_current_image()
+        )
+        auto_captioner.structured_caption_generated.connect(
+            lambda image_index, _caption:
+            image_list_model.refresh_ideogram_caption_index_for_image(
+                image_index.data(Qt.ItemDataRole.UserRole)
+            )
+        )
         auto_captioner.visibilityChanged.connect(
             lambda: menu_manager.toggle_auto_captioner_action.setChecked(
                 auto_captioner.isVisible()))
@@ -406,6 +430,15 @@ class SignalManager:
                 else None
             )
             if visible else None
+        )
+        self.main_window.ideogram_caption_editor.caption_saved.connect(
+            lambda *_: self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
+        )
+        self.main_window.ideogram_caption_editor.caption_saved.connect(
+            lambda *_:
+            self.main_window.image_list_model.refresh_ideogram_caption_index_for_image(
+                self.main_window.ideogram_caption_editor.current_image
+            )
         )
 
     def connect_video_controls_signals(self):

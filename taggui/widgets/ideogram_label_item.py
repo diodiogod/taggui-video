@@ -17,6 +17,7 @@ class IdeogramLabelItem(QGraphicsItem):
         super().__init__(parent)
         self._text = str(text or '')
         self._accent = QColor(accent)
+        self._anchor_rect = QRectF()
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self._bounding_rect = QRectF()
@@ -61,7 +62,43 @@ class IdeogramLabelItem(QGraphicsItem):
     def refresh_from_settings(self):
         self.prepareGeometryChange()
         self._recalculate_geometry()
+        self.relayout()
         self.update()
+
+    def set_anchor_rect(self, scene_rect: QRectF):
+        self._anchor_rect = QRectF(scene_rect).normalized()
+        self.relayout()
+
+    def relayout(self, *, margin_x: float = 3.0, margin_y: float = 3.0):
+        if self._anchor_rect.isEmpty():
+            return
+
+        scale = 1.0
+        scene = self.scene()
+        if scene is not None and scene.views():
+            view_scale = abs(scene.views()[0].transform().m11())
+            if view_scale > 0.0:
+                scale = view_scale
+
+        label_width = float(self.boundingRect().width()) / scale
+        label_height = float(self.boundingRect().height()) / scale
+        margin_x_scene = margin_x / scale
+        margin_y_scene = margin_y / scale
+        scene_rect = self._anchor_rect
+
+        if scene_rect.top() >= label_height + margin_y_scene:
+            target_y = scene_rect.top() - label_height - margin_y_scene
+        else:
+            target_y = scene_rect.top() + margin_y_scene
+
+        target_x = scene_rect.left() + margin_x_scene
+        if scene is not None:
+            bounds = scene.sceneRect()
+            target_x = min(
+                max(target_x, bounds.left()),
+                max(bounds.left(), bounds.right() - label_width),
+            )
+        self.setPos(target_x, target_y)
 
     def _style(self) -> dict:
         font_weight_name = str(

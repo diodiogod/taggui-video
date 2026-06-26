@@ -664,7 +664,61 @@ class IdeogramCaptionEditor(QDockWidget):
         self.json_toggle_button.setChecked(True)
         self.save_caption()
 
-    def add_region(self, element_type: str):
+    def focus_element_from_caption_panel(self, index: int):
+        self.edit_boxes_button.setChecked(True)
+        self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
+
+    def update_element_text_from_caption_panel(self, index: int, kind: str, value: str):
+        try:
+            caption = self._caption_from_editor()
+            element = caption.elements[index]
+        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
+            return
+        value = str(value or '').strip()
+        if not value:
+            return
+        if kind == "text" and element.type == "text":
+            element.text = value
+            if not element.desc:
+                element.desc = value
+        else:
+            element.desc = value
+        self._apply_caption_edit(caption)
+        self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
+
+    def update_json_from_caption_panel(self, text: str):
+        if self.current_image is None:
+            return
+        try:
+            caption = parse_ideogram_caption_text(text)
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            return
+        self._replace_text(caption.to_json(pretty=True), dirty=True)
+        self._update_summary(caption=caption, draft=True)
+        self.save_caption()
+
+    def delete_elements_from_caption_panel(self, indices: list[int]):
+        try:
+            caption = self._caption_from_editor()
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            return
+        deleted = False
+        for index in sorted({int(index) for index in indices}, reverse=True):
+            if 0 <= index < len(caption.elements):
+                caption.elements.pop(index)
+                deleted = True
+        if not deleted:
+            return
+        self._selected_element_index = None
+        self.element_container.hide()
+        self._apply_caption_edit(caption)
+
+    def add_object_from_caption_panel(self, description: str):
+        self.add_region("obj", description=description)
+
+    def add_region(self, element_type: str, *, description: str = "region"):
         if self.current_image is None:
             return
         try:
@@ -673,7 +727,7 @@ class IdeogramCaptionEditor(QDockWidget):
             caption = self._empty_caption()
         element = IdeogramElement(
             type="text" if element_type == "text" else "obj",
-            desc="region",
+            desc=description.strip() or "region",
             bbox=(250, 250, 750, 750),
             text="" if element_type == "text" else None,
         )
@@ -682,6 +736,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.edit_boxes_button.setChecked(True)
         self._apply_caption_edit(caption)
         self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
 
     def export_folder_jsonl(self):
         if self.current_path is None:
