@@ -81,6 +81,10 @@ class MarkingItem(QGraphicsRectItem):
     def __init__(self, rect: QRect, rect_type: ImageMarking, interactive: bool,
                  parent = None):
         super().__init__(rect.toRectF(), parent)
+        # Capture the owner view at construction time. The class attribute is
+        # updated by every ImageGraphicsView, so using it directly later can
+        # route edits from one viewer through another viewer's marking list.
+        self.image_view = MarkingItem.image_view
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.rect_type = rect_type
         self.label = None  # Will be set to MarkingLabel externally

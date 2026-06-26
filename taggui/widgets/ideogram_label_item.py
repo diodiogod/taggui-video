@@ -23,6 +23,7 @@ class IdeogramLabelItem(QGraphicsItem):
     ):
         super().__init__(parent)
         self._text = str(text or '')
+        self._display_text = self._text
         self._accent = QColor(accent)
         self._anchor_rect = QRectF()
         self._element_index = element_index
@@ -31,6 +32,7 @@ class IdeogramLabelItem(QGraphicsItem):
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self._bounding_rect = QRectF()
+        self._layout_max_width = 0.0
         self._recalculate_geometry()
 
     def boundingRect(self) -> QRectF:
@@ -55,7 +57,7 @@ class IdeogramLabelItem(QGraphicsItem):
             float(outline_margin + style['padding_x']),
             float(baseline_y),
             style['font'],
-            self._text,
+            self._display_text,
         )
         if style['outline_width'] > 0.0:
             outline_pen = QPen(
@@ -90,11 +92,17 @@ class IdeogramLabelItem(QGraphicsItem):
             if view_scale > 0.0:
                 scale = view_scale
 
+        scene_rect = self._anchor_rect
+        max_label_width = max(28.0, float(scene_rect.width()) * scale - (margin_x * 2.0))
+        if abs(max_label_width - self._layout_max_width) > 0.5:
+            self.prepareGeometryChange()
+            self._layout_max_width = max_label_width
+            self._recalculate_geometry(max_width=max_label_width)
+
         label_width = float(self.boundingRect().width()) / scale
         label_height = float(self.boundingRect().height()) / scale
         margin_x_scene = margin_x / scale
         margin_y_scene = margin_y / scale
-        scene_rect = self._anchor_rect
 
         if scene_rect.top() >= label_height + margin_y_scene:
             target_y = scene_rect.top() - label_height - margin_y_scene
@@ -227,13 +235,27 @@ class IdeogramLabelItem(QGraphicsItem):
             ),
         }
 
-    def _recalculate_geometry(self):
+    def _recalculate_geometry(self, *, max_width: float | None = None):
         style = self._style()
-        text_rect = style['metrics'].boundingRect(self._text)
         outline_margin = style['outline_width'] * 0.5
+        horizontal_padding = (style['padding_x'] * 2) + (outline_margin * 2)
+        available_text_width = None
+        if max_width is not None and max_width > horizontal_padding + 8:
+            available_text_width = max(4.0, float(max_width) - horizontal_padding)
+
+        if available_text_width is None:
+            self._display_text = self._text
+        else:
+            self._display_text = style['metrics'].elidedText(
+                self._text,
+                Qt.TextElideMode.ElideRight,
+                int(available_text_width),
+            )
+
+        text_rect = style['metrics'].boundingRect(self._display_text)
         self._bounding_rect = QRectF(
             0.0,
             0.0,
-            float(text_rect.width() + (style['padding_x'] * 2) + (outline_margin * 2)),
+            float(text_rect.width() + horizontal_padding),
             float(text_rect.height() + (style['padding_y'] * 2) + (outline_margin * 2)),
         )

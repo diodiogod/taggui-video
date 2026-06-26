@@ -241,62 +241,98 @@ class IdeogramCaptionEditor(QDockWidget):
         self.setStyleSheet(
             """
             QWidget#ideogramCaptionRoot {
-                background: #202326;
+                background: #2b2b2b;
+                color: #f3f4f6;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 12px;
             }
             QLabel#ideogramCaptionFile {
-                color: #f0f3f5;
+                color: #f3f4f6;
                 font-weight: 600;
-                font-size: 13px;
+                font-size: 15px;
+                padding: 0 2px;
             }
             QLabel#ideogramCaptionSummary {
-                color: #aeb8c1;
-                background: #292e33;
-                border: 1px solid #343b42;
+                color: #cbd5e1;
+                background: #1e1e24;
+                border: 1px solid #4b5563;
                 border-radius: 6px;
                 padding: 8px;
+                font-size: 12px;
             }
             QLabel#ideogramCaptionSectionLabel {
-                color: #8eddd4;
+                color: #d1d5db;
                 font-weight: 600;
+                font-size: 12px;
+                padding: 0 2px;
             }
             QPushButton#ideogramCaptionPrimaryButton {
-                background: #247f78;
-                border: 1px solid #339d94;
+                background-color: #247f78;
+                border: none;
                 border-radius: 6px;
-                color: white;
+                color: #ffffff;
                 font-weight: 600;
                 min-height: 28px;
-                padding: 3px 10px;
+                max-height: 30px;
+                padding: 6px 10px;
+                font-size: 11px;
             }
             QPushButton#ideogramCaptionPrimaryButton:hover {
                 background: #2d9188;
             }
             QPushButton#ideogramCaptionSecondaryButton,
             QToolButton#ideogramCaptionMoreButton {
-                background: #30363c;
-                border: 1px solid #444d55;
+                background: transparent;
+                border: 1px solid #4b5563;
                 border-radius: 6px;
-                color: #dbe2e8;
-                min-height: 28px;
-                padding: 3px 9px;
+                color: #d1d5db;
+                min-height: 26px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#ideogramCaptionSecondaryButton:hover,
+            QToolButton#ideogramCaptionMoreButton:hover {
+                background: #353847;
+                border-color: #6b7280;
+                color: #f3f4f6;
             }
             QPushButton#ideogramCaptionSecondaryButton:checked {
-                border-color: #45b8ae;
+                background: #173f3b;
+                border-color: #339d94;
                 color: #8eddd4;
             }
             QPlainTextEdit#ideogramCaptionJson {
-                background: #171a1d;
-                border: 1px solid #3a4249;
+                background: #1e1e24;
+                border: 1px solid #4b5563;
                 border-radius: 6px;
-                color: #d9e2e8;
-                padding: 6px;
+                color: #f3f4f6;
+                padding: 6px 8px;
                 selection-background-color: #286f69;
+                font-size: 12px;
             }
             QWidget#ideogramCaptionElementPanel {
-                background: #292e33;
-                border: 1px solid #343b42;
+                background: #1e1e24;
+                border: 1px solid #4b5563;
                 border-radius: 6px;
                 padding: 6px;
+            }
+            QLineEdit, QComboBox, QPlainTextEdit {
+                background: #1e1e24;
+                color: #f3f4f6;
+                border: 1px solid #4b5563;
+                border-radius: 4px;
+                padding: 6px 8px;
+                selection-background-color: #286f69;
+                font-size: 12px;
+            }
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
+                border-color: #339d94;
+            }
+            QLabel#ideogramCaptionStatus {
+                color: #cbd5e1;
+                font-size: 11px;
+                padding: 0 2px;
             }
             """
         )

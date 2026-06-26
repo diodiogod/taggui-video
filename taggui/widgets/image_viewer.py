@@ -2391,6 +2391,8 @@ class ImageViewer(QWidget):
         QTimer.singleShot(max(80, int(duration_ms)), _clear_scrub_feedback)
 
     def _video_surface_zone_at(self, viewer_pos: QPoint | None, *, ignore_visibility: bool = False) -> str | None:
+        if not self._is_video_loaded:
+            return None
         if not ignore_visibility and not self._should_show_contextual_video_seek_ui():
             return None
         seek_zone = self._video_seek_zone_at(viewer_pos, ignore_visibility=ignore_visibility)
@@ -3326,6 +3328,10 @@ class ImageViewer(QWidget):
 
     def _show_controls_temporarily(self):
         """Show controls and start hide timer."""
+        if not self._is_video_loaded:
+            self._hide_video_seek_overlays()
+            self._controls_visible = False
+            return
         if self.video_controls is None:
             return
         if self.video_controls_never_show or self._compare_controls_suppressed:
@@ -3367,6 +3373,10 @@ class ImageViewer(QWidget):
 
     def _show_controls_permanent(self):
         """Show controls permanently (not auto-hide)."""
+        if not self._is_video_loaded:
+            self._hide_video_seek_overlays()
+            self._controls_visible = False
+            return
         if self.video_controls is None:
             return
         if self.video_controls_never_show or self._compare_controls_suppressed:
@@ -3609,7 +3619,7 @@ class ImageViewer(QWidget):
         )
 
         if is_complete:
-            self.marking_items.clear()
+            self._clear_marking_items_from_scene()
             self.ideogram_overlay_items.clear()
             self.view.clear_scene()
             auto_play_after_layout = False
@@ -3827,9 +3837,7 @@ class ImageViewer(QWidget):
                 if player is not None:
                     QTimer.singleShot(0, player.play)
         else:
-            for item in self.marking_items:
-                self.scene.removeItem(item)
-            self.marking_items.clear()
+            self._clear_marking_items_from_scene()
             self._clear_ideogram_caption_overlays()
 
         self.marking_to_add = ImageMarking.NONE
@@ -3841,6 +3849,7 @@ class ImageViewer(QWidget):
             # No crop - reset HUD state
             self._clear_hud_crop_if_alive()
             calculate_grid(MarkingItem.image_size)
+        image.markings = self._deduplicated_markings(image.markings)
         for marking in image.markings:
             self.add_rectangle(marking.rect, marking.type, interactive=False,
                                name=marking.label, confidence=marking.confidence)
@@ -4167,6 +4176,41 @@ class ImageViewer(QWidget):
                 marking.size_changed()
         self.scene.invalidate()
 
+    def _clear_marking_items_from_scene(self):
+        for item in list(self.marking_items):
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
+        for item in list(self.scene.items()):
+            if isinstance(item, MarkingItem):
+                try:
+                    self.scene.removeItem(item)
+                except RuntimeError:
+                    pass
+        self.marking_items.clear()
+        self.crop_marking = None
+
+    def _scene_marking_items(self) -> list[MarkingItem]:
+        return [
+            item for item in self.scene.items()
+            if isinstance(item, MarkingItem)
+        ]
+
+    def _scene_marking_count(self) -> int:
+        return len(self._scene_marking_items())
+
+    def _scene_marking_debug_rects(self) -> list[tuple]:
+        rects = []
+        for item in self._scene_marking_items():
+            rects.append((
+                str(item.rect_type.value),
+                str(item.data(0) or ''),
+                item.rect().toRect().normalized().getRect(),
+            ))
+        return rects
+
     @Slot()
     def zoom_in(self, center_pos: QPoint = None):
         try:
@@ -4438,7 +4482,14 @@ class ImageViewer(QWidget):
                       interactive: bool, size: QSize = None, name: str = '',
                       confidence: float = 1.0):
         self.marking_to_add = ImageMarking.NONE
+        if (
+            not interactive
+            and rect_type not in {ImageMarking.CROP, ImageMarking.NONE}
+            and self._has_matching_marking_item(rect, rect_type, name, confidence)
+        ):
+            return
         marking_item = MarkingItem(rect, rect_type, interactive, size)
+        marking_item.image_view = self.view
         marking_item.setVisible(self.show_marking_state)
         if rect_type == ImageMarking.CROP:
             self.crop_marking = marking_item
@@ -4447,11 +4498,9 @@ class ImageViewer(QWidget):
             if hasattr(self, 'hud_item'):
                 self.hud_item.set_crop_rect(marking_item.rect())
         elif name == '' and rect_type != ImageMarking.NONE:
-            image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
             name = {ImageMarking.HINT: 'hint',
                     ImageMarking.INCLUDE: 'include',
                     ImageMarking.EXCLUDE: 'exclude'}[rect_type]
-            image.markings.append(Marking(name, rect_type, rect, confidence))
         marking_item.setData(0, name)
         marking_item.setData(1, confidence)
         if rect_type != ImageMarking.CROP and rect_type != ImageMarking.NONE:
@@ -4473,6 +4522,83 @@ class ImageViewer(QWidget):
         if rect_type == ImageMarking.CROP:
             self.accept_crop_addition.emit(False)
 
+    def _has_matching_marking_item(
+        self,
+        rect: QRect,
+        rect_type: ImageMarking,
+        label: str,
+        confidence: float,
+    ) -> bool:
+        target_rect = QRect(rect).normalized()
+        target_label = str(label or '')
+        try:
+            target_confidence = round(float(confidence), 6)
+        except (TypeError, ValueError):
+            target_confidence = 1.0
+        for item in list(self.scene.items()):
+            if not isinstance(item, MarkingItem):
+                continue
+            if item.rect_type != rect_type:
+                continue
+            if item.rect().toRect().normalized() != target_rect:
+                continue
+            item_label = str(item.data(0) or '')
+            try:
+                item_confidence = round(float(item.data(1)), 6)
+            except (TypeError, ValueError):
+                item_confidence = 1.0
+            if item_label == target_label and item_confidence == target_confidence:
+                return True
+        return False
+
+    def _live_marking_model_entries(self) -> list[Marking]:
+        entries: list[Marking] = []
+        live_items = [
+            item for item in self.scene.items()
+            if isinstance(item, MarkingItem)
+        ]
+        for marking in live_items:
+            if marking.rect_type == ImageMarking.CROP:
+                continue
+            label = marking.data(0)
+            confidence = marking.data(1)
+            entries.append(
+                Marking(
+                    label=str(label or ''),
+                    type=marking.rect_type,
+                    rect=marking.rect().toRect(),
+                    confidence=float(confidence if confidence is not None else 1.0),
+                )
+            )
+        return self._deduplicated_markings(entries)
+
+    @staticmethod
+    def _deduplicated_markings(markings: list[Marking]) -> list[Marking]:
+        deduplicated: list[Marking] = []
+        seen: set[tuple] = set()
+        for marking in markings:
+            if marking.type in {ImageMarking.CROP, ImageMarking.NONE}:
+                continue
+            rect = marking.rect.normalized()
+            key = (
+                str(marking.label or ''),
+                marking.type,
+                round(float(getattr(marking, 'confidence', 1.0) or 1.0), 6),
+                rect.getRect(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduplicated.append(
+                Marking(
+                    label=str(marking.label or ''),
+                    type=marking.type,
+                    rect=rect,
+                    confidence=float(getattr(marking, 'confidence', 1.0) or 1.0),
+                )
+            )
+        return deduplicated
+
     @Slot()
     def label_changed(self):
         """Slot to call when a marking label was changed to sync the information
@@ -4480,7 +4606,7 @@ class ImageViewer(QWidget):
         self.proxy_image_index.model().sourceModel().add_to_undo_stack(
             action_name=f'Change label', should_ask_for_confirmation=False)
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
-        image.markings.clear()
+        entries: list[Marking] = []
         for marking in self.marking_items:
             if marking.rect_type != ImageMarking.CROP:
                 label = marking.label.toPlainText()
@@ -4492,10 +4618,11 @@ class ImageViewer(QWidget):
                     confidence = 1.0
                 marking.label.parentItem().parentItem().setData(0, label)
                 marking.label.parentItem().parentItem().setData(1, confidence)
-                image.markings.append(Marking(label=label,
-                                              type=marking.rect_type,
-                                              rect=marking.rect().toRect(),
-                                              confidence=confidence))
+                entries.append(Marking(label=label,
+                                       type=marking.rect_type,
+                                       rect=marking.rect().toRect(),
+                                       confidence=confidence))
+        image.markings = self._deduplicated_markings(entries)
         self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
 
     @Slot(QGraphicsRectItem)
@@ -4547,12 +4674,12 @@ class ImageViewer(QWidget):
             finally:
                 self.inhibit_reload_image = False
         else:
-            image.markings = [Marking(m.data(0),
-                                      m.rect_type,
-                                      m.rect().toRect(),
-                                      m.data(1))
-                for m in self.marking_items if m.rect_type != ImageMarking.CROP]
-            source_model.write_meta_to_disk(image)
+            self.inhibit_reload_image = True
+            try:
+                image.markings = self._live_marking_model_entries()
+                source_model.write_meta_to_disk(image)
+            finally:
+                self.inhibit_reload_image = False
 
     def get_selected_type(self) -> ImageMarking:
         if len(self.scene.selectedItems()) > 0:

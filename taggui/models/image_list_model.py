@@ -1572,7 +1572,6 @@ class ImageListModel(QAbstractListModel):
         """Apply supported image/video metadata from a parsed sidecar JSON dict."""
         if not isinstance(meta, dict) or meta.get('version') != 1:
             return
-
         crop = meta.get('crop')
         if isinstance(crop, list) and len(crop) == 4:
             try:
@@ -1611,6 +1610,8 @@ class ImageListModel(QAbstractListModel):
 
         markings = meta.get('markings')
         if isinstance(markings, list):
+            parsed_markings = []
+            seen_markings = set()
             for marking_data in markings:
                 if not isinstance(marking_data, dict):
                     continue
@@ -1622,12 +1623,22 @@ class ImageListModel(QAbstractListModel):
                     marking = Marking(
                         label=marking_data.get('label'),
                         type=ImageMarking[rect_type_name],
-                        rect=QRect(*rect),
-                        confidence=marking_data.get('confidence', 1.0),
+                        rect=QRect(*rect).normalized(),
+                        confidence=float(marking_data.get('confidence', 1.0) or 1.0),
                     )
                 except Exception:
                     continue
-                image.markings.append(marking)
+                key = (
+                    str(marking.label or ''),
+                    marking.type,
+                    round(float(marking.confidence), 6),
+                    marking.rect.getRect(),
+                )
+                if key in seen_markings:
+                    continue
+                seen_markings.add(key)
+                parsed_markings.append(marking)
+            image.markings = parsed_markings
 
         self._apply_loop_metadata_from_meta(image, meta)
 
@@ -7661,6 +7672,7 @@ class ImageListModel(QAbstractListModel):
         # Keep DB rating synchronized even when only metadata changes.
         self._save_rating_to_db(image)
         self.save_review_state_to_db(image)
+        image.markings = self._deduplicate_markings(image.markings)
         sidecar_path = taggui_sidecar_path(image.path)
         does_exist = sidecar_path.exists()
         review_rank, review_flags = normalize_review_state(
@@ -7702,6 +7714,8 @@ class ImageListModel(QAbstractListModel):
             try:
                 with sidecar_path.open('w', encoding='UTF-8') as meta_file:
                     json.dump(meta, meta_file)
+                with self._sidecar_meta_cache_lock:
+                    self._sidecar_meta_cache.pop(str(sidecar_path), None)
             except OSError:
                 error_message_box = QMessageBox()
                 error_message_box.setWindowTitle('Error')
@@ -7709,6 +7723,32 @@ class ImageListModel(QAbstractListModel):
                 error_message_box.setText(f'Failed to save JSON for {image.path}.')
                 error_message_box.exec()
         self._save_markings_to_db(image)
+
+    @staticmethod
+    def _deduplicate_markings(markings: list[Marking]) -> list[Marking]:
+        deduplicated = []
+        seen = set()
+        for marking in markings:
+            if marking.type in {ImageMarking.CROP, ImageMarking.NONE}:
+                continue
+            rect = marking.rect.normalized()
+            confidence = float(getattr(marking, 'confidence', 1.0) or 1.0)
+            key = (
+                str(marking.label or ''),
+                marking.type,
+                round(confidence, 6),
+                rect.getRect(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduplicated.append(Marking(
+                label=str(marking.label or ''),
+                type=marking.type,
+                rect=rect,
+                confidence=confidence,
+            ))
+        return deduplicated
 
     def restore_history_tags(self, is_undo: bool):
         if is_undo:
