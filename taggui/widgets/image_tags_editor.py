@@ -1,12 +1,12 @@
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QModelIndex, QStringListModel,
-                            QTimer, Qt, Signal, Slot)
-from PySide6.QtGui import QCloseEvent, QKeyEvent, QIcon, QFont, QWheelEvent
+                            QPoint, QTimer, Qt, Signal, Slot)
+from PySide6.QtGui import QColor, QCloseEvent, QKeyEvent, QIcon, QFont, QPalette, QWheelEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
-                               QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
-                               QPushButton, QStackedWidget, QStyle, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QListView,
+                               QMenu, QMessageBox, QPushButton, QStackedWidget, QStyle,
+                               QStyleOptionViewItem, QToolButton, QVBoxLayout, QWidget)
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -119,6 +119,28 @@ class TagInputBox(QLineEdit):
         self.tags_addition_requested.emit(tags, selected_image_indices)
 
 
+class IdeogramCaptionItemDelegate(TextEditItemDelegate):
+    PLACEHOLDERS = {
+        'High-level description...',
+        'Background...',
+    }
+
+    def paint(self, painter, option, index):
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or '')
+        if text not in self.PLACEHOLDERS:
+            super().paint(painter, option, index)
+            return
+
+        paint_option = QStyleOptionViewItem(option)
+        paint_option.font.setItalic(True)
+        paint_option.palette.setColor(QPalette.ColorRole.Text, QColor('#8a8f98'))
+        paint_option.palette.setColor(
+            QPalette.ColorRole.HighlightedText,
+            QColor('#c2c7d0'),
+        )
+        super().paint(painter, paint_option, index)
+
+
 class ImageTagsList(QListView):
     def __init__(
         self,
@@ -126,13 +148,14 @@ class ImageTagsList(QListView):
         deletion_requested=None,
         *,
         lightweight_zoom: bool = False,
+        delegate_cls=TextEditItemDelegate,
     ):
         super().__init__()
         self.image_tag_list_model = image_tag_list_model
         self.deletion_requested = deletion_requested
         self.lightweight_zoom = lightweight_zoom
         self.setModel(self.image_tag_list_model)
-        self.delegate = TextEditItemDelegate(self)
+        self.delegate = delegate_cls(self)
         self.setItemDelegate(self.delegate)
         self.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -232,10 +255,16 @@ class ImageTagsList(QListView):
 
 class ImageTagsEditor(QDockWidget):
     ideogram_element_selected = Signal(int)
-    ideogram_object_add_requested = Signal(str)
+    ideogram_caption_create_requested = Signal()
+    ideogram_region_add_requested = Signal(str, str)
     ideogram_element_text_changed = Signal(int, str, str)
+    ideogram_element_type_change_requested = Signal(int, str)
     ideogram_elements_delete_requested = Signal(list)
     ideogram_json_text_changed = Signal(str)
+    ideogram_global_field_changed = Signal(str, str)
+
+    HIGH_LEVEL_PLACEHOLDER = 'High-level description...'
+    BACKGROUND_PLACEHOLDER = 'Background...'
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_counter_model: TagCounterModel,
@@ -251,7 +280,7 @@ class ImageTagsEditor(QDockWidget):
         self._descriptive_dirty = False
         self._descriptive_sync_delay_ms = 450
         self._loading_ideogram_chips = False
-        self._ideogram_entries: list[tuple[str, int | None]] = []
+        self._ideogram_entries: list[tuple[str, int | None, str | None]] = []
         self._caption_mode = 'tags'
         self._ideogram_available = False
         self._ideogram_json_dirty = False
@@ -264,6 +293,8 @@ class ImageTagsEditor(QDockWidget):
 
         # Create custom title bar with checkbox and standard buttons
         title_widget = QWidget()
+        self._title_widget = title_widget
+        title_widget.installEventFilter(self)
         title_layout = QHBoxLayout(title_widget)
         title_layout.setContentsMargins(6, 2, 6, 2)
         title_layout.setSpacing(4)
@@ -277,6 +308,24 @@ class ImageTagsEditor(QDockWidget):
         self.ideogram_mode_button.setCheckable(True)
         self.ideogram_mode_button.setFlat(True)
         self.ideogram_mode_button.hide()
+        self.create_ideogram_button = QPushButton('+ ID4')
+        self.create_ideogram_button.setFlat(True)
+        self.create_ideogram_button.hide()
+        self.create_ideogram_button.setToolTip('Create an Ideogram 4 JSON caption')
+        self.create_ideogram_button.setStyleSheet("""
+            QPushButton {
+                padding: 1px 5px;
+                border: none;
+                border-radius: 3px;
+                background: transparent;
+                color: #9aa0a6;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #303030;
+                color: #ffffff;
+            }
+        """)
         self._apply_caption_mode_title_style()
         self.descriptive_mode_checkbox = QCheckBox('Desc')
         self.descriptive_mode_checkbox.setToolTip('Descriptive Mode')
@@ -323,6 +372,7 @@ class ImageTagsEditor(QDockWidget):
 
         title_layout.addWidget(self.tags_mode_button)
         title_layout.addWidget(self.ideogram_mode_button)
+        title_layout.addWidget(self.create_ideogram_button)
         title_layout.addStretch()
         title_layout.addWidget(self.descriptive_mode_checkbox)
         title_layout.addWidget(self.grammar_check_button)
@@ -340,10 +390,14 @@ class ImageTagsEditor(QDockWidget):
             self.ideogram_tag_list_model,
             deletion_requested=self._request_ideogram_rows_delete,
             lightweight_zoom=True,
+            delegate_cls=IdeogramCaptionItemDelegate,
         )
         self.ideogram_caption_list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self.ideogram_caption_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.ideogram_caption_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
         self.ideogram_tag_list_model.dataChanged.connect(
             self._on_ideogram_caption_model_changed
         )
@@ -375,7 +429,10 @@ class ImageTagsEditor(QDockWidget):
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.addWidget(self.tag_input_box)
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.addWidget(self.tag_input_box)
+        layout.addLayout(input_layout)
         layout.addWidget(self.caption_stack)
         layout.addWidget(self.token_count_label)
         self.setWidget(container)
@@ -397,8 +454,14 @@ class ImageTagsEditor(QDockWidget):
         )
         self.tags_mode_button.clicked.connect(lambda: self.set_caption_mode('tags'))
         self.ideogram_mode_button.clicked.connect(lambda: self.set_caption_mode('ideogram'))
+        self.create_ideogram_button.clicked.connect(
+            self.ideogram_caption_create_requested.emit
+        )
         self.ideogram_caption_list.selectionModel().currentChanged.connect(
             self._on_ideogram_caption_current_changed
+        )
+        self.ideogram_caption_list.customContextMenuRequested.connect(
+            self._show_ideogram_caption_row_menu
         )
 
         # Now connect descriptive mode signals and load persistent state
@@ -500,9 +563,15 @@ class ImageTagsEditor(QDockWidget):
             return
 
         rows: list[str] = []
+        rows.append(caption.high_level_description or self.HIGH_LEVEL_PLACEHOLDER)
+        self._ideogram_entries.append(('high_level', None, 'high_level_description'))
+        rows.append(caption.compositional_background or self.BACKGROUND_PLACEHOLDER)
+        self._ideogram_entries.append(('background', None, 'background'))
         for chip in ideogram_caption_chips(caption):
+            if chip.kind in {'high_level', 'background'}:
+                continue
             rows.append(chip.text)
-            self._ideogram_entries.append((chip.kind, chip.element_index))
+            self._ideogram_entries.append((chip.kind, chip.element_index, None))
         self.ideogram_tag_list_model.setStringList(rows)
         self.ideogram_json_text_edit.blockSignals(True)
         self.ideogram_json_text_edit.setPlainText(caption.to_json(pretty=True))
@@ -513,6 +582,7 @@ class ImageTagsEditor(QDockWidget):
     def _set_ideogram_available(self, available: bool):
         self._ideogram_available = bool(available)
         self.ideogram_mode_button.setVisible(self._ideogram_available)
+        self.create_ideogram_button.hide()
         self._apply_caption_mode_title_style()
         if not self._ideogram_available and self._caption_mode == 'ideogram':
             self.set_caption_mode('tags')
@@ -592,7 +662,7 @@ class ImageTagsEditor(QDockWidget):
             return
         if current.row() >= len(self._ideogram_entries):
             return
-        _, element_index = self._ideogram_entries[current.row()]
+        _, element_index, _field = self._ideogram_entries[current.row()]
         if element_index is not None:
             self.ideogram_element_selected.emit(int(element_index))
 
@@ -603,27 +673,58 @@ class ImageTagsEditor(QDockWidget):
         for row in range(top_left.row(), bottom_right.row() + 1):
             if row < 0 or row >= len(self._ideogram_entries) or row >= len(rows):
                 continue
-            kind, element_index = self._ideogram_entries[row]
+            kind, element_index, field = self._ideogram_entries[row]
+            value = rows[row].strip()
+            if field is not None:
+                if field == 'high_level_description' and value == self.HIGH_LEVEL_PLACEHOLDER:
+                    value = ''
+                if field == 'background' and value == self.BACKGROUND_PLACEHOLDER:
+                    value = ''
+                self.ideogram_global_field_changed.emit(field, value)
+                continue
             if element_index is None or kind not in {'object', 'text'}:
                 continue
             self.ideogram_element_text_changed.emit(
                 int(element_index),
                 str(kind),
-                rows[row].strip(),
+                value,
+            )
+
+    def _show_ideogram_caption_row_menu(self, position: QPoint):
+        index = self.ideogram_caption_list.indexAt(position)
+        if not index.isValid():
+            return
+        row = index.row()
+        if row < 0 or row >= len(self._ideogram_entries):
+            return
+        kind, element_index, field = self._ideogram_entries[row]
+        if field is not None or element_index is None or kind not in {'object', 'text'}:
+            return
+
+        self.ideogram_caption_list.setCurrentIndex(index)
+        target_type = 'text' if kind == 'object' else 'obj'
+        label = 'Convert to Text region' if target_type == 'text' else 'Convert to Object region'
+        menu = QMenu(self.ideogram_caption_list)
+        action = menu.addAction(label)
+        chosen = menu.exec(self.ideogram_caption_list.viewport().mapToGlobal(position))
+        if chosen is action:
+            self.ideogram_element_type_change_requested.emit(
+                int(element_index),
+                target_type,
             )
 
     def _request_ideogram_object_add(self, tags: list[str]):
         for tag in tags:
             text = str(tag).strip()
             if text:
-                self.ideogram_object_add_requested.emit(text)
+                self.ideogram_region_add_requested.emit('obj', text)
 
     def _request_ideogram_rows_delete(self, rows: list[int]):
         element_indices = []
         for row in rows:
             if row < 0 or row >= len(self._ideogram_entries):
                 continue
-            _, element_index = self._ideogram_entries[row]
+            _, element_index, _field = self._ideogram_entries[row]
             if element_index is not None and element_index not in element_indices:
                 element_indices.append(element_index)
         if element_indices:
@@ -844,10 +945,20 @@ class ImageTagsEditor(QDockWidget):
         self._ideogram_json_sync_timer.start(self._descriptive_sync_delay_ms)
 
     def eventFilter(self, watched, event):
-        if (watched is self.descriptive_text_edit
+        if watched is getattr(self, '_title_widget', None):
+            if event.type() == QEvent.Type.Enter:
+                if (not self._ideogram_available
+                        and self.image_index is not None
+                        and self.image_index.isValid()):
+                    self.create_ideogram_button.show()
+            elif event.type() == QEvent.Type.Leave:
+                self.create_ideogram_button.hide()
+        descriptive_text_edit = getattr(self, 'descriptive_text_edit', None)
+        ideogram_json_text_edit = getattr(self, 'ideogram_json_text_edit', None)
+        if (watched is descriptive_text_edit
                 and event.type() == QEvent.Type.FocusOut):
             self._flush_descriptive_sync()
-        if (watched is self.ideogram_json_text_edit
+        if (watched is ideogram_json_text_edit
                 and event.type() == QEvent.Type.FocusOut):
             self._flush_ideogram_json_sync()
         return super().eventFilter(watched, event)

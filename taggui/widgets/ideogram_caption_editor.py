@@ -327,6 +327,9 @@ class IdeogramCaptionEditor(QDockWidget):
         self.image_viewer.ideogram_geometry_changed.connect(
             self.update_element_geometry
         )
+        self.image_viewer.ideogram_element_type_change_requested.connect(
+            self.change_element_type_from_overlay
+        )
         self.element_type_combo.currentTextChanged.connect(
             self._update_selected_element_fields
         )
@@ -669,6 +672,28 @@ class IdeogramCaptionEditor(QDockWidget):
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
 
+    def create_caption_from_caption_panel(self):
+        if self.current_image is None:
+            return
+        caption = self._empty_caption()
+        self._replace_text(caption.to_json(pretty=True), dirty=True)
+        self.current_caption_path = ideogram_caption_path(self.current_path)
+        self.path_label.setToolTip(str(self.current_caption_path))
+        self.save_caption()
+
+    def update_global_field_from_caption_panel(self, field: str, value: str):
+        try:
+            caption = self._caption_from_editor()
+        except (IdeogramCaptionError, json.JSONDecodeError):
+            return
+        if field == 'high_level_description':
+            caption.high_level_description = str(value or '')
+        elif field == 'background':
+            caption.compositional_background = str(value or '')
+        else:
+            return
+        self._apply_caption_edit(caption)
+
     def update_element_text_from_caption_panel(self, index: int, kind: str, value: str):
         try:
             caption = self._caption_from_editor()
@@ -715,8 +740,8 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_container.hide()
         self._apply_caption_edit(caption)
 
-    def add_object_from_caption_panel(self, description: str):
-        self.add_region("obj", description=description)
+    def add_region_from_caption_panel(self, element_type: str, description: str):
+        self.add_region(element_type, description=description)
 
     def add_region(self, element_type: str, *, description: str = "region"):
         if self.current_image is None:
@@ -729,11 +754,29 @@ class IdeogramCaptionEditor(QDockWidget):
             type="text" if element_type == "text" else "obj",
             desc=description.strip() or "region",
             bbox=(250, 250, 750, 750),
-            text="" if element_type == "text" else None,
+            text=(description.strip() if element_type == "text" else None),
         )
         caption.elements.append(element)
         index = len(caption.elements) - 1
         self.edit_boxes_button.setChecked(True)
+        self._apply_caption_edit(caption)
+        self.select_element(index)
+        self.image_viewer.select_ideogram_element(index)
+
+    def change_element_type_from_overlay(self, index: int, element_type: str):
+        try:
+            caption = self._caption_from_editor()
+            element = caption.elements[index]
+        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
+            return
+        element_type = 'text' if element_type == 'text' else 'obj'
+        if element.type == element_type:
+            return
+        element.type = element_type
+        if element_type == 'text':
+            element.text = element.text or element.desc or ''
+        else:
+            element.text = None
         self._apply_caption_edit(caption)
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)

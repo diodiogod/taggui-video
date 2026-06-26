@@ -365,6 +365,7 @@ class ImageViewer(QWidget):
     video_components_ready = Signal(object, name='videoComponentsReady')
     ideogram_element_selected = Signal(int)
     ideogram_geometry_changed = Signal(int, object)
+    ideogram_element_type_change_requested = Signal(int, str)
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel, *, is_spawned_viewer: bool = False):
         super().__init__()
@@ -3997,9 +3998,14 @@ class ImageViewer(QWidget):
         base_z: float,
         color: QColor,
         parent_item: QGraphicsItem | None = None,
+        element_index: int | None = None,
         tooltip: str = '',
     ):
-        label_item = IdeogramLabelItem(text, color)
+        label_item = IdeogramLabelItem(
+            text,
+            color,
+            element_index=element_index,
+        )
         label_item.setZValue(base_z + 2)
         if tooltip:
             label_item.setToolTip(tooltip)
@@ -4072,6 +4078,7 @@ class ImageViewer(QWidget):
                     'color': color,
                     'tooltip': tooltip,
                     'label_text': label_text,
+                    'element_type': element.type,
                 }
             )
 
@@ -4098,6 +4105,7 @@ class ImageViewer(QWidget):
                     color=entry['color'],
                     on_selected=self.ideogram_element_selected.emit,
                     on_geometry_changed=self.ideogram_geometry_changed.emit,
+                    on_type_change=self.ideogram_element_type_change_requested.emit,
                 )
             else:
                 rect_item = QGraphicsRectItem(
@@ -4133,6 +4141,7 @@ class ImageViewer(QWidget):
                 base_z=base_z,
                 color=entry['color'],
                 parent_item=rect_item,
+                element_index=entry['element_index'],
                 tooltip=entry['tooltip'],
             )
 
@@ -4547,7 +4556,10 @@ class ImageViewer(QWidget):
 
     def get_selected_type(self) -> ImageMarking:
         if len(self.scene.selectedItems()) > 0:
-            return self.scene.selectedItems()[0].rect_type
+            selected_item = self.scene.selectedItems()[0]
+            rect_type = getattr(selected_item, 'rect_type', None)
+            if rect_type is not None:
+                return rect_type
         return ImageMarking.NONE
 
     @Slot()

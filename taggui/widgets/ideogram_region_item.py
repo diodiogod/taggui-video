@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QBrush, QPen
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsRectItem
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsRectItem, QMenu
 
 
 class IdeogramRegionItem(QGraphicsRectItem):
@@ -18,11 +18,13 @@ class IdeogramRegionItem(QGraphicsRectItem):
         color: QColor,
         on_selected,
         on_geometry_changed,
+        on_type_change=None,
     ):
         super().__init__(rect)
         self.element_index = element_index
         self._on_selected = on_selected
         self._on_geometry_changed = on_geometry_changed
+        self._on_type_change = on_type_change
         self._resizing = False
         self._label_item = None
         self._base_color = QColor(color)
@@ -127,6 +129,22 @@ class IdeogramRegionItem(QGraphicsRectItem):
         self._relayout_label()
         scene_rect = self.mapRectToScene(self.rect()).normalized()
         self._on_geometry_changed(self.element_index, scene_rect)
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        if self._on_type_change is None:
+            event.ignore()
+            return
+        self._on_selected(self.element_index)
+        self.setSelected(True)
+        menu = QMenu()
+        object_action = menu.addAction('Convert to Object region')
+        text_action = menu.addAction('Convert to Text region')
+        chosen = menu.exec(event.screenPos())
+        if chosen is object_action:
+            self._on_type_change(self.element_index, 'obj')
+        elif chosen is text_action:
+            self._on_type_change(self.element_index, 'text')
         event.accept()
 
     def paint(self, painter, option, widget=None):

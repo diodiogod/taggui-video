@@ -5717,12 +5717,41 @@ class MainWindow(QMainWindow):
             return
 
         from widgets.marking import MarkingItem, MarkingLabel
+        from widgets.ideogram_region_item import IdeogramRegionItem
 
         current = item
         while current is not None:
             if isinstance(current, (MarkingItem, MarkingLabel)):
                 return
             current = current.parentItem()
+
+        if bool(getattr(self.image_viewer, 'ideogram_editing_enabled', False)):
+            try:
+                scene_items = view.scene().items(scene_pos)
+            except Exception:
+                scene_items = []
+            for scene_item in scene_items:
+                if not isinstance(scene_item, IdeogramRegionItem):
+                    continue
+                scene_item.setSelected(True)
+                self.image_viewer.ideogram_element_selected.emit(
+                    int(scene_item.element_index)
+                )
+                menu = QMenu(self)
+                object_action = menu.addAction("Convert to Object region")
+                text_action = menu.addAction("Convert to Text region")
+                selected = menu.exec(global_pos)
+                if selected is object_action:
+                    self.image_viewer.ideogram_element_type_change_requested.emit(
+                        int(scene_item.element_index),
+                        'obj',
+                    )
+                elif selected is text_action:
+                    self.image_viewer.ideogram_element_type_change_requested.emit(
+                        int(scene_item.element_index),
+                        'text',
+                    )
+                return
 
         checker = getattr(self.image_viewer, "is_compare_mode_active", None)
         compare_active = False

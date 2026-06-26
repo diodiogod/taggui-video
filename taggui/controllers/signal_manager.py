@@ -323,14 +323,23 @@ class SignalManager:
         image_tags_editor.ideogram_element_text_changed.connect(
             self.main_window.ideogram_caption_editor.update_element_text_from_caption_panel
         )
+        image_tags_editor.ideogram_element_type_change_requested.connect(
+            self.main_window.ideogram_caption_editor.change_element_type_from_overlay
+        )
         image_tags_editor.ideogram_elements_delete_requested.connect(
             self.main_window.ideogram_caption_editor.delete_elements_from_caption_panel
         )
         image_tags_editor.ideogram_json_text_changed.connect(
             self.main_window.ideogram_caption_editor.update_json_from_caption_panel
         )
-        image_tags_editor.ideogram_object_add_requested.connect(
-            self.main_window.ideogram_caption_editor.add_object_from_caption_panel
+        image_tags_editor.ideogram_global_field_changed.connect(
+            self.main_window.ideogram_caption_editor.update_global_field_from_caption_panel
+        )
+        image_tags_editor.ideogram_region_add_requested.connect(
+            self.main_window.ideogram_caption_editor.add_region_from_caption_panel
+        )
+        image_tags_editor.ideogram_caption_create_requested.connect(
+            self.main_window.ideogram_caption_editor.create_caption_from_caption_panel
         )
 
     def connect_all_tags_editor_signals(self):

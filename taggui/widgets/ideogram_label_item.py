@@ -13,11 +13,21 @@ class IdeogramLabelItem(QGraphicsItem):
         'Black': QFont.Weight.Black,
     }
 
-    def __init__(self, text: str, accent: QColor, parent=None):
+    def __init__(
+        self,
+        text: str,
+        accent: QColor,
+        parent=None,
+        *,
+        element_index: int | None = None,
+    ):
         super().__init__(parent)
         self._text = str(text or '')
         self._accent = QColor(accent)
         self._anchor_rect = QRectF()
+        self._element_index = element_index
+        if element_index is not None:
+            self.setData(0, int(element_index))
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self._bounding_rect = QRectF()
