@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-26
+
+### Added
+
+- Add Ideogram 4 structured dataset captioning
+- Create, import, edit, validate, and export Ideogram 4 JSON captions
+- Edit object and text bounding boxes directly in the viewer with undo, copy, paste, deletion, reordering, and group resizing
+- Use automatic color sampling, manual pixel picking, palette choices, and configurable overlay appearance
+- Generate structured captions with local vision models or remote APIs, including optional LM Studio JSON-schema enforcement
+- Search structured descriptions and palette colors with database-backed filters
+- Add a dedicated Ideogram workflow guide and updated captioning, filtering, marking, shortcut, and limitation references
+
+### Changed
+
+- Improve marking selection, history restoration, browser state restoration, and viewer refresh reliability
 ## [1.3.18] - 2026-06-17
 
 ### Added
