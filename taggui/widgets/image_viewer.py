@@ -5037,12 +5037,71 @@ class ImageViewer(QWidget):
             return True
 
         scene_pos = self.view.mapToScene(view_pos)
+        element_index = self._retarget_offscreen_ideogram_color_pick(
+            element_index,
+            scene_pos,
+        )
         color = self._sample_image_color_at_scene(scene_pos)
         self.cancel_ideogram_color_pick()
         if color is None:
             return True
         self.ideogram_palette_color_selected.emit(element_index, color.name().upper())
         return True
+
+    def _ideogram_region_item(self, element_index: int):
+        for item in self.ideogram_overlay_items:
+            if not isinstance(item, QGraphicsRectItem):
+                continue
+            if item.parentItem() is not None:
+                continue
+            try:
+                if int(item.data(0)) == int(element_index):
+                    return item
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _ideogram_region_scene_rect(item) -> QRectF:
+        return item.mapRectToScene(item.rect()).normalized()
+
+    def _retarget_offscreen_ideogram_color_pick(
+        self,
+        element_index: int,
+        scene_pos: QPointF,
+    ) -> int:
+        target_item = self._ideogram_region_item(element_index)
+        visible_scene_rect = self.view.mapToScene(
+            self.view.viewport().rect()
+        ).boundingRect()
+        if (
+            target_item is not None
+            and self._ideogram_region_scene_rect(target_item).intersects(
+                visible_scene_rect
+            )
+        ):
+            return element_index
+
+        candidates = []
+        for item in self.ideogram_overlay_items:
+            if not isinstance(item, QGraphicsRectItem):
+                continue
+            if item.parentItem() is not None:
+                continue
+            rect = self._ideogram_region_scene_rect(item)
+            if not rect.contains(scene_pos):
+                continue
+            try:
+                candidate_index = int(item.data(0))
+            except (TypeError, ValueError):
+                continue
+            candidates.append((max(1.0, rect.width() * rect.height()), candidate_index))
+        if not candidates:
+            return element_index
+
+        _, target_index = min(candidates, key=lambda candidate: candidate[0])
+        self.select_ideogram_element(target_index)
+        return target_index
 
     def _sample_image_color_at_scene(self, scene_pos: QPointF) -> QColor | None:
         if self.current_image_item is None:

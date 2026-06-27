@@ -36,6 +36,7 @@ Captioning and tagging remain core to the project, including workflows that supp
 - [Video Surface Controls](docs/VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Floating Viewers and Compare Mode](docs/FLOATING_VIEWERS_USER_GUIDE.md)
 - [Masonry Review Wall and Badges](docs/MASONRY_REVIEW_WALL_GUIDE.md)
+- [Ideogram 4 Structured Captions](docs/IDEOGRAM4_GUIDE.md)
 - [Skins and Skin Designer](docs/SKIN_DESIGNER_GUIDE.md)
 
 ## Support

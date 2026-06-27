@@ -24,7 +24,7 @@ High-level capabilities of TagGUI Video 1M.
 
 - Batch tag operations and filtering
 - Half-star ratings plus local love/bomb reactions
-- Auto-captioning integrations (including native temporal video captioning via Qwen-VL and reasoning constraints)
+- Auto-captioning integrations, including native temporal video captioning and Ideogram 4 structured JSON captions with editable bounding boxes
 - Crop/masking workflow
 - Video frame tools including screenshot, extract, remove, repeat, and repair actions
 - Dataset export pipeline
@@ -34,6 +34,7 @@ High-level capabilities of TagGUI Video 1M.
 - [Getting Started](GETTING_STARTED.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
+- [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)
 - [Compare Guide](COMPARE_GUIDE.md)

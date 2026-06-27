@@ -56,6 +56,21 @@ Fullscreen applies to the main viewer only and works for both images and videos.
 
 To add the same tag to multiple files, select the images first and then add the tag.
 
+When the `Ideogram` mode is active, the same add, edit, delete, and reorder
+interactions operate on structured caption rows. Selecting an element row also
+selects its bounding box in the main viewer.
+
+## Ideogram Regions
+
+- Delete selected regions: `Delete` or `Backspace`
+- Copy and paste selected regions: `Ctrl` + `C` / `Ctrl` + `V`
+- Duplicate selected regions: `Ctrl` + `D`
+- Undo the last recorded edit: `Ctrl` + `Z`
+- Add regions to a multi-selection: `Ctrl`, `Shift`, or `Cmd` + click
+- Move a region: drag inside it
+- Resize a region: drag any edge or corner
+- Convert object/text type: right-click a selected region
+
 ## All Tags Pane
 
 - Show all images containing a tag: select the tag when `Tag click action` is set to `Filter images for tag`

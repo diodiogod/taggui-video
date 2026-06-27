@@ -13,6 +13,7 @@ DEFAULT_SETTINGS = {
     'autocomplete_tags': True,
     'models_directory_path': '',
     'marking_models_directory_path': '',
+    'auto_captioner_model_id': 'Qwen/Qwen2.5-VL-3B-Instruct',
     'export_filter': 'All images',
     'export_preset': 'SDXL, SD3, Flux',
     'export_resolution': 1024,
@@ -94,6 +95,7 @@ DEFAULT_SETTINGS = {
     'video_controls_visibility_mode': 'auto',  # always, auto, off (main viewer)
     'auto_captioner_layout_mode': 'compact',  # compact, classic
     'caption_output_format': 'Plain caption',
+    'remote_ideogram_structured_output': False,
     'review_badge_schema': '',
     'review_badge_text_color': '#FFFFFF',
     'review_badge_font_size': 9,

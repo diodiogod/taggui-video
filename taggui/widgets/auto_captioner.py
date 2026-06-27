@@ -229,6 +229,8 @@ class ClickableLabel(QLabel):
 
 
 class CaptionSettingsForm:
+    MODEL_SETTING_KEY = 'auto_captioner_model_id'
+
     GENERATION_DEFAULTS = {
         'min_new_tokens': 1,
         'max_new_tokens': 100,
@@ -273,7 +275,20 @@ class CaptionSettingsForm:
         self.wd_tagger_tab = None
         self.unload_model_callback = unload_model_callback
 
-        self.model_combo_box = FocusedScrollSettingsComboBox(key='model_id')
+        if not settings.contains(self.MODEL_SETTING_KEY):
+            legacy_model_id = settings.value(
+                'model_id',
+                defaultValue=DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
+                type=str,
+            )
+            settings.setValue(
+                self.MODEL_SETTING_KEY,
+                legacy_model_id or DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
+            )
+        self.model_combo_box = FocusedScrollSettingsComboBox(
+            key=self.MODEL_SETTING_KEY,
+            default=DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
+        )
         self.model_combo_box.setEditable(True)
         self.model_combo_box.setIconSize(QSize(12, 12))
         model_combo_view = self.model_combo_box.view()
@@ -281,6 +296,9 @@ class CaptionSettingsForm:
             model_combo_view.setIconSize(QSize(12, 12))
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
+        self.model_combo_box.currentTextChanged.connect(
+            self._persist_selected_model
+        )
         self.model_cached_icon = self.model_combo_box.style().standardIcon(
             QStyle.StandardPixmap.SP_DialogApplyButton
         )
@@ -437,6 +455,21 @@ class CaptionSettingsForm:
             'Plain caption updates the normal TagGUI caption.\n'
             'Ideogram 4 JSON writes a validated .ideogram.json sidecar and '
             'preserves existing structured regions.'
+        )
+        self.remote_structured_output_check_box = self._make_boolean_checkbox(
+            'remote_ideogram_structured_output',
+            False,
+            self.use_compact_style,
+        )
+        self.remote_structured_output_container = self._make_toggle_row(
+            'Enforce JSON schema (remote)',
+            self.remote_structured_output_check_box,
+            compact=self.use_compact_style,
+        )
+        self.remote_structured_output_container.setToolTip(
+            'Send an OpenAI-compatible response_format JSON schema for '
+            'Ideogram output. LM Studio supports this, but some remote models '
+            'or API-compatible servers do not.'
         )
 
         self.skip_hash_check_box = self._make_boolean_checkbox(
@@ -630,6 +663,13 @@ class CaptionSettingsForm:
         self._apply_output_format_mode(
             self.output_format_combo_box.currentText()
         )
+
+    def _persist_selected_model(self, model_id: str):
+        model_id = str(model_id or '').strip()
+        if not model_id:
+            return
+        settings.setValue(self.MODEL_SETTING_KEY, model_id)
+        settings.sync()
 
     def _make_form(self, *, wrap_all_rows: bool = True, label_right: bool = False) -> QFormLayout:
         form = QFormLayout()
@@ -914,6 +954,7 @@ class CaptionSettingsForm:
         form.addRow('API Model Name', self.api_model_line_edit)
         form.addRow('Max output tokens', self.api_max_tokens_spin_box)
         form.addRow('Remote timeout', self.api_timeout_spin_box)
+        form.addRow(self.remote_structured_output_container)
         form.addRow('Video FPS', self.video_fps_spin_box)
         form.addRow('Max video frames', self.video_max_frames_spin_box)
         form.addRow(self.disable_thinking_container)
@@ -941,6 +982,7 @@ class CaptionSettingsForm:
         form.addRow('API Model Name', self.api_model_line_edit)
         form.addRow('Max output tokens', self.api_max_tokens_spin_box)
         form.addRow('Remote timeout', self.api_timeout_spin_box)
+        form.addRow(self.remote_structured_output_container)
         self.compact_video_controls_row = self._make_dual_field_row(
             'Video FPS',
             self.video_fps_spin_box,
@@ -1392,6 +1434,7 @@ class CaptionSettingsForm:
             self.basic_settings_form.setRowVisible(self.api_model_line_edit, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_max_tokens_spin_box, is_remote_model)
             self.basic_settings_form.setRowVisible(self.api_timeout_spin_box, is_remote_model)
+            self._update_remote_structured_output_visibility()
             if self.use_compact_style:
                 if self.compact_video_controls_row is not None:
                     self.compact_video_controls_row.setVisible(
@@ -1452,6 +1495,22 @@ class CaptionSettingsForm:
         )
         for widget in ignored_controls:
             widget.setToolTip(explanation)
+        self._update_remote_structured_output_visibility()
+
+    def _update_remote_structured_output_visibility(self):
+        container = getattr(self, 'remote_structured_output_container', None)
+        if container is None:
+            return
+        visible = (
+            get_model_class(self.model_combo_box.currentText()) == RemoteGen
+            and self.output_format_combo_box.currentText() == 'Ideogram 4 JSON'
+        )
+        container.setVisible(visible)
+        if self.basic_settings_form is not None:
+            try:
+                self.basic_settings_form.setRowVisible(container, visible)
+            except (AttributeError, TypeError):
+                pass
 
     @staticmethod
     def _prompting_keys_for_mode(mode: str) -> tuple[str, str]:
@@ -1554,6 +1613,9 @@ class CaptionSettingsForm:
             'disable_thinking': self.disable_thinking_check_box.isChecked(),
             'system_prompt': self.system_prompt_text_edit.toPlainText(),
             'output_format': self.output_format_combo_box.currentText(),
+            'remote_ideogram_structured_output': (
+                self.remote_structured_output_check_box.isChecked()
+            ),
             'prompt': self.prompt_text_edit.toPlainText(),
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),

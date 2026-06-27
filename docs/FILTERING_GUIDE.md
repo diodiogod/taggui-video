@@ -122,6 +122,25 @@ Example:
 caption:cat
 ```
 
+Caption searches include normal caption text and indexed Ideogram structured
+caption text.
+
+### `ideogram:`
+
+Matches searchable descriptions and text from Ideogram JSON sidecars.
+
+```text
+ideogram:"bridge tower"
+```
+
+### `ideogram_color:`
+
+Matches indexed Ideogram palette colors.
+
+```text
+ideogram_color:"#34D6C7"
+```
+
 ### `marking:`
 
 Matches files containing a marking label.
@@ -379,7 +398,7 @@ tag:"orange cat"
 ## Current Limitations in Video 1M
 
 > [!WARNING]
-> In the current paginated and DB-backed Video 1M path, not every filter type is implemented in SQL yet. Tags, star ratings, local love/bomb reactions, and basic marking predicates such as `marking:` and `marking_type:` have DB-backed support, but geometry-aware marking predicates such as `crops:` and `visible:` are still tied to in-memory or sidecar metadata behavior rather than a full SQL-backed filter path.
+> In the current paginated and DB-backed Video 1M path, not every filter type is implemented in SQL yet. Tags, star ratings, local love/bomb reactions, Ideogram text/colors, and basic marking predicates such as `marking:` and `marking_type:` have DB-backed support, but geometry-aware marking predicates such as `crops:` and `visible:` are still tied to in-memory or sidecar metadata behavior rather than a full SQL-backed filter path.
 
 > [!NOTE]
 > The parser supports more filter syntax than the current DB-backed paginated path accelerates. If a filter feels inconsistent in very large paginated datasets, this implementation gap is one of the first things to check.
@@ -395,4 +414,5 @@ tag:"orange cat"
 
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
+- [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)
 - [Export Guide](EXPORT_GUIDE.md)

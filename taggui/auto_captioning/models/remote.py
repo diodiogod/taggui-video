@@ -12,6 +12,7 @@ from PIL import Image as PilImage
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.model_availability import MODEL_ARTIFACT_KIND_REMOTE
 from models.image_list_model import _video_lock
+from utils.ideogram_caption import ideogram_caption_response_format
 from utils.image import Image
 import auto_captioning.captioning_thread as captioning_thread
 
@@ -253,19 +254,26 @@ class RemoteGen(AutoCaptioningModel):
         )
         temperature = self.generation_parameters.get('temperature', 1.0)
         top_p = self.generation_parameters.get('top_p', 1.0)
+        use_structured_output = bool(
+            self.caption_settings.get('remote_ideogram_structured_output', False)
+            and self.caption_settings.get('output_format') == 'Ideogram 4 JSON'
+        )
+        request_payload = {
+            'model': self._api_model_name,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': temperature,
+            'top_p': top_p,
+        }
+        if use_structured_output:
+            request_payload['response_format'] = ideogram_caption_response_format()
 
         try:
             endpoint = self._get_next_endpoint()
             generation_start = perf_counter()
             response = requests.post(
                 endpoint,
-                json={
-                    'model': self._api_model_name,
-                    'messages': messages,
-                    'max_tokens': max_tokens,
-                    'temperature': temperature,
-                    'top_p': top_p,
-                },
+                json=request_payload,
                 headers=self.headers,
                 timeout=max(10, timeout_seconds),
             )
@@ -273,6 +281,11 @@ class RemoteGen(AutoCaptioningModel):
 
             if response.status_code != 200:
                 error_msg = f'API Error {response.status_code}: {response.text[:300]}'
+                if use_structured_output:
+                    error_msg += (
+                        ' (The endpoint may not support JSON-schema structured '
+                        'output; disable the structured-output option and retry.)'
+                    )
                 print(error_msg)
                 return '', error_msg
 

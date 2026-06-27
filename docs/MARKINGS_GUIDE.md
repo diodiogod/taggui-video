@@ -154,6 +154,12 @@ The UI and code indicate support for:
 
 This is useful when you already have YOLO or ADetailer-style detection models and want to accelerate masking or annotation work.
 
+Non-crop markings can also seed an Ideogram 4 structured caption. The dedicated
+Ideogram panel can import them as object regions, and the Auto-Captioner uses
+them as locked regions when creating a new Ideogram sidecar. Exact duplicate
+regions are skipped while distinct overlaps remain valid. See the
+[Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md).
+
 ## Display Toggles
 
 The marking system includes display toggles for:

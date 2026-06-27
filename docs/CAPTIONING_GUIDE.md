@@ -70,6 +70,17 @@ The raw JSON editor is collapsed by default. Selecting a different image loads
 its preferred `.ideogram.json` sidecar immediately; a legacy sibling `.json`
 is accepted only when it matches the Ideogram schema.
 
+The Image Tags pane also provides an integrated `Ideogram` mode for editing
+structured fields with tag-like rows, selecting viewer boxes, reordering
+elements, and adding object regions through the normal `Add Tag` field.
+
+When using the `Remote` backend, `Enforce JSON schema (remote)` can attach a
+structured-output schema to Ideogram requests. LM Studio supports this mode;
+leave it disabled for API-compatible servers or models that do not.
+
+See the [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md) for viewer
+editing, palettes, filtering, settings, shortcuts, and sidecar details.
+
 ## Main Fields
 
 The current UI exposes these main captioning controls.

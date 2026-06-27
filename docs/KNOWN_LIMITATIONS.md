@@ -13,9 +13,16 @@ Current known constraints in TagGUI Video 1M.
 
 ## Video Captioning
 
-- Current video captioning support is frame-based.
-- TagGUI captions one frame per video plus any saved crop region: the current viewer frame for a single loaded video, or for batch captioning the saved loop-start frame when available and otherwise frame `0`.
-- It does not yet perform full-video timeline-aware captioning across an entire clip.
+- Video behavior depends on the selected model family.
+- Image-first models caption one representative frame.
+- Qwen-VL and Gemma 4 support native temporal video input with configurable sampling.
+- The remote backend sends an ordered sequence of sampled frames; quality and context limits depend on the remote model and server.
+
+## Ideogram Structured Captions
+
+- JSON-schema structured output is optional because not every remote model or OpenAI-compatible server supports it.
+- Schema enforcement guarantees structural validity, not accurate descriptions, text recognition, colors, or bounding boxes.
+- `.ideogram.json` sidecars remain the source of truth even though their searchable text and palette terms are indexed in the folder database.
 
 ## Video and Playback
 
@@ -36,3 +43,4 @@ Current known constraints in TagGUI Video 1M.
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Video Backends](VIDEO_BACKENDS.md)
 - [Export Guide](EXPORT_GUIDE.md)
+- [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)

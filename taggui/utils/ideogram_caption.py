@@ -18,6 +18,112 @@ IDEOGRAM_DUPLICATE_BBOX_TOLERANCE = 2
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-F]{6}$", re.IGNORECASE)
 
 
+def ideogram_caption_response_format() -> dict[str, Any]:
+    """Return an OpenAI-compatible structured-output schema for Ideogram JSON."""
+    bbox_schema = {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "minItems": 4,
+        "maxItems": 4,
+    }
+    palette_schema = {
+        "type": "array",
+        "items": {"type": "string", "pattern": r"^#[0-9A-F]{6}$"},
+        "maxItems": 5,
+    }
+    object_element = {
+        "type": "object",
+        "properties": {
+            "type": {"const": "obj"},
+            "bbox": bbox_schema,
+            "desc": {"type": "string"},
+            "color_palette": palette_schema,
+        },
+        "required": ["type", "bbox", "desc"],
+        "additionalProperties": False,
+    }
+    text_element = {
+        "type": "object",
+        "properties": {
+            "type": {"const": "text"},
+            "bbox": bbox_schema,
+            "text": {"type": "string"},
+            "desc": {"type": "string"},
+            "color_palette": palette_schema,
+        },
+        "required": ["type", "bbox", "text", "desc"],
+        "additionalProperties": False,
+    }
+    style_common = {
+        "aesthetics": {"type": "string"},
+        "lighting": {"type": "string"},
+        "medium": {"type": "string"},
+        "color_palette": {
+            **palette_schema,
+            "maxItems": 16,
+        },
+    }
+    style_schema = {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **style_common,
+                    "photo": {"type": "string"},
+                },
+                "required": ["aesthetics", "lighting", "photo", "medium"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **style_common,
+                    "art_style": {"type": "string"},
+                },
+                "required": ["aesthetics", "lighting", "medium", "art_style"],
+                "additionalProperties": False,
+            },
+        ]
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "aspect_ratio": {
+                "type": "string",
+                "pattern": r"^[1-9][0-9]*:[1-9][0-9]*$",
+            },
+            "high_level_description": {"type": "string"},
+            "style_description": style_schema,
+            "compositional_deconstruction": {
+                "type": "object",
+                "properties": {
+                    "background": {"type": "string"},
+                    "elements": {
+                        "type": "array",
+                        "items": {"oneOf": [object_element, text_element]},
+                    },
+                },
+                "required": ["background", "elements"],
+                "additionalProperties": False,
+            },
+        },
+        "required": [
+            "aspect_ratio",
+            "high_level_description",
+            "compositional_deconstruction",
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "ideogram4_caption",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
 class IdeogramCaptionError(ValueError):
     """Raised when an Ideogram caption cannot be parsed or validated."""
 
