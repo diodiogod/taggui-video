@@ -82,6 +82,7 @@ DEFAULT_SETTINGS = {
     'ideogram_overlay_description_font_size': 10,
     'ideogram_overlay_description_text_alpha': 190,
     'ideogram_overlay_description_background_alpha': 115,
+    'ideogram_overlay_description_text_color': '#FFFFFF',
     'ideogram_overlay_text_color': '#FFFFFF',
     'ideogram_overlay_outline_color': '#000000',
     'ideogram_overlay_background_color': '#040608',

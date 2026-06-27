@@ -4296,14 +4296,13 @@ class ImageViewer(QWidget):
 
             label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
             label_text = f'{index:02d} {label_kind}'
-            inside_text = f'{label_kind}: {element.desc or "region"}'
+            inside_text = element.desc or 'region'
             tooltip_parts = [element.desc]
             if element.type == 'text' and element.text:
                 label_text += f' "{element.text}"'
-                inside_text = (
-                    f'{label_kind}: "{element.text}" - '
-                    f'{element.desc or "region"}'
-                )
+                inside_text = f'"{element.text}"'
+                if element.desc:
+                    inside_text += f' - {element.desc}'
             if element.color_palette:
                 tooltip_parts.append(
                     f'Selected color: {element.color_palette[0]}'

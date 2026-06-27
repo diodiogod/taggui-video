@@ -13,6 +13,8 @@ class IdeogramRegionItem(QGraphicsRectItem):
 
     HANDLE_SIZE = 16.0
     PALETTE_STRIP_SIZE = 22.0
+    MIN_PALETTE_SWATCH_SCREEN_WIDTH = 14.0
+    MIN_PALETTE_REGION_SCREEN_HEIGHT = 50.0
     MIN_SIZE = 2.0
 
     def __init__(
@@ -163,19 +165,39 @@ class IdeogramRegionItem(QGraphicsRectItem):
         }
         return handle_rects
 
-    def _palette_strip_height(self) -> float:
-        if not self._palette_colors:
-            return 0.0
-        size = self.PALETTE_STRIP_SIZE
+    def _view_scale(self) -> float:
         scene = self.scene()
         if scene is not None and scene.views():
             scale = abs(scene.views()[0].transform().m11())
             if scale > 0:
-                size = self.PALETTE_STRIP_SIZE / scale
+                return scale
+        return 1.0
+
+    def _palette_is_visible(self) -> bool:
+        if not self._palette_colors:
+            return False
+        scale = self._view_scale()
+        screen_width = self.rect().width() * scale
+        screen_height = self.rect().height() * scale
+        required_width = (
+            len(self._palette_colors) * self.MIN_PALETTE_SWATCH_SCREEN_WIDTH
+        )
+        return (
+            screen_width >= required_width
+            and screen_height >= self.MIN_PALETTE_REGION_SCREEN_HEIGHT
+        )
+
+    def _palette_strip_height(self) -> float:
+        if not self._palette_is_visible():
+            return 0.0
+        size = self.PALETTE_STRIP_SIZE
+        scale = self._view_scale()
+        if scale > 0:
+            size = self.PALETTE_STRIP_SIZE / scale
         return min(max(3.0, size), max(1.0, self.rect().height()))
 
     def _palette_index_at(self, point: QPointF) -> int | None:
-        if not self._palette_colors:
+        if not self._palette_is_visible():
             return None
         rect = self.rect()
         if (
@@ -355,11 +377,13 @@ class IdeogramRegionItem(QGraphicsRectItem):
         text_color = QColor(
             str(
                 settings.value(
-                    'ideogram_overlay_text_color',
-                    defaultValue=DEFAULT_SETTINGS['ideogram_overlay_text_color'],
+                    'ideogram_overlay_description_text_color',
+                    defaultValue=DEFAULT_SETTINGS[
+                        'ideogram_overlay_description_text_color'
+                    ],
                     type=str,
                 )
-                or DEFAULT_SETTINGS['ideogram_overlay_text_color']
+                or DEFAULT_SETTINGS['ideogram_overlay_description_text_color']
             )
         )
         text_color.setAlpha(text_alpha)
@@ -732,7 +756,7 @@ class IdeogramRegionItem(QGraphicsRectItem):
         painter.setBrush(self.brush())
         painter.drawRect(rect)
 
-        if self._palette_colors:
+        if self._palette_is_visible():
             strip_height = self._palette_strip_height()
             strip_width = rect.width() / len(self._palette_colors)
             painter.setPen(Qt.PenStyle.NoPen)

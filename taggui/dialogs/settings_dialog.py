@@ -680,6 +680,7 @@ class IdeogramOverlayPreviewWidget(QWidget):
         'ideogram_overlay_description_font_size',
         'ideogram_overlay_description_text_alpha',
         'ideogram_overlay_description_background_alpha',
+        'ideogram_overlay_description_text_color',
         'ideogram_overlay_text_color',
         'ideogram_overlay_outline_color',
         'ideogram_overlay_background_color',
@@ -793,9 +794,9 @@ class IdeogramOverlayPreviewWidget(QWidget):
         self._scene.addItem(desc_background)
 
         desc_text = QGraphicsTextItem(
-            'OBJ: weathered bridge tower with concrete texture'
+            'weathered bridge tower with concrete texture'
             if 'OBJ' in text
-            else 'TEXT: readable sign on the wall'
+            else '"OPEN" - readable sign on the wall'
         )
         desc_text.setTextWidth(desc_rect.width())
         desc_font = QFont()
@@ -804,7 +805,9 @@ class IdeogramOverlayPreviewWidget(QWidget):
         )
         desc_font.setWeight(QFont.Weight.DemiBold)
         desc_text.setFont(desc_font)
-        desc_color = self._setting_color('ideogram_overlay_text_color')
+        desc_color = self._setting_color(
+            'ideogram_overlay_description_text_color'
+        )
         desc_color.setAlpha(
             max(
                 0,
@@ -1535,6 +1538,11 @@ class SettingsDialog(QDialog):
             DEFAULT_SETTINGS['ideogram_overlay_text_color'],
             type=str,
         )
+        self._ideogram_description_text_color = settings.value(
+            'ideogram_overlay_description_text_color',
+            DEFAULT_SETTINGS['ideogram_overlay_description_text_color'],
+            type=str,
+        )
         self._ideogram_outline_color = settings.value(
             'ideogram_overlay_outline_color',
             DEFAULT_SETTINGS['ideogram_overlay_outline_color'],
@@ -1547,21 +1555,31 @@ class SettingsDialog(QDialog):
         )
 
         self.ideogram_text_color_button = QPushButton()
+        self.ideogram_description_text_color_button = QPushButton()
         self.ideogram_outline_color_button = QPushButton()
         self.ideogram_background_color_button = QPushButton()
         self._apply_badge_color_button_style(self.ideogram_text_color_button, self._ideogram_text_color)
+        self._apply_badge_color_button_style(
+            self.ideogram_description_text_color_button,
+            self._ideogram_description_text_color,
+        )
         self._apply_badge_color_button_style(self.ideogram_outline_color_button, self._ideogram_outline_color)
         self._apply_badge_color_button_style(self.ideogram_background_color_button, self._ideogram_background_color)
         self.ideogram_text_color_button.clicked.connect(lambda: self._pick_ideogram_color('text'))
+        self.ideogram_description_text_color_button.clicked.connect(
+            lambda: self._pick_ideogram_color('description_text')
+        )
         self.ideogram_outline_color_button.clicked.connect(lambda: self._pick_ideogram_color('outline'))
         self.ideogram_background_color_button.clicked.connect(lambda: self._pick_ideogram_color('background'))
 
-        colors_layout.addWidget(QLabel('Text color'), 0, 0, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(QLabel('Label text color'), 0, 0, Qt.AlignmentFlag.AlignRight)
         colors_layout.addWidget(self.ideogram_text_color_button, 0, 1)
-        colors_layout.addWidget(QLabel('Outline color'), 0, 2, Qt.AlignmentFlag.AlignRight)
-        colors_layout.addWidget(self.ideogram_outline_color_button, 0, 3)
-        colors_layout.addWidget(QLabel('Background color'), 1, 0, Qt.AlignmentFlag.AlignRight)
-        colors_layout.addWidget(self.ideogram_background_color_button, 1, 1)
+        colors_layout.addWidget(QLabel('Box text color'), 0, 2, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(self.ideogram_description_text_color_button, 0, 3)
+        colors_layout.addWidget(QLabel('Outline color'), 1, 0, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(self.ideogram_outline_color_button, 1, 1)
+        colors_layout.addWidget(QLabel('Background color'), 1, 2, Qt.AlignmentFlag.AlignRight)
+        colors_layout.addWidget(self.ideogram_background_color_button, 1, 3)
         layout.addWidget(colors_group)
 
         reset_button = QPushButton('Reset Ideogram Label Defaults')
@@ -1581,6 +1599,14 @@ class SettingsDialog(QDialog):
             self._ideogram_text_color = color_hex
             self._apply_badge_color_button_style(self.ideogram_text_color_button, color_hex)
             settings.setValue('ideogram_overlay_text_color', color_hex)
+            return
+        if role == 'description_text':
+            self._ideogram_description_text_color = color_hex
+            self._apply_badge_color_button_style(
+                self.ideogram_description_text_color_button,
+                color_hex,
+            )
+            settings.setValue('ideogram_overlay_description_text_color', color_hex)
             return
         if role == 'outline':
             self._ideogram_outline_color = color_hex
@@ -1605,6 +1631,7 @@ class SettingsDialog(QDialog):
             'ideogram_overlay_description_font_size': DEFAULT_SETTINGS['ideogram_overlay_description_font_size'],
             'ideogram_overlay_description_text_alpha': DEFAULT_SETTINGS['ideogram_overlay_description_text_alpha'],
             'ideogram_overlay_description_background_alpha': DEFAULT_SETTINGS['ideogram_overlay_description_background_alpha'],
+            'ideogram_overlay_description_text_color': DEFAULT_SETTINGS['ideogram_overlay_description_text_color'],
             'ideogram_overlay_text_color': DEFAULT_SETTINGS['ideogram_overlay_text_color'],
             'ideogram_overlay_outline_color': DEFAULT_SETTINGS['ideogram_overlay_outline_color'],
             'ideogram_overlay_background_color': DEFAULT_SETTINGS['ideogram_overlay_background_color'],
@@ -1612,9 +1639,16 @@ class SettingsDialog(QDialog):
         for key, value in reset_values.items():
             settings.setValue(key, value)
         self._ideogram_text_color = reset_values['ideogram_overlay_text_color']
+        self._ideogram_description_text_color = reset_values[
+            'ideogram_overlay_description_text_color'
+        ]
         self._ideogram_outline_color = reset_values['ideogram_overlay_outline_color']
         self._ideogram_background_color = reset_values['ideogram_overlay_background_color']
         self._apply_badge_color_button_style(self.ideogram_text_color_button, self._ideogram_text_color)
+        self._apply_badge_color_button_style(
+            self.ideogram_description_text_color_button,
+            self._ideogram_description_text_color,
+        )
         self._apply_badge_color_button_style(self.ideogram_outline_color_button, self._ideogram_outline_color)
         self._apply_badge_color_button_style(self.ideogram_background_color_button, self._ideogram_background_color)
 
