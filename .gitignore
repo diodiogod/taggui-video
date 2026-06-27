@@ -131,6 +131,7 @@ venv.bak/
 
 # Local repo artifacts
 .taggui_index.db
+.taggui/
 .gitignored/
 .codex
 
