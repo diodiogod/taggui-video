@@ -145,4 +145,3 @@ Ideogram caption text and palette terms are indexed in the folder database for p
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
-
