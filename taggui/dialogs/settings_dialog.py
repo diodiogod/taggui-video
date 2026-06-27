@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
                                QApplication, QGroupBox, QProgressDialog, QGraphicsItem,
                                QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem,
+                               QGraphicsTextItem,
                                QGraphicsView)
 
 from pathlib import Path
@@ -676,6 +677,9 @@ class IdeogramOverlayPreviewWidget(QWidget):
         'ideogram_overlay_line_halo_px',
         'ideogram_overlay_line_halo_alpha',
         'ideogram_overlay_background_alpha',
+        'ideogram_overlay_description_font_size',
+        'ideogram_overlay_description_text_alpha',
+        'ideogram_overlay_description_background_alpha',
         'ideogram_overlay_text_color',
         'ideogram_overlay_outline_color',
         'ideogram_overlay_background_color',
@@ -769,6 +773,50 @@ class IdeogramOverlayPreviewWidget(QWidget):
         strip.setPen(QPen(Qt.PenStyle.NoPen))
         strip.setBrush(accent)
         self._scene.addItem(strip)
+
+        desc_rect = rect.adjusted(6.0, strip_height + 6.0, -6.0, -6.0)
+        desc_background = QGraphicsRectItem(desc_rect.adjusted(-4.0, -3.0, 4.0, 3.0))
+        desc_background.setPen(QPen(Qt.PenStyle.NoPen))
+        desc_brush = QColor('#05070A')
+        desc_brush.setAlpha(
+            max(
+                0,
+                min(
+                    255,
+                    self._setting_int(
+                        'ideogram_overlay_description_background_alpha'
+                    ),
+                ),
+            )
+        )
+        desc_background.setBrush(desc_brush)
+        self._scene.addItem(desc_background)
+
+        desc_text = QGraphicsTextItem(
+            'OBJ: weathered bridge tower with concrete texture'
+            if 'OBJ' in text
+            else 'TEXT: readable sign on the wall'
+        )
+        desc_text.setTextWidth(desc_rect.width())
+        desc_font = QFont()
+        desc_font.setPointSize(
+            self._setting_int('ideogram_overlay_description_font_size')
+        )
+        desc_font.setWeight(QFont.Weight.DemiBold)
+        desc_text.setFont(desc_font)
+        desc_color = self._setting_color('ideogram_overlay_text_color')
+        desc_color.setAlpha(
+            max(
+                0,
+                min(
+                    255,
+                    self._setting_int('ideogram_overlay_description_text_alpha'),
+                ),
+            )
+        )
+        desc_text.setDefaultTextColor(desc_color)
+        desc_text.setPos(desc_rect.topLeft())
+        self._scene.addItem(desc_text)
 
         inner = QGraphicsRectItem(rect)
         inner.setPen(QPen(accent, border_width, Qt.PenStyle.SolidLine))
@@ -1410,6 +1458,36 @@ class SettingsDialog(QDialog):
         )
         alpha_value_label = QLabel(str(alpha_slider.value()))
         alpha_slider.valueChanged.connect(lambda value: alpha_value_label.setText(str(int(value))))
+        desc_font_size_spin = SettingsSpinBox(
+            key='ideogram_overlay_description_font_size',
+            minimum=6,
+            maximum=24,
+            default=DEFAULT_SETTINGS['ideogram_overlay_description_font_size'],
+        )
+        desc_text_alpha_slider = SettingsSlider(
+            key='ideogram_overlay_description_text_alpha',
+            minimum=0,
+            maximum=255,
+            default=DEFAULT_SETTINGS['ideogram_overlay_description_text_alpha'],
+        )
+        desc_text_alpha_value_label = QLabel(str(desc_text_alpha_slider.value()))
+        desc_text_alpha_slider.valueChanged.connect(
+            lambda value: desc_text_alpha_value_label.setText(str(int(value)))
+        )
+        desc_background_alpha_slider = SettingsSlider(
+            key='ideogram_overlay_description_background_alpha',
+            minimum=0,
+            maximum=255,
+            default=DEFAULT_SETTINGS[
+                'ideogram_overlay_description_background_alpha'
+            ],
+        )
+        desc_background_alpha_value_label = QLabel(
+            str(desc_background_alpha_slider.value())
+        )
+        desc_background_alpha_slider.valueChanged.connect(
+            lambda value: desc_background_alpha_value_label.setText(str(int(value)))
+        )
 
         controls_layout.addWidget(QLabel('Font size'), 0, 0, Qt.AlignmentFlag.AlignRight)
         controls_layout.addWidget(font_size_spin, 0, 1)
@@ -1435,6 +1513,16 @@ class SettingsDialog(QDialog):
         controls_layout.addWidget(QLabel('Background alpha'), 4, 0, Qt.AlignmentFlag.AlignRight)
         controls_layout.addWidget(alpha_slider, 4, 1, 1, 2)
         controls_layout.addWidget(alpha_value_label, 4, 3, Qt.AlignmentFlag.AlignLeft)
+
+        controls_layout.addWidget(QLabel('Box text size'), 5, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(desc_font_size_spin, 5, 1)
+        controls_layout.addWidget(QLabel('Box text alpha'), 5, 2, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(desc_text_alpha_slider, 5, 3)
+        controls_layout.addWidget(desc_text_alpha_value_label, 5, 4, Qt.AlignmentFlag.AlignLeft)
+
+        controls_layout.addWidget(QLabel('Box fill alpha'), 6, 0, Qt.AlignmentFlag.AlignRight)
+        controls_layout.addWidget(desc_background_alpha_slider, 6, 1, 1, 2)
+        controls_layout.addWidget(desc_background_alpha_value_label, 6, 3, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(controls_group)
 
         colors_group = QGroupBox('Colors')
@@ -1514,6 +1602,9 @@ class SettingsDialog(QDialog):
             'ideogram_overlay_line_halo_px': DEFAULT_SETTINGS['ideogram_overlay_line_halo_px'],
             'ideogram_overlay_line_halo_alpha': DEFAULT_SETTINGS['ideogram_overlay_line_halo_alpha'],
             'ideogram_overlay_background_alpha': DEFAULT_SETTINGS['ideogram_overlay_background_alpha'],
+            'ideogram_overlay_description_font_size': DEFAULT_SETTINGS['ideogram_overlay_description_font_size'],
+            'ideogram_overlay_description_text_alpha': DEFAULT_SETTINGS['ideogram_overlay_description_text_alpha'],
+            'ideogram_overlay_description_background_alpha': DEFAULT_SETTINGS['ideogram_overlay_description_background_alpha'],
             'ideogram_overlay_text_color': DEFAULT_SETTINGS['ideogram_overlay_text_color'],
             'ideogram_overlay_outline_color': DEFAULT_SETTINGS['ideogram_overlay_outline_color'],
             'ideogram_overlay_background_color': DEFAULT_SETTINGS['ideogram_overlay_background_color'],

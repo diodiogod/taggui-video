@@ -1,7 +1,7 @@
 """Interactive graphics item for Ideogram structured-caption regions."""
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QBrush, QPen
+from PySide6.QtGui import QColor, QBrush, QFont, QPen, QTextOption
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsRectItem, QMenu
 
 from utils.rect import RectPosition, change_rectF, map_rect_position_to_cursor
@@ -26,6 +26,7 @@ class IdeogramRegionItem(QGraphicsRectItem):
         on_type_change=None,
         on_palette_color_selected=None,
         palette_colors=None,
+        inside_text: str = '',
     ):
         super().__init__(rect)
         self.element_index = element_index
@@ -36,6 +37,8 @@ class IdeogramRegionItem(QGraphicsRectItem):
         self._drag_handle = RectPosition.NONE
         self._label_item = None
         self._base_color = QColor(color)
+        self._highlighted = False
+        self._inside_text = inside_text.strip()
         self._palette_colors = [
             QColor(palette_color)
             for palette_color in (palette_colors or [])
@@ -70,6 +73,7 @@ class IdeogramRegionItem(QGraphicsRectItem):
         return super().boundingRect().adjusted(-outset, -outset, outset, outset)
 
     def set_highlighted(self, highlighted: bool):
+        self._highlighted = bool(highlighted)
         pen = QPen(self._base_color, 4 if highlighted else 2)
         pen.setCosmetic(True)
         pen.setStyle(Qt.PenStyle.SolidLine if highlighted else Qt.PenStyle.DashLine)
@@ -261,6 +265,57 @@ class IdeogramRegionItem(QGraphicsRectItem):
         color.setAlpha(IdeogramRegionItem._configured_halo_alpha())
         return color
 
+    @staticmethod
+    def _configured_description_font_size() -> int:
+        return max(
+            6,
+            int(
+                settings.value(
+                    'ideogram_overlay_description_font_size',
+                    defaultValue=DEFAULT_SETTINGS[
+                        'ideogram_overlay_description_font_size'
+                    ],
+                    type=int,
+                )
+            ),
+        )
+
+    @staticmethod
+    def _configured_description_text_alpha() -> int:
+        return max(
+            0,
+            min(
+                255,
+                int(
+                    settings.value(
+                        'ideogram_overlay_description_text_alpha',
+                        defaultValue=DEFAULT_SETTINGS[
+                            'ideogram_overlay_description_text_alpha'
+                        ],
+                        type=int,
+                    )
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _configured_description_background_alpha() -> int:
+        return max(
+            0,
+            min(
+                255,
+                int(
+                    settings.value(
+                        'ideogram_overlay_description_background_alpha',
+                        defaultValue=DEFAULT_SETTINGS[
+                            'ideogram_overlay_description_background_alpha'
+                        ],
+                        type=int,
+                    )
+                ),
+            ),
+        )
+
     def _cursor_at(self, point: QPointF):
         handle = self._handle_at(point)
         if handle not in (RectPosition.NONE, RectPosition.CENTER):
@@ -268,6 +323,57 @@ class IdeogramRegionItem(QGraphicsRectItem):
         if self._palette_index_at(point) is not None:
             return Qt.CursorShape.PointingHandCursor
         return map_rect_position_to_cursor(handle)
+
+    def _draw_inside_description(self, painter, rect: QRectF):
+        if not self._inside_text:
+            return
+        if rect.width() < 28.0 or rect.height() < 24.0:
+            return
+
+        strip_height = self._palette_strip_height()
+        margin = max(2.0, min(rect.width(), rect.height()) * 0.035)
+        text_rect = rect.adjusted(margin, strip_height + margin, -margin, -margin)
+        if text_rect.width() < 18.0 or text_rect.height() < 12.0:
+            return
+
+        background_alpha = self._configured_description_background_alpha()
+        if background_alpha > 0:
+            background = QColor('#05070A')
+            background.setAlpha(background_alpha)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRect(text_rect.adjusted(-margin, -margin, margin, margin))
+
+        text_alpha = self._configured_description_text_alpha()
+        if text_alpha <= 0:
+            return
+
+        font = QFont()
+        font.setPointSize(self._configured_description_font_size())
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        text_color = QColor(
+            str(
+                settings.value(
+                    'ideogram_overlay_text_color',
+                    defaultValue=DEFAULT_SETTINGS['ideogram_overlay_text_color'],
+                    type=str,
+                )
+                or DEFAULT_SETTINGS['ideogram_overlay_text_color']
+            )
+        )
+        text_color.setAlpha(text_alpha)
+        painter.setPen(text_color)
+
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        option.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        painter.save()
+        painter.setClipRect(text_rect)
+        painter.drawText(text_rect, self._inside_text, option)
+        painter.restore()
 
     def _handle_at(self, point: QPointF) -> RectPosition:
         for position, handle_rect in self._handle_rects().items():
@@ -281,6 +387,130 @@ class IdeogramRegionItem(QGraphicsRectItem):
         if self.rect().contains(point):
             return RectPosition.CENTER
         return RectPosition.NONE
+
+    def resize_handle_at_scene_pos(self, scene_pos: QPointF) -> RectPosition:
+        """Return a resize handle under a scene point, excluding body hits."""
+        rect = self.scene_rect()
+        band = self._scene_resize_band_size()
+        if not rect.adjusted(-band, -band, band, band).contains(scene_pos):
+            return RectPosition.NONE
+
+        x = scene_pos.x()
+        y = scene_pos.y()
+        near_left = abs(x - rect.left()) <= band
+        near_right = abs(x - rect.right()) <= band
+        near_top = abs(y - rect.top()) <= band
+        near_bottom = abs(y - rect.bottom()) <= band
+
+        if near_top and near_left:
+            return RectPosition.TL
+        if near_top and near_right:
+            return RectPosition.TR
+        if near_bottom and near_right:
+            return RectPosition.BR
+        if near_bottom and near_left:
+            return RectPosition.BL
+        if near_top:
+            return RectPosition.TOP
+        if near_right:
+            return RectPosition.RIGHT
+        if near_bottom:
+            return RectPosition.BOTTOM
+        if near_left:
+            return RectPosition.LEFT
+        return RectPosition.NONE
+
+    def _scene_resize_band_size(self) -> float:
+        scale = 1.0
+        scene = self.scene()
+        if scene is not None and scene.views():
+            view_scale = abs(scene.views()[0].transform().m11())
+            if view_scale > 0:
+                scale = view_scale
+        return max(4.0, 22.0 / scale)
+
+    def begin_forced_resize(self, scene_pos: QPointF, modifiers) -> bool:
+        """Start resizing this selected item without relying on scene hit order."""
+        press_handle = self.resize_handle_at_scene_pos(scene_pos)
+        if press_handle == RectPosition.NONE:
+            return False
+
+        scene = self.scene()
+        if scene is not None and scene.views():
+            scene.views()[0].setFocus(Qt.FocusReason.MouseFocusReason)
+        additive = bool(
+            modifiers
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        )
+        if not additive and scene is not None:
+            for item in scene.selectedItems():
+                if isinstance(item, IdeogramRegionItem) and item is not self:
+                    item.setSelected(False)
+        self._on_selected(self.element_index)
+        self.setSelected(True)
+        self._press_pos = QPointF(scene_pos)
+        self._start_rect = QRectF(self.rect())
+        self._start_item_pos = QPointF(self.pos())
+        self._drag_moved = False
+        self._drag_handle = press_handle
+        self._group_start_rects = self._selected_region_rects()
+        self.setCursor(map_rect_position_to_cursor(press_handle))
+        return True
+
+    def forced_drag_to_scene_pos(self, scene_pos: QPointF):
+        if self._drag_handle == RectPosition.NONE:
+            return
+        item_pos = self.mapFromScene(scene_pos)
+        delta = scene_pos - self._press_pos
+        if abs(delta.x()) > 0.5 or abs(delta.y()) > 0.5:
+            self._drag_moved = True
+        if len(self._group_start_rects) > 1:
+            active_start = self._group_start_rects.get(
+                self,
+                self.mapRectToScene(self._start_rect).normalized(),
+            )
+            active_new = change_rectF(
+                QRectF(active_start),
+                self._drag_handle,
+                scene_pos,
+            ).normalized()
+            if active_new.width() < self.MIN_SIZE:
+                active_new.setWidth(self.MIN_SIZE)
+            if active_new.height() < self.MIN_SIZE:
+                active_new.setHeight(self.MIN_SIZE)
+            self._resize_group(active_start, active_new)
+        else:
+            new_rect = change_rectF(
+                QRectF(self._start_rect),
+                self._drag_handle,
+                item_pos,
+            ).normalized()
+            if new_rect.width() < self.MIN_SIZE:
+                new_rect.setWidth(self.MIN_SIZE)
+            if new_rect.height() < self.MIN_SIZE:
+                new_rect.setHeight(self.MIN_SIZE)
+            self.setRect(new_rect)
+        self._relayout_label()
+
+    def finish_forced_resize(self):
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        released_handle = self._drag_handle
+        self._drag_handle = RectPosition.NONE
+        self._relayout_label()
+        self.setSelected(True)
+        self._on_selected(self.element_index)
+        changed_items = self._group_start_rects or {self: self.scene_rect()}
+        if released_handle != RectPosition.NONE and self._drag_moved:
+            for item in changed_items:
+                item.setSelected(True)
+                item._relayout_label()
+                self._on_geometry_changed(item.element_index, item.scene_rect())
+        self._drag_moved = False
+        self._group_start_rects = {}
 
     def scene_rect(self) -> QRectF:
         return self.mapRectToScene(self.rect()).normalized()
@@ -516,6 +746,8 @@ class IdeogramRegionItem(QGraphicsRectItem):
                         strip_height,
                     )
                 )
+
+        self._draw_inside_description(painter, rect)
 
         selected = self.isSelected()
         border_width = self._configured_border_width()

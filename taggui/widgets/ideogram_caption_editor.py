@@ -167,8 +167,10 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_header.setObjectName("ideogramCaptionSectionLabel")
         self.element_type_combo = QComboBox()
         self.element_type_combo.addItems(["obj", "text"])
-        self.element_desc_edit = QLineEdit()
+        self.element_desc_edit = QPlainTextEdit()
         self.element_desc_edit.setPlaceholderText("Description / detector label")
+        self.element_desc_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.element_desc_edit.setFixedHeight(72)
         self.element_text_edit = QLineEdit()
         self.element_text_edit.setPlaceholderText("Exact visible text")
         self.element_palette_edit = QLineEdit()
@@ -178,11 +180,17 @@ class IdeogramCaptionEditor(QDockWidget):
         self.auto_palette_button.setToolTip(
             "Return this element to live automatic palette picking."
         )
+        self.pick_palette_button = QPushButton("Pick")
+        self.pick_palette_button.setObjectName("ideogramCaptionSecondaryButton")
+        self.pick_palette_button.setToolTip(
+            "Pick the selected element color from a pixel in the main viewer."
+        )
         palette_layout = QHBoxLayout()
         palette_layout.setContentsMargins(0, 0, 0, 0)
         palette_layout.setSpacing(6)
         palette_layout.addWidget(self.element_palette_edit, 1)
         palette_layout.addWidget(self.auto_palette_button)
+        palette_layout.addWidget(self.pick_palette_button)
         self.palette_candidates_container = QWidget()
         self.palette_candidates_layout = QHBoxLayout(
             self.palette_candidates_container
@@ -379,6 +387,11 @@ class IdeogramCaptionEditor(QDockWidget):
         self.autosave_timer.setInterval(900)
         self.autosave_timer.timeout.connect(self._autosave_if_valid)
 
+        self.element_desc_timer = QTimer(self)
+        self.element_desc_timer.setSingleShot(True)
+        self.element_desc_timer.setInterval(350)
+        self.element_desc_timer.timeout.connect(self._update_selected_element_fields)
+
         self.editor.textChanged.connect(self._on_text_changed)
         self.from_markings_button.clicked.connect(
             self.create_caption_from_markings
@@ -414,9 +427,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_type_combo.currentTextChanged.connect(
             self._update_selected_element_fields
         )
-        self.element_desc_edit.editingFinished.connect(
-            self._update_selected_element_fields
-        )
+        self.element_desc_edit.textChanged.connect(self.element_desc_timer.start)
         self.element_text_edit.editingFinished.connect(
             self._update_selected_element_fields
         )
@@ -426,6 +437,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.auto_palette_button.clicked.connect(
             self.reset_selected_element_palette_auto
         )
+        self.pick_palette_button.clicked.connect(self.start_selected_element_color_pick)
         self.move_up_button.clicked.connect(lambda: self._move_element(-1))
         self.move_down_button.clicked.connect(lambda: self._move_element(1))
         self.delete_element_button.clicked.connect(self._delete_selected_element)
@@ -893,6 +905,17 @@ class IdeogramCaptionEditor(QDockWidget):
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
 
+    def start_selected_element_color_pick(self):
+        index = self._selected_element_index
+        if index is None:
+            self._set_status("Select an Ideogram element before picking a color.")
+            return
+        starter = getattr(self.image_viewer, "start_ideogram_color_pick", None)
+        if not callable(starter) or not starter(index):
+            self._set_status("Color picker needs a loaded image in the main viewer.")
+            return
+        self._set_status("Click a pixel in the main viewer to set this color.")
+
     def reset_selected_element_palette_auto(self):
         index = self._selected_element_index
         if index is None:
@@ -1002,6 +1025,9 @@ class IdeogramCaptionEditor(QDockWidget):
         )
 
     def select_element(self, index: int):
+        if self.element_desc_timer.isActive():
+            self.element_desc_timer.stop()
+            self._update_selected_element_fields()
         try:
             caption = self._caption_from_editor()
             element = caption.elements[index]
@@ -1012,7 +1038,9 @@ class IdeogramCaptionEditor(QDockWidget):
         blocked = self.element_type_combo.blockSignals(True)
         self.element_type_combo.setCurrentText(element.type)
         self.element_type_combo.blockSignals(blocked)
-        self.element_desc_edit.setText(element.desc)
+        desc_blocked = self.element_desc_edit.blockSignals(True)
+        self.element_desc_edit.setPlainText(element.desc)
+        self.element_desc_edit.blockSignals(desc_blocked)
         self.element_text_edit.setText(element.text or "")
         self.element_palette_edit.setText(", ".join(element.color_palette))
         self.element_text_edit.setVisible(element.type == "text")
@@ -1044,6 +1072,8 @@ class IdeogramCaptionEditor(QDockWidget):
         if self._selected_element_index == index:
             self.element_palette_edit.setText(", ".join(element.color_palette))
             self._refresh_palette_candidates(element)
+        self._selected_element_index = index
+        self.image_viewer.select_ideogram_element(index)
 
     def _update_selected_element_fields(self, *_, manual_palette: bool = False):
         index = self._selected_element_index
@@ -1055,7 +1085,7 @@ class IdeogramCaptionEditor(QDockWidget):
         except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
             return
         element.type = self.element_type_combo.currentText()
-        element.desc = self.element_desc_edit.text().strip() or "region"
+        element.desc = self.element_desc_edit.toPlainText().strip() or "region"
         element.text = (
             self.element_text_edit.text()
             if element.type == "text"
@@ -1151,14 +1181,15 @@ class IdeogramCaptionEditor(QDockWidget):
     def _palette_candidate_style(color: str, *, active: bool) -> str:
         swatch = QColor(color)
         text_color = "#FFFFFF" if swatch.lightness() < 135 else "#101318"
-        opacity_color = color if active else "#363A40"
-        border_color = color if active else "#555B66"
+        opacity_color = color if active else "#2E333B"
+        border_color = color
+        border_width = 3 if active else 2
         font_weight = "700" if active else "500"
         return (
             "QPushButton#ideogramPaletteCandidate {"
             f" background-color: {opacity_color};"
             f" color: {text_color if active else '#B8C0CC'};"
-            f" border: 1px solid {border_color};"
+            f" border: {border_width}px solid {border_color};"
             " border-radius: 4px;"
             " padding: 3px 4px;"
             " min-height: 20px;"

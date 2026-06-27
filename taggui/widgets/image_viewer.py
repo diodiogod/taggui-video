@@ -349,6 +349,63 @@ class _VideoPlaybackFeedbackOverlay(QWidget):
             painter.drawPath(path)
 
 
+class _IdeogramColorPickerPreviewOverlay(QWidget):
+    """Small loupe-style overlay showing the hovered image pixel color."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._color = QColor('#000000')
+        self._hex_text = '#000000'
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedSize(126, 58)
+        self.hide()
+
+    def update_preview(self, view_pos: QPoint, color: QColor | None):
+        if color is None or not color.isValid():
+            self.hide()
+            return
+        self._color = QColor(color)
+        self._hex_text = self._color.name().upper()
+        parent = self.parentWidget()
+        x = int(view_pos.x()) + 18
+        y = int(view_pos.y()) + 18
+        if parent is not None:
+            x = min(max(6, x), max(6, parent.width() - self.width() - 6))
+            y = min(max(6, y), max(6, parent.height() - self.height() - 6))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        painter.setPen(QPen(QColor(255, 255, 255, 170), 1.0))
+        painter.setBrush(QColor(10, 12, 16, 225))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        swatch_rect = QRect(10, 10, 38, 38)
+        painter.setPen(QPen(QColor(255, 255, 255, 210), 2.0))
+        painter.setBrush(self._color)
+        painter.drawRoundedRect(swatch_rect, 6, 6)
+
+        font = QFont()
+        font.setPointSize(10)
+        font.setWeight(QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor(245, 248, 252))
+        painter.drawText(QRect(56, 10, 62, 18), Qt.AlignmentFlag.AlignLeft, self._hex_text)
+
+        channel_text = f'{self._color.red()} {self._color.green()} {self._color.blue()}'
+        small_font = QFont()
+        small_font.setPointSize(8)
+        painter.setFont(small_font)
+        painter.setPen(QColor(184, 192, 204))
+        painter.drawText(QRect(56, 31, 62, 16), Qt.AlignmentFlag.AlignLeft, channel_text)
+
+
 class ImageViewer(QWidget):
     """Main widget coordinating image/video display, marking, and zoom functionality."""
 
@@ -393,6 +450,7 @@ class ImageViewer(QWidget):
         self.scene = QGraphicsScene()
         self._scene_padding_px = 0
         self._last_selected_ideogram_index: int | None = None
+        self._ideogram_color_pick_index: int | None = None
 
         self.view = ImageGraphicsView(self.scene, self)
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
@@ -403,7 +461,7 @@ class ImageViewer(QWidget):
         ):
             shortcut = QShortcut(key_sequence, self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(self.delete_selected_ideogram_regions)
+            shortcut.activated.connect(self.delete_selected_regions)
             self._ideogram_edit_shortcuts.append(shortcut)
         for key_sequence, handler in (
             (QKeySequence(QKeySequence.StandardKey.Copy), self.copy_selected_ideogram_regions),
@@ -530,6 +588,9 @@ class ImageViewer(QWidget):
         self._reaction_controls_overlay = None
         self._reaction_controls_overlay_attached = False
         self._reaction_feedback_overlay = ReactionFeedbackOverlay(self.view.viewport())
+        self._ideogram_color_picker_preview = _IdeogramColorPickerPreviewOverlay(
+            self.view.viewport()
+        )
         self._top_controls_active_overlay = None
         self._main_controls_overlay_zone_height = 54
         self._is_video_loaded = False
@@ -4032,11 +4093,14 @@ class ImageViewer(QWidget):
 
     def refresh_ideogram_caption_overlays(self):
         """Reload structured-caption overlays for the current media item."""
+        selected_index = self._last_selected_ideogram_index
         if not self.proxy_image_index.isValid():
             self._clear_ideogram_caption_overlays()
             return
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
         self._load_ideogram_caption_overlays(image)
+        if selected_index is not None:
+            self.select_ideogram_element(selected_index)
 
     def set_ideogram_editing_enabled(self, enabled: bool):
         self.ideogram_editing_enabled = bool(enabled)
@@ -4050,14 +4114,13 @@ class ImageViewer(QWidget):
             if item_index is None:
                 item_index = item.data(0) if hasattr(item, 'data') else None
             is_target = item_index == element_index
+            if is_target:
+                target_item = item
             if hasattr(item, 'set_highlighted'):
                 item.set_highlighted(is_target)
             if hasattr(item, 'setSelected'):
                 item.setSelected(is_target)
-            if is_target:
-                target_item = item
-                item.setZValue(max(item.zValue(), 1000.0))
-            elif item_index is not None and hasattr(item, 'data'):
+            if item_index is not None and hasattr(item, 'data'):
                 base_z = item.data(1)
                 if base_z is not None:
                     item.setZValue(float(base_z))
@@ -4069,6 +4132,21 @@ class ImageViewer(QWidget):
 
     def _remember_selected_ideogram_element(self, element_index: int):
         self._last_selected_ideogram_index = int(element_index)
+
+    def clear_ideogram_selection(self):
+        self._last_selected_ideogram_index = None
+        for item in self.ideogram_overlay_items:
+            item_index = getattr(item, 'element_index', None)
+            if item_index is None and hasattr(item, 'data'):
+                item_index = item.data(0)
+            if hasattr(item, 'set_highlighted'):
+                item.set_highlighted(False)
+            if hasattr(item, 'setSelected'):
+                item.setSelected(False)
+            if item_index is not None and hasattr(item, 'data'):
+                base_z = item.data(1)
+                if base_z is not None:
+                    item.setZValue(float(base_z))
 
     def ideogram_canvas_dimensions(self) -> tuple[int, int] | None:
         """Return the scene-space image dimensions used by caption overlays."""
@@ -4082,6 +4160,14 @@ class ImageViewer(QWidget):
         return image.valid_dimensions() if image is not None else None
 
     def _clear_ideogram_caption_overlays(self):
+        self.cancel_ideogram_color_pick()
+        restore_view_state = getattr(
+            self.view,
+            "restore_transient_ideogram_interaction_state",
+            None,
+        )
+        if callable(restore_view_state):
+            restore_view_state()
         self._last_selected_ideogram_index = None
         for item in self.ideogram_overlay_items:
             try:
@@ -4210,9 +4296,14 @@ class ImageViewer(QWidget):
 
             label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
             label_text = f'{index:02d} {label_kind}'
+            inside_text = f'{label_kind}: {element.desc or "region"}'
             tooltip_parts = [element.desc]
             if element.type == 'text' and element.text:
                 label_text += f' "{element.text}"'
+                inside_text = (
+                    f'{label_kind}: "{element.text}" - '
+                    f'{element.desc or "region"}'
+                )
             if element.color_palette:
                 tooltip_parts.append(
                     f'Selected color: {element.color_palette[0]}'
@@ -4230,6 +4321,7 @@ class ImageViewer(QWidget):
                     'color': color,
                     'tooltip': tooltip,
                     'label_text': label_text,
+                    'inside_text': inside_text,
                     'element_type': element.type,
                     'palette_colors': palette_colors,
                 }
@@ -4261,6 +4353,7 @@ class ImageViewer(QWidget):
                     on_type_change=self.ideogram_element_type_change_requested.emit,
                     on_palette_color_selected=self.ideogram_palette_color_selected.emit,
                     palette_colors=entry['palette_colors'],
+                    inside_text=entry['inside_text'],
                 )
             else:
                 rect_item = QGraphicsRectItem(
@@ -4739,12 +4832,21 @@ class ImageViewer(QWidget):
         return deduplicated
 
     @Slot()
-    def label_changed(self):
+    def label_changed(self, *, add_undo: bool = True):
         """Slot to call when a marking label was changed to sync the information
         in the image."""
-        self.proxy_image_index.model().sourceModel().add_to_undo_stack(
-            action_name=f'Change label', should_ask_for_confirmation=False)
+        if not self.proxy_image_index.isValid():
+            return
+        proxy_model = self.proxy_image_index.model()
+        source_model = proxy_model.sourceModel() if proxy_model is not None else None
+        if source_model is None:
+            return
+        if add_undo:
+            source_model.add_to_undo_stack(
+                action_name=f'Change label', should_ask_for_confirmation=False)
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
         entries: list[Marking] = []
         for marking in self.marking_items:
             if marking.rect_type != ImageMarking.CROP:
@@ -4828,7 +4930,7 @@ class ImageViewer(QWidget):
                 return rect_type
         return ImageMarking.NONE
 
-    def selected_ideogram_region_indices(self) -> list[int]:
+    def selected_ideogram_region_indices(self, *, include_fallback: bool = True) -> list[int]:
         selected = sorted({
             int(item.element_index)
             for item in self.scene.selectedItems()
@@ -4837,6 +4939,8 @@ class ImageViewer(QWidget):
         if selected:
             self._last_selected_ideogram_index = selected[-1]
             return selected
+        if not include_fallback:
+            return []
         fallback = self._last_selected_ideogram_index
         if fallback is None:
             return []
@@ -4854,11 +4958,32 @@ class ImageViewer(QWidget):
 
     @Slot()
     def delete_selected_ideogram_regions(self) -> bool:
-        indices = self.selected_ideogram_region_indices()
+        indices = self.selected_ideogram_region_indices(include_fallback=False)
         if not indices:
             return False
         self.ideogram_elements_delete_requested.emit(indices)
         return True
+
+    @Slot()
+    def delete_selected_regions(self) -> bool:
+        focused_item = self.scene.focusItem()
+        if (
+            isinstance(focused_item, MarkingLabel)
+            and bool(
+                focused_item.textInteractionFlags()
+                & Qt.TextInteractionFlag.TextEditorInteraction
+            )
+        ):
+            return False
+        selected_markings = [
+            item
+            for item in self.scene.selectedItems()
+            if isinstance(item, MarkingItem)
+        ]
+        if selected_markings:
+            self.delete_markings(selected_markings)
+            return True
+        return self.delete_selected_ideogram_regions()
 
     @Slot()
     def copy_selected_ideogram_regions(self) -> bool:
@@ -4873,6 +4998,74 @@ class ImageViewer(QWidget):
         self.ideogram_elements_paste_requested.emit()
         return True
 
+    def start_ideogram_color_pick(self, element_index: int) -> bool:
+        if self.current_image_item is None:
+            return False
+        self._ideogram_color_pick_index = int(element_index)
+        self.view.setCursor(Qt.CursorShape.CrossCursor)
+        self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        return True
+
+    def cancel_ideogram_color_pick(self):
+        if self._ideogram_color_pick_index is None:
+            return
+        self._ideogram_color_pick_index = None
+        if self._ideogram_color_picker_preview is not None:
+            self._ideogram_color_picker_preview.hide()
+        self.view.unsetCursor()
+        self.view.viewport().unsetCursor()
+        if not getattr(self.view, "insertion_mode", False):
+            self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    def handle_ideogram_color_pick_move(self, view_pos) -> bool:
+        if self._ideogram_color_pick_index is None:
+            return False
+        scene_pos = self.view.mapToScene(view_pos)
+        color = self._sample_image_color_at_scene(scene_pos)
+        if self._ideogram_color_picker_preview is not None:
+            self._ideogram_color_picker_preview.update_preview(view_pos, color)
+        return True
+
+    def handle_ideogram_color_pick_press(self, view_pos, button) -> bool:
+        element_index = self._ideogram_color_pick_index
+        if element_index is None:
+            return False
+        if button == Qt.MouseButton.RightButton:
+            self.cancel_ideogram_color_pick()
+            return True
+        if button != Qt.MouseButton.LeftButton:
+            return True
+
+        scene_pos = self.view.mapToScene(view_pos)
+        color = self._sample_image_color_at_scene(scene_pos)
+        self.cancel_ideogram_color_pick()
+        if color is None:
+            return True
+        self.ideogram_palette_color_selected.emit(element_index, color.name().upper())
+        return True
+
+    def _sample_image_color_at_scene(self, scene_pos: QPointF) -> QColor | None:
+        if self.current_image_item is None:
+            return None
+        source_qimage = getattr(self, "_static_source_qimage", None)
+        if isinstance(source_qimage, QImage) and not source_qimage.isNull():
+            x = int(round(scene_pos.x()))
+            y = int(round(scene_pos.y()))
+            if 0 <= x < source_qimage.width() and 0 <= y < source_qimage.height():
+                return source_qimage.pixelColor(x, y)
+
+        local_pos = self.current_image_item.mapFromScene(scene_pos)
+        pixmap = self.current_image_item.pixmap()
+        if pixmap.isNull():
+            return None
+        image = pixmap.toImage()
+        x = int(round(local_pos.x()))
+        y = int(round(local_pos.y()))
+        if 0 <= x < image.width() and 0 <= y < image.height():
+            return image.pixelColor(x, y)
+        return None
+
     @Slot()
     def duplicate_selected_ideogram_regions(self) -> bool:
         indices = self.selected_ideogram_region_indices()
@@ -4885,12 +5078,6 @@ class ImageViewer(QWidget):
     def delete_markings(self, items: list[MarkingItem] | None = None):
         """Slot to delete the list of items or when items = None all currently
         selected marking items."""
-        image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
-        self.proxy_image_index.model().sourceModel().add_image_to_undo_stack(
-            image,
-            action_name='Delete marking',
-            should_ask_for_confirmation=False,
-        )
         if items is None:
             items = self.scene.selectedItems()
         items = [
@@ -4899,6 +5086,20 @@ class ImageViewer(QWidget):
         ]
         if not items:
             return
+        if not self.proxy_image_index.isValid():
+            return
+        image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
+        proxy_model = self.proxy_image_index.model()
+        source_model = proxy_model.sourceModel() if proxy_model is not None else None
+        if source_model is None:
+            return
+        source_model.add_image_to_undo_stack(
+            image,
+            action_name='Delete marking',
+            should_ask_for_confirmation=False,
+        )
         for item in items:
             if item.rect_type == ImageMarking.CROP:
                 self.crop_marking = None
@@ -4909,15 +5110,16 @@ class ImageViewer(QWidget):
                 self._clear_hud_crop_if_alive()
                 self.accept_crop_addition.emit(True)
                 calculate_grid(MarkingItem.image_size)
-                self.proxy_image_list_model.sourceModel().dataChanged.emit(
+                source_model.dataChanged.emit(
                     self.proxy_image_index, self.proxy_image_index,
                     [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
                      Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
-                self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+                source_model.write_meta_to_disk(image)
             else:
-                self.marking_items.remove(item)
-                self.label_changed()
-                self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
+                if item in self.marking_items:
+                    self.marking_items.remove(item)
+                self.label_changed(add_undo=False)
+                source_model.write_meta_to_disk(image)
             self.scene.removeItem(item)
 
     @Slot()

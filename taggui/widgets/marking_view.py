@@ -57,6 +57,11 @@ class ImageGraphicsView(QGraphicsView):
         self._space_pan_active = False
         self._manual_pan_active = False
         self._manual_pan_last_global_pos = None
+        self._temporarily_raised_ideogram_item = None
+        self._temporarily_disabled_ideogram_items = []
+        self._forced_ideogram_resize_item = None
+        self._temporarily_raised_marking_item = None
+        self._temporarily_disabled_marking_items = []
         self.clear_scene()
 
     def _interactive_region_at(self, scene_pos):
@@ -77,6 +82,155 @@ class ImageGraphicsView(QGraphicsView):
                 current = current.parentItem()
         return None
 
+    def _selected_ideogram_resize_region_at(self, scene_pos):
+        for item in self._selected_ideogram_region_candidates():
+            if item.resize_handle_at_scene_pos(scene_pos) != RectPosition.NONE:
+                return item
+        return None
+
+    def _marking_regions_at(self, scene_pos):
+        regions = []
+        seen = set()
+        for scene_item in self.scene().items(scene_pos):
+            current = scene_item
+            while current is not None:
+                if isinstance(current, MarkingItem):
+                    if id(current) not in seen:
+                        regions.append(current)
+                        seen.add(id(current))
+                    break
+                current = current.parentItem()
+        return regions
+
+    @staticmethod
+    def _marking_area(item):
+        rect = item.rect().normalized()
+        return max(0.0, rect.width()) * max(0.0, rect.height())
+
+    def _selected_marking_resize_region_at(self, scene_pos):
+        candidates = [
+            item for item in self.scene().selectedItems()
+            if isinstance(item, MarkingItem)
+        ]
+        candidates.sort(key=self._marking_area)
+        for item in candidates:
+            handle = item.handleAt(item.mapFromScene(scene_pos))
+            if handle not in (RectPosition.NONE, RectPosition.CENTER):
+                return item
+        return None
+
+    def _preferred_marking_region_at(self, scene_pos):
+        candidates = self._marking_regions_at(scene_pos)
+        if not candidates:
+            return None
+        return min(candidates, key=self._marking_area)
+
+    def _prepare_marking_region_for_press(self, target, scene_pos):
+        self._restore_transient_marking_regions()
+        if target is None:
+            return
+        self._temporarily_raised_marking_item = (target, target.zValue())
+        target.setZValue(max(target.zValue(), 3000.0))
+        disabled = []
+        for item in self._marking_regions_at(scene_pos):
+            if item is target:
+                continue
+            disabled.append((item, item.acceptedMouseButtons()))
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._temporarily_disabled_marking_items = disabled
+
+    def _restore_transient_marking_regions(self):
+        disabled = self._temporarily_disabled_marking_items
+        self._temporarily_disabled_marking_items = []
+        for item, buttons in disabled:
+            try:
+                item.setAcceptedMouseButtons(buttons)
+            except RuntimeError:
+                pass
+        raised = self._temporarily_raised_marking_item
+        self._temporarily_raised_marking_item = None
+        if raised is not None:
+            item, z_value = raised
+            try:
+                item.setZValue(z_value)
+            except RuntimeError:
+                pass
+
+    def _selected_ideogram_region_candidates(self):
+        candidates = []
+        seen = set()
+
+        def add_candidate(item):
+            if (
+                isinstance(item, IdeogramRegionItem)
+                and id(item) not in seen
+            ):
+                candidates.append(item)
+                seen.add(id(item))
+
+        selected_index = getattr(
+            self.image_viewer,
+            "_last_selected_ideogram_index",
+            None,
+        )
+        overlay_items = getattr(self.image_viewer, "ideogram_overlay_items", [])
+        if selected_index is not None:
+            for item in overlay_items:
+                if int(getattr(item, "element_index", -1)) == int(selected_index):
+                    add_candidate(item)
+        for item in overlay_items:
+            if bool(getattr(item, "_highlighted", False)):
+                add_candidate(item)
+        for item in self.scene().selectedItems():
+            add_candidate(item)
+        return candidates
+
+    def _raise_ideogram_region_for_press(self, item):
+        self._restore_temporarily_raised_ideogram_region()
+        if item is None:
+            return
+        self._temporarily_raised_ideogram_item = item
+        item.setZValue(max(item.zValue(), 2000.0))
+
+    def _disable_overlapping_ideogram_regions_for_press(self, target, scene_pos):
+        self._restore_temporarily_disabled_ideogram_regions()
+        if target is None:
+            return
+        disabled = []
+        seen = set()
+        for item in self.scene().items(scene_pos):
+            current = item
+            while current is not None:
+                if isinstance(current, IdeogramRegionItem):
+                    if current is not target and id(current) not in seen:
+                        seen.add(id(current))
+                        disabled.append((current, current.acceptedMouseButtons()))
+                        current.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                    break
+                current = current.parentItem()
+        self._temporarily_disabled_ideogram_items = disabled
+
+    def _restore_temporarily_disabled_ideogram_regions(self):
+        disabled = self._temporarily_disabled_ideogram_items
+        self._temporarily_disabled_ideogram_items = []
+        for item, buttons in disabled:
+            try:
+                item.setAcceptedMouseButtons(buttons)
+            except RuntimeError:
+                pass
+
+    def _restore_temporarily_raised_ideogram_region(self):
+        item = self._temporarily_raised_ideogram_item
+        self._temporarily_raised_ideogram_item = None
+        if item is None:
+            return
+        try:
+            base_z = item.data(1)
+            if base_z is not None:
+                item.setZValue(float(base_z))
+        except RuntimeError:
+            pass
+
     def _should_start_manual_pan(self, event: QMouseEvent) -> bool:
         """Check pan gestures that should move viewport instead of editing marks."""
         if self.insertion_mode or MarkingItem.handle_selected != RectPosition.NONE:
@@ -90,6 +244,25 @@ class ImageGraphicsView(QGraphicsView):
 
         return True
 
+    def restore_transient_ideogram_interaction_state(self):
+        if self._forced_ideogram_resize_item is not None:
+            try:
+                self._forced_ideogram_resize_item.finish_forced_resize()
+            except RuntimeError:
+                pass
+            self._forced_ideogram_resize_item = None
+        self._restore_temporarily_disabled_ideogram_regions()
+        self._restore_temporarily_raised_ideogram_region()
+        self._restore_transient_marking_regions()
+
+    def _set_view_cursor(self, cursor):
+        if cursor is None:
+            self.unsetCursor()
+            self.viewport().unsetCursor()
+            return
+        self.setCursor(cursor)
+        self.viewport().setCursor(cursor)
+
     def _pan_viewport_by(self, delta):
         self.horizontalScrollBar().setValue(
             self.horizontalScrollBar().value() - int(delta.x()))
@@ -98,7 +271,11 @@ class ImageGraphicsView(QGraphicsView):
 
     def showContextMenu(self, pos):
         scene_pos = self.mapToScene(pos)
-        item = self.scene().itemAt(scene_pos, self.transform())
+        item = (
+            self._selected_marking_resize_region_at(scene_pos)
+            or self._preferred_marking_region_at(scene_pos)
+            or self.scene().itemAt(scene_pos, self.transform())
+        )
         if isinstance(item, MarkingLabel):
             item = item.parentItem().parentItem()
         if isinstance(item, MarkingItem) and MarkingItem.handle_selected != RectPosition.NONE:
@@ -141,6 +318,7 @@ class ImageGraphicsView(QGraphicsView):
 
     def clear_scene(self):
         """Use this and not scene().clear() due to resource management."""
+        self.restore_transient_ideogram_interaction_state()
         self.insertion_mode = False
         self.horizontal_line = None
         self.vertical_line = None
@@ -183,6 +361,18 @@ class ImageGraphicsView(QGraphicsView):
                                        self.last_pos.x(), view_rect.bottom())
 
     def mousePressEvent(self, event: QMouseEvent):
+        color_pick_handler = getattr(
+            self.image_viewer,
+            "handle_ideogram_color_pick_press",
+            None,
+        )
+        if callable(color_pick_handler):
+            try:
+                if bool(color_pick_handler(event.pos(), event.button())):
+                    event.accept()
+                    return
+            except Exception:
+                pass
         if event.button() == Qt.MouseButton.LeftButton and not self.insertion_mode:
             zone_press_handler = getattr(self.image_viewer, "handle_video_surface_zone_press", None)
             if callable(zone_press_handler):
@@ -192,7 +382,37 @@ class ImageGraphicsView(QGraphicsView):
                         return
                 except Exception:
                     pass
+
+        scene_pos = self.mapToScene(event.pos())
+        selected_marking_resize_item = self._selected_marking_resize_region_at(
+            scene_pos
+        )
+        selected_resize_item = self._selected_ideogram_resize_region_at(scene_pos)
+        if (
+            selected_resize_item is not None
+            and event.button() == Qt.MouseButton.LeftButton
+            and selected_resize_item.begin_forced_resize(
+                scene_pos,
+                event.modifiers(),
+            )
+        ):
+            self._forced_ideogram_resize_item = selected_resize_item
+            cursor = map_rect_position_to_cursor(
+                selected_resize_item.resize_handle_at_scene_pos(scene_pos)
+            )
+            self._set_view_cursor(cursor)
+            event.accept()
+            return
+
         if self._should_start_manual_pan(event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                clear_selection = getattr(
+                    self.image_viewer,
+                    "clear_ideogram_selection",
+                    None,
+                )
+                if callable(clear_selection):
+                    clear_selection()
             self._manual_pan_active = True
             self._manual_pan_last_global_pos = event.globalPosition().toPoint()
             fast_pan_mode_setter = getattr(self.image_viewer, "_set_fast_pan_visual_mode", None)
@@ -203,11 +423,41 @@ class ImageGraphicsView(QGraphicsView):
             return
 
         # Check if clicking on an existing marking item first
-        scene_pos = self.mapToScene(event.pos())
+        preferred_marking_item = (
+            selected_marking_resize_item
+            or self._preferred_marking_region_at(scene_pos)
+        )
+        self._prepare_marking_region_for_press(
+            preferred_marking_item,
+            scene_pos,
+        )
+        self._raise_ideogram_region_for_press(selected_resize_item)
+        self._disable_overlapping_ideogram_regions_for_press(
+            selected_resize_item,
+            scene_pos,
+        )
         interactive_item = self._interactive_region_at(scene_pos)
         if interactive_item is not None:
             if isinstance(interactive_item, IdeogramRegionItem) and self.insertion_mode:
                 self.set_insertion_mode(ImageMarking.NONE)
+            if (
+                isinstance(interactive_item, MarkingItem)
+                and not (
+                    event.modifiers()
+                    & (
+                        Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.ShiftModifier
+                        | Qt.KeyboardModifier.MetaModifier
+                    )
+                )
+            ):
+                clear_selection = getattr(
+                    self.image_viewer,
+                    "clear_ideogram_selection",
+                    None,
+                )
+                if callable(clear_selection):
+                    clear_selection()
             super().mousePressEvent(event)
             return
 
@@ -239,6 +489,24 @@ class ImageGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._forced_ideogram_resize_item is not None:
+            self._forced_ideogram_resize_item.forced_drag_to_scene_pos(
+                self.mapToScene(event.pos())
+            )
+            event.accept()
+            return
+        color_pick_move_handler = getattr(
+            self.image_viewer,
+            "handle_ideogram_color_pick_move",
+            None,
+        )
+        if callable(color_pick_move_handler):
+            try:
+                if bool(color_pick_move_handler(event.pos())):
+                    event.accept()
+                    return
+            except Exception:
+                pass
         zone_move_handler = getattr(self.image_viewer, "handle_video_surface_zone_move", None)
         if callable(zone_move_handler):
             try:
@@ -274,7 +542,38 @@ class ImageGraphicsView(QGraphicsView):
         elif MarkingItem.handle_selected != RectPosition.NONE:
             cursor = map_rect_position_to_cursor(MarkingItem.handle_selected)
         else:
+            selected_marking_resize_item = self._selected_marking_resize_region_at(
+                scene_pos
+            )
+            if selected_marking_resize_item is not None:
+                handle = selected_marking_resize_item.handleAt(
+                    selected_marking_resize_item.mapFromScene(scene_pos)
+                )
+                cursor = map_rect_position_to_cursor(handle)
+            selected_resize_item = self._selected_ideogram_resize_region_at(scene_pos)
+            if cursor is None and selected_resize_item is not None:
+                cursor = map_rect_position_to_cursor(
+                    selected_resize_item.resize_handle_at_scene_pos(scene_pos)
+                )
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                self._set_view_cursor(cursor)
+                if ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
+                    Qt.KeyboardModifier.ShiftModifier):
+                    self.last_pos = grid.snap(scene_pos.toPoint()).toPoint()
+                else:
+                    self.last_pos = scene_pos.toPoint()
+                event.accept()
+                return
+            preferred_marking_item = self._preferred_marking_region_at(scene_pos)
+            if cursor is None and preferred_marking_item is not None:
+                handle = preferred_marking_item.handleAt(
+                    preferred_marking_item.mapFromScene(scene_pos)
+                )
+                if handle != RectPosition.NONE:
+                    cursor = map_rect_position_to_cursor(handle)
             for item in items:
+                if cursor is not None:
+                    break
                 if isinstance(item, IdeogramRegionItem):
                     cursor = item.cursor().shape()
                     break
@@ -286,9 +585,10 @@ class ImageGraphicsView(QGraphicsView):
                     break
         if cursor is None:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self._set_view_cursor(None)
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self.setCursor(cursor)
+            self._set_view_cursor(cursor)
 
         if ((event.modifiers() & Qt.KeyboardModifier.ShiftModifier) ==
             Qt.KeyboardModifier.ShiftModifier):
@@ -321,6 +621,14 @@ class ImageGraphicsView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._forced_ideogram_resize_item is not None:
+            self._forced_ideogram_resize_item.finish_forced_resize()
+            self._forced_ideogram_resize_item = None
+            self._restore_temporarily_disabled_ideogram_regions()
+            self._restore_temporarily_raised_ideogram_region()
+            self._set_view_cursor(None)
+            event.accept()
+            return
         zone_release_handler = getattr(self.image_viewer, "handle_video_surface_zone_release", None)
         if callable(zone_release_handler):
             try:
@@ -339,12 +647,20 @@ class ImageGraphicsView(QGraphicsView):
             if callable(fast_pan_mode_setter):
                 fast_pan_mode_setter(False)
             if self._space_pan_active:
-                self.setCursor(Qt.CursorShape.OpenHandCursor)
+                self._set_view_cursor(Qt.CursorShape.OpenHandCursor)
             else:
-                self.unsetCursor()
+                self._set_view_cursor(None)
+            self._restore_temporarily_disabled_ideogram_regions()
+            self._restore_temporarily_raised_ideogram_region()
+            self._restore_transient_marking_regions()
             event.accept()
             return
-        super().mouseReleaseEvent(event)
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            self._restore_temporarily_disabled_ideogram_regions()
+            self._restore_temporarily_raised_ideogram_region()
+            self._restore_transient_marking_regions()
 
     def keyPressEvent(self, event):
         edited_item = self.scene().focusItem()
@@ -399,11 +715,15 @@ class ImageGraphicsView(QGraphicsView):
             if not is_editing_label:
                 # Delete marking only when not editing the label
                 # Get selected items from scene
-                if ideogram_indices:
+                selected_markings = [
+                    item for item in selected
+                    if isinstance(item, MarkingItem)
+                ]
+                if selected_markings:
+                    self.image_viewer.delete_markings(selected_markings)
+                elif ideogram_indices:
                     self.image_viewer.delete_selected_ideogram_regions()
-                    event.accept()
-                    return
-                if selected:
+                elif selected:
                     self.image_viewer.delete_markings(selected)
                 else:
                     self.image_viewer.delete_markings()

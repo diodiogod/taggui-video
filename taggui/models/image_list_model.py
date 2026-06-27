@@ -1507,6 +1507,7 @@ class Scope(str, Enum):
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
     ideogram_sidecars_restored = Signal(list)
+    image_history_restored = Signal(list)
 
     @staticmethod
     def _parse_viewer_loop_markers(raw_markers) -> dict[str, dict[str, int | None]]:
@@ -7985,6 +7986,7 @@ class ImageListModel(QAbstractListModel):
         if history_item.image_snapshots is not None:
             reverse_snapshots: list[dict[str, Any]] = []
             changed_image_indices: list[int] = []
+            restored_paths: list[str] = []
             for snapshot in history_item.image_snapshots:
                 image, image_index = self._resolve_history_snapshot_image(snapshot)
                 if image is None:
@@ -7998,6 +8000,7 @@ class ImageListModel(QAbstractListModel):
                 self.write_image_tags_to_disk(image)
                 self.write_meta_to_disk(image)
                 self.save_reactions_to_db(image)
+                restored_paths.append(self._history_image_key(image))
                 if isinstance(image_index, int):
                     changed_image_indices.append(image_index)
             if reverse_snapshots:
@@ -8013,6 +8016,8 @@ class ImageListModel(QAbstractListModel):
                     self.index(changed_image_indices[0]),
                     self.index(changed_image_indices[-1]),
                 )
+            if restored_paths:
+                self.image_history_restored.emit(restored_paths)
             self.update_undo_and_redo_actions_requested.emit()
             return
 

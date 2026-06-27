@@ -266,8 +266,13 @@ class SignalManager:
                     return
                 if current.model() is not proxy_image_list_model:
                     return
-                current_row = current.row()
-                if start.isValid() and end.isValid() and start.row() <= current_row <= end.row():
+                source_current = proxy_image_list_model.mapToSource(current)
+                if (
+                    source_current.isValid()
+                    and start.isValid()
+                    and end.isValid()
+                    and start.row() <= source_current.row() <= end.row()
+                ):
                     image = current.data(Qt.ItemDataRole.UserRole)
                     target_viewer.load_image(current, False)
                     self.main_window.ideogram_caption_editor.load_media(image)
@@ -283,6 +288,9 @@ class SignalManager:
             menu_manager.update_undo_and_redo_actions)
         image_list_model.ideogram_sidecars_restored.connect(
             self._refresh_current_ideogram_after_history_restore
+        )
+        image_list_model.image_history_restored.connect(
+            self._refresh_current_image_after_history_restore
         )
         image_list_model.total_count_changed.connect(
             lambda _count: image_list.update_image_index_label(
@@ -634,6 +642,20 @@ class SignalManager:
         target_viewer.refresh_ideogram_caption_overlays()
         self.main_window.ideogram_caption_editor.load_media(image)
         self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
+
+    def _refresh_current_image_after_history_restore(self, media_paths: list[str]):
+        """Refresh the active viewer after undo/redo restores image metadata."""
+        restored_paths = {str(Path(path)) for path in media_paths if path}
+        target_viewer = self.main_window.get_selection_target_viewer()
+        if target_viewer is None:
+            target_viewer = self.main_window.image_viewer
+        proxy_index = getattr(target_viewer, 'proxy_image_index', None)
+        if proxy_index is None or not proxy_index.isValid():
+            return
+        image = proxy_index.data(Qt.ItemDataRole.UserRole)
+        if image is None or str(getattr(image, 'path', '') or '') not in restored_paths:
+            return
+        target_viewer.load_image(proxy_index, False)
 
     def _update_tag_counts(self):
         """Update tag counts based on current model mode (paginated (DB) vs normal)."""
