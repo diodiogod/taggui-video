@@ -2279,6 +2279,7 @@ class ImageListModel(QAbstractListModel):
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
         self._path_validation_generation = 0
+        self._path_validation_satisfied_generation = -1
         self._pending_path_validation_result = None
         self._path_validation_lock = threading.Lock()
         self._background_validation_dialog = None
@@ -3964,6 +3965,7 @@ class ImageListModel(QAbstractListModel):
             )
             preloaded_pages = {}
             result['limited_scope_count'] = len(refreshed_scope_rel_paths)
+            self._path_validation_satisfied_generation = int(self._path_validation_generation)
 
         reloaded_pages = self._reload_paginated_model_after_db_update(
             new_total=new_total,
@@ -6158,6 +6160,9 @@ class ImageListModel(QAbstractListModel):
 
             def _start_validation():
                 if load_generation != self._path_validation_generation:
+                    return
+                if load_generation == int(getattr(self, '_path_validation_satisfied_generation', -1) or -1):
+                    print("[CACHE] Skipping background validation; index already synchronized")
                     return
                 print("[CACHE] Starting background validation...")
                 self._load_executor.submit(

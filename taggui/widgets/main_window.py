@@ -585,6 +585,7 @@ class MainWindow(QMainWindow):
         self._workspace_applying = False
         self._workspace_active_id = None
         self._pending_new_media_refresh_state = None
+        self._pending_auto_new_media_refresh_load_id = -1
         self._async_recenter_request_id = 0
         self._default_window_state = None
         self._background_workers_shutdown = False
@@ -7343,6 +7344,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
         self._save_folder_view_preferences()
+
+        if self._current_directory_load_options is not None:
+            self._schedule_auto_refresh_new_media_after_limited_load(
+                load_session_id=load_session_id,
+            )
             
         # Try to restore selection by path (more robust)
         self._restore_global_rank = -1
@@ -7869,6 +7875,50 @@ class MainWindow(QMainWindow):
     def _log_new_media_refresh_message(self, message: str):
         """Emit refresh diagnostics without creating UI chrome."""
         print(f"[REFRESH_NEW_UI] {message}")
+
+    def _schedule_auto_refresh_new_media_after_limited_load(
+        self,
+        *,
+        load_session_id: int,
+    ):
+        """Kick off the cheaper additions-only refresh shortly after limited loads."""
+        if self._current_directory_load_options is None:
+            return
+        if os.getenv('TAGGUI_DISABLE_LIMITED_AUTO_NEW_MEDIA_REFRESH', '0') == '1':
+            return
+
+        self._pending_auto_new_media_refresh_load_id = int(load_session_id)
+        delay_ms = self._startup_delay_ms(
+            'TAGGUI_LIMITED_AUTO_NEW_MEDIA_REFRESH_DELAY_MS',
+            250,
+        )
+        QTimer.singleShot(
+            delay_ms,
+            lambda expected_load_id=int(load_session_id): self._run_auto_refresh_new_media_after_limited_load(
+                expected_load_id
+            ),
+        )
+
+    def _run_auto_refresh_new_media_after_limited_load(self, expected_load_id: int):
+        """Run the additions-only refresh if the same limited load session is still current."""
+        if int(expected_load_id) != int(self._load_session_id):
+            return
+        if int(self._pending_auto_new_media_refresh_load_id) != int(expected_load_id):
+            return
+        if self._current_directory_load_options is None:
+            return
+        if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
+            return
+        if not getattr(self.image_list_model, '_directory_path', None):
+            return
+        if getattr(self.image_list_model, '_new_media_refresh_running', False):
+            return
+
+        self._pending_auto_new_media_refresh_load_id = -1
+        self._log_new_media_refresh_message(
+            "Running limited-mode additions refresh after folder load."
+        )
+        self.refresh_new_media_only('primary')
 
     # ─────────────────────────────────────────────────────────────────
     # Secondary Browser
