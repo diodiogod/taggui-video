@@ -22,6 +22,7 @@ This is the main documentation map for TagGUI Video 1M.
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)
+- [Pipelines Guide](PIPELINES_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Video Backends](VIDEO_BACKENDS.md)
 - [Export Guide](EXPORT_GUIDE.md)

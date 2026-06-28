@@ -21,6 +21,7 @@ class SignalManager:
         self.connect_all_tags_editor_signals()
         self.connect_auto_captioner_signals()
         self.connect_auto_markings_signals()
+        self.connect_pipeline_signals()
         self.connect_video_controls_signals()
 
     def connect_toolbar_signals(self):
@@ -466,6 +467,15 @@ class SignalManager:
             lambda *_:
             self.main_window.image_list_model.refresh_ideogram_caption_index_for_image(
                 self.main_window.ideogram_caption_editor.current_image
+            )
+        )
+
+    def connect_pipeline_signals(self):
+        pipeline_editor = self.main_window.pipeline_editor
+        pipeline_editor.visibilityChanged.connect(
+            lambda visible:
+            self.main_window.menu_manager.toggle_pipeline_editor_action.setChecked(
+                visible
             )
         )
 

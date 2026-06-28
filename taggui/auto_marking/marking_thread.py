@@ -109,10 +109,25 @@ class MarkingThread(ModelThread):
         return merged_markings
 
     def load_model(self):
-        if not self.model:
-            self.error_message = 'Model not preloaded.'
-            self.is_error = True
-        pass
+        if self.model is None:
+            self.preload_model()
+        if self.model is None:
+            return
+        if not self.marking_settings.get('classes'):
+            requested_names = {
+                str(name).strip().casefold()
+                for name in self.marking_settings.get('class_names', [])
+                if str(name).strip()
+            }
+            marking_type = str(
+                self.marking_settings.get('marking_type', 'hint') or 'hint'
+            )
+            self.marking_settings['classes'] = {
+                int(class_id): (str(class_name), marking_type)
+                for class_id, class_name in self.model.names.items()
+                if not requested_names
+                or str(class_name).strip().casefold() in requested_names
+            }
 
     def preload_model(self):
         if self.marking_settings['model_path'] is None:

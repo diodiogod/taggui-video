@@ -67,6 +67,7 @@ from widgets.auto_markings import AutoMarkings
 from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.ideogram_caption_editor import IdeogramCaptionEditor
+from widgets.pipeline_editor import PipelineEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
 from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
@@ -779,13 +780,23 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.RightDockWidgetArea,
             self.ideogram_caption_editor,
         )
+        self.pipeline_editor = PipelineEditor(self)
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.pipeline_editor,
+        )
         self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
         self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
         self.tabifyDockWidget(
             self.auto_markings,
             self.ideogram_caption_editor,
         )
+        self.tabifyDockWidget(
+            self.ideogram_caption_editor,
+            self.pipeline_editor,
+        )
         self.ideogram_caption_editor.hide()
+        self.pipeline_editor.hide()
         self.all_tags_editor.raise_()
         self._install_external_drop_targets()
         # Set default widths for the dock widgets.
@@ -2482,6 +2493,7 @@ class MainWindow(QMainWindow):
             'auto_captioner',
             'auto_markings',
             'ideogram_caption_editor',
+            'pipeline_editor',
         ):
             dock = getattr(self, dock_name, None)
             if dock is None:
@@ -10049,6 +10061,8 @@ class MainWindow(QMainWindow):
             getattr(self, 'all_tags_editor', None),
             getattr(self, 'auto_captioner', None),
             getattr(self, 'auto_markings', None),
+            getattr(self, 'ideogram_caption_editor', None),
+            getattr(self, 'pipeline_editor', None),
         ):
             if dock is None:
                 continue
@@ -10073,6 +10087,9 @@ class MainWindow(QMainWindow):
             self.menu_manager.toggle_auto_markings_action.setChecked(self.auto_markings.isVisible())
             self.menu_manager.toggle_ideogram_caption_editor_action.setChecked(
                 self.ideogram_caption_editor.isVisible()
+            )
+            self.menu_manager.toggle_pipeline_editor_action.setChecked(
+                self.pipeline_editor.isVisible()
             )
             self.menu_manager.toggle_main_viewer_action.setChecked(bool(self._main_viewer_visible))
             workspace_group = getattr(self.menu_manager, 'workspace_action_group', None)
@@ -10307,6 +10324,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": self.auto_captioner,
                 "auto_markings": self.auto_markings,
                 "ideogram_caption_editor": self.ideogram_caption_editor,
+                "pipeline_editor": self.pipeline_editor,
             }
             right_docks = [
                 right_dock_map["image_tags_editor"],
@@ -10314,6 +10332,7 @@ class MainWindow(QMainWindow):
                 right_dock_map["auto_captioner"],
                 right_dock_map["auto_markings"],
                 right_dock_map["ideogram_caption_editor"],
+                right_dock_map["pipeline_editor"],
             ]
 
             visibility = {
@@ -10325,6 +10344,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "tagging": {
                 "toolbar": True,
@@ -10334,6 +10354,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "marking": {
                 "toolbar": True,
@@ -10343,6 +10364,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": True,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "video_prep": {
                 "toolbar": True,
@@ -10352,6 +10374,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": True,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "auto_captioning": {
                 "toolbar": True,
@@ -10361,6 +10384,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": True,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "full_masonry": {
                 "toolbar": False,
@@ -10370,6 +10394,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             }[workspace_id]
 
@@ -10390,6 +10415,7 @@ class MainWindow(QMainWindow):
             self.ideogram_caption_editor.setVisible(
                 visibility["ideogram_caption_editor"]
             )
+            self.pipeline_editor.setVisible(visibility["pipeline_editor"])
 
             visible_right_docks = [
                 dock

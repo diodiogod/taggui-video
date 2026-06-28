@@ -689,6 +689,50 @@ def save_ideogram_caption(
     return destination
 
 
+def merge_image_markings_into_ideogram(
+    image: Any,
+) -> tuple[IdeogramCaption, int]:
+    """Add exact-new non-crop image markings to an Ideogram sidecar."""
+    dimensions = image.valid_dimensions()
+    if dimensions is None:
+        raise IdeogramCaptionError("Image dimensions are required to convert markings.")
+    width, height = dimensions
+    try:
+        caption = discover_ideogram_caption(Path(image.path))
+    except IdeogramCaptionError:
+        raise
+    if caption is None:
+        divisor = _gcd(width, height)
+        caption = IdeogramCaption(
+            aspect_ratio=f"{width // divisor}:{height // divisor}",
+            high_level_description="",
+            compositional_background="",
+            elements=[],
+        )
+
+    candidates: list[IdeogramElement] = []
+    for marking in getattr(image, "markings", []):
+        marking_type = getattr(getattr(marking, "type", None), "value", "")
+        if marking_type in {"crop", "no marking"}:
+            continue
+        rect = marking.rect.normalized()
+        candidates.append(
+            IdeogramElement(
+                type="obj",
+                desc=str(getattr(marking, "label", "") or "region").strip(),
+                bbox=pixel_rect_to_bbox(
+                    rect.x(), rect.y(), rect.width(), rect.height(), width, height
+                ),
+            )
+        )
+    caption.elements, added_count = append_unique_elements(
+        caption.elements,
+        candidates,
+    )
+    save_ideogram_caption(Path(image.path), caption, pretty=True)
+    return caption, added_count
+
+
 def ideogram_caption_chips(
     caption: IdeogramCaption,
     *,

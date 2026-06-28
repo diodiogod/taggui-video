@@ -558,6 +558,7 @@ class MenuManager:
         self.auto_captioner_classic_layout_action = None
         self.toggle_auto_markings_action = None
         self.toggle_ideogram_caption_editor_action = None
+        self.toggle_pipeline_editor_action = None
         self.toggle_perf_hud_action = None
         self.toggle_reaction_controls_action = None
         self.recent_folders_menu = None
@@ -642,6 +643,10 @@ class MenuManager:
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
         self.toggle_ideogram_caption_editor_action = QAction(
             'Ideogram 4 Caption',
+            parent=self.main_window,
+        )
+        self.toggle_pipeline_editor_action = QAction(
+            'Pipelines',
             parent=self.main_window,
         )
         self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
@@ -811,6 +816,7 @@ class MenuManager:
         self.toggle_auto_captioner_action.setCheckable(True)
         self.toggle_auto_markings_action.setCheckable(True)
         self.toggle_ideogram_caption_editor_action.setCheckable(True)
+        self.toggle_pipeline_editor_action.setCheckable(True)
         self.toggle_perf_hud_action.setCheckable(True)
 
         # Connect toggle actions
@@ -840,6 +846,9 @@ class MenuManager:
             lambda is_checked:
             self.main_window.ideogram_caption_editor.setVisible(is_checked)
         )
+        self.toggle_pipeline_editor_action.triggered.connect(
+            lambda is_checked: self.main_window.pipeline_editor.setVisible(is_checked)
+        )
         self.toggle_perf_hud_action.triggered.connect(
             lambda checked: self.main_window.set_perf_hud_visible(checked)
         )
@@ -863,6 +872,7 @@ class MenuManager:
         auto_captioner_menu.addAction(self.auto_captioner_classic_layout_action)
         view_menu.addAction(self.toggle_auto_markings_action)
         view_menu.addAction(self.toggle_ideogram_caption_editor_action)
+        view_menu.addAction(self.toggle_pipeline_editor_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_perf_hud_action)
 
