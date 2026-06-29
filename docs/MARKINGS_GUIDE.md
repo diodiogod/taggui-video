@@ -139,11 +139,17 @@ To use it:
 
 - configure the auto-marking models directory in `Settings`
 - select a YOLO model in the auto-marking UI
+- double-click an `Output label` cell to customize the label saved for that
+  model class
 - choose what each detected class should become:
   - ignore
   - hint
   - exclude
   - include
+
+Custom output labels are saved per YOLO model. Use `Reset labels to model
+defaults` below the class table to restore every output label for the current
+model without changing its ignore, hint, exclude, or include assignments.
 
 The UI and code indicate support for:
 
@@ -151,6 +157,7 @@ The UI and code indicate support for:
 - IoU tuning
 - maximum detections per image
 - per-class mapping into TagGUI marking types
+- persistent per-model output-label overrides
 
 This is useful when you already have YOLO or ADetailer-style detection models and want to accelerate masking or annotation work.
 

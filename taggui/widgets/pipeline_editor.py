@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -91,10 +91,73 @@ class PipelineStepList(QListWidget):
         self.setSpacing(10)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(18)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setViewportMargins(0, 8, 8, 8)
         self._active_row = -1
+        self.min_card_zoom = 60
+        self.max_card_zoom = 160
+        self.card_zoom_step = 10
+        self.card_zoom = max(
+            self.min_card_zoom,
+            min(
+                self.max_card_zoom,
+                settings.value(
+                    "pipeline_card_zoom",
+                    defaultValue=100,
+                    type=int,
+                ),
+            ),
+        )
+        self.setSpacing(max(4, round(10 * self.card_zoom / 100)))
+        self.setToolTip(
+            "Scroll to navigate. Hold Ctrl and scroll to resize pipeline steps."
+        )
         self.model().rowsMoved.connect(lambda *_args: self.order_changed.emit())
+
+    def adjust_card_zoom(self, wheel_delta: int):
+        if wheel_delta == 0:
+            return
+        change = self.card_zoom_step if wheel_delta > 0 else -self.card_zoom_step
+        new_zoom = max(
+            self.min_card_zoom,
+            min(self.max_card_zoom, self.card_zoom + change),
+        )
+        if new_zoom == self.card_zoom:
+            return
+        self.card_zoom = new_zoom
+        self.setSpacing(max(4, round(10 * new_zoom / 100)))
+        for row in range(self.count()):
+            item = self.item(row)
+            row_widget = self.itemWidget(item)
+            card = getattr(row_widget, "card", row_widget)
+            if card is None:
+                continue
+            card.set_density(new_zoom)
+            item.setSizeHint(QSize(0, row_widget.sizeHint().height()))
+        settings.setValue("pipeline_card_zoom", self.card_zoom)
+        self.viewport().update()
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.adjust_card_zoom(
+                event.angleDelta().y() or event.pixelDelta().y()
+            )
+            event.accept()
+            return
+
+        pixel_delta = event.pixelDelta().y()
+        if pixel_delta:
+            distance = pixel_delta
+        else:
+            angle_delta = event.angleDelta().y()
+            if not angle_delta:
+                event.ignore()
+                return
+            distance = round((angle_delta / 120.0) * 36)
+        scroll_bar = self.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.value() - distance)
+        event.accept()
 
     def set_active_row(self, row: int):
         self._active_row = int(row)
@@ -215,11 +278,14 @@ class PipelineStepCard(QFrame):
         self.meta = STEP_META[step.type]
         self.accent = self.meta["accent"]
         self._expanded = False
+        self._density = 100
+        self._field_labels: list[QLabel] = []
         self.setObjectName("pipelineStepCard")
         self.setProperty("runState", "idle")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         root = QVBoxLayout(self)
+        self.root_layout = root
         root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(8)
 
@@ -271,6 +337,7 @@ class PipelineStepCard(QFrame):
         self.config_widget = QWidget()
         self.config_widget.setObjectName("pipelineStepConfig")
         config_layout = QVBoxLayout(self.config_widget)
+        self.config_layout = config_layout
         config_layout.setContentsMargins(0, 6, 0, 0)
         config_layout.setSpacing(8)
         self._build_config(config_layout, marking_models, caption_models)
@@ -279,8 +346,18 @@ class PipelineStepCard(QFrame):
         self._update_summary()
         self._apply_style()
         self.setWindowOpacity(1.0 if step.enabled else 0.55)
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
 
     def _apply_style(self):
+        scale = self._density / 100.0
+        eyebrow_size = max(7, round(8 * scale))
+        title_size = max(9, round(13 * scale))
+        summary_size = max(8, round(10 * scale))
+        summary_indent = max(8, round(25 * scale))
+        control_padding_v = max(2, round(5 * scale))
+        control_padding_h = max(4, round(7 * scale))
+        control_height = max(16, round(22 * scale))
         self.setStyleSheet(
             f"""
             QFrame#pipelineStepCard {{
@@ -295,19 +372,71 @@ class PipelineStepCard(QFrame):
                 border-left: 3px solid {self.accent};
             }}
             QLabel#pipelineDragGrip {{ color: #718091; font-weight: 800; letter-spacing: -1px; }}
-            QLabel#pipelineStepEyebrow {{ font-size: 8px; font-weight: 800; letter-spacing: 1px; }}
-            QLabel#pipelineStepTitle {{ color: #F2F7FA; font-size: 13px; font-weight: 700; }}
-            QLabel#pipelineStepSummary {{ color: #95A4B5; font-size: 10px; padding-left: 25px; }}
+            QLabel#pipelineStepEyebrow {{ font-size: {eyebrow_size}px; font-weight: 800; letter-spacing: 1px; }}
+            QLabel#pipelineStepTitle {{ color: #F2F7FA; font-size: {title_size}px; font-weight: 700; }}
+            QLabel#pipelineStepSummary {{ color: #95A4B5; font-size: {summary_size}px; padding-left: {summary_indent}px; }}
             QWidget#pipelineStepConfig {{ background: #11171D; border: 1px solid #27313C; border-radius: 6px; }}
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
                 background: #0D1318; color: #E8F0F5; border: 1px solid #354252;
-                border-radius: 5px; padding: 5px 7px; min-height: 22px;
+                border-radius: 5px; padding: {control_padding_v}px {control_padding_h}px;
+                min-height: {control_height}px;
             }}
             QToolButton {{ color: #AAB8C5; background: transparent; border: 0; padding: 4px 6px; }}
             QToolButton:hover {{ color: #FFFFFF; background: #2A3541; border-radius: 4px; }}
             QCheckBox {{ color: #AFC0CC; }}
             """
         )
+
+    def set_density(self, zoom_percent: int):
+        self._density = max(60, min(160, int(zoom_percent)))
+        scale = self._density / 100.0
+        self.root_layout.setContentsMargins(
+            max(7, round(12 * scale)),
+            max(5, round(10 * scale)),
+            max(7, round(12 * scale)),
+            max(5, round(10 * scale)),
+        )
+        self.root_layout.setSpacing(max(4, round(8 * scale)))
+        self.config_layout.setSpacing(max(4, round(8 * scale)))
+        for label in self._field_labels:
+            label.setMinimumWidth(max(60, round(92 * scale)))
+            label.setStyleSheet(
+                f"color: #9EADBA; font-size: {max(8, round(10 * scale))}px; "
+                "border: 0;"
+            )
+        self._apply_style()
+        self._refresh_size_hint()
+
+    def _pipeline_step_list(self):
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, PipelineStepList):
+            parent = parent.parentWidget()
+        return parent if isinstance(parent, PipelineStepList) else None
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.Type.Wheel
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            step_list = self._pipeline_step_list()
+            if step_list is not None:
+                step_list.adjust_card_zoom(
+                    event.angleDelta().y() or event.pixelDelta().y()
+                )
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            step_list = self._pipeline_step_list()
+            if step_list is not None:
+                step_list.adjust_card_zoom(
+                    event.angleDelta().y() or event.pixelDelta().y()
+                )
+                event.accept()
+                return
+        super().wheelEvent(event)
 
     def set_run_state(self, state: str):
         self.setProperty("runState", state)
@@ -336,6 +465,7 @@ class PipelineStepCard(QFrame):
         label = QLabel(label_text)
         label.setStyleSheet("color: #9EADBA; font-size: 10px; border: 0;")
         label.setMinimumWidth(92)
+        self._field_labels.append(label)
         layout.addWidget(label)
         layout.addWidget(widget, 1)
         return row
@@ -353,7 +483,13 @@ class PipelineStepCard(QFrame):
             if isinstance(class_names, list):
                 class_names = ", ".join(str(name) for name in class_names)
             self.class_names_edit = QLineEdit(str(class_names))
-            self.class_names_edit.setPlaceholderText("Optional class names, comma separated")
+            self.class_names_edit.setPlaceholderText(
+                "eye{person eye}, hand, tool{held tool}"
+            )
+            self.class_names_edit.setToolTip(
+                "Comma-separated source classes. Rename generated markings with "
+                "source_class{output label}; plain names keep the model label."
+            )
             self.confidence_spin = QDoubleSpinBox()
             self.confidence_spin.setRange(0.01, 1.0)
             self.confidence_spin.setSingleStep(0.01)
@@ -368,7 +504,7 @@ class PipelineStepCard(QFrame):
             for text, widget in (
                 ("Model", self.model_combo),
                 ("Output", self.marking_type_combo),
-                ("Classes", self.class_names_edit),
+                ("Classes / labels", self.class_names_edit),
                 ("Confidence", self.confidence_spin),
                 ("IoU", self.iou_spin),
                 ("Max detections", self.max_detections_spin),
@@ -660,6 +796,7 @@ class PipelineEditor(QDockWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, step.id)
             card = PipelineStepCard(step, marking_models, caption_models, self.step_list)
+            card.set_density(self.step_list.card_zoom)
             card.changed.connect(self._schedule_save)
             card.delete_requested.connect(self._delete_step)
             row_widget = PipelineStepRow(card, self.step_list)

@@ -12,7 +12,11 @@ from utils.ideogram_caption import (
     IdeogramCaptionError,
     merge_image_markings_into_ideogram,
 )
-from utils.pipeline import PipelineDefinition, PipelineStep
+from utils.pipeline import (
+    PipelineDefinition,
+    PipelineStep,
+    parse_auto_mark_class_specs,
+)
 from utils.settings import DEFAULT_SETTINGS, get_tag_separator, settings
 
 
@@ -128,9 +132,9 @@ class PipelineRunner(QObject):
         if not model_path.exists():
             raise FileNotFoundError(f"Auto-marking model not found: {model_path}")
 
-        class_names = step.settings.get("class_names", [])
-        if isinstance(class_names, str):
-            class_names = [part.strip() for part in class_names.split(",") if part.strip()]
+        class_names, class_label_overrides = parse_auto_mark_class_specs(
+            step.settings.get("class_names", [])
+        )
         marking_settings = {
             "model_path": model_path,
             "conf": float(step.settings.get("confidence", 0.25)),
@@ -142,6 +146,7 @@ class PipelineRunner(QObject):
             ),
             "marking_type": str(step.settings.get("marking_type", "hint")),
             "class_names": list(class_names),
+            "class_label_overrides": class_label_overrides,
             "classes": {},
         }
         images = [

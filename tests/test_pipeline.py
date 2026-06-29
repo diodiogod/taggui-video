@@ -8,6 +8,7 @@ from taggui.utils.pipeline import (
     PipelineStore,
     PipelineValidationError,
     default_pipeline,
+    parse_auto_mark_class_specs,
 )
 
 
@@ -51,3 +52,30 @@ def test_pipeline_rejects_duplicate_step_ids():
 def test_pipeline_rejects_non_object_step_settings():
     with pytest.raises(PipelineValidationError, match="settings must be an object"):
         PipelineStep.from_dict({"type": "save", "settings": ["invalid"]})
+
+
+def test_auto_mark_class_specs_support_label_overrides():
+    class_names, overrides = parse_auto_mark_class_specs(
+        "eye{person eye}, hand, TOOL{held tool}"
+    )
+
+    assert class_names == ["eye", "hand", "TOOL"]
+    assert overrides == {"eye": "person eye", "tool": "held tool"}
+
+
+def test_auto_mark_class_specs_accept_saved_list_values_and_deduplicate():
+    class_names, overrides = parse_auto_mark_class_specs(
+        ["Eye{first label}", "eye{final label}, hand"]
+    )
+
+    assert class_names == ["Eye", "hand"]
+    assert overrides == {"eye": "final label"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["eye{", "{person eye}", "eye{}", "eye{person}extra", "eye{a{b}}"],
+)
+def test_auto_mark_class_specs_reject_malformed_overrides(value):
+    with pytest.raises(PipelineValidationError, match="Invalid auto-marking class"):
+        parse_auto_mark_class_specs(value)

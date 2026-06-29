@@ -11,6 +11,9 @@ Open `View -> Pipelines` to create and run workflows.
 Each operation appears as a card on the execution spine. The numbered glowing nodes show the exact run order.
 
 - Drag the `::::` handle to reorder a card.
+- Scroll over the step list for controlled pixel-by-pixel navigation.
+- Hold `Ctrl` and scroll anywhere over a step to resize all cards between
+  compact and expanded densities. The chosen density is remembered.
 - Use `Edit` to expand model and generation settings.
 - Clear a card's checkbox to keep it in the profile without running it.
 - Use `+ Add step` to append another operation.
@@ -30,10 +33,12 @@ Configure:
 
 - model path, relative to the configured auto-marking models directory or absolute
 - output marking type: hint, exclude, or include
-- optional comma-separated model class names
+- optional comma-separated model class names and output-label overrides
 - confidence, IoU, and maximum detections
 
 If no class names are supplied, every class exposed by that model is used. Exact matching results already present on an image are skipped; distinct overlapping regions remain valid.
+
+Use `source_class{output label}` to rename generated markings without changing the detector class used for inference. For example, `eye{person eye}, hand, tool{held tool}` detects the model classes `eye`, `hand`, and `tool`, then saves the first and third labels as `person eye` and `held tool`. Plain entries such as `hand` keep the model's original label. Class matching is case-insensitive.
 
 Add several Auto Marking cards to detect faces, hands, tools, or other model-specific regions in sequence. Pipeline execution is stage-major, so each model handles the full scope before the next model loads.
 

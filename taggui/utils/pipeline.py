@@ -23,6 +23,56 @@ class PipelineValidationError(ValueError):
     """Raised when a pipeline profile cannot be validated."""
 
 
+def parse_auto_mark_class_specs(
+    value: str | list[str] | tuple[str, ...],
+) -> tuple[list[str], dict[str, str]]:
+    """Parse ``source{output label}`` class filters used by auto-mark steps."""
+    raw_entries = value if isinstance(value, (list, tuple)) else [value]
+    entries = [
+        part.strip()
+        for raw_entry in raw_entries
+        for part in str(raw_entry or "").split(",")
+        if part.strip()
+    ]
+    class_names: list[str] = []
+    label_overrides: dict[str, str] = {}
+    seen_names: set[str] = set()
+
+    for entry in entries:
+        if "{" not in entry and "}" not in entry:
+            source_name = entry
+            output_label = None
+        else:
+            opening = entry.find("{")
+            if (
+                opening <= 0
+                or not entry.endswith("}")
+                or "{" in entry[opening + 1:-1]
+                or "}" in entry[:opening]
+                or "}" in entry[opening + 1:-1]
+            ):
+                raise PipelineValidationError(
+                    f"Invalid auto-marking class entry {entry!r}. "
+                    "Use source_class{output label}."
+                )
+            source_name = entry[:opening].strip()
+            output_label = entry[opening + 1:-1].strip()
+            if not source_name or not output_label:
+                raise PipelineValidationError(
+                    f"Invalid auto-marking class entry {entry!r}. "
+                    "Both the source class and output label are required."
+                )
+
+        normalized_name = source_name.casefold()
+        if normalized_name not in seen_names:
+            seen_names.add(normalized_name)
+            class_names.append(source_name)
+        if output_label is not None:
+            label_overrides[normalized_name] = output_label
+
+    return class_names, label_overrides
+
+
 def new_pipeline_id(prefix: str = "pipeline") -> str:
     return f"{prefix}-{uuid4().hex[:10]}"
 

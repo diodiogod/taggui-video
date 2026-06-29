@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
                                QAbstractScrollArea, QFrame, QFormLayout,
                                QMessageBox, QTableWidget, QHeaderView, QLabel,
-                               QTableWidgetItem, QComboBox)
+                               QTableWidgetItem, QComboBox, QPushButton)
 
 from utils.icons import create_add_box_icon
 from models.image_list_model import ImageListModel
@@ -56,11 +56,21 @@ class MarkingSettingsForm(QVBoxLayout):
             if key == 'marking_models_directory_path' else 0)
         basic_settings_form.addRow('Model', self.model_combo_box)
 
-        self.class_table = QTableWidget(0, 2)
-        self.class_table.setHorizontalHeaderLabels(['Class', 'Marking'])
+        self.class_table = QTableWidget(0, 3)
+        self.class_table.setHorizontalHeaderLabels(
+            ['Model class', 'Output label', 'Marking']
+        )
         self.class_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.class_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         basic_settings_form.addRow('Classes', self.class_table)
+        self.reset_class_labels_button = QPushButton(
+            'Reset labels to model defaults'
+        )
+        self.reset_class_labels_button.setToolTip(
+            'Discard custom output labels for the selected model.'
+        )
+        self.reset_class_labels_button.setEnabled(False)
+        basic_settings_form.addRow('', self.reset_class_labels_button)
 
         self.toggle_advanced_settings_form_button = TallPushButton(
             'Show Advanced Settings')
@@ -179,6 +189,7 @@ class MarkingSettingsForm(QVBoxLayout):
 class AutoMarkings(QDockWidget):
     marking_generated = Signal(QModelIndex, list)
     _CLASS_ACTIONS_SETTINGS_KEY = 'auto_marking_class_actions_json'
+    _CLASS_LABELS_SETTINGS_KEY = 'auto_marking_class_labels_json'
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList, parent):
@@ -228,6 +239,12 @@ class AutoMarkings(QDockWidget):
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_marking)
         self.marking_settings_form.model_selected.connect(self._on_model_selection_changed)
+        self.marking_settings_form.class_table.itemChanged.connect(
+            self._on_class_label_changed
+        )
+        self.marking_settings_form.reset_class_labels_button.clicked.connect(
+            self._reset_class_labels
+        )
         QTimer.singleShot(
             _startup_delay_ms('TAGGUI_AUTO_MARKING_RESTORE_DELAY_MS', 6500),
             self._restore_model_selection_state,
@@ -235,6 +252,9 @@ class AutoMarkings(QDockWidget):
 
     @Slot(bool)
     def _on_model_selection_changed(self, has_model_text: bool):
+        self.marking_settings_form.reset_class_labels_button.setEnabled(
+            has_model_text
+        )
         if not has_model_text:
             self.start_cancel_button.setEnabled(False)
             return
@@ -267,8 +287,9 @@ class AutoMarkings(QDockWidget):
     def _current_model_key(self) -> str:
         return str(self.marking_settings_form.model_combo_box.currentText() or '').strip()
 
-    def _load_saved_class_actions(self) -> dict[str, dict[str, str]]:
-        raw = settings.value(self._CLASS_ACTIONS_SETTINGS_KEY, '{}', type=str)
+    @staticmethod
+    def _load_saved_class_values(key: str) -> dict[str, dict[str, str]]:
+        raw = settings.value(key, '{}', type=str)
         if not raw:
             return {}
         try:
@@ -277,19 +298,23 @@ class AutoMarkings(QDockWidget):
             return {}
         return parsed if isinstance(parsed, dict) else {}
 
-    def _save_saved_class_actions(self, payload: dict[str, dict[str, str]]):
-        settings.setValue(self._CLASS_ACTIONS_SETTINGS_KEY, json.dumps(payload))
+    @staticmethod
+    def _save_saved_class_values(
+            key: str, payload: dict[str, dict[str, str]]):
+        settings.setValue(key, json.dumps(payload))
 
     def _persist_class_actions_for_current_model(self):
         model_key = self._current_model_key()
         if not model_key:
             return
-        payload = self._load_saved_class_actions()
+        payload = self._load_saved_class_values(
+            self._CLASS_ACTIONS_SETTINGS_KEY
+        )
         model_actions = {}
         row_count = self.marking_settings_form.class_table.rowCount()
         for row in range(row_count):
             class_item = self.marking_settings_form.class_table.item(row, 0)
-            combo = self.marking_settings_form.class_table.cellWidget(row, 1)
+            combo = self.marking_settings_form.class_table.cellWidget(row, 2)
             if class_item is None or combo is None:
                 continue
             class_id = class_item.data(Qt.ItemDataRole.UserRole)
@@ -297,13 +322,17 @@ class AutoMarkings(QDockWidget):
                 continue
             model_actions[str(class_id)] = str(combo.currentText() or 'ignore')
         payload[model_key] = model_actions
-        self._save_saved_class_actions(payload)
+        self._save_saved_class_values(
+            self._CLASS_ACTIONS_SETTINGS_KEY, payload
+        )
 
     def _restore_class_actions_for_current_model(self):
         model_key = self._current_model_key()
         if not model_key:
             return
-        payload = self._load_saved_class_actions()
+        payload = self._load_saved_class_values(
+            self._CLASS_ACTIONS_SETTINGS_KEY
+        )
         model_actions = payload.get(model_key, {})
         default_action = 'hint'
         if self.marking_settings_form.class_table.rowCount() > 1:
@@ -311,12 +340,87 @@ class AutoMarkings(QDockWidget):
         row_count = self.marking_settings_form.class_table.rowCount()
         for row in range(row_count):
             class_item = self.marking_settings_form.class_table.item(row, 0)
-            combo = self.marking_settings_form.class_table.cellWidget(row, 1)
+            combo = self.marking_settings_form.class_table.cellWidget(row, 2)
             if class_item is None or combo is None:
                 continue
             class_id = class_item.data(Qt.ItemDataRole.UserRole)
             action = model_actions.get(str(class_id), default_action)
             combo.setCurrentText(action)
+
+    def _persist_class_labels_for_current_model(self):
+        model_key = self._current_model_key()
+        if not model_key:
+            return
+        payload = self._load_saved_class_values(
+            self._CLASS_LABELS_SETTINGS_KEY
+        )
+        model_labels = {}
+        table = self.marking_settings_form.class_table
+        for row in range(table.rowCount()):
+            class_item = table.item(row, 0)
+            label_item = table.item(row, 1)
+            if class_item is None or label_item is None:
+                continue
+            class_id = class_item.data(Qt.ItemDataRole.UserRole)
+            default_label = str(
+                label_item.data(Qt.ItemDataRole.UserRole) or ''
+            ).strip()
+            output_label = label_item.text().strip()
+            if class_id is not None and output_label and output_label != default_label:
+                model_labels[str(class_id)] = output_label
+        if model_labels:
+            payload[model_key] = model_labels
+        else:
+            payload.pop(model_key, None)
+        self._save_saved_class_values(
+            self._CLASS_LABELS_SETTINGS_KEY, payload
+        )
+
+    def _restore_class_labels_for_current_model(self):
+        model_key = self._current_model_key()
+        if not model_key:
+            return
+        payload = self._load_saved_class_values(
+            self._CLASS_LABELS_SETTINGS_KEY
+        )
+        model_labels = payload.get(model_key, {})
+        table = self.marking_settings_form.class_table
+        previous = table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                class_item = table.item(row, 0)
+                label_item = table.item(row, 1)
+                if class_item is None or label_item is None:
+                    continue
+                class_id = class_item.data(Qt.ItemDataRole.UserRole)
+                default_label = str(
+                    label_item.data(Qt.ItemDataRole.UserRole) or ''
+                )
+                label_item.setText(
+                    str(model_labels.get(str(class_id), default_label))
+                )
+        finally:
+            table.blockSignals(previous)
+
+    @Slot(QTableWidgetItem)
+    def _on_class_label_changed(self, item: QTableWidgetItem):
+        if item.column() == 1:
+            self._persist_class_labels_for_current_model()
+
+    @Slot()
+    def _reset_class_labels(self):
+        table = self.marking_settings_form.class_table
+        previous = table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                label_item = table.item(row, 1)
+                if label_item is not None:
+                    label_item.setText(str(
+                        label_item.data(Qt.ItemDataRole.UserRole) or ''
+                    ))
+        finally:
+            table.blockSignals(previous)
+        self._persist_class_labels_for_current_model()
 
     @Slot(str)
     def update_console_text_edit(self, text: str):
@@ -393,27 +497,45 @@ class AutoMarkings(QDockWidget):
         if self.show_alert_when_finished:
             self.marking_thread.finished.connect(self.show_alert)
         self.marking_thread.preload_model()
+        class_table = self.marking_settings_form.class_table
         if self.marking_thread.model is None:
-            self.marking_settings_form.class_table.setRowCount(0)
+            class_table.setRowCount(0)
             self.start_cancel_button.setEnabled(False)
             return
-        else:
-            self.marking_settings_form.class_table.setRowCount(
+        previous = class_table.blockSignals(True)
+        try:
+            class_table.setRowCount(
                 len(self.marking_thread.model.names))
-        for row, (class_id, class_name) in enumerate(
-                self.marking_thread.model.names.items()):
-            class_item = QTableWidgetItem(class_name)
-            class_item.setData(Qt.ItemDataRole.UserRole, int(class_id))
-            self.marking_settings_form.class_table.setItem(row, 0, class_item)
-            combo = QComboBox()
-            combo.addItem('ignore')
-            combo.addItem(create_add_box_icon(Qt.gray), 'hint')
-            combo.addItem(create_add_box_icon(Qt.red), 'exclude')
-            combo.addItem(create_add_box_icon(Qt.green), 'include')
-            combo.currentTextChanged.connect(
-                lambda _text, self=self: self._persist_class_actions_for_current_model()
-            )
-            self.marking_settings_form.class_table.setCellWidget(row, 1, combo)
+            for row, (class_id, class_name) in enumerate(
+                    self.marking_thread.model.names.items()):
+                class_item = QTableWidgetItem(str(class_name))
+                class_item.setData(Qt.ItemDataRole.UserRole, int(class_id))
+                class_item.setFlags(
+                    class_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                )
+                class_table.setItem(row, 0, class_item)
+
+                label_item = QTableWidgetItem(str(class_name))
+                label_item.setData(
+                    Qt.ItemDataRole.UserRole, str(class_name)
+                )
+                label_item.setToolTip(
+                    'Double-click to customize the generated marking label.'
+                )
+                class_table.setItem(row, 1, label_item)
+
+                combo = QComboBox()
+                combo.addItem('ignore')
+                combo.addItem(create_add_box_icon(Qt.gray), 'hint')
+                combo.addItem(create_add_box_icon(Qt.red), 'exclude')
+                combo.addItem(create_add_box_icon(Qt.green), 'include')
+                combo.currentTextChanged.connect(
+                    lambda _text, self=self: self._persist_class_actions_for_current_model()
+                )
+                class_table.setCellWidget(row, 2, combo)
+        finally:
+            class_table.blockSignals(previous)
+        self._restore_class_labels_for_current_model()
         self._restore_class_actions_for_current_model()
         self.start_cancel_button.setEnabled(True)
         # NOTE: As this thread has no place to display the output, we keep
@@ -436,9 +558,16 @@ class AutoMarkings(QDockWidget):
         classes = {}
         for row, (class_id, class_name) in enumerate(
                 self.marking_thread.model.names.items()):
-            combo = self.marking_settings_form.class_table.cellWidget(row, 1).currentText()
+            label_item = self.marking_settings_form.class_table.item(row, 1)
+            output_label = (
+                label_item.text().strip()
+                if label_item is not None else ''
+            ) or str(class_name)
+            combo = self.marking_settings_form.class_table.cellWidget(
+                row, 2
+            ).currentText()
             if combo != 'ignore':
-                classes[class_id] = (class_name, combo)
+                classes[class_id] = (output_label, combo)
         self.marking_thread.marking_settings['classes'] = classes
         selected_image_count = len(selected_image_indices)
         self.image_list_model.add_to_undo_stack(
