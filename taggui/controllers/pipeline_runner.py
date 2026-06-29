@@ -33,12 +33,13 @@ class PipelineRunner(QObject):
         "auto_mark": "Auto Marking",
         "build_ideogram_regions": "Build Ideogram Regions",
         "auto_caption": "Auto Caption",
-        "save": "Save Metadata",
+        "save": "Synchronize Search Indexes",
     }
 
     def __init__(self, main_window):
         super().__init__(main_window)
         self.main_window = main_window
+        self.image_list_model = main_window.image_list_model
         self.pipeline: PipelineDefinition | None = None
         self.image_indices: list[QModelIndex] = []
         self.steps: list[PipelineStep] = []
@@ -51,6 +52,7 @@ class PipelineRunner(QObject):
         self,
         pipeline: PipelineDefinition,
         image_indices: list[QModelIndex],
+        image_list_model=None,
     ) -> bool:
         if self.is_running:
             return False
@@ -60,6 +62,7 @@ class PipelineRunner(QObject):
             self.finished.emit(False, "No images are available in the selected scope.")
             return False
         self.pipeline = pipeline
+        self.image_list_model = image_list_model or self.main_window.image_list_model
         self.image_indices = valid_indices
         self.steps = [step for step in pipeline.steps if step.enabled]
         if not self.steps:
@@ -150,17 +153,17 @@ class PipelineRunner(QObject):
             "classes": {},
         }
         images = [
-            self.main_window.image_list_model.data(index, Qt.ItemDataRole.UserRole)
+            self.image_list_model.data(index, Qt.ItemDataRole.UserRole)
             for index in self.image_indices
         ]
-        self.main_window.image_list_model.add_images_to_undo_stack(
+        self.image_list_model.add_images_to_undo_stack(
             [image for image in images if image is not None],
             action_name="Pipeline auto marking",
             should_ask_for_confirmation=False,
         )
         thread = MarkingThread(
             self,
-            self.main_window.image_list_model,
+            self.image_list_model,
             self.image_indices,
             marking_settings,
         )
@@ -170,7 +173,7 @@ class PipelineRunner(QObject):
         self._start_thread(thread)
 
     def _add_exact_new_markings(self, image_index: QModelIndex, markings: list[dict]):
-        image = self.main_window.image_list_model.data(
+        image = self.image_list_model.data(
             image_index,
             Qt.ItemDataRole.UserRole,
         )
@@ -207,10 +210,11 @@ class PipelineRunner(QObject):
             existing.add(key)
             unique.append(marking)
         if unique:
-            self.main_window.image_list_model.add_image_markings(
+            self.image_list_model.add_image_markings(
                 image_index,
                 unique,
             )
+            self.main_window.image_viewer.refresh_marking_overlays(image)
 
     def _start_auto_caption(self, step: PipelineStep):
         form = self.main_window.auto_captioner.caption_settings_form
@@ -232,20 +236,56 @@ class PipelineRunner(QObject):
         )
         thread = CaptioningThread(
             self,
-            self.main_window.image_list_model,
+            self.image_list_model,
             self.image_indices,
             caption_settings,
             get_tag_separator(),
             Path(models_directory) if models_directory else None,
             self.main_window.image_viewer,
         )
-        thread.caption_generated.connect(
-            self.main_window.auto_captioner.caption_generated.emit
-        )
+        thread.caption_generated.connect(self._apply_caption_result)
         thread.structured_caption_generated.connect(
-            self.main_window.auto_captioner.structured_caption_generated.emit
+            self._apply_structured_caption_result
         )
         self._start_thread(thread)
+
+    def _apply_caption_result(
+        self,
+        image_index: QModelIndex,
+        _caption: str,
+        tags: list,
+    ):
+        self.image_list_model.update_image_tags(image_index, tags)
+        if self._target_browser_is_active():
+            self.main_window.image_tags_editor.reload_image_tags_if_changed(
+                image_index,
+                image_index,
+            )
+
+    def _apply_structured_caption_result(
+        self,
+        image_index: QModelIndex,
+        _caption,
+    ):
+        image = image_index.data(Qt.ItemDataRole.UserRole)
+        self.image_list_model.refresh_ideogram_caption_index_for_image(image)
+        if not self._target_browser_is_active():
+            return
+        self.main_window.ideogram_caption_editor.reload_generated_caption(image)
+        self.main_window.image_viewer.refresh_ideogram_caption_overlays()
+        self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
+
+    def _target_browser_is_active(self) -> bool:
+        manager = getattr(self.main_window, "_context_switch_manager", None)
+        secondary = getattr(self.main_window, "_secondary_browser", None)
+        active_model = self.main_window.image_list_model
+        if (
+            manager is not None
+            and getattr(manager, "active_context", "primary") == "secondary"
+            and secondary is not None
+        ):
+            active_model = secondary.image_list_model
+        return self.image_list_model is active_model
 
     def _start_thread(self, thread):
         self.active_thread = thread
@@ -279,7 +319,7 @@ class PipelineRunner(QObject):
             if self.cancel_requested:
                 self._finish(False, "Pipeline canceled.")
                 return
-            image = self.main_window.image_list_model.data(
+            image = self.image_list_model.data(
                 index, Qt.ItemDataRole.UserRole
             )
             if image is None:
@@ -287,7 +327,7 @@ class PipelineRunner(QObject):
             try:
                 _caption, added = merge_image_markings_into_ideogram(image)
                 added_total += added
-                self.main_window.image_list_model.refresh_ideogram_caption_index_for_image(
+                self.image_list_model.refresh_ideogram_caption_index_for_image(
                     image
                 )
             except (IdeogramCaptionError, OSError) as exc:
@@ -303,17 +343,19 @@ class PipelineRunner(QObject):
 
     def _run_save(self):
         for position, index in enumerate(self.image_indices, start=1):
-            image = self.main_window.image_list_model.data(
+            image = self.image_list_model.data(
                 index, Qt.ItemDataRole.UserRole
             )
             if image is None:
                 continue
-            self.main_window.image_list_model.write_image_tags_to_disk(image)
-            self.main_window.image_list_model.write_meta_to_disk(image)
-            self.main_window.image_list_model.refresh_ideogram_caption_index_for_image(
+            self.image_list_model.refresh_search_indexes_for_image(
                 image
             )
-            self.progress_changed.emit(position, len(self.image_indices), "Save Metadata")
+            self.progress_changed.emit(
+                position,
+                len(self.image_indices),
+                "Synchronize Search Indexes",
+            )
         QTimer.singleShot(0, self._advance)
 
     def _refresh_ideogram_ui(self):

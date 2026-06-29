@@ -4484,6 +4484,30 @@ class ImageViewer(QWidget):
                 marking.size_changed()
         self.scene.invalidate()
 
+    def refresh_marking_overlays(self, image: Image | None = None):
+        """Add missing marking graphics for the currently displayed image."""
+        if not self.proxy_image_index.isValid():
+            return
+        current_image: Image = self.proxy_image_index.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if current_image is None or (image is not None and current_image is not image):
+            return
+        current_image.markings = self._deduplicated_markings(
+            current_image.markings
+        )
+        for marking in current_image.markings:
+            self.add_rectangle(
+                marking.rect,
+                marking.type,
+                interactive=False,
+                name=marking.label,
+                confidence=marking.confidence,
+            )
+        self._apply_marking_ideogram_overlay_priority()
+        self.scene.invalidate()
+        self.view.viewport().update()
+
     def _clear_marking_items_from_scene(self):
         for item in list(self.marking_items):
             try:

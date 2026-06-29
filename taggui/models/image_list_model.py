@@ -8885,6 +8885,17 @@ class ImageListModel(QAbstractListModel):
             rel_path = image.path.name
         self._db.set_ideogram_caption_text_for_file(rel_path, image.path)
 
+    def refresh_search_indexes_for_image(self, image: Image | None):
+        """Synchronize searchable DB state without rewriting source sidecars."""
+        if image is None:
+            return
+        self._save_tags_to_db(image)
+        self._save_markings_to_db(image)
+        self._save_rating_to_db(image)
+        self.save_reactions_to_db(image)
+        self.save_review_state_to_db(image)
+        self.refresh_ideogram_caption_index_for_image(image)
+
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
         """Add one or more tags to one or more images."""

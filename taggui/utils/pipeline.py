@@ -178,7 +178,6 @@ def default_pipeline(name: str = "Ideogram marking pass") -> PipelineDefinition:
             PipelineStep("auto_mark"),
             PipelineStep("build_ideogram_regions"),
             PipelineStep("auto_caption", {"output_format": "Ideogram 4 JSON"}),
-            PipelineStep("save"),
         ],
     )
 

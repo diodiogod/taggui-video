@@ -135,6 +135,10 @@ These filtering details should later move into a dedicated filtering guide.
 
 TagGUI also supports automatic marking detection with YOLO models.
 
+Auto-Marking follows the active browser. Browser 1 and Browser 2 results are
+written to their respective source models, metadata sidecars, search indexes,
+and undo histories.
+
 To use it:
 
 - configure the auto-marking models directory in `Settings`

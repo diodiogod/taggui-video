@@ -24,6 +24,16 @@ def test_pipeline_store_round_trip(tmp_path):
     assert restored[0].to_dict() == pipeline.to_dict()
 
 
+def test_default_pipeline_relies_on_each_step_persisting_its_output():
+    pipeline = default_pipeline()
+
+    assert [step.type for step in pipeline.steps] == [
+        "auto_mark",
+        "build_ideogram_regions",
+        "auto_caption",
+    ]
+
+
 def test_pipeline_store_writes_versioned_json(tmp_path):
     store = PipelineStore(tmp_path / "pipelines.json")
     store.save([PipelineDefinition("One", [PipelineStep("save")])])

@@ -40,6 +40,10 @@ If no class names are supplied, every class exposed by that model is used. Exact
 
 Use `source_class{output label}` to rename generated markings without changing the detector class used for inference. For example, `eye{person eye}, hand, tool{held tool}` detects the model classes `eye`, `hand`, and `tool`, then saves the first and third labels as `person eye` and `held tool`. Plain entries such as `hand` keep the model's original label. Class matching is case-insensitive.
 
+Double-click the `Classes / labels` field label to populate the field with every
+default class from the selected YOLO model. Existing filters or custom mappings
+require confirmation before they are replaced.
+
 Add several Auto Marking cards to detect faces, hands, tools, or other model-specific regions in sequence. Pipeline execution is stage-major, so each model handles the full scope before the next model loads.
 
 ### Build Ideogram Regions
@@ -58,16 +62,26 @@ Configure:
 
 Settings not shown on the card, such as the endpoint, API key, prompt, generation parameters, and video sampling, come from the current Auto-Captioner configuration.
 
-### Save Metadata
+### Synchronize Search Indexes
 
-Flushes normal captions, TagGUI marking metadata, Ideogram sidecars, and searchable Ideogram indexes.
+Refreshes searchable database state for tags, markings, ratings, reactions,
+review state, and Ideogram captions. It does not rewrite `.txt`, `.taggui.json`,
+or Ideogram caption sidecars.
+
+Normal pipeline operations save their own output immediately, so this optional
+maintenance step is not included in new default pipelines. Add it when database
+search data needs explicit reconciliation, such as after index maintenance.
 
 ## Scopes
 
-- `Current image`: run only on the image shown in Browser 1.
-- `Selected images`: run on the current Browser 1 selection.
-- `Filtered images`: run on images currently exposed by the active Browser 1 filter.
-- `All images`: run on the complete Browser 1 source model.
+- `Current image`: run only on the image shown by the active browser.
+- `Selected images`: run on the active browser's current selection.
+- `Filtered images`: run on images exposed by the active browser's filter.
+- `All images`: run on the active browser's complete source model.
+
+Browser 1 and Browser 2 keep independent source models, undo history, sidecars,
+and search indexes. Pipeline results are applied to whichever browser is active
+when the run starts.
 
 ## Running
 
@@ -84,7 +98,6 @@ An Ideogram dataset pipeline can use:
 3. Auto Marking with a tool detector.
 4. Build Ideogram Regions.
 5. Auto Caption using `Ideogram 4 JSON`.
-6. Save Metadata.
 
 This produces a structured caption scaffold from all detector regions before the vision-language model expands their descriptions.
 

@@ -66,10 +66,10 @@ STEP_META = {
         "description": "Generate prose or enrich the Ideogram JSON caption.",
     },
     "save": {
-        "title": "Save Metadata",
-        "eyebrow": "COMMIT",
+        "title": "Synchronize Search Indexes",
+        "eyebrow": "INDEX",
         "accent": "#7ED68A",
-        "description": "Flush captions, markings, and searchable indexes.",
+        "description": "Refresh searchable database data without rewriting sidecars.",
     },
 }
 
@@ -257,6 +257,17 @@ class PipelineDragHandle(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class PipelineFieldLabel(QLabel):
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class PipelineStepRow(QWidget):
     """Reserve a clear gutter for the flow spine beside a step card."""
 
@@ -271,6 +282,7 @@ class PipelineStepRow(QWidget):
 class PipelineStepCard(QFrame):
     changed = Signal()
     delete_requested = Signal(str)
+    _model_class_cache: dict[str, tuple[int, list[str]]] = {}
 
     def __init__(self, step: PipelineStep, marking_models: list[str], caption_models: list[str], parent=None):
         super().__init__(parent)
@@ -322,11 +334,13 @@ class PipelineStepCard(QFrame):
             self.expand_button.hide()
         header.addWidget(self.expand_button)
 
-        remove_button = QToolButton()
-        remove_button.setText("X")
-        remove_button.setToolTip("Remove step")
-        remove_button.clicked.connect(lambda: self.delete_requested.emit(self.step.id))
-        header.addWidget(remove_button)
+        self.remove_button = QToolButton()
+        self.remove_button.setText("X")
+        self.remove_button.setToolTip("Remove step")
+        self.remove_button.clicked.connect(
+            lambda: self.delete_requested.emit(self.step.id)
+        )
+        header.addWidget(self.remove_button)
         root.addLayout(header)
 
         self.summary_label = QLabel()
@@ -383,6 +397,7 @@ class PipelineStepCard(QFrame):
             }}
             QToolButton {{ color: #AAB8C5; background: transparent; border: 0; padding: 4px 6px; }}
             QToolButton:hover {{ color: #FFFFFF; background: #2A3541; border-radius: 4px; }}
+            QToolButton:disabled {{ color: #4B5661; background: transparent; }}
             QCheckBox {{ color: #AFC0CC; }}
             """
         )
@@ -458,13 +473,24 @@ class PipelineStepCard(QFrame):
                 parent.startDrag(Qt.DropAction.MoveAction)
                 return
 
-    def _field_row(self, label_text: str, widget: QWidget) -> QWidget:
+    def _field_row(
+        self,
+        label_text: str,
+        widget: QWidget,
+        double_click_handler=None,
+    ) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
         layout.setContentsMargins(8, 2, 8, 2)
-        label = QLabel(label_text)
+        label = PipelineFieldLabel(label_text)
         label.setStyleSheet("color: #9EADBA; font-size: 10px; border: 0;")
         label.setMinimumWidth(92)
+        if double_click_handler is not None:
+            label.setCursor(Qt.CursorShape.PointingHandCursor)
+            label.setToolTip(
+                "Double-click to load the selected model's default classes."
+            )
+            label.double_clicked.connect(double_click_handler)
         self._field_labels.append(label)
         layout.addWidget(label)
         layout.addWidget(widget, 1)
@@ -504,12 +530,17 @@ class PipelineStepCard(QFrame):
             for text, widget in (
                 ("Model", self.model_combo),
                 ("Output", self.marking_type_combo),
-                ("Classes / labels", self.class_names_edit),
                 ("Confidence", self.confidence_spin),
                 ("IoU", self.iou_spin),
                 ("Max detections", self.max_detections_spin),
             ):
                 layout.addWidget(self._field_row(text, widget))
+            classes_row = self._field_row(
+                "Classes / labels",
+                self.class_names_edit,
+                self._populate_default_classes,
+            )
+            layout.insertWidget(2, classes_row)
             self.model_combo.currentTextChanged.connect(self._sync_settings)
             self.marking_type_combo.currentTextChanged.connect(self._sync_settings)
             self.class_names_edit.textChanged.connect(self._sync_settings)
@@ -538,6 +569,72 @@ class PipelineStepCard(QFrame):
             description.setStyleSheet("color: #A7B5C1; padding: 8px; border: 0;")
             layout.addWidget(description)
 
+    def _selected_marking_model_path(self) -> Path:
+        model_value = self.model_combo.currentText().strip()
+        if not model_value:
+            main_window = self.window()
+            auto_markings = getattr(main_window, "auto_markings", None)
+            if auto_markings is not None:
+                model_value = str(
+                    auto_markings.marking_settings_form.model_combo_box.currentText()
+                    or ""
+                ).strip()
+        if not model_value:
+            raise ValueError("Select an auto-marking model first.")
+
+        model_path = Path(model_value).expanduser()
+        if not model_path.is_absolute():
+            root = settings.value(
+                "marking_models_directory_path",
+                DEFAULT_SETTINGS["marking_models_directory_path"],
+                type=str,
+            )
+            model_path = Path(root) / model_path if root else model_path
+        if not model_path.exists():
+            raise FileNotFoundError(f"Auto-marking model not found: {model_path}")
+        return model_path
+
+    def _populate_default_classes(self):
+        current_text = self.class_names_edit.text().strip()
+        if current_text:
+            reply = QMessageBox.question(
+                self,
+                "Load model classes",
+                "Replace the current class filters and custom labels with the "
+                "selected model's default class names?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            model_path = self._selected_marking_model_path()
+            modified_ns = model_path.stat().st_mtime_ns
+            cache_key = str(model_path.resolve())
+            cached = self._model_class_cache.get(cache_key)
+            if cached is not None and cached[0] == modified_ns:
+                class_names = cached[1]
+            else:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    from ultralytics import YOLO
+
+                    model = YOLO(model_path)
+                    class_names = [
+                        str(class_name)
+                        for _class_id, class_name in sorted(model.names.items())
+                    ]
+                finally:
+                    QApplication.restoreOverrideCursor()
+                self._model_class_cache[cache_key] = (
+                    modified_ns,
+                    class_names,
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "Load model classes", str(exc))
+            return
+        self.class_names_edit.setText(", ".join(class_names))
+
     def _enabled_changed(self, enabled: bool):
         self.step.enabled = bool(enabled)
         self.setWindowOpacity(1.0 if enabled else 0.55)
@@ -547,6 +644,11 @@ class PipelineStepCard(QFrame):
         self._expanded = not self._expanded
         self.config_widget.setVisible(self._expanded)
         self.expand_button.setText("Done" if self._expanded else "Edit")
+        self.remove_button.setEnabled(not self._expanded)
+        self.remove_button.setToolTip(
+            "Collapse this step before removing it."
+            if self._expanded else "Remove step"
+        )
         self._refresh_size_hint()
 
     def _sync_settings(self, *_args):
@@ -948,23 +1050,46 @@ class PipelineEditor(QDockWidget):
         except (OSError, PipelineValidationError) as exc:
             self.status_label.setText(f"Save failed: {exc}")
 
-    def _scope_indices(self) -> list[QModelIndex]:
+    def _active_browser_models(self):
+        manager = getattr(self.main_window, "_context_switch_manager", None)
+        secondary = getattr(self.main_window, "_secondary_browser", None)
+        if (
+            manager is not None
+            and getattr(manager, "active_context", "primary") == "secondary"
+            and secondary is not None
+            and not secondary.dock.isHidden()
+        ):
+            return (
+                secondary.image_list_model,
+                secondary.proxy_image_list_model,
+                secondary.dock,
+            )
+        return (
+            self.main_window.image_list_model,
+            self.main_window.proxy_image_list_model,
+            self.main_window.image_list,
+        )
+
+    def _scope_indices(self) -> tuple[object, list[QModelIndex]]:
         scope = self.scope_combo.currentText()
-        source_model = self.main_window.image_list_model
-        proxy_model = self.main_window.proxy_image_list_model
+        source_model, proxy_model, image_list = self._active_browser_models()
         if scope == "Current image":
-            current = self.main_window.image_list.list_view.currentIndex()
-            return [proxy_model.mapToSource(current)] if current.isValid() else []
+            current = image_list.list_view.currentIndex()
+            indices = [proxy_model.mapToSource(current)] if current.isValid() else []
+            return source_model, indices
         if scope == "Selected images":
-            return self.main_window.image_list.get_selected_image_indices()
+            return source_model, image_list.get_selected_image_indices()
         if scope == "Filtered images":
             indices = []
             for row in range(proxy_model.rowCount()):
                 proxy_index = proxy_model.index(row, 0)
                 if proxy_index.data(Qt.ItemDataRole.UserRole) is not None:
                     indices.append(proxy_model.mapToSource(proxy_index))
-            return indices
-        return [source_model.index(row, 0) for row in range(source_model.rowCount())]
+            return source_model, indices
+        return source_model, [
+            source_model.index(row, 0)
+            for row in range(source_model.rowCount())
+        ]
 
     def _run_or_cancel(self):
         if self.runner.is_running:
@@ -975,7 +1100,12 @@ class PipelineEditor(QDockWidget):
         self._save_profiles()
         self.log_edit.clear()
         try:
-            self.runner.run_pipeline(self.current_pipeline, self._scope_indices())
+            source_model, image_indices = self._scope_indices()
+            self.runner.run_pipeline(
+                self.current_pipeline,
+                image_indices,
+                source_model,
+            )
         except PipelineValidationError as exc:
             self.status_label.setText(str(exc))
 

@@ -434,12 +434,8 @@ class SignalManager:
     def connect_auto_markings_signals(self):
         """Connect auto markings-related signals."""
         auto_markings = self.main_window.auto_markings
-        image_list_model = self.main_window.image_list_model
         menu_manager = self.main_window.menu_manager
 
-        auto_markings.marking_generated.connect(
-            lambda image_index, markings:
-            image_list_model.add_image_markings(image_index, markings))
         auto_markings.visibilityChanged.connect(
             lambda: menu_manager.toggle_auto_markings_action.setChecked(
                 auto_markings.isVisible()))

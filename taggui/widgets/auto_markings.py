@@ -194,6 +194,7 @@ class AutoMarkings(QDockWidget):
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList, parent):
         super().__init__(parent)
+        self.main_window = parent
         self.image_list_model = image_list_model
         self.image_list = image_list
         self.is_marking = False
@@ -259,6 +260,19 @@ class AutoMarkings(QDockWidget):
             self.start_cancel_button.setEnabled(False)
             return
         self.prepare_generation()
+
+    def set_browser_context(
+            self, image_list_model: ImageListModel, image_list: ImageList):
+        """Target future runs at the active browser's independent model."""
+        if (
+            self.image_list_model is image_list_model
+            and self.image_list is image_list
+        ):
+            return
+        self.image_list_model = image_list_model
+        self.image_list = image_list
+        if not self.is_marking:
+            self.marking_thread = None
 
     @Slot()
     def start_or_cancel_marking(self):
@@ -483,7 +497,7 @@ class AutoMarkings(QDockWidget):
         self.marking_thread.clear_console_text_edit_requested.connect(
             self.console_text_edit.clear)
         self.marking_thread.marking_generated.connect(
-            self.marking_generated)
+            self._apply_generated_markings)
         self.marking_thread.marking_result.connect(
             self.update_result_label)
         self.marking_thread.progress_bar_update_requested.connect(
@@ -545,10 +559,25 @@ class AutoMarkings(QDockWidget):
         ###sys.stdout = self.marking_thread
         ###sys.stderr = self.marking_thread
 
+    @Slot(QModelIndex, list)
+    def _apply_generated_markings(
+            self, image_index: QModelIndex, markings: list[dict]):
+        thread = self.sender()
+        target_model = getattr(thread, 'image_list_model', self.image_list_model)
+        target_model.add_image_markings(image_index, markings)
+        image = image_index.data(Qt.ItemDataRole.UserRole)
+        viewer = getattr(self.main_window, 'image_viewer', None)
+        if viewer is not None:
+            viewer.refresh_marking_overlays(image)
+        self.marking_generated.emit(image_index, markings)
+
     @Slot()
     def generate_markings(self):
         selected_image_indices = self.image_list.get_selected_image_indices()
-        if self.marking_thread is None:
+        if (
+            self.marking_thread is None
+            or self.marking_thread.image_list_model is not self.image_list_model
+        ):
             self.prepare_generation()
         if self.marking_thread is None or self.marking_thread.model is None:
             self.start_cancel_button.setEnabled(False)
