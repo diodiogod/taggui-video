@@ -6,7 +6,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QRectF, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QModelIndex, QRect, QRectF, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -39,7 +39,8 @@ from utils.ideogram_caption import (
     pixel_rect_to_bbox,
     save_ideogram_caption,
 )
-from utils.image import Image, ImageMarking
+from utils.image import Image, ImageMarking, Marking
+from utils.settings import DEFAULT_SETTINGS, settings
 from widgets.auto_captioner import InlineEditorResizeGrip
 
 
@@ -822,23 +823,75 @@ class IdeogramCaptionEditor(QDockWidget):
         self.save_caption()
 
     def delete_elements_from_caption_panel(self, indices: list[int]):
+        self._delete_elements(indices)
+
+    def _delete_elements(self, indices: list[int]):
         try:
             caption = self._caption_from_editor()
         except (IdeogramCaptionError, json.JSONDecodeError):
             return
-        deleted = False
-        deleted_indices = sorted({int(index) for index in indices}, reverse=True)
-        for index in deleted_indices:
-            if 0 <= index < len(caption.elements):
-                caption.elements.pop(index)
-                deleted = True
-        if not deleted:
+        deleted_indices = sorted({
+            int(index)
+            for index in indices
+            if 0 <= int(index) < len(caption.elements)
+        }, reverse=True)
+        if not deleted_indices:
             return
+
+        linked_marking_indices: set[int] = set()
+        source_model = self._current_source_model()
+        dimensions = self.image_viewer.ideogram_canvas_dimensions()
+        sync_linked_markings = (
+            self.current_image is not None
+            and source_model is not None
+            and dimensions is not None
+            and settings.value(
+                'ideogram_sync_linked_markings',
+                DEFAULT_SETTINGS['ideogram_sync_linked_markings'],
+                type=bool,
+            )
+        )
+        if sync_linked_markings:
+            width, height = dimensions
+            for index in deleted_indices:
+                marking_index = self._linked_marking_index(
+                    caption.elements[index],
+                    width,
+                    height,
+                )
+                if marking_index is not None:
+                    linked_marking_indices.add(marking_index)
+        linked_markings = [
+            self.current_image.markings[index]
+            for index in sorted(linked_marking_indices)
+        ] if self.current_image is not None else []
+        if linked_markings:
+            source_model.add_image_to_undo_stack(
+                self.current_image,
+                action_name='Delete linked Ideogram region and marking',
+                should_ask_for_confirmation=False,
+            )
+
+        for index in deleted_indices:
+            caption.elements.pop(index)
         for index in deleted_indices:
             self._remove_manual_palette_index(index)
         self._selected_element_index = None
         self.element_container.hide()
-        self._apply_caption_edit(caption, action_name="Delete Ideogram region")
+        self._apply_caption_edit(
+            caption,
+            action_name=(
+                None if linked_markings else 'Delete Ideogram region'
+            ),
+        )
+        if linked_markings:
+            self.current_image.markings = [
+                marking
+                for marking_index, marking in enumerate(self.current_image.markings)
+                if marking_index not in linked_marking_indices
+            ]
+            source_model.write_meta_to_disk(self.current_image)
+            self.image_viewer.remove_marking_overlays(linked_markings)
 
     def copy_elements_from_overlay(self, indices: list[int]):
         try:
@@ -1059,6 +1112,29 @@ class IdeogramCaptionEditor(QDockWidget):
         except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
             return
         width, height = dimensions
+        linked_marking_index = self._linked_marking_index(
+            element,
+            width,
+            height,
+        )
+        source_model = self._current_source_model()
+        sync_linked_marking = (
+            linked_marking_index is not None
+            and source_model is not None
+            and settings.value(
+                'ideogram_sync_linked_markings',
+                DEFAULT_SETTINGS['ideogram_sync_linked_markings'],
+                type=bool,
+            )
+        )
+        old_marking = None
+        if sync_linked_marking:
+            old_marking = self.current_image.markings[linked_marking_index]
+            source_model.add_image_to_undo_stack(
+                self.current_image,
+                action_name='Move linked Ideogram region and marking',
+                should_ask_for_confirmation=False,
+            )
         element.bbox = pixel_rect_to_bbox(
             rect.x(), rect.y(), rect.width(), rect.height(), width, height
         )
@@ -1067,13 +1143,98 @@ class IdeogramCaptionEditor(QDockWidget):
         self._apply_caption_edit(
             caption,
             refresh_overlays=False,
-            action_name="Move Ideogram region",
+            action_name=(
+                None if sync_linked_marking else "Move Ideogram region"
+            ),
         )
+        if sync_linked_marking and old_marking is not None:
+            final_x, final_y, final_width, final_height = bbox_to_pixel_rect(
+                element.bbox,
+                width,
+                height,
+            )
+            new_rect = QRectF(
+                final_x,
+                final_y,
+                final_width,
+                final_height,
+            ).toAlignedRect()
+            new_marking = Marking(
+                label=old_marking.label,
+                type=old_marking.type,
+                rect=QRect(new_rect),
+                confidence=old_marking.confidence,
+            )
+            updated_markings = list(self.current_image.markings)
+            updated_markings[linked_marking_index] = new_marking
+            self.current_image.markings = updated_markings
+            source_model.write_meta_to_disk(self.current_image)
+            self.image_viewer.update_marking_overlay_geometry(
+                old_marking,
+                new_marking,
+            )
         if self._selected_element_index == index:
             self.element_palette_edit.setText(", ".join(element.color_palette))
             self._refresh_palette_candidates(element)
         self._selected_element_index = index
         self.image_viewer.select_ideogram_element(index)
+
+    def _linked_marking_index(
+        self,
+        element: IdeogramElement,
+        width: int,
+        height: int,
+    ) -> int | None:
+        if self.current_image is None or element.bbox is None:
+            return None
+        candidates = []
+        for marking_index, marking in enumerate(self.current_image.markings):
+            if marking.type in {ImageMarking.CROP, ImageMarking.NONE}:
+                continue
+            marking_rect = marking.rect.normalized()
+            marking_bbox = pixel_rect_to_bbox(
+                marking_rect.x(),
+                marking_rect.y(),
+                marking_rect.width(),
+                marking_rect.height(),
+                width,
+                height,
+            )
+            if all(
+                abs(marking_coord - element_coord) <= 1
+                for marking_coord, element_coord in zip(
+                    marking_bbox,
+                    element.bbox,
+                )
+            ):
+                candidates.append(marking_index)
+        if len(candidates) == 1:
+            return candidates[0]
+        normalized_description = str(element.desc or '').strip().casefold()
+        label_matches = [
+            marking_index
+            for marking_index in candidates
+            if str(
+                self.current_image.markings[marking_index].label or ''
+            ).strip().casefold() == normalized_description
+        ]
+        return label_matches[0] if len(label_matches) == 1 else None
+
+    def _current_source_model(self):
+        try:
+            proxy_index = self.image_viewer.proxy_image_index
+            proxy_model = proxy_index.model() if proxy_index.isValid() else None
+            source_model = proxy_model.sourceModel() if proxy_model is not None else None
+        except RuntimeError:
+            source_model = None
+        if source_model is not None:
+            return source_model
+        proxy_model = getattr(self.image_viewer, 'proxy_image_list_model', None)
+        return (
+            proxy_model.sourceModel()
+            if proxy_model is not None and hasattr(proxy_model, 'sourceModel')
+            else None
+        )
 
     def _update_selected_element_fields(self, *_, manual_palette: bool = False):
         index = self._selected_element_index
@@ -1259,15 +1420,7 @@ class IdeogramCaptionEditor(QDockWidget):
         index = self._selected_element_index
         if index is None:
             return
-        try:
-            caption = self._caption_from_editor()
-            caption.elements.pop(index)
-        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
-            return
-        self._remove_manual_palette_index(index)
-        self._selected_element_index = None
-        self.element_container.hide()
-        self._apply_caption_edit(caption, action_name="Delete Ideogram region")
+        self._delete_elements([index])
 
     def _should_auto_update_palette(self, index: int) -> bool:
         return int(index) not in self._manual_palette_indices
@@ -1348,20 +1501,7 @@ class IdeogramCaptionEditor(QDockWidget):
     def _add_ideogram_undo(self, action_name: str):
         if self.current_image is None or self.current_path is None:
             return
-        source_model = None
-        try:
-            proxy_index = self.image_viewer.proxy_image_index
-            proxy_model = proxy_index.model() if proxy_index.isValid() else None
-            source_model = proxy_model.sourceModel() if proxy_model is not None else None
-        except RuntimeError:
-            source_model = None
-        if source_model is None:
-            proxy_model = getattr(self.image_viewer, 'proxy_image_list_model', None)
-            source_model = (
-                proxy_model.sourceModel()
-                if proxy_model is not None and hasattr(proxy_model, 'sourceModel')
-                else None
-            )
+        source_model = self._current_source_model()
         if source_model is None:
             return
         add_undo = getattr(source_model, 'add_ideogram_sidecar_to_undo_stack', None)

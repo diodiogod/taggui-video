@@ -84,6 +84,12 @@ Ideogram regions are editable directly in the main viewer.
 - Use `Ctrl+Z` or `Edit -> Undo` to undo region and marking edits recorded in history.
 - Right-click a selected region to convert it between object and text.
 
+By default, moving, resizing, or deleting an Ideogram region also updates a
+uniquely matching TagGUI marking. Matching uses the region's pre-edit normalized
+geometry and its label only to disambiguate exact duplicates; ordinary overlaps
+are never treated as links. Disable this under `Settings -> Ideogram -> Region
+Interaction` when the two region systems should remain independent.
+
 The compact external label shows the element number and `OBJ` or `TEXT`. The text inside the region shows the description without repeating the type.
 
 ## Color Palettes

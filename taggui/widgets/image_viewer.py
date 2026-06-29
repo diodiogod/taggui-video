@@ -4508,6 +4508,57 @@ class ImageViewer(QWidget):
         self.scene.invalidate()
         self.view.viewport().update()
 
+    def update_marking_overlay_geometry(
+        self,
+        old_marking: Marking,
+        new_marking: Marking,
+    ):
+        """Move one exact matching marking graphic without reloading media."""
+        candidates = [
+            item
+            for item in self.marking_items
+            if item.rect_type == old_marking.type
+            and item.rect().toRect().normalized() == old_marking.rect.normalized()
+        ]
+        if len(candidates) > 1:
+            candidates = [
+                item for item in candidates
+                if str(item.data(0) or '') == str(old_marking.label or '')
+            ]
+        if len(candidates) != 1:
+            return
+        item = candidates[0]
+        item.setRect(QRectF(new_marking.rect))
+        item.size_changed()
+        item.adjust_layout()
+        self._apply_marking_ideogram_overlay_priority()
+        self.scene.invalidate()
+        self.view.viewport().update()
+
+    def remove_marking_overlays(self, markings: list[Marking]):
+        """Remove exact marking graphics after a linked metadata deletion."""
+        for marking in markings:
+            candidates = [
+                item
+                for item in self.marking_items
+                if item.rect_type == marking.type
+                and item.rect().toRect().normalized() == marking.rect.normalized()
+            ]
+            if len(candidates) > 1:
+                candidates = [
+                    item for item in candidates
+                    if str(item.data(0) or '') == str(marking.label or '')
+                ]
+            if len(candidates) != 1:
+                continue
+            item = candidates[0]
+            self.marking_items.remove(item)
+            if item.scene() is self.scene:
+                self.scene.removeItem(item)
+        self._apply_marking_ideogram_overlay_priority()
+        self.scene.invalidate()
+        self.view.viewport().update()
+
     def _clear_marking_items_from_scene(self):
         for item in list(self.marking_items):
             try:
