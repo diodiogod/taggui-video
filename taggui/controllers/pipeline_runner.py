@@ -8,6 +8,7 @@ from PySide6.QtCore import QModelIndex, QObject, Qt, QTimer, Signal
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_marking.marking_thread import MarkingThread
+from utils.auto_marking_preferences import saved_class_labels_for_model
 from utils.ideogram_caption import (
     IdeogramCaptionError,
     merge_image_markings_into_ideogram,
@@ -52,6 +53,7 @@ class PipelineRunner(QObject):
         self.is_running = False
         self.cancel_requested = False
         self._linked_marking_results: dict[str, dict[str, dict]] = {}
+        self._auto_mark_results: dict[str, dict[str, int]] = {}
 
     def run_pipeline(
         self,
@@ -76,6 +78,7 @@ class PipelineRunner(QObject):
         self.step_index = -1
         self.cancel_requested = False
         self._linked_marking_results = {}
+        self._auto_mark_results = {}
         self.is_running = True
         self.running_changed.emit(True)
         self.log_message.emit(
@@ -103,7 +106,7 @@ class PipelineRunner(QObject):
             return
         self.step_index += 1
         if self.step_index >= len(self.steps):
-            self._finish(True, "Pipeline completed.")
+            self._finish(True, self._completion_message())
             return
         step = self.steps[self.step_index]
         title = self.STEP_TITLES[step.type]
@@ -164,7 +167,10 @@ class PipelineRunner(QObject):
             "marking_type": str(step.settings.get("marking_type", "hint")),
             "class_names": list(class_names),
             "class_label_overrides": class_label_overrides,
-            "classes": {},
+            "class_id_label_overrides": saved_class_labels_for_model(
+                model_value
+            ),
+            "classes": None,
         }
         if not merge_group or self._is_first_merge_group_step(merge_group):
             images = [
@@ -185,6 +191,10 @@ class PipelineRunner(QObject):
             self.image_indices,
             marking_settings,
         )
+        thread.marking_result.connect(
+            lambda _image_name, count, step_id=step.id:
+                self._record_auto_mark_result(step_id, count)
+        )
         if merge_group:
             thread.marking_generated.connect(
                 lambda image_index, markings, group_id=merge_group:
@@ -193,6 +203,29 @@ class PipelineRunner(QObject):
         else:
             thread.marking_generated.connect(self._add_exact_new_markings)
         self._start_thread(thread)
+
+    def _record_auto_mark_result(self, step_id: str, marking_count: int):
+        result = self._auto_mark_results.setdefault(
+            str(step_id),
+            {"images": 0, "detections": 0},
+        )
+        result["images"] += 1
+        result["detections"] += max(0, int(marking_count))
+
+    def _completion_message(self) -> str:
+        if not any(step.type == "auto_mark" for step in self.steps):
+            return "Pipeline completed."
+        detection_count = sum(
+            result["detections"]
+            for result in self._auto_mark_results.values()
+        )
+        if detection_count <= 0:
+            return "Pipeline completed: no auto-marking detections found."
+        label = "detection" if detection_count == 1 else "detections"
+        return (
+            f"Pipeline completed: {detection_count} auto-marking "
+            f"{label} found."
+        )
 
     def _effective_merge_group(self, step: PipelineStep) -> str:
         group_id = str(step.settings.get("merge_group") or "")
@@ -418,6 +451,21 @@ class PipelineRunner(QObject):
             self._finish(False, message)
             return
         step = self.steps[self.step_index]
+        if step.type == "auto_mark":
+            result = self._auto_mark_results.get(
+                step.id,
+                {"images": 0, "detections": 0},
+            )
+            detection_count = result["detections"]
+            image_count = result["images"] or len(self.image_indices)
+            detection_label = (
+                "detection" if detection_count == 1 else "detections"
+            )
+            image_label = "image" if image_count == 1 else "images"
+            self.log_message.emit(
+                f"Auto Marking found {detection_count} {detection_label} "
+                f"in {image_count} {image_label}."
+            )
         merge_group = (
             self._effective_merge_group(step)
             if step.type == "auto_mark"

@@ -133,6 +133,13 @@ class MarkingThread(ModelThread):
                 ).items()
                 if str(name).strip() and str(label).strip()
             }
+            class_id_label_overrides = {
+                str(class_id): str(label).strip()
+                for class_id, label in self.marking_settings.get(
+                    'class_id_label_overrides', {}
+                ).items()
+                if str(label).strip()
+            }
             marking_type = str(
                 self.marking_settings.get('marking_type', 'hint') or 'hint'
             )
@@ -140,7 +147,10 @@ class MarkingThread(ModelThread):
                 int(class_id): (
                     label_overrides.get(
                         str(class_name).strip().casefold(),
-                        str(class_name),
+                        class_id_label_overrides.get(
+                            str(class_id),
+                            str(class_name),
+                        ),
                     ),
                     marking_type,
                 )

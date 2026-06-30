@@ -4,9 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QMimeData,
+    QModelIndex,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
+    QDrag,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -46,6 +57,7 @@ from PySide6.QtWidgets import (
 from controllers.pipeline_runner import PipelineRunner
 from auto_captioning.models_list import MODELS
 from widgets.auto_markings import MarkingModelComboBox
+from utils.auto_marking_preferences import saved_class_labels_for_model
 from utils.pipeline import (
     PIPELINE_STEP_TYPES,
     PipelineDefinition,
@@ -207,11 +219,60 @@ class PipelineGroupConnector(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class PipelineAddStepButton(QPushButton):
+    """Clickable add control that can also be dragged into the step list."""
+
+    MIME_TYPE = "application/x-taggui-pipeline-new-step"
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self._press_pos = QPoint()
+        self._dragging = False
+        self.setToolTip(
+            "Click to append a step, or drag between cards to insert one."
+        )
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+            self._dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if (
+            event.buttons() & Qt.MouseButton.LeftButton
+            and not self._dragging
+            and (event.pos() - self._press_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._dragging = True
+            drag = QDrag(self)
+            mime_data = QMimeData()
+            mime_data.setData(self.MIME_TYPE, b"add-step")
+            drag.setMimeData(mime_data)
+            pixmap = self.grab()
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(self._press_pos)
+            drag.exec(Qt.DropAction.CopyAction)
+            self.setDown(False)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self.setDown(False)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class PipelineStepList(QListWidget):
     """Reorderable card list with a painted execution spine."""
 
     order_changed = Signal()
     unlink_requested = Signal(str, str)
+    add_step_dropped = Signal(int, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -237,6 +298,7 @@ class PipelineStepList(QListWidget):
         self._connector_refresh_pending = False
         self._connector_stabilize_pending = False
         self._hide_connectors_until_stable = False
+        self._add_step_insert_row: int | None = None
         self.link_overlay = PipelineLinkOverlay(self)
         self.link_overlay.setGeometry(self.viewport().rect())
         self.min_card_zoom = 60
@@ -520,9 +582,90 @@ class PipelineStepList(QListWidget):
         self.viewport().update()
 
     def dropEvent(self, event):
+        if event.mimeData().hasFormat(PipelineAddStepButton.MIME_TYPE):
+            insert_row = self._insertion_row_at(event.position().toPoint())
+            global_pos = self.viewport().mapToGlobal(
+                event.position().toPoint()
+            )
+            self._clear_add_step_indicator()
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            self.add_step_dropped.emit(insert_row, global_pos)
+            return
         super().dropEvent(event)
         self.viewport().update()
         self.schedule_link_connector_refresh()
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(PipelineAddStepButton.MIME_TYPE):
+            self._add_step_insert_row = self._insertion_row_at(
+                event.position().toPoint()
+            )
+            self.viewport().update()
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(PipelineAddStepButton.MIME_TYPE):
+            insert_row = self._insertion_row_at(event.position().toPoint())
+            if insert_row != self._add_step_insert_row:
+                self._add_step_insert_row = insert_row
+                self.viewport().update()
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        self._clear_add_step_indicator()
+        super().dragLeaveEvent(event)
+
+    def _insertion_row_at(self, position: QPoint) -> int:
+        for row in range(self.count()):
+            item_rect = self.visualItemRect(self.item(row))
+            if position.y() < item_rect.center().y():
+                return row
+        return self.count()
+
+    def _clear_add_step_indicator(self):
+        if self._add_step_insert_row is None:
+            return
+        self._add_step_insert_row = None
+        self.viewport().update()
+
+    def _paint_add_step_indicator(self, painter: QPainter):
+        row = self._add_step_insert_row
+        if row is None:
+            return
+        if self.count() == 0:
+            y = max(10, self.viewport().height() // 2)
+        elif row <= 0:
+            y = max(5, self.visualItemRect(self.item(0)).top() - 5)
+        elif row >= self.count():
+            y = min(
+                self.viewport().height() - 5,
+                self.visualItemRect(self.item(self.count() - 1)).bottom() + 5,
+            )
+        else:
+            previous_rect = self.visualItemRect(self.item(row - 1))
+            next_rect = self.visualItemRect(self.item(row))
+            y = (previous_rect.bottom() + next_rect.top()) // 2
+        start_x = 42
+        end_x = max(start_x + 20, self.viewport().width() - 14)
+        painter.setPen(QPen(
+            QColor(39, 216, 197, 65),
+            8.0,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+        ))
+        painter.drawLine(start_x, y, end_x, y)
+        painter.setPen(QPen(
+            QColor("#55F2E2"),
+            2.5,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+        ))
+        painter.drawLine(start_x, y, end_x, y)
 
     def _card_for_item(self, item):
         widget = self.itemWidget(item)
@@ -540,6 +683,9 @@ class PipelineStepList(QListWidget):
             card = self._card_for_item(self.item(row))
             accents.append(QColor(card.accent if card is not None else "#27D8C5"))
         if not centers:
+            painter = QPainter(self.viewport())
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            self._paint_add_step_indicator(painter)
             return
 
         painter = QPainter(self.viewport())
@@ -579,6 +725,7 @@ class PipelineStepList(QListWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 str(row + 1),
             )
+        self._paint_add_step_indicator(painter)
 
 class PipelineDragHandle(QLabel):
     drag_requested = Signal()
@@ -717,7 +864,7 @@ class PipelineStepCard(QFrame):
     link_drag_started = Signal(str, object)
     link_drag_moved = Signal(str, object)
     link_drag_finished = Signal(str, object)
-    _model_class_cache: dict[str, tuple[int, list[str]]] = {}
+    _model_class_cache: dict[str, tuple[int, list[tuple[int, str]]]] = {}
 
     def __init__(self, step: PipelineStep, marking_models: list[str], caption_models: list[str], parent=None):
         super().__init__(parent)
@@ -943,7 +1090,8 @@ class PipelineStepCard(QFrame):
         if double_click_handler is not None:
             label.setCursor(Qt.CursorShape.PointingHandCursor)
             label.setToolTip(
-                "Double-click to load the selected model's default classes."
+                "Double-click to load the selected model's classes and saved "
+                "Auto Markings custom labels."
             )
             label.double_clicked.connect(double_click_handler)
         self._field_labels.append(label)
@@ -972,7 +1120,8 @@ class PipelineStepCard(QFrame):
             )
             self.class_names_edit.setToolTip(
                 "Comma-separated source classes. Rename generated markings with "
-                "source_class{output label}; plain names keep the model label. "
+                "source_class{output label}. Plain names inherit custom labels "
+                "saved in Auto Markings, or use the model label when none exists. "
                 "Linked models only merge detections with the exact same output "
                 "label and marking type, so use mappings such as eyes{eye} to "
                 "normalize different model labels."
@@ -1050,7 +1199,7 @@ class PipelineStepCard(QFrame):
             description.setStyleSheet("color: #A7B5C1; padding: 8px; border: 0;")
             layout.addWidget(description)
 
-    def _selected_marking_model_path(self) -> Path:
+    def _selected_marking_model_value(self) -> str:
         model_value = self.model_combo.currentText().strip()
         if not model_value:
             main_window = self.window()
@@ -1062,6 +1211,10 @@ class PipelineStepCard(QFrame):
                 ).strip()
         if not model_value:
             raise ValueError("Select an auto-marking model first.")
+        return model_value
+
+    def _selected_marking_model_path(self) -> Path:
+        model_value = self._selected_marking_model_value()
         root = settings.value(
             "marking_models_directory_path",
             DEFAULT_SETTINGS["marking_models_directory_path"],
@@ -1079,7 +1232,7 @@ class PipelineStepCard(QFrame):
                 self,
                 "Load model classes",
                 "Replace the current class filters and custom labels with the "
-                "selected model's default class names?",
+                "selected model's classes and saved Auto Markings labels?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -1095,7 +1248,7 @@ class PipelineStepCard(QFrame):
             cache_key = str(model_path.resolve())
             cached = self._model_class_cache.get(cache_key)
             if cached is not None and cached[0] == modified_ns:
-                class_names = cached[1]
+                model_classes = cached[1]
             else:
                 QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                 try:
@@ -1106,20 +1259,30 @@ class PipelineStepCard(QFrame):
                         model_path,
                         task=infer_marking_model_task(model_path),
                     )
-                    class_names = [
-                        str(class_name)
-                        for _class_id, class_name in sorted(model.names.items())
+                    model_classes = [
+                        (int(class_id), str(class_name))
+                        for class_id, class_name in sorted(model.names.items())
                     ]
                 finally:
                     QApplication.restoreOverrideCursor()
                 self._model_class_cache[cache_key] = (
                     modified_ns,
-                    class_names,
+                    model_classes,
                 )
         except Exception as exc:
             QMessageBox.warning(self, "Load model classes", str(exc))
             return
-        self.class_names_edit.setText(", ".join(class_names))
+        saved_labels = saved_class_labels_for_model(
+            self._selected_marking_model_value()
+        )
+        class_specs = []
+        for class_id, class_name in model_classes:
+            custom_label = saved_labels.get(str(class_id), "").strip()
+            if custom_label and custom_label != class_name:
+                class_specs.append(f"{class_name}{{{custom_label}}}")
+            else:
+                class_specs.append(class_name)
+        self.class_names_edit.setText(", ".join(class_specs))
 
     def _enabled_changed(self, enabled: bool):
         self.step.enabled = bool(enabled)
@@ -1319,6 +1482,9 @@ class PipelineEditor(QDockWidget):
         )
         self.step_list.order_changed.connect(self._steps_reordered)
         self.step_list.unlink_requested.connect(self._unlink_step_pair)
+        self.step_list.add_step_dropped.connect(
+            self._show_insert_step_menu
+        )
         steps_layout.addWidget(self.step_list, 1)
 
         self.add_step_container = QWidget()
@@ -1330,9 +1496,11 @@ class PipelineEditor(QDockWidget):
         self.add_step_layout = add_row
         add_row.setContentsMargins(0, 0, 0, 0)
         add_row.setSpacing(0)
-        self.add_step_button = QPushButton("+ Add step")
+        self.add_step_button = PipelineAddStepButton("Drag + Add Step")
         self.add_step_button.setObjectName("pipelineAddStep")
-        self.add_step_button.clicked.connect(self._show_add_step_menu)
+        self.add_step_button.clicked.connect(
+            lambda: self._show_add_step_menu()
+        )
         add_row.addWidget(self.add_step_button)
         add_row.addStretch(1)
         steps_layout.addWidget(self.add_step_container)
@@ -2115,21 +2283,47 @@ class PipelineEditor(QDockWidget):
         except OSError as exc:
             QMessageBox.warning(self, "Export pipeline", str(exc))
 
-    def _show_add_step_menu(self):
+    def _show_add_step_menu(
+        self,
+        insertion_index: int | None = None,
+        menu_position: QPoint | None = None,
+    ):
         menu = QMenu(self)
         for step_type in PIPELINE_STEP_TYPES:
             meta = STEP_META[step_type]
             action = menu.addAction(f"{meta['eyebrow'].title()}  -  {meta['title']}")
-            action.triggered.connect(lambda _checked=False, value=step_type: self._add_step(value))
-        menu.exec(self.add_step_button.mapToGlobal(QPoint(0, self.add_step_button.height())))
+            action.setData(step_type)
+        if menu_position is None:
+            menu_position = self.add_step_button.mapToGlobal(
+                QPoint(0, self.add_step_button.height())
+            )
+        chosen = menu.exec(menu_position)
+        if chosen is not None:
+            self._add_step(str(chosen.data()), insertion_index)
 
-    def _add_step(self, step_type: str):
+    def _show_insert_step_menu(self, insertion_index: int, position: QPoint):
+        self._show_add_step_menu(insertion_index, position)
+
+    def _add_step(self, step_type: str, insertion_index: int | None = None):
         if self.current_pipeline is None:
             return
         settings_payload = {"output_format": "Ideogram 4 JSON"} if step_type == "auto_caption" else {}
-        self.current_pipeline.steps.append(PipelineStep(step_type, settings_payload))
+        step = PipelineStep(step_type, settings_payload)
+        if insertion_index is None:
+            insertion_index = len(self.current_pipeline.steps)
+        insertion_index = max(
+            0,
+            min(int(insertion_index), len(self.current_pipeline.steps)),
+        )
+        self.current_pipeline.steps.insert(insertion_index, step)
+        self._normalize_merge_groups()
         self._rebuild_steps()
-        self.step_list.scrollToBottom()
+        item = self.step_list.item(insertion_index)
+        if item is not None:
+            self.step_list.scrollToItem(
+                item,
+                QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
         self._schedule_save()
 
     def _delete_step(self, step_id: str):

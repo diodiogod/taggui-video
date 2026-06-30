@@ -1,5 +1,4 @@
 import sys
-import json
 import os
 from pathlib import Path
 
@@ -14,6 +13,12 @@ from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QListWidget, QListWidgetItem)
 
 from utils.icons import create_add_box_icon
+from utils.auto_marking_preferences import (
+    CLASS_ACTIONS_SETTINGS_KEY,
+    CLASS_LABELS_SETTINGS_KEY,
+    load_saved_class_values,
+    save_saved_class_values,
+)
 from models.image_list_model import ImageListModel
 from utils.utils import pluralize
 from utils.big_widgets import TallPushButton
@@ -447,8 +452,8 @@ class MarkingSettingsForm(QVBoxLayout):
 
 class AutoMarkings(QDockWidget):
     marking_generated = Signal(QModelIndex, list)
-    _CLASS_ACTIONS_SETTINGS_KEY = 'auto_marking_class_actions_json'
-    _CLASS_LABELS_SETTINGS_KEY = 'auto_marking_class_labels_json'
+    _CLASS_ACTIONS_SETTINGS_KEY = CLASS_ACTIONS_SETTINGS_KEY
+    _CLASS_LABELS_SETTINGS_KEY = CLASS_LABELS_SETTINGS_KEY
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList, parent):
@@ -587,19 +592,12 @@ class AutoMarkings(QDockWidget):
 
     @staticmethod
     def _load_saved_class_values(key: str) -> dict[str, dict[str, str]]:
-        raw = settings.value(key, '{}', type=str)
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+        return load_saved_class_values(key)
 
     @staticmethod
     def _save_saved_class_values(
             key: str, payload: dict[str, dict[str, str]]):
-        settings.setValue(key, json.dumps(payload))
+        save_saved_class_values(key, payload)
 
     def _persist_class_actions_for_current_model(self):
         model_key = self._current_model_key()

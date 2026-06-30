@@ -50,6 +50,10 @@ require confirmation before they are replaced.
 
 Add several Auto Marking cards to detect faces, hands, tools, or other model-specific regions in sequence. Pipeline execution is stage-major, so each model handles the full scope before the next model loads.
 
+Click `+ Add step` to append a stage, or drag it into the card list. A cyan
+insertion line shows the destination; releasing opens the step-type menu and
+inserts the selected stage at that position.
+
 #### Linked Auto-Marking Steps
 
 Drag the chain icon from one Auto-Marking card onto an adjacent Auto-Marking
@@ -59,6 +63,11 @@ valid. Linked cards retain a cyan connector and a `LINKED` summary badge.
 
 - Link the model classes to a shared output label, such as `hand`, using the
   existing `source_class{output label}` syntax.
+- Plain class names inherit persistent custom labels from the Auto Markings
+  panel for the same model. Explicit `{output label}` mappings take priority,
+  and classes without either customization keep the model's default label.
+- Double-click `Classes / labels` to import all model classes and snapshot any
+  saved custom labels as explicit `source{output label}` mappings.
 - Configure `Linked overlap` on either card; the threshold is shared by every
   card in that linked group.
 - Overlapping detections meeting the threshold become one union bounding box
