@@ -31,6 +31,7 @@ numpy==2.2.6
 
 # WD Tagger
 huggingface-hub>=0.31.4
+onnx>=1.16.0
 onnxruntime==1.22.0
 
 # ============================================

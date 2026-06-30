@@ -74,6 +74,7 @@ Ideogram regions are editable directly in the main viewer.
 
 - Click and drag inside a region to move it.
 - Drag any edge or corner to resize it.
+- Hold `Space` while dragging to pan the image through any region or marking.
 - Smaller nested regions receive normal click priority.
 - A selected larger region keeps resize priority on its own edges even when a smaller region overlaps it.
 - Hold `Ctrl`, `Shift`, or `Cmd` while selecting to build a multi-selection.

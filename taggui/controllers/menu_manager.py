@@ -749,12 +749,16 @@ class MenuManager:
         edit_menu = menu_bar.addMenu('Edit')
 
         self.undo_action.setShortcut(QKeySequence('Ctrl+Z'))
-        self.undo_action.triggered.connect(self.main_window.image_list_model.undo)
+        self.undo_action.triggered.connect(
+            lambda: self._active_image_list_model().undo()
+        )
         self.undo_action.setDisabled(True)
         edit_menu.addAction(self.undo_action)
 
         self.redo_action.setShortcut(QKeySequence('Ctrl+Y'))
-        self.redo_action.triggered.connect(self.main_window.image_list_model.redo)
+        self.redo_action.triggered.connect(
+            lambda: self._active_image_list_model().redo()
+        )
         self.redo_action.setDisabled(True)
         edit_menu.addAction(self.redo_action)
 
@@ -1064,21 +1068,34 @@ class MenuManager:
 
     def update_undo_and_redo_actions(self):
         """Update undo/redo menu action text and enabled state."""
-        if self.main_window.image_list_model.undo_stack:
-            undo_action_name = self.main_window.image_list_model.undo_stack[-1].action_name
+        image_list_model = self._active_image_list_model()
+        if image_list_model.undo_stack:
+            undo_action_name = image_list_model.undo_stack[-1].action_name
             self.undo_action.setText(f'Undo "{undo_action_name}"')
             self.undo_action.setDisabled(False)
         else:
             self.undo_action.setText('Undo')
             self.undo_action.setDisabled(True)
 
-        if self.main_window.image_list_model.redo_stack:
-            redo_action_name = self.main_window.image_list_model.redo_stack[-1].action_name
+        if image_list_model.redo_stack:
+            redo_action_name = image_list_model.redo_stack[-1].action_name
             self.redo_action.setText(f'Redo "{redo_action_name}"')
             self.redo_action.setDisabled(False)
         else:
             self.redo_action.setText('Redo')
             self.redo_action.setDisabled(True)
+
+    def _active_image_list_model(self):
+        manager = getattr(self.main_window, '_context_switch_manager', None)
+        secondary = getattr(self.main_window, '_secondary_browser', None)
+        if (
+            manager is not None
+            and getattr(manager, 'active_context', 'primary') == 'secondary'
+            and secondary is not None
+            and not secondary.dock.isHidden()
+        ):
+            return secondary.image_list_model
+        return self.main_window.image_list_model
 
     def _update_recent_folders_menu(self):
         """Update recent folders menu with current list."""

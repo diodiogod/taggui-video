@@ -14,6 +14,10 @@ Each operation appears as a card on the execution spine. The numbered glowing no
 - Scroll over the step list for controlled pixel-by-pixel navigation.
 - Hold `Ctrl` and scroll anywhere over a step to resize all cards between
   compact and expanded densities. The chosen density is remembered.
+- Hold `Ctrl` and scroll over the surrounding pipeline controls to resize the
+  hero, profile, Add Step, scope, status, and run UI independently of cards.
+- The dock can be compressed to a minimal footprint. At extreme sizes,
+  lower-priority controls may clip instead of forcing neighboring docks larger.
 - Use `Edit` to expand model and generation settings.
 - Clear a card's checkbox to keep it in the profile without running it.
 - Use `+ Add step` to append another operation.
@@ -45,6 +49,29 @@ default class from the selected YOLO model. Existing filters or custom mappings
 require confirmation before they are replaced.
 
 Add several Auto Marking cards to detect faces, hands, tools, or other model-specific regions in sequence. Pipeline execution is stage-major, so each model handles the full scope before the next model loads.
+
+#### Linked Auto-Marking Steps
+
+Drag the chain icon from one Auto-Marking card onto an adjacent Auto-Marking
+card to merge their same-label, same-marking-type detections before they are
+written. The live cyan connector and target highlight show whether the drop is
+valid. Linked cards retain a cyan connector and a `LINKED` summary badge.
+
+- Link the model classes to a shared output label, such as `hand`, using the
+  existing `source_class{output label}` syntax.
+- Configure `Linked overlap` on either card; the threshold is shared by every
+  card in that linked group.
+- Overlapping detections meeting the threshold become one union bounding box
+  with the highest confidence from the group.
+- Non-overlapping detections remain separate, so two independently located
+  hands still produce two markings.
+- Linked detections are buffered until the final linked model completes and
+  create one undo action for the whole group.
+
+Linked cards must remain adjacent because following steps may consume their
+results. Reordering or deleting cards automatically removes links that no
+longer form a valid adjacent group. Click a linked chain icon to unlink that
+card; click an unlinked chain to display the drag instruction.
 
 ### Build Ideogram Regions
 

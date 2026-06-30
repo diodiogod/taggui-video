@@ -17,6 +17,10 @@ from utils.pipeline import (
     PipelineStep,
     parse_auto_mark_class_specs,
 )
+from utils.marking_model_security import (
+    prompt_resolve_runtime_path,
+    resolve_marking_model_value,
+)
 from utils.settings import DEFAULT_SETTINGS, get_tag_separator, settings
 
 
@@ -47,6 +51,7 @@ class PipelineRunner(QObject):
         self.active_thread = None
         self.is_running = False
         self.cancel_requested = False
+        self._linked_marking_results: dict[str, dict[str, dict]] = {}
 
     def run_pipeline(
         self,
@@ -70,6 +75,7 @@ class PipelineRunner(QObject):
             return False
         self.step_index = -1
         self.cancel_requested = False
+        self._linked_marking_results = {}
         self.is_running = True
         self.running_changed.emit(True)
         self.log_message.emit(
@@ -124,26 +130,34 @@ class PipelineRunner(QObject):
                 self.main_window.auto_markings.marking_settings_form.model_combo_box.currentText()
                 or ""
             ).strip()
-        model_path = Path(model_value).expanduser()
-        if not model_path.is_absolute():
-            root = settings.value(
-                "marking_models_directory_path",
-                DEFAULT_SETTINGS["marking_models_directory_path"],
-                type=str,
-            )
-            model_path = Path(root) / model_path if root else model_path
+        root = settings.value(
+            "marking_models_directory_path",
+            DEFAULT_SETTINGS["marking_models_directory_path"],
+            type=str,
+        )
+        model_path = resolve_marking_model_value(model_value, root)
         if not model_path.exists():
             raise FileNotFoundError(f"Auto-marking model not found: {model_path}")
+        model_path = prompt_resolve_runtime_path(
+            model_path,
+            parent=self.main_window,
+            purpose="run",
+        )
 
         class_names, class_label_overrides = parse_auto_mark_class_specs(
             step.settings.get("class_names", [])
         )
+        merge_group = self._effective_merge_group(step)
         marking_settings = {
             "model_path": model_path,
             "conf": float(step.settings.get("confidence", 0.25)),
             "iou": float(step.settings.get("iou", 0.7)),
             "max_det": int(step.settings.get("max_detections", 300)),
-            "merge_overlaps": bool(step.settings.get("merge_overlaps", False)),
+            "merge_overlaps": (
+                False
+                if merge_group
+                else bool(step.settings.get("merge_overlaps", False))
+            ),
             "merge_overlap_threshold": float(
                 step.settings.get("merge_overlap_threshold", 0.6)
             ),
@@ -152,33 +166,125 @@ class PipelineRunner(QObject):
             "class_label_overrides": class_label_overrides,
             "classes": {},
         }
-        images = [
-            self.image_list_model.data(index, Qt.ItemDataRole.UserRole)
-            for index in self.image_indices
-        ]
-        self.image_list_model.add_images_to_undo_stack(
-            [image for image in images if image is not None],
-            action_name="Pipeline auto marking",
-            should_ask_for_confirmation=False,
-        )
+        if not merge_group or self._is_first_merge_group_step(merge_group):
+            images = [
+                self.image_list_model.data(index, Qt.ItemDataRole.UserRole)
+                for index in self.image_indices
+            ]
+            self.image_list_model.add_images_to_undo_stack(
+                [image for image in images if image is not None],
+                action_name=(
+                    "Pipeline linked auto marking"
+                    if merge_group else "Pipeline auto marking"
+                ),
+                should_ask_for_confirmation=False,
+            )
         thread = MarkingThread(
             self,
             self.image_list_model,
             self.image_indices,
             marking_settings,
         )
-        thread.marking_generated.connect(
-            self._add_exact_new_markings
-        )
+        if merge_group:
+            thread.marking_generated.connect(
+                lambda image_index, markings, group_id=merge_group:
+                self._collect_linked_markings(group_id, image_index, markings)
+            )
+        else:
+            thread.marking_generated.connect(self._add_exact_new_markings)
         self._start_thread(thread)
 
-    def _add_exact_new_markings(self, image_index: QModelIndex, markings: list[dict]):
+    def _effective_merge_group(self, step: PipelineStep) -> str:
+        group_id = str(step.settings.get("merge_group") or "")
+        if not group_id:
+            return ""
+        member_count = sum(
+            1
+            for candidate in self.steps
+            if candidate.type == "auto_mark"
+            and str(candidate.settings.get("merge_group") or "") == group_id
+        )
+        return group_id if member_count >= 2 else ""
+
+    def _merge_group_positions(self, group_id: str) -> list[int]:
+        return [
+            index
+            for index, candidate in enumerate(self.steps)
+            if candidate.type == "auto_mark"
+            and str(candidate.settings.get("merge_group") or "") == group_id
+        ]
+
+    def _is_first_merge_group_step(self, group_id: str) -> bool:
+        positions = self._merge_group_positions(group_id)
+        return bool(positions) and self.step_index == positions[0]
+
+    def _is_last_merge_group_step(self, group_id: str) -> bool:
+        positions = self._merge_group_positions(group_id)
+        return bool(positions) and self.step_index == positions[-1]
+
+    def _collect_linked_markings(
+        self,
+        group_id: str,
+        image_index: QModelIndex,
+        markings: list[dict],
+    ):
         image = self.image_list_model.data(
             image_index,
             Qt.ItemDataRole.UserRole,
         )
         if image is None:
             return
+        entry = self._linked_marking_results.setdefault(
+            group_id,
+            {},
+        ).setdefault(
+            str(image.path),
+            {"index": image_index, "markings": []},
+        )
+        entry["markings"].extend(dict(marking) for marking in markings)
+
+    def _flush_linked_markings(self, group_id: str):
+        group_results = self._linked_marking_results.pop(group_id, {})
+        positions = self._merge_group_positions(group_id)
+        if not positions:
+            return
+        threshold = float(
+            self.steps[positions[0]].settings.get(
+                "merge_overlap_threshold",
+                0.6,
+            )
+        )
+        raw_count = 0
+        fused_count = 0
+        added_count = 0
+        for entry in group_results.values():
+            markings = list(entry["markings"])
+            raw_count += len(markings)
+            fused = MarkingThread._merge_overlapping_markings(
+                markings,
+                threshold,
+            )
+            fused_count += len(fused)
+            added_count += self._add_exact_new_markings(
+                entry["index"],
+                fused,
+            )
+        self.log_message.emit(
+            f"Linked merge combined {raw_count} detection(s) into "
+            f"{fused_count} region(s); added {added_count} exact-new marking(s)."
+        )
+
+    def _add_exact_new_markings(
+        self,
+        image_index: QModelIndex,
+        markings: list[dict],
+    ) -> int:
+        image = self.image_list_model.data(
+            image_index,
+            Qt.ItemDataRole.UserRole,
+        )
+        if image is None:
+            return 0
         existing = {
             (
                 str(marking.label or ""),
@@ -215,6 +321,7 @@ class PipelineRunner(QObject):
                 unique,
             )
             self.main_window.image_viewer.refresh_marking_overlays(image)
+        return len(unique)
 
     def _start_auto_caption(self, step: PipelineStep):
         form = self.main_window.auto_captioner.caption_settings_form
@@ -310,6 +417,18 @@ class PipelineRunner(QObject):
             message = str(getattr(thread, "error_message", "") or "Model step failed.")
             self._finish(False, message)
             return
+        step = self.steps[self.step_index]
+        merge_group = (
+            self._effective_merge_group(step)
+            if step.type == "auto_mark"
+            else ""
+        )
+        if merge_group and self._is_last_merge_group_step(merge_group):
+            try:
+                self._flush_linked_markings(merge_group)
+            except Exception as exc:
+                self._finish(False, f"Linked auto-marking merge failed: {exc}")
+                return
         QTimer.singleShot(0, self._advance)
 
     def _run_build_ideogram(self):

@@ -269,6 +269,27 @@ class ImageGraphicsView(QGraphicsView):
         self.verticalScrollBar().setValue(
             self.verticalScrollBar().value() - int(delta.y()))
 
+    def _begin_manual_pan(self, event: QMouseEvent, *, clear_selection: bool):
+        if clear_selection and event.button() == Qt.MouseButton.LeftButton:
+            clear_ideogram_selection = getattr(
+                self.image_viewer,
+                "clear_ideogram_selection",
+                None,
+            )
+            if callable(clear_ideogram_selection):
+                clear_ideogram_selection()
+        self._manual_pan_active = True
+        self._manual_pan_last_global_pos = event.globalPosition().toPoint()
+        fast_pan_mode_setter = getattr(
+            self.image_viewer,
+            "_set_fast_pan_visual_mode",
+            None,
+        )
+        if callable(fast_pan_mode_setter):
+            fast_pan_mode_setter(True)
+        self._set_view_cursor(Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
     def showContextMenu(self, pos):
         scene_pos = self.mapToScene(pos)
         item = (
@@ -361,6 +382,19 @@ class ImageGraphicsView(QGraphicsView):
                                        self.last_pos.x(), view_rect.bottom())
 
     def mousePressEvent(self, event: QMouseEvent):
+        if (
+            self._space_pan_active
+            and event.button() in (
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.MiddleButton,
+            )
+        ):
+            self._restore_temporarily_disabled_ideogram_regions()
+            self._restore_temporarily_raised_ideogram_region()
+            self._restore_transient_marking_regions()
+            self._begin_manual_pan(event, clear_selection=False)
+            return
+
         color_pick_handler = getattr(
             self.image_viewer,
             "handle_ideogram_color_pick_press",
@@ -405,21 +439,7 @@ class ImageGraphicsView(QGraphicsView):
             return
 
         if self._should_start_manual_pan(event):
-            if event.button() == Qt.MouseButton.LeftButton:
-                clear_selection = getattr(
-                    self.image_viewer,
-                    "clear_ideogram_selection",
-                    None,
-                )
-                if callable(clear_selection):
-                    clear_selection()
-            self._manual_pan_active = True
-            self._manual_pan_last_global_pos = event.globalPosition().toPoint()
-            fast_pan_mode_setter = getattr(self.image_viewer, "_set_fast_pan_visual_mode", None)
-            if callable(fast_pan_mode_setter):
-                fast_pan_mode_setter(True)
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
+            self._begin_manual_pan(event, clear_selection=True)
             return
 
         # Check if clicking on an existing marking item first
@@ -523,6 +543,10 @@ class ImageGraphicsView(QGraphicsView):
             self._manual_pan_last_global_pos = current_global
             event.accept()
             return
+        if self._space_pan_active:
+            self._set_view_cursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
 
         # Notify parent to show video controls if hovering near them
         if self.image_viewer._is_video_loaded and self.image_viewer.video_controls_auto_hide:
@@ -602,6 +626,9 @@ class ImageGraphicsView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if self._space_pan_active:
+            event.accept()
+            return
         item = self.scene().itemAt(self.mapToScene(event.pos()), self.transform())
         if isinstance(item, MarkingLabel):
             super().mouseDoubleClickEvent(event)
@@ -678,7 +705,7 @@ class ImageGraphicsView(QGraphicsView):
         if event.key() == Qt.Key.Key_Space:
             self._space_pan_active = True
             if not self._manual_pan_active:
-                self.setCursor(Qt.CursorShape.OpenHandCursor)
+                self._set_view_cursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
             return
         selected = self.scene().selectedItems()
@@ -795,7 +822,7 @@ class ImageGraphicsView(QGraphicsView):
         if event.key() == Qt.Key.Key_Space:
             self._space_pan_active = False
             if not self._manual_pan_active:
-                self.unsetCursor()
+                self._set_view_cursor(None)
             event.accept()
             return
         if MarkingItem.handle_selected == RectPosition.NONE:

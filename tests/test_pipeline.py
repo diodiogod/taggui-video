@@ -64,6 +64,33 @@ def test_pipeline_rejects_non_object_step_settings():
         PipelineStep.from_dict({"type": "save", "settings": ["invalid"]})
 
 
+def test_pipeline_accepts_adjacent_linked_auto_marking_steps():
+    pipeline = PipelineDefinition(
+        "Linked",
+        [
+            PipelineStep("auto_mark", {"merge_group": "hands"}),
+            PipelineStep("auto_mark", {"merge_group": "hands"}),
+            PipelineStep("build_ideogram_regions"),
+        ],
+    )
+
+    pipeline.validate()
+
+
+def test_pipeline_rejects_non_adjacent_linked_steps():
+    pipeline = PipelineDefinition(
+        "Broken links",
+        [
+            PipelineStep("auto_mark", {"merge_group": "hands"}),
+            PipelineStep("build_ideogram_regions"),
+            PipelineStep("auto_mark", {"merge_group": "hands"}),
+        ],
+    )
+
+    with pytest.raises(PipelineValidationError, match="adjacent steps"):
+        pipeline.validate()
+
+
 def test_auto_mark_class_specs_support_label_overrides():
     class_names, overrides = parse_auto_mark_class_specs(
         "eye{person eye}, hand, TOOL{held tool}"

@@ -135,11 +135,41 @@ class PipelineDefinition:
         if not str(self.id or "").strip():
             raise PipelineValidationError("Pipeline requires a stable ID.")
         seen_ids: set[str] = set()
-        for step in self.steps:
+        merge_group_positions: dict[str, list[int]] = {}
+        for position, step in enumerate(self.steps):
             step.validate()
             if step.id in seen_ids:
                 raise PipelineValidationError(f"Duplicate pipeline step ID: {step.id}")
             seen_ids.add(step.id)
+            merge_group = str(step.settings.get("merge_group") or "")
+            if not merge_group:
+                continue
+            if step.type != "auto_mark":
+                raise PipelineValidationError(
+                    "Only Auto Marking steps can belong to a linked merge group."
+                )
+            merge_group_positions.setdefault(merge_group, []).append(position)
+            try:
+                threshold = float(
+                    step.settings.get("merge_overlap_threshold", 0.6)
+                )
+            except (TypeError, ValueError) as exc:
+                raise PipelineValidationError(
+                    "Linked overlap thresholds must be numbers."
+                ) from exc
+            if not 0.0 < threshold <= 1.0:
+                raise PipelineValidationError(
+                    "Linked overlap thresholds must be greater than 0 and at most 1."
+                )
+        for group_id, positions in merge_group_positions.items():
+            if len(positions) < 2:
+                raise PipelineValidationError(
+                    f"Linked merge group {group_id!r} requires at least two steps."
+                )
+            if positions != list(range(positions[0], positions[-1] + 1)):
+                raise PipelineValidationError(
+                    f"Linked merge group {group_id!r} must contain adjacent steps."
+                )
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()

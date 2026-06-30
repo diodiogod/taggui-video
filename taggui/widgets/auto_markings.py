@@ -9,13 +9,22 @@ from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
                                QAbstractScrollArea, QFrame, QFormLayout,
                                QMessageBox, QTableWidget, QHeaderView, QLabel,
-                               QTableWidgetItem, QComboBox, QPushButton)
+                               QTableWidgetItem, QComboBox, QPushButton,
+                               QHBoxLayout, QToolButton, QStyle, QLineEdit,
+                               QListWidget, QListWidgetItem)
 
 from utils.icons import create_add_box_icon
 from models.image_list_model import ImageListModel
 from utils.utils import pluralize
 from utils.big_widgets import TallPushButton
 from utils.settings import settings, DEFAULT_SETTINGS
+from utils.marking_model_security import (
+    list_marking_model_paths,
+    open_virustotal_for_file,
+    passive_model_warning_text,
+    preferred_runtime_path,
+    prompt_resolve_runtime_path,
+)
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     FocusedScrollSettingsDoubleSpinBox,
                                     FocusedScrollSettingsSpinBox,
@@ -34,8 +43,173 @@ def _startup_delay_ms(env_name: str, default_ms: int) -> int:
         return max(0, int(default_ms))
 
 
+class MarkingModelComboBox(FocusedScrollSettingsComboBox):
+    _SORT_LABELS = {
+        'name': 'Name',
+        'recent': 'Recent',
+    }
+
+    def __init__(self, key: str):
+        super().__init__(key=key)
+        self._entries: list[tuple[str, Path, int]] = []
+        self._popup: QFrame | None = None
+        self._filter_edit: QLineEdit | None = None
+        self._sort_button: QToolButton | None = None
+        self._list_widget: QListWidget | None = None
+        self._updating_entries = False
+
+    def sort_mode(self) -> str:
+        mode = str(settings.value('marking_model_sort_mode', 'name', type=str) or 'name')
+        return mode if mode in self._SORT_LABELS else 'name'
+
+    def set_sort_mode(self, mode: str):
+        normalized = str(mode or 'name').strip().lower()
+        if normalized not in self._SORT_LABELS:
+            normalized = 'name'
+        settings.setValue('marking_model_sort_mode', normalized)
+        self._rebuild_combo_items()
+        self._refresh_popup_contents()
+
+    def toggle_sort_mode(self):
+        self.set_sort_mode('recent' if self.sort_mode() == 'name' else 'name')
+
+    def set_model_entries(self, entries: list[tuple[str, Path, int]], selected_text: str = ''):
+        self._entries = list(entries)
+        self._rebuild_combo_items(selected_text=selected_text)
+        self._refresh_popup_contents()
+
+    def showPopup(self):
+        if self._popup is None:
+            self._build_popup()
+        self._refresh_popup_contents()
+        popup = self._popup
+        if popup is None:
+            return
+        popup_width = max(self.width(), 380)
+        popup_height = min(460, max(180, 56 + max(1, self._visible_entry_count()) * 28))
+        popup.setFixedWidth(popup_width)
+        popup.resize(popup_width, popup_height)
+        popup.move(self.mapToGlobal(self.rect().bottomLeft()))
+        popup.show()
+        popup.raise_()
+        popup.activateWindow()
+        if self._filter_edit is not None:
+            self._filter_edit.clear()
+            self._filter_edit.setFocus()
+
+    def hidePopup(self):
+        if self._popup is not None:
+            self._popup.hide()
+
+    def _visible_entry_count(self) -> int:
+        if self._list_widget is None:
+            return len(self._entries)
+        return self._list_widget.count()
+
+    def _build_popup(self):
+        popup = QFrame(None, Qt.WindowType.Popup)
+        popup.setObjectName('markingModelPopup')
+        popup.setStyleSheet(
+            'QFrame#markingModelPopup { background: #121920; border: 1px solid #31404B; border-radius: 8px; }'
+            'QLineEdit { background: #0D1318; color: #E8F0F5; border: 1px solid #354252; border-radius: 5px; padding: 6px 8px; }'
+            'QListWidget { background: transparent; color: #E8F0F5; border: 0; padding: 2px; }'
+            'QListWidget::item { padding: 6px 8px; border-radius: 4px; }'
+            'QListWidget::item:selected { background: #1D3A39; color: #FFFFFF; }'
+            'QToolButton { color: #AAB8C5; background: #182129; border: 1px solid #303C48; border-radius: 5px; padding: 5px 8px; }'
+            'QToolButton:hover { color: #FFFFFF; border-color: #4A6070; background: #202C36; }'
+        )
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+        filter_edit = QLineEdit()
+        filter_edit.setPlaceholderText('Filter models...')
+        filter_edit.textChanged.connect(self._refresh_popup_contents)
+        controls.addWidget(filter_edit, 1)
+        sort_button = QToolButton()
+        sort_button.clicked.connect(self.toggle_sort_mode)
+        controls.addWidget(sort_button)
+        layout.addLayout(controls)
+        list_widget = QListWidget()
+        list_widget.itemActivated.connect(self._popup_item_activated)
+        list_widget.itemClicked.connect(self._popup_item_activated)
+        layout.addWidget(list_widget, 1)
+        self._popup = popup
+        self._filter_edit = filter_edit
+        self._sort_button = sort_button
+        self._list_widget = list_widget
+
+    def _sorted_entries(self) -> list[tuple[str, Path, int]]:
+        entries = list(self._entries)
+        if self.sort_mode() == 'recent':
+            return sorted(entries, key=lambda item: (-item[2], item[0].casefold()))
+        return sorted(entries, key=lambda item: item[0].casefold())
+
+    def _rebuild_combo_items(self, selected_text: str = ''):
+        current_text = selected_text or str(self.currentText() or '')
+        current_data = self.currentData()
+        entries = self._sorted_entries()
+        previous = self.blockSignals(True)
+        self._updating_entries = True
+        try:
+            self.clear()
+            for text, path, _mtime_ns in entries:
+                self.addItem(text, userData=path)
+            if current_text and self.findText(current_text) >= 0:
+                self.setCurrentText(current_text)
+            elif current_data is not None:
+                for index, (_text, path, _mtime_ns) in enumerate(entries):
+                    if path == current_data:
+                        self.setCurrentIndex(index)
+                        break
+            elif self.count() > 0:
+                self.setCurrentIndex(0)
+        finally:
+            self._updating_entries = False
+            self.blockSignals(previous)
+
+    def _refresh_popup_contents(self):
+        if self._sort_button is not None:
+            self._sort_button.setText(self._SORT_LABELS[self.sort_mode()])
+            self._sort_button.setToolTip('Toggle model ordering: name or most recently modified')
+        if self._list_widget is None:
+            return
+        filter_text = str(self._filter_edit.text() if self._filter_edit is not None else '').strip().casefold()
+        current_path = self.currentData()
+        self._list_widget.clear()
+        for text, path, _mtime_ns in self._sorted_entries():
+            haystack = f'{text} {path.name}'.casefold()
+            if filter_text and filter_text not in haystack:
+                continue
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(str(path))
+            self._list_widget.addItem(item)
+            if current_path is not None and path == current_path:
+                self._list_widget.setCurrentItem(item)
+
+    def _popup_item_activated(self, item):
+        if item is None:
+            return
+        selected_path = item.data(Qt.ItemDataRole.UserRole)
+        selected_text = str(item.text() or '')
+        if selected_text and self.findText(selected_text) >= 0:
+            self.setCurrentText(selected_text)
+        elif selected_path is not None:
+            for index in range(self.count()):
+                if self.itemData(index) == selected_path:
+                    self.setCurrentIndex(index)
+                    break
+        self.hidePopup()
+        self.activated.emit(self.currentIndex())
+
+
 class MarkingSettingsForm(QVBoxLayout):
     model_selected = Signal(bool)
+    model_activated = Signal()
+    models_refreshed = Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -44,17 +218,47 @@ class MarkingSettingsForm(QVBoxLayout):
             QFormLayout.RowWrapPolicy.WrapAllRows)
         basic_settings_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.model_combo_box = FocusedScrollSettingsComboBox(key='marking_model_id')
+        self.model_combo_box = MarkingModelComboBox(key='marking_model_id')
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
-        self.model_combo_box.activated.connect(lambda _: self.model_selected.emit(True))
+        self.model_combo_box.activated.connect(self._on_model_activated)
         self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
+        model_selector = QWidget()
+        model_selector_layout = QHBoxLayout(model_selector)
+        model_selector_layout.setContentsMargins(0, 0, 0, 0)
+        model_selector_layout.setSpacing(4)
+        model_selector_layout.addWidget(self.model_combo_box, 1)
+        self.rescan_models_button = QToolButton()
+        self.rescan_models_button.setIcon(
+            self.model_combo_box.style().standardIcon(
+                QStyle.StandardPixmap.SP_BrowserReload
+            )
+        )
+        self.rescan_models_button.setToolTip(
+            'Rescan the auto-marking models directory'
+        )
+        self.rescan_models_button.clicked.connect(self.get_local_model_paths)
+        model_selector_layout.addWidget(self.rescan_models_button)
+        self.scan_model_button = QToolButton()
+        self.scan_model_button.setText("VT")
+        self.scan_model_button.setToolTip(
+            "Open the selected model hash on VirusTotal"
+        )
+        self.scan_model_button.clicked.connect(self.open_selected_model_on_virustotal)
+        model_selector_layout.addWidget(self.scan_model_button)
         QTimer.singleShot(
             _startup_delay_ms('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', 6000),
             self.get_local_model_paths,
         )
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
-        basic_settings_form.addRow('Model', self.model_combo_box)
+        basic_settings_form.addRow('Model', model_selector)
+        self.model_warning_label = QLabel()
+        self.model_warning_label.setWordWrap(True)
+        self.model_warning_label.hide()
+        self.model_warning_label.setStyleSheet(
+            'color: #F2B84B; padding: 2px 0 4px 0;'
+        )
+        basic_settings_form.addRow('', self.model_warning_label)
 
         self.class_table = QTableWidget(0, 3)
         self.class_table.setHorizontalHeaderLabels(
@@ -130,39 +334,91 @@ class MarkingSettingsForm(QVBoxLayout):
     @Slot(str)
     def _on_model_text_changed(self, text: str):
         settings.setValue('marking_model_id', text)
+        self._refresh_model_warning()
         self.model_selected.emit(bool(text))
+
+    @Slot(int)
+    def _on_model_activated(self, _index: int):
+        self._refresh_model_warning()
+        self.model_selected.emit(bool(self.model_combo_box.currentText()))
+        self.model_activated.emit()
+
+    def _refresh_model_warning(self):
+        warning_text = passive_model_warning_text(
+            self.model_combo_box.currentData()
+        )
+        self.model_warning_label.setText(warning_text)
+        self.model_warning_label.setVisible(bool(warning_text))
 
     def get_local_model_paths(self):
         models_directory_path = settings.value(
             'marking_models_directory_path',
             defaultValue=DEFAULT_SETTINGS['marking_models_directory_path'],
             type=str)
+        previous_text = str(self.model_combo_box.currentText() or '')
+        previous_path = self.model_combo_box.currentData()
         if not models_directory_path:
-            return
+            previous = self.model_combo_box.blockSignals(True)
+            self.model_combo_box.clear()
+            self.model_combo_box.setPlaceholderText(
+                'Set marking model directory in "Settings..."'
+            )
+            self.model_combo_box.blockSignals(previous)
+            settings.setValue('marking_model_id', '')
+            self._refresh_model_warning()
+            self.models_refreshed.emit([])
+            if previous_path is not None or previous_text:
+                self.model_selected.emit(False)
+            return []
         models_directory_path = Path(models_directory_path)
         print(f'Loading local auto-marking model paths under '
               f'{models_directory_path}...')
-        config_paths = sorted(models_directory_path.glob('**/*.pt'))
-        saved_text = str(settings.value('marking_model_id', '', type=str) or '')
-        self.model_selected.emit(False)
-        prev_block = self.model_combo_box.blockSignals(True)
-        self.model_combo_box.clear()
+        config_paths = list_marking_model_paths(models_directory_path)
+        saved_text = str(
+            settings.value('marking_model_id', '', type=str) or previous_text
+        )
+        if saved_text and saved_text.endswith('.pt'):
+            preferred_saved_text = str(Path(saved_text).with_suffix('.onnx')).replace("\\", "/")
+            if any(
+                str(path.relative_to(models_directory_path)).replace("\\", "/") == preferred_saved_text
+                for path in config_paths
+            ):
+                saved_text = preferred_saved_text
         if len(config_paths) == 0:
+            previous = self.model_combo_box.blockSignals(True)
+            self.model_combo_box.clear()
             self.model_combo_box.setPlaceholderText(
                 'Set marking model directory in "Settings..."')
+            self.model_combo_box.blockSignals(previous)
         else:
             self.model_combo_box.setPlaceholderText('Select marking model')
-            for path in config_paths:
-                self.model_combo_box.addItem(
-                    str(path.relative_to(models_directory_path)), userData=path)
-            if saved_text and self.model_combo_box.findText(saved_text) >= 0:
-                self.model_combo_box.setCurrentText(saved_text)
-            elif self.model_combo_box.count() > 0:
-                self.model_combo_box.setCurrentIndex(0)
-        self.model_combo_box.blockSignals(prev_block)
+            entries = [
+                (
+                    str(path.relative_to(models_directory_path)).replace("\\", "/"),
+                    path,
+                    path.stat().st_mtime_ns if path.exists() else 0,
+                )
+                for path in config_paths
+            ]
+            self.model_combo_box.set_model_entries(entries, selected_text=saved_text)
         current_text = str(self.model_combo_box.currentText() or '')
+        current_path = self.model_combo_box.currentData()
         settings.setValue('marking_model_id', current_text)
-        self.model_selected.emit(bool(current_text))
+        self._refresh_model_warning()
+        relative_paths = [
+            str(path.relative_to(models_directory_path)) for path in config_paths
+        ]
+        self.models_refreshed.emit(relative_paths)
+        if current_path != previous_path or current_text != previous_text:
+            self.model_selected.emit(bool(current_text))
+        return relative_paths
+
+    @Slot()
+    def open_selected_model_on_virustotal(self):
+        selected_path = self.model_combo_box.currentData()
+        if selected_path is None:
+            return
+        open_virustotal_for_file(Path(selected_path), parent=self.model_combo_box.window())
 
     @Slot()
     def toggle_advanced_settings_form(self):
@@ -178,12 +434,13 @@ class MarkingSettingsForm(QVBoxLayout):
     def get_marking_settings(self) -> dict:
         return {
             'model_path': self.model_combo_box.currentData(),
+            'requested_model_path': self.model_combo_box.currentData(),
             'conf': self.confidence_spin_box.value(),
             'iou': self.iou_spin_box.value(),
             'max_det': self.max_det_spin_box.value(),
             'merge_overlaps': self.merge_overlaps_check_box.isChecked(),
             'merge_overlap_threshold': self.merge_overlap_threshold_spin_box.value(),
-            'classes': []
+            'classes': None
         }
 
 class AutoMarkings(QDockWidget):
@@ -240,6 +497,12 @@ class AutoMarkings(QDockWidget):
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_marking)
         self.marking_settings_form.model_selected.connect(self._on_model_selection_changed)
+        self.marking_settings_form.model_activated.connect(
+            self._on_model_activated
+        )
+        self.marking_settings_form.models_refreshed.connect(
+            self._on_models_refreshed
+        )
         self.marking_settings_form.class_table.itemChanged.connect(
             self._on_class_label_changed
         )
@@ -260,6 +523,22 @@ class AutoMarkings(QDockWidget):
             self.start_cancel_button.setEnabled(False)
             return
         self.prepare_generation()
+
+    @Slot()
+    def _on_model_activated(self):
+        requested_model_path = self.marking_settings_form.model_combo_box.currentData()
+        if requested_model_path is None:
+            return
+        requested_model_path = Path(requested_model_path)
+        if preferred_runtime_path(requested_model_path) == requested_model_path:
+            if requested_model_path.suffix.lower() == '.pt':
+                self.prepare_generation(interactive=True, purpose='inspect')
+
+    @Slot(list)
+    def _on_models_refreshed(self, model_paths: list[str]):
+        pipeline_editor = getattr(self.main_window, 'pipeline_editor', None)
+        if pipeline_editor is not None:
+            pipeline_editor.refresh_marking_models(model_paths)
 
     def set_browser_context(
             self, image_list_model: ImageListModel, image_list: ImageList):
@@ -290,7 +569,6 @@ class AutoMarkings(QDockWidget):
         if self.marking_settings_form.model_combo_box.currentData() is None:
             return
         self.prepare_generation()
-        self.start_cancel_button.setEnabled(True)
 
     def set_is_marking(self, is_marking: bool):
         self.is_marking = is_marking
@@ -349,8 +627,6 @@ class AutoMarkings(QDockWidget):
         )
         model_actions = payload.get(model_key, {})
         default_action = 'hint'
-        if self.marking_settings_form.class_table.rowCount() > 1:
-            default_action = 'ignore'
         row_count = self.marking_settings_form.class_table.rowCount()
         for row in range(row_count):
             class_item = self.marking_settings_form.class_table.item(row, 0)
@@ -486,9 +762,59 @@ class AutoMarkings(QDockWidget):
         self.result_label.setText(text)
         self.result_label.show()
 
-    def prepare_generation(self):
+    def _sync_selected_model_path(self, runtime_model_path: Path):
+        models_directory_path = settings.value(
+            'marking_models_directory_path',
+            defaultValue=DEFAULT_SETTINGS['marking_models_directory_path'],
+            type=str,
+        )
+        if not models_directory_path:
+            return
+        base = Path(models_directory_path)
+        try:
+            relative_text = str(
+                Path(runtime_model_path).expanduser().relative_to(base)
+            ).replace("\\", "/")
+        except Exception:
+            return
+        self.marking_settings_form.get_local_model_paths()
+        if self.marking_settings_form.model_combo_box.findText(relative_text) >= 0:
+            self.marking_settings_form.model_combo_box.setCurrentText(relative_text)
+
+    def prepare_generation(self, *, interactive: bool = False, purpose: str = 'run'):
         selected_image_indices = self.image_list.get_selected_image_indices()
         marking_settings = self.marking_settings_form.get_marking_settings()
+        requested_model_path = marking_settings.get('requested_model_path')
+        if requested_model_path is not None:
+            requested_model_path = Path(requested_model_path)
+            try:
+                if interactive:
+                    marking_settings['model_path'] = prompt_resolve_runtime_path(
+                        requested_model_path,
+                        parent=self,
+                        purpose=purpose,
+                    )
+                    self._sync_selected_model_path(marking_settings['model_path'])
+                else:
+                    marking_settings['model_path'] = preferred_runtime_path(
+                        requested_model_path
+                    )
+            except RuntimeError as exc:
+                self.result_label.setText(str(exc))
+                self.result_label.show()
+                self.start_cancel_button.setEnabled(bool(requested_model_path))
+                return
+            if (not interactive
+                    and Path(marking_settings['model_path']).suffix.lower() == '.pt'):
+                self.marking_thread = None
+                self.marking_settings_form.class_table.setRowCount(0)
+                self.result_label.setText(
+                    'PT model selected. TagGUI will offer a safer ONNX import '
+                    'or explicit unsafe fallback when you run it.'
+                )
+                self.result_label.show()
+                self.start_cancel_button.setEnabled(True)
+                return
         self.marking_thread = MarkingThread(
             self, self.image_list_model, selected_image_indices,
             marking_settings)
@@ -504,6 +830,7 @@ class AutoMarkings(QDockWidget):
             self.progress_bar.setValue)
         self.marking_thread.finished.connect(
             lambda: self.set_is_marking(False))
+        self.marking_thread.finished.connect(self._handle_marking_finished)
         self.marking_thread.finished.connect(restore_stdout_and_stderr)
         self.marking_thread.finished.connect(self.progress_bar.hide)
         self.marking_thread.finished.connect(
@@ -572,18 +899,34 @@ class AutoMarkings(QDockWidget):
         self.marking_generated.emit(image_index, markings)
 
     @Slot()
+    def _handle_marking_finished(self):
+        if self.marking_thread is None:
+            return
+        if self.marking_thread.is_canceled:
+            self.result_label.setText('Auto-marking canceled.')
+        elif self.marking_thread.is_error:
+            self.result_label.setText(
+                'Auto-marking failed. See the console for details.'
+            )
+        elif not self.marking_thread.marking_settings.get('classes'):
+            self.result_label.setText('No classes enabled. Nothing was marked.')
+        else:
+            self.result_label.setText('Auto-marking finished.')
+        self.result_label.show()
+
+    @Slot()
     def generate_markings(self):
         selected_image_indices = self.image_list.get_selected_image_indices()
-        if (
-            self.marking_thread is None
-            or self.marking_thread.image_list_model is not self.image_list_model
-        ):
-            self.prepare_generation()
+        self.prepare_generation(interactive=True)
         if self.marking_thread is None or self.marking_thread.model is None:
             self.start_cancel_button.setEnabled(False)
             return
         self.marking_thread.selected_image_indices = selected_image_indices
         self.marking_thread.marking_settings = self.marking_settings_form.get_marking_settings()
+        self.marking_thread.marking_settings['model_path'] = self.marking_thread.model_path
+        self.marking_thread.marking_settings['requested_model_path'] = (
+            self.marking_thread.model_path
+        )
         classes = {}
         for row, (class_id, class_name) in enumerate(
                 self.marking_thread.model.names.items()):

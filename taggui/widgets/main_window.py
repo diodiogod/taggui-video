@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QFileDialog, QMainWindow,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar, QSlider, QFrame,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
                                QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu,
@@ -2797,7 +2797,7 @@ class MainWindow(QMainWindow):
             return False
         if isinstance(
             focus_widget,
-            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox),
+            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox),
         ):
             return True
 
@@ -7993,6 +7993,15 @@ class MainWindow(QMainWindow):
         )
         self._secondary_browser.image_list_model.new_media_refresh_finished.connect(
             self._on_new_media_refresh_finished
+        )
+        self._secondary_browser.image_list_model.update_undo_and_redo_actions_requested.connect(
+            self.menu_manager.update_undo_and_redo_actions
+        )
+        self._secondary_browser.image_list_model.ideogram_sidecars_restored.connect(
+            self.signal_manager._refresh_current_ideogram_after_history_restore
+        )
+        self._secondary_browser.image_list_model.image_history_restored.connect(
+            self.signal_manager._refresh_current_image_after_history_restore
         )
         self._secondary_browser.dock.deletion_marking_changed.connect(
             self.signal_manager._update_delete_button_visibility

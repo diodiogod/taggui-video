@@ -662,6 +662,8 @@ class SignalManager:
         if image is None or str(getattr(image, 'path', '') or '') not in restored_paths:
             return
         target_viewer.load_image(proxy_index, False)
+        self.main_window.ideogram_caption_editor.load_media(image)
+        self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
 
     def _update_tag_counts(self):
         """Update tag counts based on current model mode (paginated (DB) vs normal)."""

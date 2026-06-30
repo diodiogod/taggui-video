@@ -8,7 +8,12 @@ from pathlib import Path
 import huggingface_hub
 import numpy as np
 from PIL import Image as PilImage
-from onnxruntime import InferenceSession
+try:
+    from onnxruntime import InferenceSession
+    _ONNXRUNTIME_IMPORT_ERROR = None
+except Exception as exc:
+    InferenceSession = None
+    _ONNXRUNTIME_IMPORT_ERROR = exc
 
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
@@ -30,6 +35,11 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 class WdTaggerModel:
     def __init__(self, model_id: str):
+        if InferenceSession is None:
+            raise RuntimeError(
+                "onnxruntime is not available. "
+                f"Original import error: {_ONNXRUNTIME_IMPORT_ERROR}"
+            )
         model_path = Path(model_id) / 'model.onnx'
         if not model_path.is_file():
             model_path = huggingface_hub.hf_hub_download(model_id,
@@ -103,6 +113,11 @@ class WdTagger(AutoCaptioningModel):
         self.show_probabilities = self.wd_tagger_settings['show_probabilities']
 
     def get_error_message(self) -> str | None:
+        if _ONNXRUNTIME_IMPORT_ERROR is not None:
+            return (
+                "WD Tagger is unavailable because onnxruntime failed to import. "
+                f"Original error: {_ONNXRUNTIME_IMPORT_ERROR}"
+            )
         return None
 
     def get_processor(self):

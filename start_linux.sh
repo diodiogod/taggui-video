@@ -291,6 +291,29 @@ if [ $CLEAN_OLD -eq 1 ]; then
     fi
 fi
 
+echo "Verifying ONNX Runtime installation..."
+python -c "import onnxruntime" >/dev/null 2>&1 || {
+    echo "Repairing ONNX Runtime dependencies..."
+    pip install --upgrade --force-reinstall 'onnx>=1.16.0' 'onnxruntime==1.22.0' >> "$LOGFILE" 2>&1 || {
+        echo ""
+        echo "======================================================"
+        echo "ERROR: Failed to repair ONNX Runtime dependencies"
+        echo "======================================================"
+        echo "Check the log file for details: $LOGFILE"
+        echo ""
+        exit 1
+    }
+    python -c "import onnxruntime" >/dev/null 2>&1 || {
+        echo ""
+        echo "======================================================"
+        echo "ERROR: ONNX Runtime is still broken after reinstall"
+        echo "======================================================"
+        echo "Check the log file for details: $LOGFILE"
+        echo ""
+        exit 1
+    }
+}
+
 # Run TagGUI
 echo ""
 echo "======================================================"

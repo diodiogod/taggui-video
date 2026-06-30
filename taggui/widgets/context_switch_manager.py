@@ -139,6 +139,9 @@ class ContextSwitchManager:
         self._active_context_name = ctx_name
         self._connected_image_list_model = new_image_model
         self._connected_tag_counter_model = new_tag_counter
+        menu_manager = getattr(mw, 'menu_manager', None)
+        if menu_manager is not None:
+            menu_manager.update_undo_and_redo_actions()
 
         print(f'[ContextSwitchManager] switched → {ctx_name}')
 

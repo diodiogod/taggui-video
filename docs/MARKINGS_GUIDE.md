@@ -173,6 +173,9 @@ regions are skipped while distinct overlaps remain valid. See the
 
 ## Display Toggles
 
+Hold `Space` while dragging in the main viewer to pan regardless of whether the
+pointer is over empty image space, a marking, or an Ideogram region.
+
 The marking system includes display toggles for:
 
 - showing or hiding markings
