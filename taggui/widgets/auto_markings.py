@@ -49,7 +49,7 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
         'recent': 'Recent',
     }
 
-    def __init__(self, key: str):
+    def __init__(self, key: str | None = None):
         super().__init__(key=key)
         self._entries: list[tuple[str, Path, int]] = []
         self._popup: QFrame | None = None
@@ -159,6 +159,8 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
                 self.addItem(text, userData=path)
             if current_text and self.findText(current_text) >= 0:
                 self.setCurrentText(current_text)
+            elif current_text and self.isEditable():
+                self.setEditText(current_text)
             elif current_data is not None:
                 for index, (_text, path, _mtime_ns) in enumerate(entries):
                     if path == current_data:
@@ -457,6 +459,10 @@ class AutoMarkings(QDockWidget):
         self.is_marking = False
         self.marking_thread = None
         self.show_alert_when_finished = False
+        self._run_marking_count = 0
+        self._run_processed_image_count = 0
+        self._run_expected_image_count = 0
+        self._run_last_image_name = ''
         # Whether the last block of text in the console text edit should be
         # replaced with the next block of text that is outputted.
         self.replace_last_console_text_edit_block = False
@@ -745,7 +751,7 @@ class AutoMarkings(QDockWidget):
                     'Auto-Marking console for more information.')
         else:
             icon = QMessageBox.Icon.Information
-            text = 'Marking has finished.'
+            text = self.result_label.text() or 'Auto-marking finished.'
         alert = QMessageBox()
         alert.setIcon(icon)
         alert.setText(text)
@@ -753,6 +759,9 @@ class AutoMarkings(QDockWidget):
 
     @Slot(str, int)
     def update_result_label(self, image_name: str, marking_count: int):
+        self._run_marking_count += max(0, marking_count)
+        self._run_processed_image_count += 1
+        self._run_last_image_name = image_name
         if marking_count <= 0:
             text = f'No markings found for {image_name}.'
         elif marking_count == 1:
@@ -910,8 +919,29 @@ class AutoMarkings(QDockWidget):
             )
         elif not self.marking_thread.marking_settings.get('classes'):
             self.result_label.setText('No classes enabled. Nothing was marked.')
+        elif self._run_marking_count <= 0:
+            image_count = (
+                self._run_processed_image_count
+                or self._run_expected_image_count
+            )
+            if image_count == 1 and self._run_last_image_name:
+                text = f'No markings found for {self._run_last_image_name}.'
+            else:
+                text = f'No markings found in {image_count} images.'
+            self.result_label.setText(text)
         else:
-            self.result_label.setText('Auto-marking finished.')
+            image_count = (
+                self._run_processed_image_count
+                or self._run_expected_image_count
+            )
+            marking_label = (
+                'marking' if self._run_marking_count == 1 else 'markings'
+            )
+            image_label = 'image' if image_count == 1 else 'images'
+            self.result_label.setText(
+                f'Found {self._run_marking_count} {marking_label} '
+                f'in {image_count} {image_label}.'
+            )
         self.result_label.show()
 
     @Slot()
@@ -954,6 +984,10 @@ class AutoMarkings(QDockWidget):
                 return
             self.show_alert_when_finished = (confirmation_dialog
                                              .show_alert_check_box.isChecked())
+        self._run_marking_count = 0
+        self._run_processed_image_count = 0
+        self._run_expected_image_count = selected_image_count
+        self._run_last_image_name = ''
         self.set_is_marking(True)
         self.result_label.setText('Running auto-marking...')
         self.result_label.show()

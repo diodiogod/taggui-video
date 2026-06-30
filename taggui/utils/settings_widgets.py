@@ -20,16 +20,22 @@ class SettingsBigCheckBox(BigCheckBox):
 
 
 class SettingsComboBox(QComboBox):
-    def __init__(self, key: str, default: str | None = None):
+    def __init__(self, key: str | None = None, default: str | None = None):
         super().__init__()
         self.key = key
+        if key is None:
+            return
         if not settings.contains(key):
             settings.setValue(key, default or DEFAULT_SETTINGS.get(key))
         self.currentTextChanged.connect(
             lambda text: settings.setValue(self.key, text))
 
     def addItems(self, texts: list[str]):
-        setting: str = settings.value(self.key, type=str)
+        setting = (
+            settings.value(self.key, type=str)
+            if self.key is not None
+            else None
+        )
         signals_were_blocked = self.blockSignals(True)
         try:
             super().addItems(texts)

@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from controllers.pipeline_runner import PipelineRunner
 from auto_captioning.models_list import MODELS
+from widgets.auto_markings import MarkingModelComboBox
 from utils.pipeline import (
     PIPELINE_STEP_TYPES,
     PipelineDefinition,
@@ -92,6 +93,25 @@ STEP_META = {
         "description": "Refresh searchable database data without rewriting sidecars.",
     },
 }
+
+
+def _marking_model_entries(models: list[str]) -> list[tuple[str, Path, int]]:
+    root = settings.value(
+        "marking_models_directory_path",
+        DEFAULT_SETTINGS["marking_models_directory_path"],
+        type=str,
+    )
+    base = Path(root) if root else Path()
+    entries = []
+    for model in models:
+        path = Path(model)
+        full_path = path if path.is_absolute() else base / path
+        entries.append((
+            str(model),
+            full_path,
+            full_path.stat().st_mtime_ns if full_path.exists() else 0,
+        ))
+    return entries
 
 
 class CompressiblePipelineRoot(QWidget):
@@ -933,10 +953,13 @@ class PipelineStepCard(QFrame):
 
     def _build_config(self, layout: QVBoxLayout, marking_models: list[str], caption_models: list[str]):
         if self.step.type == "auto_mark":
-            self.model_combo = QComboBox()
+            self.model_combo = MarkingModelComboBox()
             self.model_combo.setEditable(True)
-            self.model_combo.addItems(marking_models)
-            self.model_combo.setCurrentText(str(self.step.settings.get("model", "")))
+            selected_model = str(self.step.settings.get("model", ""))
+            self.model_combo.set_model_entries(
+                _marking_model_entries(marking_models),
+                selected_text=selected_model,
+            )
             self.marking_type_combo = QComboBox()
             self.marking_type_combo.addItems(["hint", "exclude", "include"])
             self.marking_type_combo.setCurrentText(str(self.step.settings.get("marking_type", "hint")))
@@ -1192,6 +1215,8 @@ class PipelineStepCard(QFrame):
 
 class PipelineEditor(QDockWidget):
     """Named pipeline editor with connected drag-reorder cards."""
+
+    _SELECTED_PIPELINE_SETTINGS_KEY = "pipeline_selected_id"
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -1560,9 +1585,15 @@ class PipelineEditor(QDockWidget):
                 continue
             current_text = str(combo.currentText() or "")
             blocked = combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(available_models)
-            combo.setCurrentText(current_text)
+            if isinstance(combo, MarkingModelComboBox):
+                combo.set_model_entries(
+                    _marking_model_entries(available_models),
+                    selected_text=current_text,
+                )
+            else:
+                combo.clear()
+                combo.addItems(available_models)
+                combo.setCurrentText(current_text)
             combo.blockSignals(blocked)
 
     def _caption_models(self) -> list[str]:
@@ -1585,7 +1616,20 @@ class PipelineEditor(QDockWidget):
         if not self.pipelines:
             self.pipelines = [default_pipeline()]
             self.store.save(self.pipelines)
-        self._refresh_pipeline_combo(0)
+        selected_id = str(settings.value(
+            self._SELECTED_PIPELINE_SETTINGS_KEY,
+            "",
+            type=str,
+        ) or "")
+        selected_index = next(
+            (
+                index
+                for index, pipeline in enumerate(self.pipelines)
+                if pipeline.id == selected_id
+            ),
+            0,
+        )
+        self._refresh_pipeline_combo(selected_index)
 
     def _refresh_pipeline_combo(self, selected_index: int):
         self._loading = True
@@ -1599,6 +1643,10 @@ class PipelineEditor(QDockWidget):
         if self._loading or index < 0 or index >= len(self.pipelines):
             return
         self.current_pipeline = self.pipelines[index]
+        settings.setValue(
+            self._SELECTED_PIPELINE_SETTINGS_KEY,
+            self.current_pipeline.id,
+        )
         self._rebuild_steps()
 
     def _rebuild_steps(self):
