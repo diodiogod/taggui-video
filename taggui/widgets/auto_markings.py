@@ -1,16 +1,16 @@
-import sys
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer
+from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer, QSize, QEvent
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
-                               QAbstractScrollArea, QFrame, QFormLayout,
+                               QFrame, QFormLayout,
                                QMessageBox, QTableWidget, QHeaderView, QLabel,
-                               QTableWidgetItem, QComboBox, QPushButton,
+                               QTableWidgetItem, QComboBox,
                                QHBoxLayout, QToolButton, QStyle, QLineEdit,
-                               QListWidget, QListWidgetItem)
+                               QListWidget, QListWidgetItem, QSizePolicy,
+                               QAbstractItemView, QLayout)
 
 from utils.icons import create_add_box_icon
 from utils.auto_marking_preferences import (
@@ -34,8 +34,7 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     FocusedScrollSettingsDoubleSpinBox,
                                     FocusedScrollSettingsSpinBox,
                                     SettingsBigCheckBox)
-from widgets.auto_captioner import (set_text_edit_height,
-                                    restore_stdout_and_stderr, HorizontalLine)
+from widgets.auto_captioner import set_text_edit_height, restore_stdout_and_stderr
 from widgets.image_list import ImageList
 from auto_marking.marking_thread import MarkingThread
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
@@ -46,6 +45,16 @@ def _startup_delay_ms(env_name: str, default_ms: int) -> int:
         return max(0, int(os.getenv(env_name, str(default_ms)) or default_ms))
     except (TypeError, ValueError):
         return max(0, int(default_ms))
+
+
+class CompressibleAutoMarkingsRoot(QWidget):
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+
+class CompressibleScrollArea(QScrollArea):
+    def minimumSizeHint(self):
+        return QSize(0, 0)
 
 
 class MarkingModelComboBox(FocusedScrollSettingsComboBox):
@@ -90,11 +99,31 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
         popup = self._popup
         if popup is None:
             return
-        popup_width = max(self.width(), 380)
-        popup_height = min(460, max(180, 56 + max(1, self._visible_entry_count()) * 28))
+        available = self.screen().availableGeometry()
+        popup_width = min(
+            max(self.width(), 380),
+            max(180, available.width() - 16),
+        )
+        popup_height = min(
+            460,
+            max(180, 56 + max(1, self._visible_entry_count()) * 28),
+            max(180, available.height() - 16),
+        )
         popup.setFixedWidth(popup_width)
         popup.resize(popup_width, popup_height)
-        popup.move(self.mapToGlobal(self.rect().bottomLeft()))
+        anchor = self.mapToGlobal(self.rect().bottomLeft())
+        popup_x = max(
+            available.left() + 8,
+            min(anchor.x(), available.right() - popup_width - 8),
+        )
+        popup_y = anchor.y()
+        if popup_y + popup_height > available.bottom() - 8:
+            popup_y = self.mapToGlobal(self.rect().topLeft()).y() - popup_height
+        popup_y = max(
+            available.top() + 8,
+            min(popup_y, available.bottom() - popup_height - 8),
+        )
+        popup.move(popup_x, popup_y)
         popup.show()
         popup.raise_()
         popup.activateWindow()
@@ -115,13 +144,13 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
         popup = QFrame(None, Qt.WindowType.Popup)
         popup.setObjectName('markingModelPopup')
         popup.setStyleSheet(
-            'QFrame#markingModelPopup { background: #121920; border: 1px solid #31404B; border-radius: 8px; }'
-            'QLineEdit { background: #0D1318; color: #E8F0F5; border: 1px solid #354252; border-radius: 5px; padding: 6px 8px; }'
-            'QListWidget { background: transparent; color: #E8F0F5; border: 0; padding: 2px; }'
+            'QFrame#markingModelPopup { background: #25262B; border: 1px solid #4B5563; border-radius: 8px; }'
+            'QLineEdit { background: #1E1E24; color: #F3F4F6; border: 1px solid #4B5563; border-radius: 5px; padding: 6px 8px; }'
+            'QListWidget { background: transparent; color: #F3F4F6; border: 0; padding: 2px; }'
             'QListWidget::item { padding: 6px 8px; border-radius: 4px; }'
-            'QListWidget::item:selected { background: #1D3A39; color: #FFFFFF; }'
-            'QToolButton { color: #AAB8C5; background: #182129; border: 1px solid #303C48; border-radius: 5px; padding: 5px 8px; }'
-            'QToolButton:hover { color: #FFFFFF; border-color: #4A6070; background: #202C36; }'
+            'QListWidget::item:selected { background: #3B82F6; color: #FFFFFF; }'
+            'QToolButton { color: #D1D5DB; background: #303139; border: 1px solid #4B5563; border-radius: 5px; padding: 5px 8px; }'
+            'QToolButton:hover { color: #FFFFFF; border-color: #6B7280; background: #393B44; }'
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -213,26 +242,44 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
         self.activated.emit(self.currentIndex())
 
 
-class MarkingSettingsForm(QVBoxLayout):
+class MarkingSettingsForm(QWidget):
     model_selected = Signal(bool)
     model_activated = Signal()
     models_refreshed = Signal(list)
 
     def __init__(self):
         super().__init__()
-        basic_settings_form = QFormLayout()
-        basic_settings_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapAllRows)
-        basic_settings_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.setObjectName('autoMarkingsSettings')
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        root = QVBoxLayout(self)
+        self.root_layout = root
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+
+        model_title = QLabel('MODEL')
+        model_title.setObjectName('autoMarkingsSectionTitle')
+        model_subtitle = QLabel(
+            'Choose a detector, then decide how each class becomes a marking.'
+        )
+        model_subtitle.setObjectName('autoMarkingsSectionSubtitle')
+        model_subtitle.setWordWrap(True)
+        root.addWidget(model_title)
+        root.addWidget(model_subtitle)
+
         self.model_combo_box = MarkingModelComboBox(key='marking_model_id')
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
         self.model_combo_box.activated.connect(self._on_model_activated)
         self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
         model_selector = QWidget()
+        model_selector.setObjectName('autoMarkingsModelRow')
         model_selector_layout = QHBoxLayout(model_selector)
+        self.model_selector_layout = model_selector_layout
         model_selector_layout.setContentsMargins(0, 0, 0, 0)
-        model_selector_layout.setSpacing(4)
+        model_selector_layout.setSpacing(6)
         model_selector_layout.addWidget(self.model_combo_box, 1)
         self.rescan_models_button = QToolButton()
         self.rescan_models_button.setIcon(
@@ -252,44 +299,88 @@ class MarkingSettingsForm(QVBoxLayout):
         )
         self.scan_model_button.clicked.connect(self.open_selected_model_on_virustotal)
         model_selector_layout.addWidget(self.scan_model_button)
+        root.addWidget(model_selector)
         QTimer.singleShot(
             _startup_delay_ms('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', 6000),
             self.get_local_model_paths,
         )
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
-        basic_settings_form.addRow('Model', model_selector)
         self.model_warning_label = QLabel()
         self.model_warning_label.setWordWrap(True)
         self.model_warning_label.hide()
-        self.model_warning_label.setStyleSheet(
-            'color: #F2B84B; padding: 2px 0 4px 0;'
-        )
-        basic_settings_form.addRow('', self.model_warning_label)
+        self.model_warning_label.setObjectName('autoMarkingsWarning')
+        root.addWidget(self.model_warning_label)
 
-        self.class_table = QTableWidget(0, 3)
-        self.class_table.setHorizontalHeaderLabels(
-            ['Model class', 'Output label', 'Marking']
-        )
-        self.class_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.class_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        basic_settings_form.addRow('Classes', self.class_table)
-        self.reset_class_labels_button = QPushButton(
-            'Reset labels to model defaults'
-        )
+        class_header = QWidget()
+        class_header_layout = QHBoxLayout(class_header)
+        self.class_header_layout = class_header_layout
+        class_header_layout.setContentsMargins(0, 5, 0, 0)
+        class_header_layout.setSpacing(6)
+        self.class_title_label = QLabel('CLASS MAPPING')
+        self.class_title_label.setObjectName('autoMarkingsSectionTitle')
+        class_header_layout.addWidget(self.class_title_label)
+        class_header_layout.addStretch(1)
+        self.reset_class_labels_button = QToolButton()
+        self.reset_class_labels_button.setText('Reset labels')
         self.reset_class_labels_button.setToolTip(
             'Discard custom output labels for the selected model.'
         )
         self.reset_class_labels_button.setEnabled(False)
-        basic_settings_form.addRow('', self.reset_class_labels_button)
+        class_header_layout.addWidget(self.reset_class_labels_button)
+        root.addWidget(class_header)
 
-        self.toggle_advanced_settings_form_button = TallPushButton(
-            'Show Advanced Settings')
+        self.class_table = QTableWidget(0, 3)
+        self.class_table.setObjectName('autoMarkingsClassTable')
+        self.class_table.setHorizontalHeaderLabels(
+            ['Model class', 'Output label', 'Marking']
+        )
+        header = self.class_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
+        self.class_table.verticalHeader().hide()
+        self.class_table.verticalHeader().setDefaultSectionSize(30)
+        self.class_table.setShowGrid(False)
+        self.class_table.setAlternatingRowColors(True)
+        self.class_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.class_table.setMinimumHeight(140)
+        self.class_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        root.addWidget(self.class_table, 1)
 
-        self.advanced_settings_form_container = QWidget()
+        self.toggle_advanced_settings_form_button = QToolButton()
+        self.toggle_advanced_settings_form_button.setObjectName(
+            'autoMarkingsAdvancedToggle'
+        )
+        self.toggle_advanced_settings_form_button.setText('Advanced settings')
+        self.toggle_advanced_settings_form_button.setCheckable(True)
+        self.toggle_advanced_settings_form_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.toggle_advanced_settings_form_button.setArrowType(
+            Qt.ArrowType.RightArrow
+        )
+
+        self.advanced_settings_form_container = QFrame()
+        self.advanced_settings_form_container.setObjectName(
+            'autoMarkingsAdvancedPanel'
+        )
         advanced_settings_form = QFormLayout(
             self.advanced_settings_form_container)
-        advanced_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.advanced_settings_form = advanced_settings_form
+        advanced_settings_form.setContentsMargins(10, 8, 10, 8)
+        advanced_settings_form.setHorizontalSpacing(10)
+        advanced_settings_form.setVerticalSpacing(6)
+        advanced_settings_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        advanced_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         advanced_settings_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         # Sets the minimum confidence threshold for detections.
@@ -329,13 +420,10 @@ class MarkingSettingsForm(QVBoxLayout):
                                       self.merge_overlap_threshold_spin_box)
         self.advanced_settings_form_container.hide()
 
-        self.addLayout(basic_settings_form)
-        self.horizontal_line = HorizontalLine()
-        self.addWidget(self.horizontal_line)
-        self.addWidget(self.toggle_advanced_settings_form_button)
-        self.addWidget(self.advanced_settings_form_container)
+        root.addWidget(self.toggle_advanced_settings_form_button)
+        root.addWidget(self.advanced_settings_form_container)
 
-        self.toggle_advanced_settings_form_button.clicked.connect(
+        self.toggle_advanced_settings_form_button.toggled.connect(
             self.toggle_advanced_settings_form)
 
     @Slot(str)
@@ -427,16 +515,12 @@ class MarkingSettingsForm(QVBoxLayout):
             return
         open_virustotal_for_file(Path(selected_path), parent=self.model_combo_box.window())
 
-    @Slot()
-    def toggle_advanced_settings_form(self):
-        if self.advanced_settings_form_container.isHidden():
-            self.advanced_settings_form_container.show()
-            self.toggle_advanced_settings_form_button.setText(
-                'Hide Advanced Settings')
-        else:
-            self.advanced_settings_form_container.hide()
-            self.toggle_advanced_settings_form_button.setText(
-                'Show Advanced Settings')
+    @Slot(bool)
+    def toggle_advanced_settings_form(self, expanded: bool):
+        self.advanced_settings_form_container.setVisible(expanded)
+        self.toggle_advanced_settings_form_button.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
 
     def get_marking_settings(self) -> dict:
         return {
@@ -449,6 +533,35 @@ class MarkingSettingsForm(QVBoxLayout):
             'merge_overlap_threshold': self.merge_overlap_threshold_spin_box.value(),
             'classes': None
         }
+
+    def set_class_count(self, count: int):
+        suffix = f' ({count})' if count > 0 else ''
+        self.class_title_label.setText(f'CLASS MAPPING{suffix}')
+
+    def apply_ui_zoom(self, scale: float):
+        spacing = max(3, round(8 * scale))
+        self.root_layout.setSpacing(spacing)
+        self.model_selector_layout.setSpacing(max(2, round(6 * scale)))
+        self.class_header_layout.setSpacing(max(2, round(6 * scale)))
+        self.class_header_layout.setContentsMargins(
+            0, max(2, round(5 * scale)), 0, 0
+        )
+        self.advanced_settings_form.setContentsMargins(
+            max(5, round(10 * scale)),
+            max(4, round(8 * scale)),
+            max(5, round(10 * scale)),
+            max(4, round(8 * scale)),
+        )
+        self.advanced_settings_form.setHorizontalSpacing(
+            max(4, round(10 * scale))
+        )
+        self.advanced_settings_form.setVerticalSpacing(
+            max(3, round(6 * scale))
+        )
+        self.class_table.verticalHeader().setDefaultSectionSize(
+            max(20, round(30 * scale))
+        )
+        self.class_table.setMinimumHeight(max(90, round(140 * scale)))
 
 class AutoMarkings(QDockWidget):
     marking_generated = Signal(QModelIndex, list)
@@ -468,6 +581,20 @@ class AutoMarkings(QDockWidget):
         self._run_processed_image_count = 0
         self._run_expected_image_count = 0
         self._run_last_image_name = ''
+        self.min_ui_zoom = 60
+        self.max_ui_zoom = 160
+        self.ui_zoom_step = 10
+        self.ui_zoom = max(
+            self.min_ui_zoom,
+            min(
+                self.max_ui_zoom,
+                settings.value(
+                    'auto_markings_ui_zoom',
+                    defaultValue=DEFAULT_SETTINGS['auto_markings_ui_zoom'],
+                    type=int,
+                ),
+            ),
+        )
         # Whether the last block of text in the console text edit should be
         # replaced with the next block of text that is outputted.
         self.replace_last_console_text_edit_block = False
@@ -476,37 +603,96 @@ class AutoMarkings(QDockWidget):
         self.setWindowTitle('Auto-Markings')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
                              Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setMinimumSize(150, 80)
 
         self.start_cancel_button = TallPushButton('Start Auto-Marking')
+        self.start_cancel_button.setObjectName('autoMarkingsPrimaryButton')
+        self.start_cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.start_cancel_button.setEnabled(False)
         self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName('autoMarkingsProgress')
         self.progress_bar.setFormat('%v / %m images marked (%p%)')
         self.progress_bar.hide()
         self.result_label = QLabel()
+        self.result_label.setObjectName('autoMarkingsStatus')
         self.result_label.setWordWrap(True)
         self.result_label.hide()
+        self.log_button = QToolButton()
+        self.log_button.setObjectName('autoMarkingsLogButton')
+        self.log_button.setText('Log')
+        self.log_button.setCheckable(True)
+        self.log_button.setToolTip('Show or hide auto-marking output')
         self.console_text_edit = QPlainTextEdit()
+        self.console_text_edit.setObjectName('autoMarkingsConsole')
         set_text_edit_height(self.console_text_edit, 4)
         self.console_text_edit.setReadOnly(True)
-        self.console_text_edit.hide()
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.addWidget(self.start_cancel_button)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.result_label)
-        layout.addWidget(self.console_text_edit)
+        self.console_text_edit.setMinimumHeight(72)
+        self.console_text_edit.setMaximumHeight(180)
+        self.console_text_edit.setFixedHeight(96)
+        self.console_panel = QWidget()
+        self.console_panel.setObjectName('autoMarkingsConsolePanel')
+        console_layout = QVBoxLayout(self.console_panel)
+        console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(4)
+        console_layout.addWidget(self.console_text_edit)
+        self.console_panel.hide()
+
         self.marking_settings_form = MarkingSettingsForm()
-        layout.addLayout(self.marking_settings_form)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setSizeAdjustPolicy(
-            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setWidget(container)
-        self.setWidget(scroll_area)
+        self.settings_scroll_area = CompressibleScrollArea()
+        self.settings_scroll_area.setObjectName('autoMarkingsSettingsScroll')
+        self.settings_scroll_area.setWidgetResizable(True)
+        self.settings_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.settings_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.settings_scroll_area.setWidget(self.marking_settings_form)
+        self.settings_scroll_area.setMinimumSize(0, 0)
+        self.settings_scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
+        )
+
+        self.run_panel = QFrame()
+        self.run_panel.setObjectName('autoMarkingsRunPanel')
+        self.run_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        run_layout = QVBoxLayout(self.run_panel)
+        self.run_layout = run_layout
+        run_layout.setContentsMargins(0, 8, 0, 0)
+        run_layout.setSpacing(6)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(6)
+        status_row.addWidget(self.result_label, 1)
+        status_row.addWidget(self.log_button)
+        run_layout.addLayout(status_row)
+        run_layout.addWidget(self.progress_bar)
+        run_layout.addWidget(self.console_panel)
+        run_layout.addWidget(self.start_cancel_button)
+
+        container = CompressibleAutoMarkingsRoot()
+        container.setObjectName('autoMarkingsRoot')
+        container.setMinimumSize(0, 0)
+        container.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Ignored,
+        )
+        layout = QVBoxLayout(container)
+        self.root_layout = layout
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(self.settings_scroll_area, 1)
+        layout.addWidget(self.run_panel)
+        self.setWidget(container)
+        self._install_ui_zoom_filters()
+        self._apply_ui_zoom()
 
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_marking)
+        self.log_button.toggled.connect(self._toggle_console_panel)
         self.marking_settings_form.model_selected.connect(self._on_model_selection_changed)
         self.marking_settings_form.model_activated.connect(
             self._on_model_activated
@@ -523,6 +709,328 @@ class AutoMarkings(QDockWidget):
         QTimer.singleShot(
             _startup_delay_ms('TAGGUI_AUTO_MARKING_RESTORE_DELAY_MS', 6500),
             self._restore_model_selection_state,
+        )
+
+    def minimumSizeHint(self):
+        return QSize(150, 80)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_primary_button_text()
+        width = self.width()
+        self.marking_settings_form.reset_class_labels_button.setText(
+            'Reset labels' if width >= 300 else 'Reset'
+        )
+
+    def _install_ui_zoom_filters(self):
+        root = self.widget()
+        root.installEventFilter(self)
+        for child in root.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.Type.Wheel
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.adjust_ui_zoom(
+                event.angleDelta().y() or event.pixelDelta().y()
+            )
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.adjust_ui_zoom(
+                event.angleDelta().y() or event.pixelDelta().y()
+            )
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def adjust_ui_zoom(self, wheel_delta: int):
+        if wheel_delta == 0:
+            return
+        change = self.ui_zoom_step if wheel_delta > 0 else -self.ui_zoom_step
+        new_zoom = max(
+            self.min_ui_zoom,
+            min(self.max_ui_zoom, self.ui_zoom + change),
+        )
+        if new_zoom == self.ui_zoom:
+            return
+        self.ui_zoom = new_zoom
+        settings.setValue('auto_markings_ui_zoom', new_zoom)
+        self._apply_ui_zoom()
+
+    def _apply_ui_zoom(self):
+        scale = self.ui_zoom / 100.0
+        margin = max(4, round(8 * scale))
+        self.root_layout.setContentsMargins(margin, margin, margin, margin)
+        self.root_layout.setSpacing(max(4, round(8 * scale)))
+        self.run_layout.setContentsMargins(
+            0, max(4, round(8 * scale)), 0, 0
+        )
+        self.run_layout.setSpacing(max(3, round(6 * scale)))
+        self.marking_settings_form.apply_ui_zoom(scale)
+        self.console_text_edit.setFixedHeight(max(64, round(96 * scale)))
+        self._apply_style()
+
+    def _update_primary_button_text(self, *, canceling: bool = False):
+        if canceling:
+            full_text = 'Canceling Auto-Marking...'
+            compact_text = 'Canceling...'
+        elif self.is_marking:
+            full_text = 'Cancel Auto-Marking'
+            compact_text = 'Cancel'
+        else:
+            full_text = 'Start Auto-Marking'
+            compact_text = 'Start'
+        self.start_cancel_button.setText(
+            full_text if self.width() >= 230 else compact_text
+        )
+
+    @Slot(bool)
+    def _toggle_console_panel(self, visible: bool):
+        self.console_panel.setVisible(visible)
+        if visible:
+            self.log_button.setText('Log')
+
+    def _apply_style(self):
+        scale = self.ui_zoom / 100.0
+        base_style = """
+            QWidget#autoMarkingsRoot {
+                background: #2B2B2B;
+                color: #F3F4F6;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 12px;
+            }
+            QScrollArea#autoMarkingsSettingsScroll {
+                background: transparent;
+                border: 0;
+            }
+            QScrollArea#autoMarkingsSettingsScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            QWidget#autoMarkingsSettings {
+                background: transparent;
+            }
+            QLabel#autoMarkingsSectionTitle {
+                color: #DDE3EA;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 1px;
+            }
+            QLabel#autoMarkingsSectionSubtitle {
+                color: #9CA3AF;
+                font-size: 11px;
+            }
+            QLabel#autoMarkingsWarning {
+                color: #F2B84B;
+                background: #332C20;
+                border-left: 2px solid #D99A32;
+                padding: 6px 8px;
+            }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                background: #1E1E24;
+                color: #F3F4F6;
+                border: 1px solid #4B5563;
+                border-radius: 5px;
+                padding: 5px 7px;
+                min-height: 27px;
+                selection-background-color: #3B82F6;
+            }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+            QDoubleSpinBox:focus {
+                border-color: #3B82F6;
+            }
+            QComboBox QAbstractItemView {
+                background: #25262B;
+                color: #F3F4F6;
+                border: 1px solid #4B5563;
+                selection-background-color: #3B82F6;
+            }
+            QToolButton {
+                color: #D1D5DB;
+                background: transparent;
+                border: 1px solid #4B5563;
+                border-radius: 5px;
+                padding: 5px 7px;
+            }
+            QToolButton:hover {
+                color: #FFFFFF;
+                background: #35363E;
+                border-color: #6B7280;
+            }
+            QToolButton:disabled {
+                color: #6B7280;
+                border-color: #3A3D44;
+            }
+            QToolButton#autoMarkingsAdvancedToggle {
+                border: 0;
+                border-top: 1px solid #42454D;
+                border-radius: 0;
+                padding: 8px 2px 3px 2px;
+                text-align: left;
+                font-weight: 600;
+            }
+            QToolButton#autoMarkingsAdvancedToggle:hover {
+                background: transparent;
+                color: #60A5FA;
+            }
+            QFrame#autoMarkingsAdvancedPanel {
+                background: #25262B;
+                border: 0;
+                border-radius: 6px;
+            }
+            QTableWidget#autoMarkingsClassTable {
+                background: #24252A;
+                alternate-background-color: #292A30;
+                color: #E5E7EB;
+                border: 1px solid #42454D;
+                border-radius: 6px;
+                outline: 0;
+                selection-background-color: #334C70;
+            }
+            QTableWidget#autoMarkingsClassTable::item {
+                border: 0;
+                padding: 4px 6px;
+            }
+            QHeaderView::section {
+                background: #303139;
+                color: #BFC7D2;
+                border: 0;
+                border-bottom: 1px solid #4B4E57;
+                padding: 6px;
+                font-size: 10px;
+                font-weight: 600;
+            }
+            QTableCornerButton::section {
+                background: #303139;
+                border: 0;
+            }
+            QFrame#autoMarkingsRunPanel {
+                background: transparent;
+                border: 0;
+                border-top: 1px solid #42454D;
+            }
+            QLabel#autoMarkingsStatus {
+                color: #CBD5E1;
+                font-size: 11px;
+                padding: 2px 0;
+            }
+            QToolButton#autoMarkingsLogButton {
+                border: 0;
+                padding: 3px 5px;
+                color: #9CA3AF;
+            }
+            QToolButton#autoMarkingsLogButton:checked {
+                color: #60A5FA;
+            }
+            QPlainTextEdit#autoMarkingsConsole {
+                background: #1E1E24;
+                color: #CBD5E1;
+                border: 1px solid #42454D;
+                border-radius: 5px;
+                padding: 5px;
+                font-family: Consolas, monospace;
+                font-size: 10px;
+            }
+            QProgressBar#autoMarkingsProgress {
+                color: #E5E7EB;
+                background: #1E1E24;
+                border: 1px solid #4B5563;
+                border-radius: 4px;
+                text-align: center;
+                min-height: 15px;
+                max-height: 17px;
+                font-size: 10px;
+            }
+            QProgressBar#autoMarkingsProgress::chunk {
+                background: #3B82F6;
+                border-radius: 3px;
+            }
+            QPushButton#autoMarkingsPrimaryButton {
+                color: #FFFFFF;
+                background: #3B82F6;
+                border: 0;
+                border-radius: 6px;
+                padding: 7px 10px;
+                min-height: 28px;
+                max-height: 30px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QPushButton#autoMarkingsPrimaryButton:hover {
+                background: #2563EB;
+            }
+            QPushButton#autoMarkingsPrimaryButton:disabled {
+                color: #8C929D;
+                background: #3A3C43;
+            }
+        """
+        scaled_style = f"""
+            QWidget#autoMarkingsRoot {{
+                font-size: {max(8, round(12 * scale))}px;
+            }}
+            QLabel#autoMarkingsSectionTitle {{
+                font-size: {max(8, round(11 * scale))}px;
+                letter-spacing: {max(0, round(1 * scale))}px;
+            }}
+            QLabel#autoMarkingsSectionSubtitle {{
+                font-size: {max(8, round(11 * scale))}px;
+            }}
+            QLabel#autoMarkingsWarning {{
+                padding: {max(3, round(6 * scale))}px
+                         {max(4, round(8 * scale))}px;
+            }}
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+                font-size: {max(8, round(11 * scale))}px;
+                padding: {max(2, round(5 * scale))}px
+                         {max(4, round(7 * scale))}px;
+                min-height: {max(18, round(27 * scale))}px;
+            }}
+            QToolButton {{
+                font-size: {max(8, round(11 * scale))}px;
+                padding: {max(2, round(5 * scale))}px
+                         {max(3, round(7 * scale))}px;
+            }}
+            QToolButton#autoMarkingsAdvancedToggle {{
+                padding: {max(4, round(8 * scale))}px
+                         {max(1, round(2 * scale))}px
+                         {max(2, round(3 * scale))}px
+                         {max(1, round(2 * scale))}px;
+            }}
+            QTableWidget#autoMarkingsClassTable::item {{
+                padding: {max(2, round(4 * scale))}px
+                         {max(3, round(6 * scale))}px;
+            }}
+            QHeaderView::section {{
+                padding: {max(3, round(6 * scale))}px;
+                font-size: {max(8, round(10 * scale))}px;
+            }}
+            QLabel#autoMarkingsStatus {{
+                font-size: {max(8, round(11 * scale))}px;
+            }}
+            QPlainTextEdit#autoMarkingsConsole {{
+                padding: {max(3, round(5 * scale))}px;
+                font-size: {max(8, round(10 * scale))}px;
+            }}
+            QProgressBar#autoMarkingsProgress {{
+                min-height: {max(10, round(15 * scale))}px;
+                max-height: {max(12, round(17 * scale))}px;
+                font-size: {max(8, round(10 * scale))}px;
+            }}
+            QPushButton#autoMarkingsPrimaryButton {{
+                padding: {max(4, round(7 * scale))}px
+                         {max(5, round(10 * scale))}px;
+                min-height: {max(20, round(28 * scale))}px;
+                max-height: {max(22, round(30 * scale))}px;
+                font-size: {max(8, round(11 * scale))}px;
+            }}
+        """
+        self.widget().setStyleSheet(
+            base_style + scaled_style
         )
 
     @Slot(bool)
@@ -570,7 +1078,7 @@ class AutoMarkings(QDockWidget):
             # Cancel marking.
             self.marking_thread.is_canceled = True
             self.start_cancel_button.setEnabled(False)
-            self.start_cancel_button.setText('Canceling Auto-Marking...')
+            self._update_primary_button_text(canceling=True)
         else:
             # Start marking.
             self.generate_markings()
@@ -583,9 +1091,7 @@ class AutoMarkings(QDockWidget):
 
     def set_is_marking(self, is_marking: bool):
         self.is_marking = is_marking
-        button_text = ('Cancel Auto-Marking' if is_marking
-                       else 'Start Auto-Marking')
-        self.start_cancel_button.setText(button_text)
+        self._update_primary_button_text()
 
     def _current_model_key(self) -> str:
         return str(self.marking_settings_form.model_combo_box.currentText() or '').strip()
@@ -725,8 +1231,8 @@ class AutoMarkings(QDockWidget):
         text = text.strip()
         if not text:
             return
-        if self.console_text_edit.isHidden():
-            self.console_text_edit.show()
+        if not self.log_button.isChecked():
+            self.log_button.setText('Log *')
         if self.replace_last_console_text_edit_block:
             self.replace_last_console_text_edit_block = False
             # Select and remove the last block of text.
@@ -815,6 +1321,7 @@ class AutoMarkings(QDockWidget):
                     and Path(marking_settings['model_path']).suffix.lower() == '.pt'):
                 self.marking_thread = None
                 self.marking_settings_form.class_table.setRowCount(0)
+                self.marking_settings_form.set_class_count(0)
                 self.result_label.setText(
                     'PT model selected. TagGUI will offer a safer ONNX import '
                     'or explicit unsafe fallback when you run it.'
@@ -848,12 +1355,16 @@ class AutoMarkings(QDockWidget):
         class_table = self.marking_settings_form.class_table
         if self.marking_thread.model is None:
             class_table.setRowCount(0)
+            self.marking_settings_form.set_class_count(0)
             self.start_cancel_button.setEnabled(False)
             return
         previous = class_table.blockSignals(True)
         try:
             class_table.setRowCount(
                 len(self.marking_thread.model.names))
+            self.marking_settings_form.set_class_count(
+                len(self.marking_thread.model.names)
+            )
             for row, (class_id, class_name) in enumerate(
                     self.marking_thread.model.names.items()):
                 class_item = QTableWidgetItem(str(class_name))
@@ -877,6 +1388,7 @@ class AutoMarkings(QDockWidget):
                 combo.addItem(create_add_box_icon(Qt.gray), 'hint')
                 combo.addItem(create_add_box_icon(Qt.red), 'exclude')
                 combo.addItem(create_add_box_icon(Qt.green), 'include')
+                combo.installEventFilter(self)
                 combo.currentTextChanged.connect(
                     lambda _text, self=self: self._persist_class_actions_for_current_model()
                 )
@@ -886,12 +1398,6 @@ class AutoMarkings(QDockWidget):
         self._restore_class_labels_for_current_model()
         self._restore_class_actions_for_current_model()
         self.start_cancel_button.setEnabled(True)
-        # NOTE: As this thread has no place to display the output, we keep
-        # `stdout` and `stderr`.
-        # Redirect `stdout` and `stderr` so that the outputs are displayed in
-        # the console text edit.
-        ###sys.stdout = self.marking_thread
-        ###sys.stderr = self.marking_thread
 
     @Slot(QModelIndex, list)
     def _apply_generated_markings(
