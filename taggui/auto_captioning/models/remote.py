@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import math
 import re
 from itertools import cycle
@@ -207,6 +208,51 @@ class RemoteGen(AutoCaptioningModel):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
             return {'frames_b64': [image_b64], 'is_video': False, 'fps': None}
 
+    @staticmethod
+    def _extract_message_content(message: dict) -> str:
+        """Read text or structured payloads from OpenAI-compatible responses."""
+        if not isinstance(message, dict):
+            return ''
+
+        content = message.get('content')
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, str):
+                    stripped = item.strip()
+                    if stripped:
+                        text_parts.append(stripped)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get('type')
+                if item_type == 'text' and isinstance(item.get('text'), str):
+                    stripped = item['text'].strip()
+                    if stripped:
+                        text_parts.append(stripped)
+            if text_parts:
+                return '\n'.join(text_parts)
+
+        parsed = message.get('parsed')
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, ensure_ascii=False)
+
+        tool_calls = message.get('tool_calls')
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get('function')
+                if not isinstance(function, dict):
+                    continue
+                arguments = function.get('arguments')
+                if isinstance(arguments, str) and arguments.strip():
+                    return arguments.strip()
+
+        return ''
+
     def generate_caption(self, model_inputs: dict, image_prompt: str) -> tuple[str, str]:
         """Send frames to the remote API and return the caption."""
         if not self.api_urls:
@@ -293,7 +339,7 @@ class RemoteGen(AutoCaptioningModel):
             choice = result['choices'][0]
             finish_reason = choice.get('finish_reason', '')
             message = choice.get('message', {})
-            content_out = message.get('content')
+            content_out = self._extract_message_content(message)
 
             if not content_out:
                 if finish_reason and 'safety' in finish_reason.lower():
@@ -302,6 +348,12 @@ class RemoteGen(AutoCaptioningModel):
                 else:
                     error_msg = (f'Skipped: API returned empty content '
                                  f'(finish_reason: {finish_reason!r})')
+                    if use_structured_output:
+                        error_msg += (
+                            ' (The endpoint may not fully support JSON-schema '
+                            'structured output; disable the structured-output '
+                            'option and retry.)'
+                        )
                 print(error_msg)
                 return '', error_msg
 

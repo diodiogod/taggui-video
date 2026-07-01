@@ -131,6 +131,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.add_text_action = actions_menu.addAction("Add text region")
         self.save_action = actions_menu.addAction("Save now")
         self.reload_action = actions_menu.addAction("Reload from disk")
+        self.delete_json_action = actions_menu.addAction("Delete JSON sidecar")
         actions_menu.addSeparator()
         self.import_action = actions_menu.addAction("Import JSON file")
         self.format_action = actions_menu.addAction("Format JSON")
@@ -451,6 +452,7 @@ class IdeogramCaptionEditor(QDockWidget):
         )
         self.save_action.triggered.connect(lambda: self.save_caption())
         self.reload_action.triggered.connect(self.reload_caption)
+        self.delete_json_action.triggered.connect(self.delete_caption_sidecar)
         self.import_action.triggered.connect(self.import_caption_file)
         self.format_action.triggered.connect(self.format_caption)
         self.copy_action.triggered.connect(self.copy_caption)
@@ -763,6 +765,48 @@ class IdeogramCaptionEditor(QDockWidget):
         self._update_summary(caption=caption, draft=True)
         self.json_toggle_button.setChecked(True)
         self.save_caption()
+
+    def delete_caption_sidecar(self):
+        if self.current_path is None:
+            return
+        target_path = self.current_caption_path or ideogram_caption_path(
+            self.current_path
+        )
+        if not target_path.exists():
+            self._set_status("No Ideogram JSON sidecar exists for this image.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Ideogram JSON",
+            (
+                "Delete the Ideogram JSON sidecar for this image?\n\n"
+                "This removes only the structured caption and Ideogram overlay "
+                "boxes. Normal TagGUI markings will be kept."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            target_path.unlink()
+        except OSError as exc:
+            self._set_status(f"Delete failed: {exc}", error=True)
+            return
+
+        self.autosave_timer.stop()
+        self._drafts.pop(self.current_path, None)
+        self.current_caption_path = ideogram_caption_path(self.current_path)
+        self._selected_element_index = None
+        self.element_container.hide()
+        self._replace_text("")
+        self._populate_detail_fields(self._empty_caption())
+        self.path_label.setText(self.current_path.name)
+        self.path_label.setToolTip(str(self.current_caption_path))
+        self._update_summary()
+        self._set_status("Deleted Ideogram JSON sidecar.", success=True)
+        self.image_viewer.refresh_ideogram_caption_overlays()
+        self.caption_saved.emit(self.current_caption_path)
 
     def focus_element_from_caption_panel(self, index: int):
         self.select_element(index)
@@ -1730,6 +1774,7 @@ class IdeogramCaptionEditor(QDockWidget):
             self.add_text_action,
             self.save_action,
             self.reload_action,
+            self.delete_json_action,
             self.import_action,
             self.format_action,
             self.copy_action,
