@@ -135,15 +135,25 @@ These filtering details should later move into a dedicated filtering guide.
 
 TagGUI also supports automatic marking detection with YOLO models.
 
+Auto-Marking follows the active browser. Browser 1 and Browser 2 results are
+written to their respective source models, metadata sidecars, search indexes,
+and undo histories.
+
 To use it:
 
 - configure the auto-marking models directory in `Settings`
 - select a YOLO model in the auto-marking UI
+- double-click an `Output label` cell to customize the label saved for that
+  model class
 - choose what each detected class should become:
   - ignore
   - hint
   - exclude
   - include
+
+Custom output labels are saved per YOLO model. Use `Reset labels to model
+defaults` below the class table to restore every output label for the current
+model without changing its ignore, hint, exclude, or include assignments.
 
 The UI and code indicate support for:
 
@@ -151,6 +161,7 @@ The UI and code indicate support for:
 - IoU tuning
 - maximum detections per image
 - per-class mapping into TagGUI marking types
+- persistent per-model output-label overrides
 
 This is useful when you already have YOLO or ADetailer-style detection models and want to accelerate masking or annotation work.
 
@@ -161,6 +172,9 @@ regions are skipped while distinct overlaps remain valid. See the
 [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md).
 
 ## Display Toggles
+
+Hold `Space` while dragging in the main viewer to pan regardless of whether the
+pointer is over empty image space, a marking, or an Ideogram region.
 
 The marking system includes display toggles for:
 

@@ -1582,6 +1582,23 @@ class SettingsDialog(QDialog):
         colors_layout.addWidget(self.ideogram_background_color_button, 1, 3)
         layout.addWidget(colors_group)
 
+        interaction_group = QGroupBox('Region Interaction')
+        interaction_layout = QVBoxLayout(interaction_group)
+        sync_linked_markings = SettingsBigCheckBox(
+            key='ideogram_sync_linked_markings',
+            default=DEFAULT_SETTINGS['ideogram_sync_linked_markings'],
+            text='Move and delete matching TagGUI markings with Ideogram regions',
+        )
+        sync_note = QLabel(
+            'When an Ideogram region exactly matches a marking, moving or '
+            'resizing or deleting the region updates that marking too. Distinct overlapping '
+            'regions are not linked.'
+        )
+        sync_note.setWordWrap(True)
+        interaction_layout.addWidget(sync_linked_markings)
+        interaction_layout.addWidget(sync_note)
+        layout.addWidget(interaction_group)
+
         reset_button = QPushButton('Reset Ideogram Label Defaults')
         reset_button.clicked.connect(self._reset_ideogram_overlay_settings)
         layout.addWidget(reset_button, alignment=Qt.AlignmentFlag.AlignLeft)

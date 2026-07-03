@@ -16,6 +16,7 @@ IDEOGRAM_CAPTION_SUFFIX = ".ideogram.json"
 IDEOGRAM_BBOX_SCALE = 1000
 IDEOGRAM_DUPLICATE_BBOX_TOLERANCE = 2
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-F]{6}$", re.IGNORECASE)
+_PROMPT_PLACEHOLDER_PATTERN = re.compile(r"\{([a-z_]+)\}")
 
 
 def ideogram_caption_response_format() -> dict[str, Any]:
@@ -388,37 +389,110 @@ def build_ideogram_caption_prompt(
         for index, element in enumerate(seed_elements)
     ]
     extra = user_prompt.strip()
-    prompt = (
-        "Analyze the supplied image and return only one compact JSON object for "
-        "Ideogram 4 training. Use bbox coordinates on a 0-1000 grid ordered "
-        "[y1,x1,y2,x2]. Keep keys in schema order. The top-level keys may be "
-        "aspect_ratio, high_level_description, style_description, and "
-        "compositional_deconstruction, in that order. high_level_description "
-        "should be a one- or two-sentence summary. "
-        "compositional_deconstruction must contain "
-        "background and elements. background must be one concise string, not "
-        "an array or object; put boxed background regions in elements. Every "
-        "element must be type obj or text, may contain bbox, must contain "
-        "desc, and text elements must contain exact visible text in text. An "
-        "element color_palette may contain at most five uppercase #RRGGBB "
-        "values. Include all prominent readable text. "
-        "style_description must be omitted or contain exactly one of photo or "
-        "art_style plus string fields aesthetics, lighting, and medium; its "
-        "optional color_palette may contain at most sixteen uppercase #RRGGBB "
-        "values. Describe visible content, not annotation workflow metadata. "
-        "Do not use markdown or commentary."
-    )
-    if aspect_ratio:
-        prompt += f" Use aspect_ratio {aspect_ratio}."
-    if locked:
-        prompt += (
-            " Preserve these locked regions in this exact order and preserve "
-            "their bbox coordinates exactly; expand their labels into visual "
-            f"descriptions when possible: {json.dumps(locked, ensure_ascii=False)}."
+    sections = [
+        (
+            "Task:\n"
+            "Analyze the supplied image and return only one compact Ideogram 4 "
+            "training JSON object."
+        ),
+        (
+            "Schema rules:\n"
+            "- Use bbox coordinates on a 0-1000 grid ordered [y1,x1,y2,x2].\n"
+            "- Keep keys in schema order.\n"
+            "- Allowed top-level keys are aspect_ratio, "
+            "high_level_description, style_description, and "
+            "compositional_deconstruction.\n"
+            "- high_level_description should be a one- or two-sentence summary.\n"
+            "- compositional_deconstruction must contain background and "
+            "elements.\n"
+            "- background must be one concise string, not an array or object.\n"
+            "- Boxed or localized regions belong in elements, not background.\n"
+            "- Every element must be type obj or text and must contain desc.\n"
+            "- Text elements must contain exact visible text in text.\n"
+            "- Element color_palette may contain at most five uppercase "
+            "#RRGGBB values.\n"
+            "- style_description may be omitted, but if present it must contain "
+            "exactly one of photo or art_style plus aesthetics, lighting, and "
+            "medium.\n"
+            "- style_description.color_palette may contain at most sixteen "
+            "uppercase #RRGGBB values."
+        ),
+        (
+            "Captioning rules:\n"
+            "- Describe only visible content.\n"
+            "- Include all prominent readable text.\n"
+            "- Use concrete visual descriptions instead of annotation metadata.\n"
+            "- Do not use markdown or commentary."
+        ),
+    ]
+    if extra and _PROMPT_PLACEHOLDER_PATTERN.search(extra):
+        sections.append(_render_user_ideogram_prompt(extra, aspect_ratio, locked))
+    else:
+        context = _render_user_ideogram_prompt(
+            "{aspect_ratio_section}{locked_regions_section}",
+            aspect_ratio,
+            locked,
         )
-    if extra:
-        prompt += f" Additional user guidance: {extra}"
-    return prompt, seed_elements
+        if context:
+            sections.append(context)
+        if extra:
+            sections.append(_render_user_ideogram_prompt(extra, None, []))
+    return "\n\n".join(sections), seed_elements
+
+
+def _render_user_ideogram_prompt(
+    template: str,
+    aspect_ratio: str | None,
+    locked: list[dict[str, Any]],
+) -> str:
+    replacements = {
+        "aspect_ratio_section": (
+            f"\n\nImage context:\n- Use aspect_ratio {aspect_ratio}."
+            if aspect_ratio
+            else ""
+        ),
+        "locked_regions_section": (
+            "\n\nLocked regions:\n"
+            "- Preserve these locked regions in this exact order.\n"
+            "- Preserve their bbox coordinates exactly.\n"
+            "- Treat each label as the semantic identity of its region.\n"
+            "- Expand each label into a richer visual description, but keep "
+            "the same underlying subject or part named by the label.\n"
+            "- Do not rename a locked region to a different body part, object, "
+            "or text string unless the label is clearly impossible for the "
+            "visible content.\n"
+            "- When a label is broad or shorthand, refine it using the image; "
+            "when a label is specific, preserve that specificity.\n"
+            f"- Regions: {json.dumps(locked, ensure_ascii=False)}"
+            if locked
+            else ""
+        ),
+    }
+
+    if _PROMPT_PLACEHOLDER_PATTERN.search(template):
+        rendered = _PROMPT_PLACEHOLDER_PATTERN.sub(
+            lambda match: replacements.get(match.group(1), ""),
+            template,
+        )
+        return _compact_prompt_whitespace(rendered)
+    return f"User guidance:\n- {template}"
+
+
+def _compact_prompt_whitespace(text: str) -> str:
+    lines = [line.rstrip() for line in str(text or "").splitlines()]
+    compacted: list[str] = []
+    previous_blank = False
+    for line in lines:
+        is_blank = not line.strip()
+        if is_blank:
+            if previous_blank:
+                continue
+            compacted.append("")
+            previous_blank = True
+            continue
+        compacted.append(line)
+        previous_blank = False
+    return "\n".join(compacted).strip()
 
 
 def _normalize_ideogram_caption_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -439,14 +513,19 @@ def _normalize_style_description_payload(payload: dict[str, Any]) -> None:
     if has_photo == has_art_style:
         if has_photo:
             style.pop("art_style", None)
-            return
-        medium = str(style.get("medium", "") or "")
-        aesthetics = str(style.get("aesthetics", "") or "")
-        style_text = f"{medium} {aesthetics}".casefold()
+    medium = str(style.get("medium", "") or "")
+    aesthetics = str(style.get("aesthetics", "") or "")
+    style_text = f"{medium} {aesthetics}".casefold()
+    if not has_photo and not has_art_style:
         if "photo" in style_text or "camera" in style_text:
             style["photo"] = medium or aesthetics or "photograph"
         else:
             style["art_style"] = aesthetics or medium or "naturalistic"
+        return
+    if has_photo and not isinstance(style.get("photo"), str):
+        style["photo"] = medium or aesthetics or "photograph"
+    if has_art_style and not isinstance(style.get("art_style"), str):
+        style["art_style"] = aesthetics or medium or "naturalistic"
 
 
 def _normalize_deconstruction_payload(payload: dict[str, Any]) -> None:
@@ -687,6 +766,50 @@ def save_ideogram_caption(
             temporary_path.unlink()
     caption.source_path = destination
     return destination
+
+
+def merge_image_markings_into_ideogram(
+    image: Any,
+) -> tuple[IdeogramCaption, int]:
+    """Add exact-new non-crop image markings to an Ideogram sidecar."""
+    dimensions = image.valid_dimensions()
+    if dimensions is None:
+        raise IdeogramCaptionError("Image dimensions are required to convert markings.")
+    width, height = dimensions
+    try:
+        caption = discover_ideogram_caption(Path(image.path))
+    except IdeogramCaptionError:
+        raise
+    if caption is None:
+        divisor = _gcd(width, height)
+        caption = IdeogramCaption(
+            aspect_ratio=f"{width // divisor}:{height // divisor}",
+            high_level_description="",
+            compositional_background="",
+            elements=[],
+        )
+
+    candidates: list[IdeogramElement] = []
+    for marking in getattr(image, "markings", []):
+        marking_type = getattr(getattr(marking, "type", None), "value", "")
+        if marking_type in {"crop", "no marking"}:
+            continue
+        rect = marking.rect.normalized()
+        candidates.append(
+            IdeogramElement(
+                type="obj",
+                desc=str(getattr(marking, "label", "") or "region").strip(),
+                bbox=pixel_rect_to_bbox(
+                    rect.x(), rect.y(), rect.width(), rect.height(), width, height
+                ),
+            )
+        )
+    caption.elements, added_count = append_unique_elements(
+        caption.elements,
+        candidates,
+    )
+    save_ideogram_caption(Path(image.path), caption, pretty=True)
+    return caption, added_count
 
 
 def ideogram_caption_chips(

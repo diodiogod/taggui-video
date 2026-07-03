@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QFileDialog, QMainWindow,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QMainWindow,
                                QMessageBox, QStackedWidget, QToolBar, QSlider, QFrame,
                                QVBoxLayout, QWidget, QSizePolicy, QHBoxLayout,
                                QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QMenu,
@@ -67,6 +67,7 @@ from widgets.auto_markings import AutoMarkings
 from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.ideogram_caption_editor import IdeogramCaptionEditor
+from widgets.pipeline_editor import PipelineEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
 from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
@@ -585,6 +586,7 @@ class MainWindow(QMainWindow):
         self._workspace_applying = False
         self._workspace_active_id = None
         self._pending_new_media_refresh_state = None
+        self._pending_auto_new_media_refresh_load_id = -1
         self._async_recenter_request_id = 0
         self._default_window_state = None
         self._background_workers_shutdown = False
@@ -778,13 +780,23 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.RightDockWidgetArea,
             self.ideogram_caption_editor,
         )
+        self.pipeline_editor = PipelineEditor(self)
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.pipeline_editor,
+        )
         self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
         self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
         self.tabifyDockWidget(
             self.auto_markings,
             self.ideogram_caption_editor,
         )
+        self.tabifyDockWidget(
+            self.ideogram_caption_editor,
+            self.pipeline_editor,
+        )
         self.ideogram_caption_editor.hide()
+        self.pipeline_editor.hide()
         self.all_tags_editor.raise_()
         self._install_external_drop_targets()
         # Set default widths for the dock widgets.
@@ -2481,6 +2493,7 @@ class MainWindow(QMainWindow):
             'auto_captioner',
             'auto_markings',
             'ideogram_caption_editor',
+            'pipeline_editor',
         ):
             dock = getattr(self, dock_name, None)
             if dock is None:
@@ -2784,7 +2797,7 @@ class MainWindow(QMainWindow):
             return False
         if isinstance(
             focus_widget,
-            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox),
+            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox),
         ):
             return True
 
@@ -7343,6 +7356,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
         self._save_folder_view_preferences()
+
+        if self._current_directory_load_options is not None:
+            self._schedule_auto_refresh_new_media_after_limited_load(
+                load_session_id=load_session_id,
+            )
             
         # Try to restore selection by path (more robust)
         self._restore_global_rank = -1
@@ -7870,6 +7888,50 @@ class MainWindow(QMainWindow):
         """Emit refresh diagnostics without creating UI chrome."""
         print(f"[REFRESH_NEW_UI] {message}")
 
+    def _schedule_auto_refresh_new_media_after_limited_load(
+        self,
+        *,
+        load_session_id: int,
+    ):
+        """Kick off the cheaper additions-only refresh shortly after limited loads."""
+        if self._current_directory_load_options is None:
+            return
+        if os.getenv('TAGGUI_DISABLE_LIMITED_AUTO_NEW_MEDIA_REFRESH', '0') == '1':
+            return
+
+        self._pending_auto_new_media_refresh_load_id = int(load_session_id)
+        delay_ms = self._startup_delay_ms(
+            'TAGGUI_LIMITED_AUTO_NEW_MEDIA_REFRESH_DELAY_MS',
+            250,
+        )
+        QTimer.singleShot(
+            delay_ms,
+            lambda expected_load_id=int(load_session_id): self._run_auto_refresh_new_media_after_limited_load(
+                expected_load_id
+            ),
+        )
+
+    def _run_auto_refresh_new_media_after_limited_load(self, expected_load_id: int):
+        """Run the additions-only refresh if the same limited load session is still current."""
+        if int(expected_load_id) != int(self._load_session_id):
+            return
+        if int(self._pending_auto_new_media_refresh_load_id) != int(expected_load_id):
+            return
+        if self._current_directory_load_options is None:
+            return
+        if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
+            return
+        if not getattr(self.image_list_model, '_directory_path', None):
+            return
+        if getattr(self.image_list_model, '_new_media_refresh_running', False):
+            return
+
+        self._pending_auto_new_media_refresh_load_id = -1
+        self._log_new_media_refresh_message(
+            "Running limited-mode additions refresh after folder load."
+        )
+        self.refresh_new_media_only('primary')
+
     # ─────────────────────────────────────────────────────────────────
     # Secondary Browser
     # ─────────────────────────────────────────────────────────────────
@@ -7931,6 +7993,15 @@ class MainWindow(QMainWindow):
         )
         self._secondary_browser.image_list_model.new_media_refresh_finished.connect(
             self._on_new_media_refresh_finished
+        )
+        self._secondary_browser.image_list_model.update_undo_and_redo_actions_requested.connect(
+            self.menu_manager.update_undo_and_redo_actions
+        )
+        self._secondary_browser.image_list_model.ideogram_sidecars_restored.connect(
+            self.signal_manager._refresh_current_ideogram_after_history_restore
+        )
+        self._secondary_browser.image_list_model.image_history_restored.connect(
+            self.signal_manager._refresh_current_image_after_history_restore
         )
         self._secondary_browser.dock.deletion_marking_changed.connect(
             self.signal_manager._update_delete_button_visibility
@@ -9999,6 +10070,8 @@ class MainWindow(QMainWindow):
             getattr(self, 'all_tags_editor', None),
             getattr(self, 'auto_captioner', None),
             getattr(self, 'auto_markings', None),
+            getattr(self, 'ideogram_caption_editor', None),
+            getattr(self, 'pipeline_editor', None),
         ):
             if dock is None:
                 continue
@@ -10023,6 +10096,9 @@ class MainWindow(QMainWindow):
             self.menu_manager.toggle_auto_markings_action.setChecked(self.auto_markings.isVisible())
             self.menu_manager.toggle_ideogram_caption_editor_action.setChecked(
                 self.ideogram_caption_editor.isVisible()
+            )
+            self.menu_manager.toggle_pipeline_editor_action.setChecked(
+                self.pipeline_editor.isVisible()
             )
             self.menu_manager.toggle_main_viewer_action.setChecked(bool(self._main_viewer_visible))
             workspace_group = getattr(self.menu_manager, 'workspace_action_group', None)
@@ -10167,6 +10243,7 @@ class MainWindow(QMainWindow):
             {"id": "media_viewer", "label": "Media Viewer"},
             {"id": "tagging", "label": "Tagging"},
             {"id": "marking", "label": "Image Marking"},
+            {"id": "ideogram_tagging", "label": "Ideogram Tagging"},
             {"id": "video_prep", "label": "Video Prep"},
             {"id": "auto_captioning", "label": "Auto Captioning"},
             {"id": "full_masonry", "label": "Full Masonry"},
@@ -10257,6 +10334,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": self.auto_captioner,
                 "auto_markings": self.auto_markings,
                 "ideogram_caption_editor": self.ideogram_caption_editor,
+                "pipeline_editor": self.pipeline_editor,
             }
             right_docks = [
                 right_dock_map["image_tags_editor"],
@@ -10264,6 +10342,7 @@ class MainWindow(QMainWindow):
                 right_dock_map["auto_captioner"],
                 right_dock_map["auto_markings"],
                 right_dock_map["ideogram_caption_editor"],
+                right_dock_map["pipeline_editor"],
             ]
 
             visibility = {
@@ -10275,6 +10354,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "tagging": {
                 "toolbar": True,
@@ -10284,6 +10364,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "marking": {
                 "toolbar": True,
@@ -10293,6 +10374,17 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": True,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": True,
+            },
+            "ideogram_tagging": {
+                "toolbar": True,
+                "image_list": True,
+                "image_tags_editor": True,
+                "all_tags_editor": True,
+                "auto_captioner": False,
+                "auto_markings": False,
+                "ideogram_caption_editor": True,
+                "pipeline_editor": False,
             },
             "video_prep": {
                 "toolbar": True,
@@ -10302,6 +10394,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": True,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "auto_captioning": {
                 "toolbar": True,
@@ -10311,6 +10404,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": True,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             "full_masonry": {
                 "toolbar": False,
@@ -10320,6 +10414,7 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": False,
             },
             }[workspace_id]
 
@@ -10340,6 +10435,7 @@ class MainWindow(QMainWindow):
             self.ideogram_caption_editor.setVisible(
                 visibility["ideogram_caption_editor"]
             )
+            self.pipeline_editor.setVisible(visibility["pipeline_editor"])
 
             visible_right_docks = [
                 dock
@@ -10367,6 +10463,22 @@ class MainWindow(QMainWindow):
                         self.image_tags_editor,
                         self.auto_captioner,
                         Qt.Orientation.Vertical,
+                    )
+                except Exception:
+                    pass
+            elif workspace_id == "ideogram_tagging":
+                try:
+                    self.splitDockWidget(
+                        self.image_tags_editor,
+                        self.ideogram_caption_editor,
+                        Qt.Orientation.Vertical,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.tabifyDockWidget(
+                        self.ideogram_caption_editor,
+                        self.all_tags_editor,
                     )
                 except Exception:
                     pass
@@ -10414,6 +10526,18 @@ class MainWindow(QMainWindow):
                     [self.image_list, self.auto_markings],
                     [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
                     Qt.Orientation.Horizontal,
+                )
+            elif workspace_id == "ideogram_tagging":
+                self.ideogram_caption_editor.raise_()
+                self.resizeDocks(
+                    [self.image_list, self.image_tags_editor],
+                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
+                    Qt.Orientation.Horizontal,
+                )
+                self.resizeDocks(
+                    [self.image_tags_editor, self.ideogram_caption_editor],
+                    [max(190, int(self.height() * 0.40)), max(240, int(self.height() * 0.60))],
+                    Qt.Orientation.Vertical,
                 )
             elif workspace_id == "video_prep":
                 self.auto_captioner.raise_()

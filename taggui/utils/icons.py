@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter, QPen, Qt, QPainterPath, QImage, QFont
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, QRectF
 
 from utils.utils import get_resource_path
 
@@ -39,6 +39,26 @@ def create_ideogram_caption_icon() -> QIcon:
     painter.setPen(QColor('#E8FFFC'))
     painter.setFont(QFont('DejaVu Sans', 10, QFont.Weight.Bold))
     painter.drawText(QRect(2, 2, 28, 28), Qt.AlignmentFlag.AlignCenter, 'I4')
+    painter.end()
+    return QIcon(pixmap)
+
+
+def create_chain_link_icon(color: QColor | str = '#AFC0CA') -> QIcon:
+    """Create a compact chain icon independent of the desktop icon theme."""
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(QColor('transparent'))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(color), 2.6, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    for center_x in (11, 21):
+        painter.save()
+        painter.translate(center_x, 16)
+        painter.rotate(-35)
+        painter.drawRoundedRect(QRectF(-7, -4, 14, 8), 4, 4)
+        painter.restore()
+    painter.drawLine(13, 19, 19, 13)
     painter.end()
     return QIcon(pixmap)
 

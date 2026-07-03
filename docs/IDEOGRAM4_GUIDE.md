@@ -74,6 +74,7 @@ Ideogram regions are editable directly in the main viewer.
 
 - Click and drag inside a region to move it.
 - Drag any edge or corner to resize it.
+- Hold `Space` while dragging to pan the image through any region or marking.
 - Smaller nested regions receive normal click priority.
 - A selected larger region keeps resize priority on its own edges even when a smaller region overlaps it.
 - Hold `Ctrl`, `Shift`, or `Cmd` while selecting to build a multi-selection.
@@ -83,6 +84,12 @@ Ideogram regions are editable directly in the main viewer.
 - Use `Ctrl+D` to duplicate selected regions while the viewer owns keyboard focus.
 - Use `Ctrl+Z` or `Edit -> Undo` to undo region and marking edits recorded in history.
 - Right-click a selected region to convert it between object and text.
+
+By default, moving, resizing, or deleting an Ideogram region also updates a
+uniquely matching TagGUI marking. Matching uses the region's pre-edit normalized
+geometry and its label only to disambiguate exact duplicates; ordinary overlaps
+are never treated as links. Disable this under `Settings -> Ideogram -> Region
+Interaction` when the two region systems should remain independent.
 
 The compact external label shows the element number and `OBJ` or `TEXT`. The text inside the region shows the description without repeating the type.
 

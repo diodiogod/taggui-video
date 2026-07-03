@@ -558,6 +558,7 @@ class MenuManager:
         self.auto_captioner_classic_layout_action = None
         self.toggle_auto_markings_action = None
         self.toggle_ideogram_caption_editor_action = None
+        self.toggle_pipeline_editor_action = None
         self.toggle_perf_hud_action = None
         self.toggle_reaction_controls_action = None
         self.recent_folders_menu = None
@@ -642,6 +643,10 @@ class MenuManager:
         self.toggle_auto_markings_action = QAction('Auto-Markings', parent=self.main_window)
         self.toggle_ideogram_caption_editor_action = QAction(
             'Ideogram 4 Caption',
+            parent=self.main_window,
+        )
+        self.toggle_pipeline_editor_action = QAction(
+            'Pipelines',
             parent=self.main_window,
         )
         self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
@@ -744,12 +749,16 @@ class MenuManager:
         edit_menu = menu_bar.addMenu('Edit')
 
         self.undo_action.setShortcut(QKeySequence('Ctrl+Z'))
-        self.undo_action.triggered.connect(self.main_window.image_list_model.undo)
+        self.undo_action.triggered.connect(
+            lambda: self._active_image_list_model().undo()
+        )
         self.undo_action.setDisabled(True)
         edit_menu.addAction(self.undo_action)
 
         self.redo_action.setShortcut(QKeySequence('Ctrl+Y'))
-        self.redo_action.triggered.connect(self.main_window.image_list_model.redo)
+        self.redo_action.triggered.connect(
+            lambda: self._active_image_list_model().redo()
+        )
         self.redo_action.setDisabled(True)
         edit_menu.addAction(self.redo_action)
 
@@ -811,6 +820,7 @@ class MenuManager:
         self.toggle_auto_captioner_action.setCheckable(True)
         self.toggle_auto_markings_action.setCheckable(True)
         self.toggle_ideogram_caption_editor_action.setCheckable(True)
+        self.toggle_pipeline_editor_action.setCheckable(True)
         self.toggle_perf_hud_action.setCheckable(True)
 
         # Connect toggle actions
@@ -840,6 +850,9 @@ class MenuManager:
             lambda is_checked:
             self.main_window.ideogram_caption_editor.setVisible(is_checked)
         )
+        self.toggle_pipeline_editor_action.triggered.connect(
+            lambda is_checked: self.main_window.pipeline_editor.setVisible(is_checked)
+        )
         self.toggle_perf_hud_action.triggered.connect(
             lambda checked: self.main_window.set_perf_hud_visible(checked)
         )
@@ -863,6 +876,7 @@ class MenuManager:
         auto_captioner_menu.addAction(self.auto_captioner_classic_layout_action)
         view_menu.addAction(self.toggle_auto_markings_action)
         view_menu.addAction(self.toggle_ideogram_caption_editor_action)
+        view_menu.addAction(self.toggle_pipeline_editor_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_perf_hud_action)
 
@@ -1054,21 +1068,34 @@ class MenuManager:
 
     def update_undo_and_redo_actions(self):
         """Update undo/redo menu action text and enabled state."""
-        if self.main_window.image_list_model.undo_stack:
-            undo_action_name = self.main_window.image_list_model.undo_stack[-1].action_name
+        image_list_model = self._active_image_list_model()
+        if image_list_model.undo_stack:
+            undo_action_name = image_list_model.undo_stack[-1].action_name
             self.undo_action.setText(f'Undo "{undo_action_name}"')
             self.undo_action.setDisabled(False)
         else:
             self.undo_action.setText('Undo')
             self.undo_action.setDisabled(True)
 
-        if self.main_window.image_list_model.redo_stack:
-            redo_action_name = self.main_window.image_list_model.redo_stack[-1].action_name
+        if image_list_model.redo_stack:
+            redo_action_name = image_list_model.redo_stack[-1].action_name
             self.redo_action.setText(f'Redo "{redo_action_name}"')
             self.redo_action.setDisabled(False)
         else:
             self.redo_action.setText('Redo')
             self.redo_action.setDisabled(True)
+
+    def _active_image_list_model(self):
+        manager = getattr(self.main_window, '_context_switch_manager', None)
+        secondary = getattr(self.main_window, '_secondary_browser', None)
+        if (
+            manager is not None
+            and getattr(manager, 'active_context', 'primary') == 'secondary'
+            and secondary is not None
+            and not secondary.dock.isHidden()
+        ):
+            return secondary.image_list_model
+        return self.main_window.image_list_model
 
     def _update_recent_folders_menu(self):
         """Update recent folders menu with current list."""

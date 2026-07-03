@@ -24,6 +24,8 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/MASONRY_WINDOWED_STRICT_HANDOFF.md`: Current masonry strict-mode handoff and known hurdles.
 - `docs/MASONRY_CURRENT_PROBLEMS_MATRIX.md`: Repro matrix and current fail/pass status.
 - `docs/VIDEO_SURFACE_CONTROLS_GUIDE.md`: Contextual hover controls for video seek, scrub, and temporary speed actions.
+- `docs/PIPELINES_GUIDE.md`: Pipeline creation, step configuration, linking, execution, and import/export guide.
+- `docs/MARKINGS_GUIDE.md`: Manual and automatic marking workflows, class actions, and model safety notes.
 
 ## Archived Docs (`docs/archive/`)
 
@@ -72,10 +74,12 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_list_masonry_completion_service.py`: Masonry completion handler (height reconciliation, anchoring, async UI apply).
 - `image_list_dock.py`: `ImageList` dock widget (toolbar/filter/status integration).
 - `image_viewer.py`: Main image/video preview viewer.
-- `image_tags_editor.py`: Tag editing panel for current media.
+- `image_tags_editor.py`: Tag editing panel plus quick Ideogram caption list/JSON editing, caption creation, and full-editor handoff.
+- `ideogram_caption_editor.py`: Responsive structured-caption inspector with scene/element editing, palettes, autosave state, raw JSON, and persistent Ctrl+wheel UI zoom.
 - `all_tags_editor.py`: Bulk/all-tags editor.
 - `auto_captioner.py`: Auto-caption UI integration.
-- `auto_markings.py`: Auto-marking UI integration.
+- `auto_markings.py`: Responsive auto-marking panel with persistent Ctrl+wheel UI zoom, model picker, class-to-label/action mapping, advanced inference controls, and run status/log UI.
+- `pipeline_editor.py`: Named pipeline editor with reorderable step cards, linked marking steps, scope selection, profiles, and execution status.
 - `marking_view.py`: Marking canvas integration.
 - `masonry_layout.py`: Masonry layout computation logic.
 - `masonry_worker.py`: Background masonry worker/executor integration.
@@ -102,10 +106,15 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `toolbar_manager.py`: Toolbar wiring.
 - `signal_manager.py`: Signal/slot wiring.
 - `video_editing_controller.py`: Video editing workflow control, screenshot export, and copy-output media registration.
+- `pipeline_runner.py`: Sequential pipeline execution, scope resolution, progress/log signals, and step dispatch.
 
 ### Utilities (`taggui/utils/`)
 
 - `settings.py`: Persistent settings access.
+- `pipeline.py`: Pipeline definitions, serialization, validation, and persistent profile storage.
+- `auto_marking_preferences.py`: Persistent per-model class action and custom output-label preferences.
+- `marking_model_security.py`: Marking-model discovery, PT trust/import prompts, task inference, VirusTotal lookup, and safer ONNX runtime setup.
+- `marking_model_importer.py`: Isolated PT-to-ONNX import helper with source timestamp preservation.
 - `image_index_db.py`: DB index/cache layer for large datasets.
 - `thumbnail_cache.py`: Thumbnail cache management.
 - `image.py`: Image/media utility helpers.
@@ -118,6 +127,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `video/validator.py`: Video validation helpers.
 - `video/common.py`: Shared video utility functions.
 - `sidecar.py`: Canonical TagGUI sidecar path rules, legacy JSON fallback, and sidecar copy/restore helpers.
+- `ideogram_caption.py`: Ideogram 4 schema models, validation, sidecar I/O, locked-region prompt construction, merging, and JSONL export.
 - `icons.py`: Icon loading helpers.
 - `grid.py`: Grid helpers.
 - `crop_applier.py`: Crop application utilities.
@@ -146,4 +156,4 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 
 ### Auto Marking (`taggui/auto_marking/`)
 
-- `marking_thread.py`: Background auto-marking thread.
+- `marking_thread.py`: Background YOLO/ONNX model loading and marking inference, including detection/segmentation box output and post-processing.

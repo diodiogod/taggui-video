@@ -4,11 +4,20 @@ from pathlib import Path
 from time import perf_counter
 
 from PySide6.QtCore import QModelIndex, Qt, Signal, Slot, QSize, QRect, QTimer
-from PySide6.QtGui import QFontMetrics, QTextCursor, QPainter, QColor, QPen, QIcon
+from PySide6.QtGui import (
+    QAction,
+    QFontMetrics,
+    QTextCursor,
+    QPainter,
+    QColor,
+    QPen,
+    QIcon,
+)
 from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
-                               QStyle, QTabWidget, QSizePolicy, QVBoxLayout, QWidget)
+                               QMenu, QStyle, QTabWidget, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.model_availability import (
@@ -74,22 +83,76 @@ PLAIN_CAPTION_SYSTEM_PROMPT = (
 )
 
 IDEOGRAM_JSON_SYSTEM_PROMPT = (
-    'You convert visual media into an Ideogram 4 structured JSON caption. '
-    'Return only a valid JSON object, with no markdown and no commentary. '
-    'Use normalized bbox coordinates on a 0-1000 grid ordered [y1,x1,y2,x2]. '
-    'Describe visible content for training data: high-level scene summary, '
-    'background shell, and object/text elements. Preserve readable text '
-    'verbatim in text elements. Use concrete colors/materials/positions. '
-    'Do not describe annotation workflow metadata.'
+    'You analyze an existing image and convert only its visible content into '
+    'an Ideogram 4 structured JSON caption for training data.\n'
+    '\n'
+    'Core behavior:\n'
+    '- Return exactly one valid JSON object.\n'
+    '- Return no markdown, no code fences, no explanation, and no commentary.\n'
+    '- Describe only what is visible in the image. Do not invent, complete, '
+    'or embellish missing scene details.\n'
+    '- Use concrete descriptions rather than hedging. Avoid maybe, likely, '
+    'appears to be, probably, possibly, various, several, or similar filler.\n'
+    '\n'
+    'Top-level schema:\n'
+    '- Allowed top-level keys are aspect_ratio, high_level_description, '
+    'style_description, and compositional_deconstruction.\n'
+    '- Keep keys in that order when present.\n'
+    '- compositional_deconstruction is required.\n'
+    '- high_level_description should be a concise one- or two-sentence scene '
+    'summary.\n'
+    '\n'
+    'Style description:\n'
+    '- style_description may be omitted.\n'
+    '- If present, it must contain aesthetics, lighting, and medium.\n'
+    '- It must contain exactly one of photo or art_style.\n'
+    '- If present, color_palette must be a list of uppercase #RRGGBB values.\n'
+    '\n'
+    'Background rules:\n'
+    '- compositional_deconstruction.background must be one concise prose '
+    'string only, never an array or object.\n'
+    '- background should describe broad non-localized scene context, surfaces, '
+    'or environment.\n'
+    '- Do not place localized boxed objects in background.\n'
+    '- Do not duplicate the same content in both background and elements.\n'
+    '\n'
+    'Element rules:\n'
+    '- compositional_deconstruction.elements must contain the important '
+    'localized objects and text regions.\n'
+    '- Each element must be type obj or text.\n'
+    '- Each element must contain desc.\n'
+    '- Text elements must contain exact visible text in text.\n'
+    '- For text elements, desc should describe the text appearance, material, '
+    'or placement rather than replacing the exact text value.\n'
+    '- Represent one real-world subject as one element when possible instead '
+    'of fragmenting it into body parts or micro-objects unless those parts are '
+    'independently important.\n'
+    '- Use concrete visual details in desc such as color, material, pose, '
+    'clothing, orientation, or spatial relationship when clearly visible.\n'
+    '\n'
+    'Bounding box rules:\n'
+    '- Use normalized bbox coordinates on a 0-1000 grid ordered [y1,x1,y2,x2].\n'
+    '- bbox values must be integers.\n'
+    '- Include bbox for localized visible elements.\n'
+    '- Keep boxes tight enough to identify the element, but do not box the '
+    'entire image unless the element truly spans nearly the full frame.\n'
+    '\n'
+    'Output discipline:\n'
+    '- Prefer one strong, faithful description over many weak overlapping '
+    'elements.\n'
+    '- Preserve readable text verbatim.\n'
+    '- Do not describe annotation workflow metadata, JSON rules, or hidden '
+    'reasoning in the output.'
 )
 
 PLAIN_CAPTION_PROMPT = ''
 
 IDEOGRAM_JSON_PROMPT = (
     'Create or refine an Ideogram 4 structured JSON caption for this image. '
-    'The per-image prompt may include the current aspect ratio and existing '
-    'locked regions from the sidecar or markings; preserve those regions and '
-    'expand them into useful training descriptions. Return complete JSON only.'
+    '{aspect_ratio_section}{locked_regions_section}'
+    'Keep the response faithful to the observed image and improve description '
+    'quality. Add new elements only for visible localized content not already '
+    'covered. Return complete JSON only.'
 )
 
 
@@ -299,6 +362,14 @@ class CaptionSettingsForm:
         self.model_combo_box.currentTextChanged.connect(
             self._persist_selected_model
         )
+        line_edit = self.model_combo_box.lineEdit()
+        if line_edit is not None:
+            line_edit.editingFinished.connect(
+                lambda: self._persist_selected_model(
+                    self.model_combo_box.currentText()
+                )
+            )
+        self._restore_selected_model()
         self.model_cached_icon = self.model_combo_box.style().standardIcon(
             QStyle.StandardPixmap.SP_DialogApplyButton
         )
@@ -410,10 +481,21 @@ class CaptionSettingsForm:
             default=PLAIN_CAPTION_SYSTEM_PROMPT,
         )
         set_text_edit_height(self.system_prompt_text_edit, 3)
-        self.system_prompt_history_button = QPushButton('📜')
+        self.system_prompt_history_button = self._make_history_menu_button(
+            'View System Prompt History',
+        )
         self.system_prompt_history_button.setToolTip('View System Prompt History')
-        self.system_prompt_history_button.setMaximumWidth(30)
-        self.system_prompt_history_button.setMaximumHeight(40)
+        self.system_prompt_history_action = QAction('History', self.system_prompt_history_button)
+        self.system_prompt_reset_action = QAction(
+            'Reset to Default',
+            self.system_prompt_history_button,
+        )
+        self.system_prompt_history_button._history_menu.addAction(
+            self.system_prompt_history_action
+        )
+        self.system_prompt_history_button._history_menu.addAction(
+            self.system_prompt_reset_action
+        )
         self.system_prompt_container = self._make_line_edit_row(
             self.system_prompt_text_edit,
             self.system_prompt_history_button,
@@ -422,10 +504,21 @@ class CaptionSettingsForm:
         self.prompt_label = QLabel('Prompt')
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
         set_text_edit_height(self.prompt_text_edit, 4)
-        self.prompt_history_button = QPushButton('📜')
+        self.prompt_history_button = self._make_history_menu_button(
+            'View Prompt History',
+        )
         self.prompt_history_button.setToolTip('View Prompt History')
-        self.prompt_history_button.setMaximumWidth(30)
-        self.prompt_history_button.setMaximumHeight(60)
+        self.prompt_history_action = QAction('History', self.prompt_history_button)
+        self.prompt_reset_action = QAction(
+            'Reset to Default',
+            self.prompt_history_button,
+        )
+        self.prompt_history_button._history_menu.addAction(
+            self.prompt_history_action
+        )
+        self.prompt_history_button._history_menu.addAction(
+            self.prompt_reset_action
+        )
         self.prompt_container = self._make_line_edit_row(
             self.prompt_text_edit,
             self.prompt_history_button,
@@ -653,6 +746,12 @@ class CaptionSettingsForm:
         self.prompt_text_edit.textChanged.connect(
             self._persist_active_prompting_fields
         )
+        self.system_prompt_reset_action.triggered.connect(
+            self.reset_current_mode_system_prompt
+        )
+        self.prompt_reset_action.triggered.connect(
+            self.reset_current_mode_prompt
+        )
         self.device_combo_box.currentTextChanged.connect(self.set_load_in_4_bit_visibility)
         self.toggle_advanced_settings_form_button.clicked.connect(self.toggle_advanced_settings_form)
         self.min_new_token_count_spin_box.valueChanged.connect(self.max_new_token_count_spin_box.setMinimum)
@@ -670,6 +769,26 @@ class CaptionSettingsForm:
             return
         settings.setValue(self.MODEL_SETTING_KEY, model_id)
         settings.sync()
+
+    def _restore_selected_model(self):
+        saved_model_id = settings.value(
+            self.MODEL_SETTING_KEY,
+            defaultValue=DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
+            type=str,
+        )
+        saved_model_id = str(saved_model_id or '').strip()
+        if not saved_model_id:
+            saved_model_id = DEFAULT_SETTINGS[self.MODEL_SETTING_KEY]
+        signals_were_blocked = self.model_combo_box.blockSignals(True)
+        try:
+            index = self.model_combo_box.findText(saved_model_id)
+            if index >= 0:
+                self.model_combo_box.setCurrentIndex(index)
+            else:
+                self.model_combo_box.setEditText(saved_model_id)
+        finally:
+            self.model_combo_box.blockSignals(signals_were_blocked)
+        self._persist_selected_model(self.model_combo_box.currentText())
 
     def _make_form(self, *, wrap_all_rows: bool = True, label_right: bool = False) -> QFormLayout:
         form = QFormLayout()
@@ -697,6 +816,25 @@ class CaptionSettingsForm:
         layout.addWidget(field_widget, 1)
         layout.addWidget(button, 0)
         return container
+
+    def _make_history_menu_button(self, tooltip: str) -> QPushButton:
+        button = QPushButton()
+        button.setText('📜')
+        button.setToolTip(tooltip)
+        button.setMaximumWidth(30)
+        button.setMaximumHeight(40)
+        button.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        menu = QMenu(button)
+        button._history_menu = menu
+        button.clicked.connect(
+            lambda: menu.popup(
+                button.mapToGlobal(button.rect().bottomLeft())
+            )
+        )
+        return button
 
     def _make_boolean_checkbox(self, key: str, default: bool, use_switch: bool) -> SettingsBigCheckBox:
         checkbox_cls = SettingsSwitchCheckBox if use_switch else SettingsBigCheckBox
@@ -1170,7 +1308,7 @@ class CaptionSettingsForm:
         self,
         label_text: str,
         field_widget: QWidget,
-        button: QWidget,
+        controls_widget: QWidget,
     ) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -1182,7 +1320,7 @@ class CaptionSettingsForm:
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        button.setSizePolicy(
+        controls_widget.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
@@ -1195,7 +1333,7 @@ class CaptionSettingsForm:
         editor_row_layout.setContentsMargins(0, 0, 0, 0)
         editor_row_layout.setSpacing(4)
         editor_row_layout.addWidget(field_widget, 1)
-        editor_row_layout.addWidget(button, 0)
+        editor_row_layout.addWidget(controls_widget, 0)
 
         layout.addWidget(label)
         layout.addWidget(editor_row, 1)
@@ -1589,6 +1727,24 @@ class CaptionSettingsForm:
             self.prompt_text_edit.setToolTip('')
 
     @Slot()
+    def reset_current_mode_system_prompt(self):
+        if self._active_prompting_mode is None:
+            return
+        default_system, _default_prompt = self._default_prompting_values_for_mode(
+            self._active_prompting_mode
+        )
+        self.system_prompt_text_edit.setPlainText(default_system)
+
+    @Slot()
+    def reset_current_mode_prompt(self):
+        if self._active_prompting_mode is None:
+            return
+        _default_system, default_prompt = self._default_prompting_values_for_mode(
+            self._active_prompting_mode
+        )
+        self.prompt_text_edit.setPlainText(default_prompt)
+
+    @Slot()
     def toggle_advanced_settings_form(self):
         if self.advanced_settings_form_container.isHidden():
             self.advanced_settings_form_container.show()
@@ -1765,8 +1921,8 @@ class AutoCaptioner(QDockWidget):
             self.start_or_cancel_captioning)
 
     def _connect_caption_history_buttons(self, form: CaptionSettingsForm):
-        form.prompt_history_button.clicked.connect(self.show_prompt_history)
-        form.system_prompt_history_button.clicked.connect(
+        form.prompt_history_action.triggered.connect(self.show_prompt_history)
+        form.system_prompt_history_action.triggered.connect(
             lambda: self.show_field_history(
                 'system_prompt',
                 form.system_prompt_text_edit,

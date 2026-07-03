@@ -124,6 +124,14 @@ class ContextSwitchManager:
         # ── 5. Reconnect new tag-write signals ───────────────────────────────
         self._connect_tag_signals(new_image_model, new_tag_counter)
 
+        # ── 5b. Point automation panels at this browser's model stack ────────
+        auto_markings = getattr(mw, 'auto_markings', None)
+        if auto_markings is not None:
+            auto_markings.set_browser_context(
+                new_image_model,
+                ctx['image_list'],
+            )
+
         # ── 6. Visual indicators ─────────────────────────────────────────────
         self._update_visual_indicators(ctx_name)
 
@@ -131,6 +139,9 @@ class ContextSwitchManager:
         self._active_context_name = ctx_name
         self._connected_image_list_model = new_image_model
         self._connected_tag_counter_model = new_tag_counter
+        menu_manager = getattr(mw, 'menu_manager', None)
+        if menu_manager is not None:
+            menu_manager.update_undo_and_redo_actions()
 
         print(f'[ContextSwitchManager] switched → {ctx_name}')
 

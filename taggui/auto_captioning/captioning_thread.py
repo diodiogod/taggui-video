@@ -130,6 +130,8 @@ class CaptioningThread(ModelThread):
         caption, console_output_caption = self.model.generate_caption(
             model_inputs, image_prompt)
         if self.caption_settings.get('output_format') == 'Ideogram 4 JSON':
+            if not str(caption or '').strip():
+                return console_output_caption
             try:
                 structured = parse_ideogram_caption_text(caption)
             except IdeogramCaptionError as exc:

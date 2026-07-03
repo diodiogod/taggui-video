@@ -4177,6 +4177,80 @@ class ImageViewer(QWidget):
                 pass
         self.ideogram_overlay_items.clear()
 
+    @staticmethod
+    def _rectf_area(rect: QRectF) -> float:
+        rect = QRectF(rect).normalized()
+        return max(0.0, float(rect.width())) * max(0.0, float(rect.height()))
+
+    @staticmethod
+    def _scene_rects_match_for_overlay_priority(
+        first: QRectF,
+        second: QRectF,
+    ) -> bool:
+        first = QRectF(first).normalized()
+        second = QRectF(second).normalized()
+        first_area = ImageViewer._rectf_area(first)
+        second_area = ImageViewer._rectf_area(second)
+        if first_area <= 0.0 or second_area <= 0.0:
+            return False
+        intersection = first.intersected(second)
+        overlap_ratio = (
+            ImageViewer._rectf_area(intersection) / min(first_area, second_area)
+        )
+        edge_delta = max(
+            abs(first.left() - second.left()),
+            abs(first.top() - second.top()),
+            abs(first.right() - second.right()),
+            abs(first.bottom() - second.bottom()),
+        )
+        tolerance = max(
+            6.0,
+            min(first.width(), first.height(), second.width(), second.height()) * 0.04,
+        )
+        return overlap_ratio >= 0.88 and edge_delta <= tolerance
+
+    def _ideogram_overlay_region_rects(self) -> list[QRectF]:
+        rects: list[QRectF] = []
+        for item in self.ideogram_overlay_items:
+            if isinstance(item, IdeogramRegionItem):
+                rects.append(QRectF(item.scene_rect()).normalized())
+                continue
+            if isinstance(item, QGraphicsRectItem) and hasattr(item, 'rect'):
+                rects.append(QRectF(item.mapRectToScene(item.rect())).normalized())
+        return rects
+
+    def _apply_marking_ideogram_overlay_priority(self):
+        ideogram_rects = []
+        if self.show_marking_state and self.show_ideogram_caption_state:
+            ideogram_rects = self._ideogram_overlay_region_rects()
+        for marking in self.marking_items:
+            hidden_by_ideogram = False
+            if (
+                ideogram_rects
+                and marking.rect_type not in {ImageMarking.CROP, ImageMarking.NONE}
+            ):
+                marking_rect = QRectF(
+                    marking.mapRectToScene(marking.rect())
+                ).normalized()
+                hidden_by_ideogram = any(
+                    self._scene_rects_match_for_overlay_priority(
+                        marking_rect,
+                        ideogram_rect,
+                    )
+                    for ideogram_rect in ideogram_rects
+                )
+            marking_visible = self.show_marking_state and not hidden_by_ideogram
+            marking.setVisible(marking_visible)
+            if marking.label is not None:
+                label_visible = (
+                    marking_visible
+                    and self.show_label_state
+                )
+                marking.label.setVisible(label_visible)
+                label_parent = marking.label.parentItem()
+                if label_parent is not None:
+                    label_parent.setVisible(label_visible)
+
     def _relayout_ideogram_labels(self):
         for item in self.ideogram_overlay_items:
             if isinstance(item, IdeogramLabelItem):
@@ -4238,159 +4312,162 @@ class ImageViewer(QWidget):
 
     def _load_ideogram_caption_overlays(self, image: Image):
         self._clear_ideogram_caption_overlays()
-        if image is None or not self.show_ideogram_caption_state:
-            return
-
         try:
-            caption = discover_ideogram_caption(image.path)
-        except IdeogramCaptionError as exc:
-            preferred_path = ideogram_caption_path(image.path)
-            self._add_ideogram_badge(
-                'IDEOGRAM JSON ERROR',
-                color=QColor('#FF6B6B'),
-                tooltip=f'{preferred_path}\n{exc}',
-            )
-            return
+            if image is None or not self.show_ideogram_caption_state:
+                return
 
-        if caption is None:
-            return
-        dimensions = self.ideogram_canvas_dimensions()
-        if dimensions is None:
-            return
-        width, height = dimensions
-
-        object_color = QColor('#34D6C7')
-        text_color = QColor('#FFB454')
-        overlay_entries = []
-        for index, element in enumerate(caption.elements, start=1):
-            if element.bbox is None:
-                continue
-            x, y, rect_width, rect_height = bbox_to_pixel_rect(
-                element.bbox,
-                width,
-                height,
-            )
-            saved_color_hex = (
-                str(element.color_palette[0]).upper()
-                if element.color_palette
-                else ''
-            )
-            auto_palette = self.dominant_ideogram_colors_for_rect(
-                QRectF(x, y, rect_width, rect_height),
-                maximum=5,
-            )
-            selected_color_hex = saved_color_hex or (
-                auto_palette[0]
-                if auto_palette
-                else '#FFB454' if element.type == 'text' else '#34D6C7'
-            )
-            color = QColor(selected_color_hex)
-            palette_hexes = [selected_color_hex]
-            for candidate in auto_palette:
-                candidate = str(candidate).upper()
-                if candidate not in palette_hexes:
-                    palette_hexes.append(candidate)
-                if len(palette_hexes) >= 5:
-                    break
-            palette_colors = [QColor(candidate) for candidate in palette_hexes]
-
-            label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
-            label_text = f'{index:02d} {label_kind}'
-            inside_text = element.desc or 'region'
-            tooltip_parts = [element.desc]
-            if element.type == 'text' and element.text:
-                label_text += f' "{element.text}"'
-                inside_text = f'"{element.text}"'
-                if element.desc:
-                    inside_text += f' - {element.desc}'
-            if element.color_palette:
-                tooltip_parts.append(
-                    f'Selected color: {element.color_palette[0]}'
+            try:
+                caption = discover_ideogram_caption(image.path)
+            except IdeogramCaptionError as exc:
+                preferred_path = ideogram_caption_path(image.path)
+                self._add_ideogram_badge(
+                    'IDEOGRAM JSON ERROR',
+                    color=QColor('#FF6B6B'),
+                    tooltip=f'{preferred_path}\n{exc}',
                 )
-            tooltip = '\n'.join(part for part in tooltip_parts if part)
-            overlay_entries.append(
-                {
-                    'index': index,
-                    'element_index': index - 1,
-                    'area': max(1.0, rect_width * rect_height),
-                    'x': x,
-                    'y': y,
-                    'rect_width': rect_width,
-                    'rect_height': rect_height,
-                    'color': color,
-                    'tooltip': tooltip,
-                    'label_text': label_text,
-                    'inside_text': inside_text,
-                    'element_type': element.type,
-                    'palette_colors': palette_colors,
-                }
-            )
+                return
 
-        # Smaller regions stack above larger overlapping regions so they remain
-        # directly selectable without relying on creation order.
-        for layer, entry in enumerate(
-            sorted(
-                overlay_entries,
-                key=lambda item: (item['area'], item['index']),
-                reverse=True,
-            ),
-            start=30,
-        ):
-            base_z = float(layer * 3)
-            if self.ideogram_editing_enabled:
-                rect_item = IdeogramRegionItem(
-                    QRectF(
-                        entry['x'],
-                        entry['y'],
-                        entry['rect_width'],
-                        entry['rect_height'],
-                    ),
-                    element_index=entry['element_index'],
-                    color=entry['color'],
-                    on_selected=self.ideogram_element_selected.emit,
-                    on_geometry_changed=self.ideogram_geometry_changed.emit,
-                    on_type_change=self.ideogram_element_type_change_requested.emit,
-                    on_palette_color_selected=self.ideogram_palette_color_selected.emit,
-                    palette_colors=entry['palette_colors'],
-                    inside_text=entry['inside_text'],
+            if caption is None:
+                return
+            dimensions = self.ideogram_canvas_dimensions()
+            if dimensions is None:
+                return
+            width, height = dimensions
+
+            object_color = QColor('#34D6C7')
+            text_color = QColor('#FFB454')
+            overlay_entries = []
+            for index, element in enumerate(caption.elements, start=1):
+                if element.bbox is None:
+                    continue
+                x, y, rect_width, rect_height = bbox_to_pixel_rect(
+                    element.bbox,
+                    width,
+                    height,
                 )
-            else:
-                rect_item = QGraphicsRectItem(
-                    QRectF(
-                        entry['x'],
-                        entry['y'],
-                        entry['rect_width'],
-                        entry['rect_height'],
+                saved_color_hex = (
+                    str(element.color_palette[0]).upper()
+                    if element.color_palette
+                    else ''
+                )
+                auto_palette = self.dominant_ideogram_colors_for_rect(
+                    QRectF(x, y, rect_width, rect_height),
+                    maximum=5,
+                )
+                selected_color_hex = saved_color_hex or (
+                    auto_palette[0]
+                    if auto_palette
+                    else '#FFB454' if element.type == 'text' else '#34D6C7'
+                )
+                color = QColor(selected_color_hex)
+                palette_hexes = [selected_color_hex]
+                for candidate in auto_palette:
+                    candidate = str(candidate).upper()
+                    if candidate not in palette_hexes:
+                        palette_hexes.append(candidate)
+                    if len(palette_hexes) >= 5:
+                        break
+                palette_colors = [QColor(candidate) for candidate in palette_hexes]
+
+                label_kind = 'TEXT' if element.type == 'text' else 'OBJ'
+                label_text = f'{index:02d} {label_kind}'
+                inside_text = element.desc or 'region'
+                tooltip_parts = [element.desc]
+                if element.type == 'text' and element.text:
+                    label_text += f' "{element.text}"'
+                    inside_text = f'"{element.text}"'
+                    if element.desc:
+                        inside_text += f' - {element.desc}'
+                if element.color_palette:
+                    tooltip_parts.append(
+                        f'Selected color: {element.color_palette[0]}'
                     )
+                tooltip = '\n'.join(part for part in tooltip_parts if part)
+                overlay_entries.append(
+                    {
+                        'index': index,
+                        'element_index': index - 1,
+                        'area': max(1.0, rect_width * rect_height),
+                        'x': x,
+                        'y': y,
+                        'rect_width': rect_width,
+                        'rect_height': rect_height,
+                        'color': color,
+                        'tooltip': tooltip,
+                        'label_text': label_text,
+                        'inside_text': inside_text,
+                        'element_type': element.type,
+                        'palette_colors': palette_colors,
+                    }
                 )
-                pen = QPen(entry['color'], 2)
-                pen.setStyle(Qt.PenStyle.DashLine)
-                pen.setCosmetic(True)
-                rect_item.setPen(pen)
-                fill = QColor(entry['color'])
-                fill.setAlpha(28)
-                rect_item.setBrush(fill)
-                rect_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-                rect_item.setFlag(
-                    QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
-                    False,
+
+            # Smaller regions stack above larger overlapping regions so they remain
+            # directly selectable without relying on creation order.
+            for layer, entry in enumerate(
+                sorted(
+                    overlay_entries,
+                    key=lambda item: (item['area'], item['index']),
+                    reverse=True,
+                ),
+                start=30,
+            ):
+                base_z = float(layer * 3)
+                if self.ideogram_editing_enabled:
+                    rect_item = IdeogramRegionItem(
+                        QRectF(
+                            entry['x'],
+                            entry['y'],
+                            entry['rect_width'],
+                            entry['rect_height'],
+                        ),
+                        element_index=entry['element_index'],
+                        color=entry['color'],
+                        on_selected=self.ideogram_element_selected.emit,
+                        on_geometry_changed=self.ideogram_geometry_changed.emit,
+                        on_type_change=self.ideogram_element_type_change_requested.emit,
+                        on_palette_color_selected=self.ideogram_palette_color_selected.emit,
+                        palette_colors=entry['palette_colors'],
+                        inside_text=entry['inside_text'],
+                    )
+                else:
+                    rect_item = QGraphicsRectItem(
+                        QRectF(
+                            entry['x'],
+                            entry['y'],
+                            entry['rect_width'],
+                            entry['rect_height'],
+                        )
+                    )
+                    pen = QPen(entry['color'], 2)
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                    pen.setCosmetic(True)
+                    rect_item.setPen(pen)
+                    fill = QColor(entry['color'])
+                    fill.setAlpha(28)
+                    rect_item.setBrush(fill)
+                    rect_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                    rect_item.setFlag(
+                        QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+                        False,
+                    )
+                rect_item.setZValue(base_z)
+                rect_item.setData(0, entry['element_index'])
+                rect_item.setData(1, base_z)
+                rect_item.setToolTip(entry['tooltip'])
+                self.scene.addItem(rect_item)
+                self.ideogram_overlay_items.append(rect_item)
+                self._add_ideogram_label_chip(
+                    entry['label_text'],
+                    x=rect_item.rect().left() + 3,
+                    y=rect_item.rect().top() + 3,
+                    base_z=base_z,
+                    color=entry['color'],
+                    parent_item=rect_item,
+                    element_index=entry['element_index'],
+                    tooltip=entry['tooltip'],
                 )
-            rect_item.setZValue(base_z)
-            rect_item.setData(0, entry['element_index'])
-            rect_item.setData(1, base_z)
-            rect_item.setToolTip(entry['tooltip'])
-            self.scene.addItem(rect_item)
-            self.ideogram_overlay_items.append(rect_item)
-            self._add_ideogram_label_chip(
-                entry['label_text'],
-                x=rect_item.rect().left() + 3,
-                y=rect_item.rect().top() + 3,
-                base_z=base_z,
-                color=entry['color'],
-                parent_item=rect_item,
-                element_index=entry['element_index'],
-                tooltip=entry['tooltip'],
-            )
+        finally:
+            self._apply_marking_ideogram_overlay_priority()
 
     def recalculate_markings(self, ignore: MarkingItem | None = None):
         from widgets.marking import grid
@@ -4406,6 +4483,81 @@ class ImageViewer(QWidget):
             if marking != ignore:
                 marking.size_changed()
         self.scene.invalidate()
+
+    def refresh_marking_overlays(self, image: Image | None = None):
+        """Add missing marking graphics for the currently displayed image."""
+        if not self.proxy_image_index.isValid():
+            return
+        current_image: Image = self.proxy_image_index.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if current_image is None or (image is not None and current_image is not image):
+            return
+        current_image.markings = self._deduplicated_markings(
+            current_image.markings
+        )
+        for marking in current_image.markings:
+            self.add_rectangle(
+                marking.rect,
+                marking.type,
+                interactive=False,
+                name=marking.label,
+                confidence=marking.confidence,
+            )
+        self._apply_marking_ideogram_overlay_priority()
+        self.scene.invalidate()
+        self.view.viewport().update()
+
+    def update_marking_overlay_geometry(
+        self,
+        old_marking: Marking,
+        new_marking: Marking,
+    ):
+        """Move one exact matching marking graphic without reloading media."""
+        candidates = [
+            item
+            for item in self.marking_items
+            if item.rect_type == old_marking.type
+            and item.rect().toRect().normalized() == old_marking.rect.normalized()
+        ]
+        if len(candidates) > 1:
+            candidates = [
+                item for item in candidates
+                if str(item.data(0) or '') == str(old_marking.label or '')
+            ]
+        if len(candidates) != 1:
+            return
+        item = candidates[0]
+        item.setRect(QRectF(new_marking.rect))
+        item.size_changed()
+        item.adjust_layout()
+        self._apply_marking_ideogram_overlay_priority()
+        self.scene.invalidate()
+        self.view.viewport().update()
+
+    def remove_marking_overlays(self, markings: list[Marking]):
+        """Remove exact marking graphics after a linked metadata deletion."""
+        for marking in markings:
+            candidates = [
+                item
+                for item in self.marking_items
+                if item.rect_type == marking.type
+                and item.rect().toRect().normalized() == marking.rect.normalized()
+            ]
+            if len(candidates) > 1:
+                candidates = [
+                    item for item in candidates
+                    if str(item.data(0) or '') == str(marking.label or '')
+                ]
+            if len(candidates) != 1:
+                continue
+            item = candidates[0]
+            self.marking_items.remove(item)
+            if item.scene() is self.scene:
+                self.scene.removeItem(item)
+        self._apply_marking_ideogram_overlay_priority()
+        self.scene.invalidate()
+        self.view.viewport().update()
 
     def _clear_marking_items_from_scene(self):
         for item in list(self.marking_items):
@@ -4576,16 +4728,12 @@ class ImageViewer(QWidget):
     @Slot(bool)
     def show_marking(self, checked: bool):
         self.show_marking_state = checked
-        for marking in self.marking_items:
-            marking.setVisible(checked)
+        self._apply_marking_ideogram_overlay_priority()
 
     @Slot(bool)
     def show_label(self, checked: bool):
         self.show_label_state = checked
-        for marking in self.marking_items:
-            if marking.label:
-                marking.label.setVisible(checked)
-                marking.label.parentItem().setVisible(checked)
+        self._apply_marking_ideogram_overlay_priority()
 
     @Slot(bool)
     def show_marking_latent(self, checked: bool):
@@ -4750,6 +4898,8 @@ class ImageViewer(QWidget):
         if interactive:
             self.scene.clearSelection()
             marking_item.grabMouse()
+        else:
+            self._apply_marking_ideogram_overlay_priority()
         if rect_type == ImageMarking.CROP:
             self.accept_crop_addition.emit(False)
 
@@ -4920,6 +5070,7 @@ class ImageViewer(QWidget):
                 source_model.write_meta_to_disk(image)
             finally:
                 self.inhibit_reload_image = False
+        self._apply_marking_ideogram_overlay_priority()
 
     def get_selected_type(self) -> ImageMarking:
         if len(self.scene.selectedItems()) > 0:

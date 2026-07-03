@@ -5,10 +5,15 @@ import pillow_jxl
 
 import torch
 from ultralytics import YOLO
+from pathlib import Path
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
 from utils.ModelThread import ModelThread
+from utils.marking_model_security import (
+    configure_ultralytics_marking_runtime,
+    infer_marking_model_task,
+)
 
 
 class MarkingThread(ModelThread):
@@ -24,6 +29,7 @@ class MarkingThread(ModelThread):
         super().__init__(parent, image_list_model, selected_image_indices)
         self.marking_settings = marking_settings
         self.model: YOLO | None = None
+        self.model_path = marking_settings.get('model_path')
         self.text = {
             'Generating': 'Marking',
             'generating': 'marking'
@@ -109,19 +115,76 @@ class MarkingThread(ModelThread):
         return merged_markings
 
     def load_model(self):
-        if not self.model:
-            self.error_message = 'Model not preloaded.'
-            self.is_error = True
-        pass
+        if self.model is None:
+            self.preload_model()
+        if self.model is None:
+            return
+        classes = self.marking_settings.get('classes')
+        if classes is None:
+            requested_names = {
+                str(name).strip().casefold()
+                for name in self.marking_settings.get('class_names', [])
+                if str(name).strip()
+            }
+            label_overrides = {
+                str(name).strip().casefold(): str(label).strip()
+                for name, label in self.marking_settings.get(
+                    'class_label_overrides', {}
+                ).items()
+                if str(name).strip() and str(label).strip()
+            }
+            class_id_label_overrides = {
+                str(class_id): str(label).strip()
+                for class_id, label in self.marking_settings.get(
+                    'class_id_label_overrides', {}
+                ).items()
+                if str(label).strip()
+            }
+            marking_type = str(
+                self.marking_settings.get('marking_type', 'hint') or 'hint'
+            )
+            self.marking_settings['classes'] = {
+                int(class_id): (
+                    label_overrides.get(
+                        str(class_name).strip().casefold(),
+                        class_id_label_overrides.get(
+                            str(class_id),
+                            str(class_name),
+                        ),
+                    ),
+                    marking_type,
+                )
+                for class_id, class_name in self.model.names.items()
+                if not requested_names
+                or str(class_name).strip().casefold() in requested_names
+            }
 
     def preload_model(self):
-        if self.marking_settings['model_path'] is None:
+        self.model_path = self.marking_settings.get('model_path')
+        if self.model_path is None:
             self.error_message = 'Model path not set'
             self.is_error = True
             self.model = None
             return
-        self.model = YOLO(self.marking_settings['model_path'])
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        configure_ultralytics_marking_runtime(self.model_path)
+        self.model = YOLO(
+            self.model_path,
+            task=infer_marking_model_task(self.model_path),
+        )
+        self.device = self._preferred_device_for_model(self.model_path)
+
+    @staticmethod
+    def _preferred_device_for_model(model_path: str) -> str:
+        if not torch.cuda.is_available():
+            return 'cpu'
+        if Path(str(model_path)).suffix.lower() != '.onnx':
+            return 'cuda'
+        try:
+            import onnxruntime
+        except Exception:
+            return 'cpu'
+        providers = set(onnxruntime.get_available_providers())
+        return 'cuda' if 'CUDAExecutionProvider' in providers else 'cpu'
 
     def _predict_with_device(self, pil_image, device: str):
         return self.model.predict(source=pil_image,

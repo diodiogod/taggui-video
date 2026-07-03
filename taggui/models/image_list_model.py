@@ -573,13 +573,22 @@ def _select_limited_paths_from_files(
     return []
 
 
-def _limited_background_validation_delay_ms() -> int:
-    """Delay full-folder validation in limited startup so the UI stays responsive."""
-    raw_value = os.getenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '60000')
-    try:
-        return max(0, int(raw_value))
-    except (TypeError, ValueError):
-        return 60000
+def _limited_background_validation_delay_ms(
+    *,
+    has_directory_signatures: bool = False,
+    cached_count: int = 0,
+) -> int:
+    """Delay limited-mode validation just long enough for the first UI frame to settle."""
+    raw_value = os.getenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS')
+    if raw_value is not None:
+        try:
+            return max(0, int(raw_value))
+        except (TypeError, ValueError):
+            pass
+
+    if has_directory_signatures and int(cached_count) > 0:
+        return 1500
+    return 5000
 
 
 def _background_validation_delay_ms() -> int:
@@ -2270,6 +2279,7 @@ class ImageListModel(QAbstractListModel):
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
         self._path_validation_generation = 0
+        self._path_validation_satisfied_generation = -1
         self._pending_path_validation_result = None
         self._path_validation_lock = threading.Lock()
         self._background_validation_dialog = None
@@ -3943,6 +3953,19 @@ class ImageListModel(QAbstractListModel):
             except Exception:
                 pass
         self._db = ImageIndexDB(self._directory_path)
+
+        if self._active_load_options is not None:
+            refreshed_scope_rel_paths = self._db.get_limited_paths(self._active_load_options)
+            self._set_scope_from_rel_paths(refreshed_scope_rel_paths)
+            new_total = int(
+                self._db.count(
+                    filter_sql=self._filter_sql,
+                    bindings=self._filter_bindings,
+                ) or 0
+            )
+            preloaded_pages = {}
+            result['limited_scope_count'] = len(refreshed_scope_rel_paths)
+            self._path_validation_satisfied_generation = int(self._path_validation_generation)
 
         reloaded_pages = self._reload_paginated_model_after_db_update(
             new_total=new_total,
@@ -6104,6 +6127,7 @@ class ImageListModel(QAbstractListModel):
         from utils.image_index_db import ImageIndexDB
         db = ImageIndexDB(directory_path)
         cached_paths = db.get_all_paths()
+        stored_dir_mtimes = db.get_directory_signatures()
         cache_stats = None
         dir_mtimes = None
         scan_progress = None
@@ -6136,6 +6160,9 @@ class ImageListModel(QAbstractListModel):
 
             def _start_validation():
                 if load_generation != self._path_validation_generation:
+                    return
+                if load_generation == int(getattr(self, '_path_validation_satisfied_generation', -1) or -1):
+                    print("[CACHE] Skipping background validation; index already synchronized")
                     return
                 print("[CACHE] Starting background validation...")
                 self._load_executor.submit(
@@ -6266,7 +6293,10 @@ class ImageListModel(QAbstractListModel):
                 load_options=normalized_load_options,
             )
             validation_delay_ms = (
-                _limited_background_validation_delay_ms()
+                _limited_background_validation_delay_ms(
+                    has_directory_signatures=bool(stored_dir_mtimes),
+                    cached_count=effective_cached_count,
+                )
                 if normalized_load_options is not None
                 else _background_validation_delay_ms()
             )
@@ -8854,6 +8884,17 @@ class ImageListModel(QAbstractListModel):
         except ValueError:
             rel_path = image.path.name
         self._db.set_ideogram_caption_text_for_file(rel_path, image.path)
+
+    def refresh_search_indexes_for_image(self, image: Image | None):
+        """Synchronize searchable DB state without rewriting source sidecars."""
+        if image is None:
+            return
+        self._save_tags_to_db(image)
+        self._save_markings_to_db(image)
+        self._save_rating_to_db(image)
+        self.save_reactions_to_db(image)
+        self.save_review_state_to_db(image)
+        self.refresh_ideogram_caption_index_for_image(image)
 
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):

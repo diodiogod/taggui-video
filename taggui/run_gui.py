@@ -334,7 +334,7 @@ def run_gui(argv: list[str] | None = None):
         f"QT_STYLE_OVERRIDE={os.getenv('QT_STYLE_OVERRIDE', '') or '<default>'}, "
         f"desktop_settings_aware={os.getenv('TAGGUI_DESKTOP_SETTINGS_AWARE', '1')}, "
         f"background_validation_delay_ms={os.getenv('TAGGUI_BACKGROUND_VALIDATION_DELAY_MS', '5000')}, "
-        f"limited_validation_delay_ms={os.getenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '60000')}, "
+        f"limited_validation_delay_ms={os.getenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '<adaptive>')}, "
         f"secondary_restore_delay_ms={os.getenv('TAGGUI_SECONDARY_RESTORE_DELAY_MS', '<default>')}, "
         f"auto_marking_delay_ms={os.getenv('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', '6000')}"
     )

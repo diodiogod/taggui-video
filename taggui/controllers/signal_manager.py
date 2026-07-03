@@ -21,6 +21,7 @@ class SignalManager:
         self.connect_all_tags_editor_signals()
         self.connect_auto_captioner_signals()
         self.connect_auto_markings_signals()
+        self.connect_pipeline_signals()
         self.connect_video_controls_signals()
 
     def connect_toolbar_signals(self):
@@ -360,6 +361,9 @@ class SignalManager:
         image_tags_editor.ideogram_caption_create_requested.connect(
             self.main_window.ideogram_caption_editor.create_caption_from_caption_panel
         )
+        image_tags_editor.ideogram_editor_open_requested.connect(
+            self.main_window.ideogram_caption_editor.show_from_caption_panel
+        )
 
     def connect_all_tags_editor_signals(self):
         """Connect all tags editor-related signals."""
@@ -433,12 +437,8 @@ class SignalManager:
     def connect_auto_markings_signals(self):
         """Connect auto markings-related signals."""
         auto_markings = self.main_window.auto_markings
-        image_list_model = self.main_window.image_list_model
         menu_manager = self.main_window.menu_manager
 
-        auto_markings.marking_generated.connect(
-            lambda image_index, markings:
-            image_list_model.add_image_markings(image_index, markings))
         auto_markings.visibilityChanged.connect(
             lambda: menu_manager.toggle_auto_markings_action.setChecked(
                 auto_markings.isVisible()))
@@ -466,6 +466,15 @@ class SignalManager:
             lambda *_:
             self.main_window.image_list_model.refresh_ideogram_caption_index_for_image(
                 self.main_window.ideogram_caption_editor.current_image
+            )
+        )
+
+    def connect_pipeline_signals(self):
+        pipeline_editor = self.main_window.pipeline_editor
+        pipeline_editor.visibilityChanged.connect(
+            lambda visible:
+            self.main_window.menu_manager.toggle_pipeline_editor_action.setChecked(
+                visible
             )
         )
 
@@ -656,6 +665,8 @@ class SignalManager:
         if image is None or str(getattr(image, 'path', '') or '') not in restored_paths:
             return
         target_viewer.load_image(proxy_index, False)
+        self.main_window.ideogram_caption_editor.load_media(image)
+        self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
 
     def _update_tag_counts(self):
         """Update tag counts based on current model mode (paginated (DB) vs normal)."""

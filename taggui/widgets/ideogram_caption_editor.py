@@ -6,7 +6,16 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QRectF, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QRect,
+    QRectF,
+    QSize,
+    QTimer,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,6 +29,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QFrame,
+    QLayout,
+    QScrollArea,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -39,8 +51,37 @@ from utils.ideogram_caption import (
     pixel_rect_to_bbox,
     save_ideogram_caption,
 )
-from utils.image import Image, ImageMarking
+from utils.image import Image, ImageMarking, Marking
+from utils.focused_scroll_mixin import FocusedScrollMixin
+from utils.settings import DEFAULT_SETTINGS, settings
 from widgets.auto_captioner import InlineEditorResizeGrip
+
+
+class _CompressibleIdeogramRoot(QWidget):
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+
+class _CompressibleIdeogramScrollArea(QScrollArea):
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+
+class _FocusedScrollComboBox(FocusedScrollMixin, QComboBox):
+    pass
+
+
+def _labeled_control(label_text: str, control: QWidget) -> QWidget:
+    container = QWidget()
+    container.setObjectName("ideogramCaptionField")
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(3)
+    label = QLabel(label_text)
+    label.setObjectName("ideogramCaptionFieldLabel")
+    layout.addWidget(label)
+    layout.addWidget(control)
+    return container
 
 
 class IdeogramCaptionEditor(QDockWidget):
@@ -60,6 +101,21 @@ class IdeogramCaptionEditor(QDockWidget):
         self._selected_element_index: int | None = None
         self._region_clipboard: list[IdeogramElement] = []
         self._manual_palette_indices: set[int] = set()
+        self._has_caption = False
+        self.min_ui_zoom = 60
+        self.max_ui_zoom = 160
+        self.ui_zoom_step = 10
+        self.ui_zoom = max(
+            self.min_ui_zoom,
+            min(
+                self.max_ui_zoom,
+                settings.value(
+                    "ideogram_caption_ui_zoom",
+                    DEFAULT_SETTINGS["ideogram_caption_ui_zoom"],
+                    type=int,
+                ),
+            ),
+        )
 
         self.setObjectName("ideogram_caption_editor")
         self.setWindowTitle("Ideogram 4 Caption")
@@ -73,6 +129,13 @@ class IdeogramCaptionEditor(QDockWidget):
         self.path_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self.path_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.save_state_label = QLabel("No media")
+        self.save_state_label.setObjectName("ideogramCaptionSaveState")
+        self.save_state_label.setProperty("state", "idle")
         self.summary_label = QLabel("Select an image to inspect its caption.")
         self.summary_label.setObjectName("ideogramCaptionSummary")
         self.summary_label.setWordWrap(True)
@@ -114,11 +177,10 @@ class IdeogramCaptionEditor(QDockWidget):
         self.json_toggle_button.setObjectName("ideogramCaptionSecondaryButton")
         self.json_toggle_button.setCheckable(True)
         self.json_toggle_button.setToolTip("Show or hide the raw structured JSON.")
-        self.edit_boxes_button = QPushButton("Edit boxes")
-        self.edit_boxes_button.setObjectName("ideogramCaptionSecondaryButton")
-        self.edit_boxes_button.setCheckable(True)
-        self.edit_boxes_button.setChecked(True)
-        self.edit_boxes_button.hide()
+        self.details_button = QPushButton("Details")
+        self.details_button.setObjectName("ideogramCaptionSecondaryButton")
+        self.details_button.setCheckable(True)
+        self.details_button.setToolTip("Show or hide scene-level caption fields.")
 
         self.more_button = QToolButton()
         self.more_button.setObjectName("ideogramCaptionMoreButton")
@@ -128,28 +190,34 @@ class IdeogramCaptionEditor(QDockWidget):
         self.new_action = actions_menu.addAction("New caption")
         self.add_object_action = actions_menu.addAction("Add object region")
         self.add_text_action = actions_menu.addAction("Add text region")
+        self.details_action = actions_menu.addAction("Scene details")
+        self.details_action.setCheckable(True)
+        actions_menu.addSeparator()
         self.save_action = actions_menu.addAction("Save now")
         self.reload_action = actions_menu.addAction("Reload from disk")
-        actions_menu.addSeparator()
         self.import_action = actions_menu.addAction("Import JSON file")
+        actions_menu.addSeparator()
         self.format_action = actions_menu.addAction("Format JSON")
         self.copy_action = actions_menu.addAction("Copy JSON")
         self.paste_action = actions_menu.addAction("Paste JSON")
         actions_menu.addSeparator()
         self.export_jsonl_action = actions_menu.addAction("Export folder JSONL")
-        self.details_action = actions_menu.addAction("Scene details")
-        self.details_action.setCheckable(True)
+        actions_menu.addSeparator()
+        self.delete_json_action = actions_menu.addAction("Delete JSON sidecar")
         self.more_button.setMenu(actions_menu)
 
         controls_layout = QHBoxLayout()
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(6)
         controls_layout.addWidget(self.from_markings_button, 1)
+        controls_layout.addWidget(self.details_button)
         controls_layout.addWidget(self.json_toggle_button)
         controls_layout.addWidget(self.more_button)
+        self.controls_layout = controls_layout
 
         self.json_container = QWidget()
         json_layout = QVBoxLayout(self.json_container)
+        self.json_layout = json_layout
         json_layout.setContentsMargins(0, 0, 0, 0)
         json_layout.setSpacing(4)
         json_header = QLabel("Structured JSON")
@@ -165,7 +233,7 @@ class IdeogramCaptionEditor(QDockWidget):
         element_layout.setSpacing(5)
         self.element_header = QLabel("Selected element")
         self.element_header.setObjectName("ideogramCaptionSectionLabel")
-        self.element_type_combo = QComboBox()
+        self.element_type_combo = _FocusedScrollComboBox()
         self.element_type_combo.addItems(["obj", "text"])
         self.element_desc_edit = QPlainTextEdit()
         self.element_desc_edit.setPlaceholderText("Description / detector label")
@@ -185,7 +253,9 @@ class IdeogramCaptionEditor(QDockWidget):
         self.pick_palette_button.setToolTip(
             "Pick the selected element color from a pixel in the main viewer."
         )
-        palette_layout = QHBoxLayout()
+        palette_row = QWidget()
+        palette_layout = QHBoxLayout(palette_row)
+        self.palette_layout = palette_layout
         palette_layout.setContentsMargins(0, 0, 0, 0)
         palette_layout.setSpacing(6)
         palette_layout.addWidget(self.element_palette_edit, 1)
@@ -213,19 +283,39 @@ class IdeogramCaptionEditor(QDockWidget):
             self.palette_candidate_buttons.append(button)
             self.palette_candidates_layout.addWidget(button, 1)
         element_actions = QHBoxLayout()
+        self.element_actions_layout = element_actions
         self.move_up_button = QPushButton("Up")
         self.move_down_button = QPushButton("Down")
         self.delete_element_button = QPushButton("Delete")
+        self.move_up_button.setObjectName("ideogramCaptionSecondaryButton")
+        self.move_down_button.setObjectName("ideogramCaptionSecondaryButton")
+        self.delete_element_button.setObjectName("ideogramCaptionDangerButton")
         element_actions.addWidget(self.move_up_button)
         element_actions.addWidget(self.move_down_button)
         element_actions.addWidget(self.delete_element_button)
+        self.element_type_field = _labeled_control(
+            "Region type", self.element_type_combo
+        )
+        self.element_desc_field = _labeled_control(
+            "Description", self.element_desc_edit
+        )
+        self.element_text_field = _labeled_control(
+            "Visible text", self.element_text_edit
+        )
+        self.element_palette_field = _labeled_control(
+            "Selected color", palette_row
+        )
+        self.palette_candidates_field = _labeled_control(
+            "Suggested colors", self.palette_candidates_container
+        )
         element_layout.addWidget(self.element_header)
-        element_layout.addWidget(self.element_type_combo)
-        element_layout.addWidget(self.element_desc_edit)
-        element_layout.addWidget(self.element_text_edit)
-        element_layout.addLayout(palette_layout)
-        element_layout.addWidget(self.palette_candidates_container)
+        element_layout.addWidget(self.element_type_field)
+        element_layout.addWidget(self.element_desc_field)
+        element_layout.addWidget(self.element_text_field)
+        element_layout.addWidget(self.element_palette_field)
+        element_layout.addWidget(self.palette_candidates_field)
         element_layout.addLayout(element_actions)
+        self.element_layout = element_layout
         self.element_container.hide()
 
         self.details_container = QWidget()
@@ -241,7 +331,7 @@ class IdeogramCaptionEditor(QDockWidget):
         self.background_edit = QPlainTextEdit()
         self.background_edit.setPlaceholderText("Background description")
         self.background_edit.setFixedHeight(64)
-        self.style_kind_combo = QComboBox()
+        self.style_kind_combo = _FocusedScrollComboBox()
         self.style_kind_combo.addItems(["none", "photo", "art_style"])
         self.style_descriptor_edit = QLineEdit()
         self.style_descriptor_edit.setPlaceholderText(
@@ -255,33 +345,64 @@ class IdeogramCaptionEditor(QDockWidget):
         self.medium_edit.setPlaceholderText("Medium")
         self.style_palette_edit = QLineEdit()
         self.style_palette_edit.setPlaceholderText("#RRGGBB, #RRGGBB")
-        for widget in (
-            details_header,
-            self.high_level_edit,
-            self.background_edit,
-            self.style_kind_combo,
-            self.style_descriptor_edit,
-            self.aesthetics_edit,
-            self.lighting_edit,
-            self.medium_edit,
-            self.style_palette_edit,
+        details_layout.addWidget(details_header)
+        for label_text, widget in (
+            ("High-level description", self.high_level_edit),
+            ("Background", self.background_edit),
+            ("Style type", self.style_kind_combo),
+            ("Style description", self.style_descriptor_edit),
+            ("Aesthetics", self.aesthetics_edit),
+            ("Lighting", self.lighting_edit),
+            ("Medium", self.medium_edit),
+            ("Scene palette", self.style_palette_edit),
         ):
-            details_layout.addWidget(widget)
+            details_layout.addWidget(_labeled_control(label_text, widget))
+        self.details_layout = details_layout
         self.details_container.hide()
 
-        container = QWidget()
+        content = QWidget()
+        content.setObjectName("ideogramCaptionContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(self.element_container)
+        content_layout.addWidget(self.details_container)
+        content_layout.addWidget(self.json_container)
+        content_layout.addStretch(1)
+        self.content_layout = content_layout
+
+        self.content_scroll = _CompressibleIdeogramScrollArea()
+        self.content_scroll.setObjectName("ideogramCaptionScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setMinimumSize(0, 0)
+        self.content_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
+        )
+        self.content_scroll.setWidget(content)
+
+        container = _CompressibleIdeogramRoot()
         container.setObjectName("ideogramCaptionRoot")
         layout = QVBoxLayout(container)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
-        layout.addWidget(self.path_label)
+        file_row = QHBoxLayout()
+        file_row.setContentsMargins(0, 0, 0, 0)
+        file_row.setSpacing(6)
+        file_row.addWidget(self.path_label, 1)
+        file_row.addWidget(self.save_state_label)
+        layout.addLayout(file_row)
         layout.addWidget(self.summary_label)
         layout.addLayout(controls_layout)
-        layout.addWidget(self.details_container)
-        layout.addWidget(self.element_container)
-        layout.addWidget(self.json_container)
+        layout.addWidget(self.content_scroll, 1)
         layout.addWidget(self.status_label)
-        layout.addStretch(1)
+        self.root_layout = layout
+        self.file_layout = file_row
         self.setWidget(container)
         self.setStyleSheet(
             """
@@ -291,24 +412,58 @@ class IdeogramCaptionEditor(QDockWidget):
                 font-family: "Segoe UI", Arial, sans-serif;
                 font-size: 12px;
             }
+            QScrollArea#ideogramCaptionScroll {
+                background: transparent;
+                border: 0;
+            }
+            QScrollArea#ideogramCaptionScroll > QWidget > QWidget,
+            QWidget#ideogramCaptionContent,
+            QWidget#ideogramCaptionField {
+                background: transparent;
+            }
             QLabel#ideogramCaptionFile {
                 color: #f3f4f6;
                 font-weight: 600;
-                font-size: 15px;
+                font-size: 13px;
                 padding: 0 2px;
+            }
+            QLabel#ideogramCaptionSaveState {
+                color: #aab2bd;
+                background: #35373d;
+                border-radius: 7px;
+                padding: 2px 7px;
+                font-size: 10px;
+                font-weight: 600;
+            }
+            QLabel#ideogramCaptionSaveState[state="saved"] {
+                color: #8ed9b0;
+                background: #203a2d;
+            }
+            QLabel#ideogramCaptionSaveState[state="saving"] {
+                color: #f3cf79;
+                background: #40351f;
+            }
+            QLabel#ideogramCaptionSaveState[state="error"] {
+                color: #ff9b9b;
+                background: #482828;
             }
             QLabel#ideogramCaptionSummary {
                 color: #cbd5e1;
-                background: #1e1e24;
-                border: 1px solid #4b5563;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 12px;
+                background: transparent;
+                border: 0;
+                padding: 0 2px 2px 2px;
+                font-size: 11px;
             }
             QLabel#ideogramCaptionSectionLabel {
                 color: #d1d5db;
                 font-weight: 600;
                 font-size: 12px;
+                padding: 0 2px;
+            }
+            QLabel#ideogramCaptionFieldLabel {
+                color: #9ca3af;
+                font-weight: 600;
+                font-size: 10px;
                 padding: 0 2px;
             }
             QPushButton#ideogramCaptionPrimaryButton {
@@ -347,6 +502,21 @@ class IdeogramCaptionEditor(QDockWidget):
                 border-color: #339d94;
                 color: #8eddd4;
             }
+            QPushButton#ideogramCaptionDangerButton {
+                background: transparent;
+                border: 1px solid #74464a;
+                border-radius: 6px;
+                color: #f0a5aa;
+                min-height: 26px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#ideogramCaptionDangerButton:hover {
+                background: #4a292d;
+                border-color: #a85b61;
+                color: #ffd1d4;
+            }
             QPlainTextEdit#ideogramCaptionJson {
                 background: #1e1e24;
                 border: 1px solid #4b5563;
@@ -381,11 +551,16 @@ class IdeogramCaptionEditor(QDockWidget):
             }
             """
         )
+        self._base_style_sheet = self.styleSheet()
 
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.setInterval(900)
         self.autosave_timer.timeout.connect(self._autosave_if_valid)
+        self.status_clear_timer = QTimer(self)
+        self.status_clear_timer.setSingleShot(True)
+        self.status_clear_timer.setInterval(4500)
+        self.status_clear_timer.timeout.connect(lambda: self._set_status(""))
 
         self.element_desc_timer = QTimer(self)
         self.element_desc_timer.setSingleShot(True)
@@ -397,8 +572,9 @@ class IdeogramCaptionEditor(QDockWidget):
             self.create_caption_from_markings
         )
         self.json_toggle_button.toggled.connect(
-            self.json_container.setVisible
+            self._set_json_visible
         )
+        self.details_button.toggled.connect(self.details_action.setChecked)
         self.image_viewer.set_ideogram_editing_enabled(True)
         self.image_viewer.ideogram_element_selected.connect(
             self.select_element
@@ -450,12 +626,14 @@ class IdeogramCaptionEditor(QDockWidget):
         )
         self.save_action.triggered.connect(lambda: self.save_caption())
         self.reload_action.triggered.connect(self.reload_caption)
+        self.delete_json_action.triggered.connect(self.delete_caption_sidecar)
         self.import_action.triggered.connect(self.import_caption_file)
         self.format_action.triggered.connect(self.format_caption)
         self.copy_action.triggered.connect(self.copy_caption)
         self.paste_action.triggered.connect(self.paste_caption)
         self.export_jsonl_action.triggered.connect(self.export_folder_jsonl)
-        self.details_action.toggled.connect(self.details_container.setVisible)
+        self.details_action.toggled.connect(self.details_button.setChecked)
+        self.details_action.toggled.connect(self._set_details_visible)
         self.visibilityChanged.connect(self._on_visibility_changed)
         self.details_timer = QTimer(self)
         self.details_timer.setSingleShot(True)
@@ -475,6 +653,9 @@ class IdeogramCaptionEditor(QDockWidget):
         ):
             field.textChanged.connect(self._schedule_scene_details)
         self._set_controls_enabled(False)
+        self._install_ui_zoom_filters()
+        self._apply_ui_zoom()
+        self._set_save_state("No media", "idle")
 
     def load_image(self, index: QModelIndex):
         """Backward-compatible index loader."""
@@ -484,6 +665,26 @@ class IdeogramCaptionEditor(QDockWidget):
             else None
         )
         self.load_media(image)
+
+    def _set_json_visible(self, visible: bool):
+        self.json_container.setVisible(visible)
+        if visible:
+            QTimer.singleShot(
+                0,
+                lambda: self.content_scroll.ensureWidgetVisible(
+                    self.json_container, 0, 12
+                ),
+            )
+
+    def _set_details_visible(self, visible: bool):
+        self.details_container.setVisible(visible)
+        if visible:
+            QTimer.singleShot(
+                0,
+                lambda: self.content_scroll.ensureWidgetVisible(
+                    self.details_container, 0, 12
+                ),
+            )
 
     def load_media(self, image):
         """Load the displayed media item's caption or preserved draft."""
@@ -500,14 +701,15 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_container.hide()
         self.autosave_timer.stop()
         self.details_timer.stop()
+        self._populate_detail_fields(
+            IdeogramCaption(compositional_background="", elements=[])
+        )
 
         if self.current_path is None:
             self._replace_text("")
             self.path_label.setText("No media selected")
             self.path_label.setToolTip("")
-            self.summary_label.setText(
-                "Select an image to inspect its caption."
-            )
+            self._update_summary()
             self._set_status("")
             self._set_controls_enabled(False)
             return
@@ -530,6 +732,135 @@ class IdeogramCaptionEditor(QDockWidget):
     def sizeHint(self):
         return QSize(300, 240)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_action_labels()
+        self.summary_label.setVisible(self.height() >= 190)
+
+    def _update_action_labels(self):
+        width = self.width()
+        if self._has_caption:
+            full_primary = "Add markings"
+            compact_primary = "Add"
+        else:
+            full_primary = "Create from markings"
+            compact_primary = "Create"
+        self.from_markings_button.setText(
+            full_primary if width >= 290 else compact_primary
+        )
+        self.details_button.setVisible(width >= 220)
+        self.details_button.setText("Details" if width >= 245 else "Info")
+        self.more_button.setText("More" if width >= 275 else "...")
+        self.move_up_button.setText("Move up" if width >= 280 else "Up")
+        self.move_down_button.setText("Move down" if width >= 280 else "Down")
+
+    def _set_save_state(self, text: str, state: str):
+        self.save_state_label.setText(text)
+        if self.save_state_label.property("state") != state:
+            self.save_state_label.setProperty("state", state)
+            self.save_state_label.style().unpolish(self.save_state_label)
+            self.save_state_label.style().polish(self.save_state_label)
+
+    def _install_ui_zoom_filters(self):
+        root = self.widget()
+        root.installEventFilter(self)
+        for child in root.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.Type.Wheel
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.adjust_ui_zoom(
+                event.angleDelta().y() or event.pixelDelta().y()
+            )
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.adjust_ui_zoom(
+                event.angleDelta().y() or event.pixelDelta().y()
+            )
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def adjust_ui_zoom(self, wheel_delta: int):
+        if wheel_delta == 0:
+            return
+        change = self.ui_zoom_step if wheel_delta > 0 else -self.ui_zoom_step
+        new_zoom = max(
+            self.min_ui_zoom,
+            min(self.max_ui_zoom, self.ui_zoom + change),
+        )
+        if new_zoom == self.ui_zoom:
+            return
+        self.ui_zoom = new_zoom
+        settings.setValue("ideogram_caption_ui_zoom", new_zoom)
+        self._apply_ui_zoom()
+
+    def _apply_ui_zoom(self):
+        scale = self.ui_zoom / 100.0
+        margin = max(4, round(8 * scale))
+        spacing = max(4, round(8 * scale))
+        self.root_layout.setContentsMargins(margin, margin, margin, margin)
+        self.root_layout.setSpacing(spacing)
+        self.file_layout.setSpacing(max(3, round(6 * scale)))
+        self.controls_layout.setSpacing(max(3, round(6 * scale)))
+        self.content_layout.setSpacing(spacing)
+        self.json_layout.setSpacing(max(2, round(4 * scale)))
+        self.element_layout.setSpacing(max(3, round(5 * scale)))
+        self.details_layout.setSpacing(max(3, round(5 * scale)))
+        self.palette_layout.setSpacing(max(3, round(6 * scale)))
+        self.palette_candidates_layout.setSpacing(max(2, round(4 * scale)))
+        self.element_actions_layout.setSpacing(max(3, round(6 * scale)))
+        self.element_desc_edit.setFixedHeight(max(48, round(72 * scale)))
+        self.high_level_edit.setFixedHeight(max(44, round(64 * scale)))
+        self.background_edit.setFixedHeight(max(44, round(64 * scale)))
+
+        scaled_style = f"""
+            QWidget#ideogramCaptionRoot {{
+                font-size: {max(8, round(12 * scale))}px;
+            }}
+            QLabel#ideogramCaptionFile {{
+                font-size: {max(9, round(13 * scale))}px;
+            }}
+            QLabel#ideogramCaptionSaveState {{
+                padding: {max(1, round(2 * scale))}px
+                         {max(4, round(7 * scale))}px;
+                font-size: {max(8, round(10 * scale))}px;
+            }}
+            QLabel#ideogramCaptionSummary,
+            QLabel#ideogramCaptionStatus {{
+                font-size: {max(8, round(11 * scale))}px;
+            }}
+            QLabel#ideogramCaptionSectionLabel {{
+                font-size: {max(8, round(12 * scale))}px;
+            }}
+            QLabel#ideogramCaptionFieldLabel {{
+                font-size: {max(8, round(10 * scale))}px;
+            }}
+            QPushButton#ideogramCaptionPrimaryButton,
+            QPushButton#ideogramCaptionSecondaryButton,
+            QPushButton#ideogramCaptionDangerButton,
+            QToolButton#ideogramCaptionMoreButton {{
+                padding: {max(3, round(5 * scale))}px
+                         {max(5, round(10 * scale))}px;
+                min-height: {max(20, round(27 * scale))}px;
+                max-height: {max(22, round(30 * scale))}px;
+                font-size: {max(8, round(11 * scale))}px;
+            }}
+            QLineEdit, QComboBox, QPlainTextEdit {{
+                padding: {max(3, round(6 * scale))}px
+                         {max(4, round(8 * scale))}px;
+                font-size: {max(8, round(12 * scale))}px;
+            }}
+        """
+        self.setStyleSheet(self._base_style_sheet + scaled_style)
+
     def reload_caption(self):
         if self.current_path is None:
             return
@@ -543,7 +874,7 @@ class IdeogramCaptionEditor(QDockWidget):
             except OSError as exc:
                 self._replace_text("")
                 self._set_status(f"Failed to read caption: {exc}", error=True)
-                self._update_summary()
+                self._update_summary(error=True)
                 return
             self._replace_text(raw_text)
             self.path_label.setText(self.current_path.name)
@@ -565,6 +896,7 @@ class IdeogramCaptionEditor(QDockWidget):
         if caption is None:
             self.current_caption_path = preferred_path
             self._replace_text("")
+            self._populate_detail_fields(self._empty_caption())
             self.path_label.setText(self.current_path.name)
             self.path_label.setToolTip(str(preferred_path))
             self._set_status("No Ideogram caption found.")
@@ -583,6 +915,7 @@ class IdeogramCaptionEditor(QDockWidget):
             ""
         )
         self._update_summary(caption=caption)
+        self._populate_detail_fields(caption)
 
     def create_new_caption(self):
         if self.current_image is None:
@@ -678,6 +1011,7 @@ class IdeogramCaptionEditor(QDockWidget):
             )
         except (IdeogramCaptionError, OSError, json.JSONDecodeError) as exc:
             self._set_status(f"Not saved: {exc}", error=True)
+            self._set_save_state("Save failed", "error")
             return False
 
         self.current_caption_path = destination
@@ -702,6 +1036,7 @@ class IdeogramCaptionEditor(QDockWidget):
             self._set_status(f"Cannot format: {exc}", error=True)
             return
         self._replace_text(caption.to_json(pretty=True), dirty=True)
+        self._update_summary(caption=caption, draft=True)
         self._set_status("Formatted. Waiting to autosave.", success=True)
         self.autosave_timer.start()
 
@@ -763,9 +1098,60 @@ class IdeogramCaptionEditor(QDockWidget):
         self.json_toggle_button.setChecked(True)
         self.save_caption()
 
+    def delete_caption_sidecar(self):
+        if self.current_path is None:
+            return
+        target_path = self.current_caption_path or ideogram_caption_path(
+            self.current_path
+        )
+        if not target_path.exists():
+            self._set_status("No Ideogram JSON sidecar exists for this image.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Ideogram JSON",
+            (
+                "Delete the Ideogram JSON sidecar for this image?\n\n"
+                "This removes only the structured caption and Ideogram overlay "
+                "boxes. Normal TagGUI markings will be kept."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            target_path.unlink()
+        except OSError as exc:
+            self._set_status(f"Delete failed: {exc}", error=True)
+            return
+
+        self.autosave_timer.stop()
+        self._drafts.pop(self.current_path, None)
+        self.current_caption_path = ideogram_caption_path(self.current_path)
+        self._selected_element_index = None
+        self.element_container.hide()
+        self._replace_text("")
+        self._populate_detail_fields(self._empty_caption())
+        self.path_label.setText(self.current_path.name)
+        self.path_label.setToolTip(str(self.current_caption_path))
+        self._update_summary()
+        self._set_status("Deleted Ideogram JSON sidecar.", success=True)
+        self.image_viewer.refresh_ideogram_caption_overlays()
+        self.caption_saved.emit(self.current_caption_path)
+
     def focus_element_from_caption_panel(self, index: int):
         self.select_element(index)
         self.image_viewer.select_ideogram_element(index)
+
+    def show_from_caption_panel(self, index: int = -1):
+        self.show()
+        self.raise_()
+        if index >= 0:
+            QTimer.singleShot(
+                0,
+                lambda: self.focus_element_from_caption_panel(index),
+            )
 
     def create_caption_from_caption_panel(self):
         if self.current_image is None:
@@ -822,23 +1208,75 @@ class IdeogramCaptionEditor(QDockWidget):
         self.save_caption()
 
     def delete_elements_from_caption_panel(self, indices: list[int]):
+        self._delete_elements(indices)
+
+    def _delete_elements(self, indices: list[int]):
         try:
             caption = self._caption_from_editor()
         except (IdeogramCaptionError, json.JSONDecodeError):
             return
-        deleted = False
-        deleted_indices = sorted({int(index) for index in indices}, reverse=True)
-        for index in deleted_indices:
-            if 0 <= index < len(caption.elements):
-                caption.elements.pop(index)
-                deleted = True
-        if not deleted:
+        deleted_indices = sorted({
+            int(index)
+            for index in indices
+            if 0 <= int(index) < len(caption.elements)
+        }, reverse=True)
+        if not deleted_indices:
             return
+
+        linked_marking_indices: set[int] = set()
+        source_model = self._current_source_model()
+        dimensions = self.image_viewer.ideogram_canvas_dimensions()
+        sync_linked_markings = (
+            self.current_image is not None
+            and source_model is not None
+            and dimensions is not None
+            and settings.value(
+                'ideogram_sync_linked_markings',
+                DEFAULT_SETTINGS['ideogram_sync_linked_markings'],
+                type=bool,
+            )
+        )
+        if sync_linked_markings:
+            width, height = dimensions
+            for index in deleted_indices:
+                marking_index = self._linked_marking_index(
+                    caption.elements[index],
+                    width,
+                    height,
+                )
+                if marking_index is not None:
+                    linked_marking_indices.add(marking_index)
+        linked_markings = [
+            self.current_image.markings[index]
+            for index in sorted(linked_marking_indices)
+        ] if self.current_image is not None else []
+        if linked_markings:
+            source_model.add_image_to_undo_stack(
+                self.current_image,
+                action_name='Delete linked Ideogram region and marking',
+                should_ask_for_confirmation=False,
+            )
+
+        for index in deleted_indices:
+            caption.elements.pop(index)
         for index in deleted_indices:
             self._remove_manual_palette_index(index)
         self._selected_element_index = None
         self.element_container.hide()
-        self._apply_caption_edit(caption, action_name="Delete Ideogram region")
+        self._apply_caption_edit(
+            caption,
+            action_name=(
+                None if linked_markings else 'Delete Ideogram region'
+            ),
+        )
+        if linked_markings:
+            self.current_image.markings = [
+                marking
+                for marking_index, marking in enumerate(self.current_image.markings)
+                if marking_index not in linked_marking_indices
+            ]
+            source_model.write_meta_to_disk(self.current_image)
+            self.image_viewer.remove_marking_overlays(linked_markings)
 
     def copy_elements_from_overlay(self, indices: list[int]):
         try:
@@ -1043,9 +1481,16 @@ class IdeogramCaptionEditor(QDockWidget):
         self.element_desc_edit.blockSignals(desc_blocked)
         self.element_text_edit.setText(element.text or "")
         self.element_palette_edit.setText(", ".join(element.color_palette))
-        self.element_text_edit.setVisible(element.type == "text")
+        self.element_text_field.setVisible(element.type == "text")
         self._refresh_palette_candidates(element)
         self.element_container.show()
+        if self.isVisible():
+            QTimer.singleShot(
+                0,
+                lambda: self.content_scroll.ensureWidgetVisible(
+                    self.element_container, 0, 12
+                ),
+            )
 
     def update_element_geometry(self, index: int, rect):
         if self.current_image is None:
@@ -1059,6 +1504,29 @@ class IdeogramCaptionEditor(QDockWidget):
         except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
             return
         width, height = dimensions
+        linked_marking_index = self._linked_marking_index(
+            element,
+            width,
+            height,
+        )
+        source_model = self._current_source_model()
+        sync_linked_marking = (
+            linked_marking_index is not None
+            and source_model is not None
+            and settings.value(
+                'ideogram_sync_linked_markings',
+                DEFAULT_SETTINGS['ideogram_sync_linked_markings'],
+                type=bool,
+            )
+        )
+        old_marking = None
+        if sync_linked_marking:
+            old_marking = self.current_image.markings[linked_marking_index]
+            source_model.add_image_to_undo_stack(
+                self.current_image,
+                action_name='Move linked Ideogram region and marking',
+                should_ask_for_confirmation=False,
+            )
         element.bbox = pixel_rect_to_bbox(
             rect.x(), rect.y(), rect.width(), rect.height(), width, height
         )
@@ -1067,13 +1535,98 @@ class IdeogramCaptionEditor(QDockWidget):
         self._apply_caption_edit(
             caption,
             refresh_overlays=False,
-            action_name="Move Ideogram region",
+            action_name=(
+                None if sync_linked_marking else "Move Ideogram region"
+            ),
         )
+        if sync_linked_marking and old_marking is not None:
+            final_x, final_y, final_width, final_height = bbox_to_pixel_rect(
+                element.bbox,
+                width,
+                height,
+            )
+            new_rect = QRectF(
+                final_x,
+                final_y,
+                final_width,
+                final_height,
+            ).toAlignedRect()
+            new_marking = Marking(
+                label=old_marking.label,
+                type=old_marking.type,
+                rect=QRect(new_rect),
+                confidence=old_marking.confidence,
+            )
+            updated_markings = list(self.current_image.markings)
+            updated_markings[linked_marking_index] = new_marking
+            self.current_image.markings = updated_markings
+            source_model.write_meta_to_disk(self.current_image)
+            self.image_viewer.update_marking_overlay_geometry(
+                old_marking,
+                new_marking,
+            )
         if self._selected_element_index == index:
             self.element_palette_edit.setText(", ".join(element.color_palette))
             self._refresh_palette_candidates(element)
         self._selected_element_index = index
         self.image_viewer.select_ideogram_element(index)
+
+    def _linked_marking_index(
+        self,
+        element: IdeogramElement,
+        width: int,
+        height: int,
+    ) -> int | None:
+        if self.current_image is None or element.bbox is None:
+            return None
+        candidates = []
+        for marking_index, marking in enumerate(self.current_image.markings):
+            if marking.type in {ImageMarking.CROP, ImageMarking.NONE}:
+                continue
+            marking_rect = marking.rect.normalized()
+            marking_bbox = pixel_rect_to_bbox(
+                marking_rect.x(),
+                marking_rect.y(),
+                marking_rect.width(),
+                marking_rect.height(),
+                width,
+                height,
+            )
+            if all(
+                abs(marking_coord - element_coord) <= 1
+                for marking_coord, element_coord in zip(
+                    marking_bbox,
+                    element.bbox,
+                )
+            ):
+                candidates.append(marking_index)
+        if len(candidates) == 1:
+            return candidates[0]
+        normalized_description = str(element.desc or '').strip().casefold()
+        label_matches = [
+            marking_index
+            for marking_index in candidates
+            if str(
+                self.current_image.markings[marking_index].label or ''
+            ).strip().casefold() == normalized_description
+        ]
+        return label_matches[0] if len(label_matches) == 1 else None
+
+    def _current_source_model(self):
+        try:
+            proxy_index = self.image_viewer.proxy_image_index
+            proxy_model = proxy_index.model() if proxy_index.isValid() else None
+            source_model = proxy_model.sourceModel() if proxy_model is not None else None
+        except RuntimeError:
+            source_model = None
+        if source_model is not None:
+            return source_model
+        proxy_model = getattr(self.image_viewer, 'proxy_image_list_model', None)
+        return (
+            proxy_model.sourceModel()
+            if proxy_model is not None and hasattr(proxy_model, 'sourceModel')
+            else None
+        )
 
     def _update_selected_element_fields(self, *_, manual_palette: bool = False):
         index = self._selected_element_index
@@ -1097,7 +1650,7 @@ class IdeogramCaptionEditor(QDockWidget):
         )[:1]
         if manual_palette:
             self._manual_palette_indices.add(index)
-        self.element_text_edit.setVisible(element.type == "text")
+        self.element_text_field.setVisible(element.type == "text")
         self._apply_caption_edit(caption, action_name="Edit Ideogram element")
         self._refresh_palette_candidates(element)
 
@@ -1259,15 +1812,7 @@ class IdeogramCaptionEditor(QDockWidget):
         index = self._selected_element_index
         if index is None:
             return
-        try:
-            caption = self._caption_from_editor()
-            caption.elements.pop(index)
-        except (IdeogramCaptionError, json.JSONDecodeError, IndexError):
-            return
-        self._remove_manual_palette_index(index)
-        self._selected_element_index = None
-        self.element_container.hide()
-        self._apply_caption_edit(caption, action_name="Delete Ideogram region")
+        self._delete_elements([index])
 
     def _should_auto_update_palette(self, index: int) -> bool:
         return int(index) not in self._manual_palette_indices
@@ -1348,20 +1893,7 @@ class IdeogramCaptionEditor(QDockWidget):
     def _add_ideogram_undo(self, action_name: str):
         if self.current_image is None or self.current_path is None:
             return
-        source_model = None
-        try:
-            proxy_index = self.image_viewer.proxy_image_index
-            proxy_model = proxy_index.model() if proxy_index.isValid() else None
-            source_model = proxy_model.sourceModel() if proxy_model is not None else None
-        except RuntimeError:
-            source_model = None
-        if source_model is None:
-            proxy_model = getattr(self.image_viewer, 'proxy_image_list_model', None)
-            source_model = (
-                proxy_model.sourceModel()
-                if proxy_model is not None and hasattr(proxy_model, 'sourceModel')
-                else None
-            )
+        source_model = self._current_source_model()
         if source_model is None:
             return
         add_undo = getattr(source_model, 'add_ideogram_sidecar_to_undo_stack', None)
@@ -1581,7 +2113,10 @@ class IdeogramCaptionEditor(QDockWidget):
 
     def _set_controls_enabled(self, enabled: bool):
         self.editor.setEnabled(enabled)
+        self.details_container.setEnabled(enabled)
+        self.element_container.setEnabled(enabled)
         self.from_markings_button.setEnabled(enabled)
+        self.details_button.setEnabled(enabled)
         self.json_toggle_button.setEnabled(enabled)
         self.more_button.setEnabled(enabled)
         for action in (
@@ -1590,6 +2125,7 @@ class IdeogramCaptionEditor(QDockWidget):
             self.add_text_action,
             self.save_action,
             self.reload_action,
+            self.delete_json_action,
             self.import_action,
             self.format_action,
             self.copy_action,
@@ -1607,33 +2143,45 @@ class IdeogramCaptionEditor(QDockWidget):
         error: bool = False,
     ):
         if self.current_path is None:
+            self._has_caption = False
             self.summary_label.setText(
                 "Select an image to inspect its caption."
             )
+            self._set_save_state("No media", "idle")
+            self._update_action_labels()
             return
         if error:
+            self._has_caption = bool(self.editor.toPlainText().strip())
             self.summary_label.setText(
-                "Caption JSON needs attention. The file on disk was not "
-                "overwritten."
+                "Caption JSON needs attention; the disk file was not overwritten."
             )
+            self._set_save_state("Invalid", "error")
+            self._update_action_labels()
             return
         if caption is None:
+            self._has_caption = False
             self.summary_label.setText(
-                "No structured caption yet. Add current markings or create "
-                "a blank caption from More."
+                "No structured caption yet."
             )
+            self._set_save_state("No caption", "idle")
+            self._update_action_labels()
             return
+        self._has_caption = True
         object_count = sum(
             element.type == "obj" for element in caption.elements
         )
         text_count = sum(
             element.type == "text" for element in caption.elements
         )
-        state = "Unsaved draft" if draft else "Caption ready"
         self.summary_label.setText(
-            f"{state}  •  {len(caption.elements)} elements  •  "
+            f"{len(caption.elements)} elements  •  "
             f"{object_count} objects  •  {text_count} text"
         )
+        self._set_save_state(
+            "Saving..." if draft else "Saved",
+            "saving" if draft else "saved",
+        )
+        self._update_action_labels()
 
     def _set_status(
         self,
@@ -1646,6 +2194,10 @@ class IdeogramCaptionEditor(QDockWidget):
         self.status_label.setStyleSheet(f"color: {color};")
         self.status_label.setText(text)
         self.status_label.setVisible(bool(text))
+        if text and success:
+            self.status_clear_timer.start()
+        else:
+            self.status_clear_timer.stop()
 
 
 def _greatest_common_divisor(a: int, b: int) -> int:
