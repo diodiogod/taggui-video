@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-07-03
+
+### Added
+
+- Add pipelines, Ideogram workflow improvements, and ONNX GPU setup
+- Add the visual automation pipeline editor and pipeline runner for marking and caption workflows
+- Add a dedicated Ideogram tagging workspace and refine right-side tool layouts
+- Automatically use ONNX Runtime GPU when CUDA is available, with CPU fallback when it is not
+
+### Changed
+
+- Improve Ideogram 4 caption editing, JSON repair, region syncing, and tagging integration
+- Improve auto-marking model handling, including safer ONNX import and better per-model class mapping
 ## [1.4.0] - 2026-06-26
 
 ### Added
