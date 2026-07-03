@@ -294,6 +294,7 @@ class ImageTagsEditor(QDockWidget):
     ideogram_elements_delete_requested = Signal(list)
     ideogram_json_text_changed = Signal(str)
     ideogram_global_field_changed = Signal(str, str)
+    ideogram_editor_open_requested = Signal(int)
 
     HIGH_LEVEL_PLACEHOLDER = 'High-level description...'
     BACKGROUND_PLACEHOLDER = 'Background...'
@@ -315,6 +316,7 @@ class ImageTagsEditor(QDockWidget):
         self._ideogram_entries: list[tuple[str, int | None, str | None]] = []
         self._caption_mode = 'tags'
         self._ideogram_available = False
+        self._ideogram_has_media = False
         self._ideogram_json_dirty = False
 
         # Each `QDockWidget` needs a unique object name for saving its state.
@@ -489,7 +491,7 @@ class ImageTagsEditor(QDockWidget):
         self.tags_mode_button.clicked.connect(lambda: self.set_caption_mode('tags'))
         self.ideogram_mode_button.clicked.connect(lambda: self.set_caption_mode('ideogram'))
         self.create_ideogram_button.clicked.connect(
-            self.ideogram_caption_create_requested.emit
+            self._request_ideogram_caption_creation
         )
         self.ideogram_caption_list.selectionModel().currentChanged.connect(
             self._on_ideogram_caption_current_changed
@@ -573,6 +575,7 @@ class ImageTagsEditor(QDockWidget):
 
     def _set_ideogram_caption_chips_for_image(self, image: Image | None):
         self._loading_ideogram_chips = True
+        self._ideogram_has_media = image is not None
         self._ideogram_entries = []
         self.ideogram_tag_list_model.setStringList([])
         self.ideogram_json_text_edit.blockSignals(True)
@@ -619,12 +622,19 @@ class ImageTagsEditor(QDockWidget):
     def _set_ideogram_available(self, available: bool):
         self._ideogram_available = bool(available)
         self.ideogram_mode_button.setVisible(self._ideogram_available)
-        self.create_ideogram_button.hide()
+        self.create_ideogram_button.setVisible(
+            self._ideogram_has_media and not self._ideogram_available
+        )
         self._apply_caption_mode_title_style()
         if not self._ideogram_available and self._caption_mode == 'ideogram':
             self.set_caption_mode('tags')
         else:
             self._sync_caption_mode_widgets()
+
+    def _request_ideogram_caption_creation(self):
+        self.ideogram_caption_create_requested.emit()
+        if self._ideogram_available:
+            self.set_caption_mode('ideogram')
 
     def _apply_caption_mode_title_style(self):
         if not getattr(self, '_ideogram_available', False):
@@ -732,19 +742,34 @@ class ImageTagsEditor(QDockWidget):
         if not index.isValid():
             return
         row = index.row()
-        if row < 0 or row >= len(self._ideogram_entries):
-            return
-        kind, element_index, field = self._ideogram_entries[row]
-        if field is not None or element_index is None or kind not in {'object', 'text'}:
-            return
 
         self.ideogram_caption_list.setCurrentIndex(index)
-        target_type = 'text' if kind == 'object' else 'obj'
-        label = 'Convert to Text region' if target_type == 'text' else 'Convert to Object region'
         menu = QMenu(self.ideogram_caption_list)
-        action = menu.addAction(label)
+        open_action = menu.addAction('Open in Ideogram Caption Editor')
+        convert_action = None
+        element_index = None
+        target_type = None
+        if 0 <= row < len(self._ideogram_entries):
+            kind, element_index, field = self._ideogram_entries[row]
+            if (
+                field is None
+                and element_index is not None
+                and kind in {'object', 'text'}
+            ):
+                menu.addSeparator()
+                target_type = 'text' if kind == 'object' else 'obj'
+                label = (
+                    'Convert to Text region'
+                    if target_type == 'text'
+                    else 'Convert to Object region'
+                )
+                convert_action = menu.addAction(label)
         chosen = menu.exec(self.ideogram_caption_list.viewport().mapToGlobal(position))
-        if chosen is action:
+        if chosen is open_action:
+            self.ideogram_editor_open_requested.emit(
+                int(element_index) if element_index is not None else -1
+            )
+        elif chosen is convert_action and element_index is not None:
             self.ideogram_element_type_change_requested.emit(
                 int(element_index),
                 target_type,

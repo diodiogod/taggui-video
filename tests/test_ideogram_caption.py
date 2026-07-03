@@ -325,3 +325,16 @@ def test_build_prompt_seeds_taggui_markings(tmp_path):
     assert seeds[0].desc == "face"
     assert seeds[0].bbox == (200, 100, 600, 400)
     assert "Preserve these locked regions" in prompt
+
+
+def test_custom_prompt_keeps_locked_region_context(tmp_path):
+    image = _FakeImage(tmp_path / "sample.png")
+
+    prompt, _seeds = build_ideogram_caption_prompt(
+        image,
+        user_prompt="Describe facial details precisely.",
+    )
+
+    assert "Preserve these locked regions" in prompt
+    assert "User guidance:" in prompt
+    assert "Describe facial details precisely." in prompt

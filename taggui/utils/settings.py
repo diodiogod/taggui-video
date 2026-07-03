@@ -74,6 +74,7 @@ DEFAULT_SETTINGS = {
     'trusted_marking_models_json': '{}',
     'show_ideogram_caption_overlays': True,
     'ideogram_sync_linked_markings': True,
+    'ideogram_caption_ui_zoom': 100,
     'ideogram_overlay_font_size': 11,
     'ideogram_overlay_font_weight': 'Black',
     'ideogram_overlay_text_outline_px': 2,

@@ -361,6 +361,9 @@ class SignalManager:
         image_tags_editor.ideogram_caption_create_requested.connect(
             self.main_window.ideogram_caption_editor.create_caption_from_caption_panel
         )
+        image_tags_editor.ideogram_editor_open_requested.connect(
+            self.main_window.ideogram_caption_editor.show_from_caption_panel
+        )
 
     def connect_all_tags_editor_signals(self):
         """Connect all tags editor-related signals."""

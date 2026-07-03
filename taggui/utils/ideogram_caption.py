@@ -425,8 +425,18 @@ def build_ideogram_caption_prompt(
             "- Do not use markdown or commentary."
         ),
     ]
-    if extra:
+    if extra and _PROMPT_PLACEHOLDER_PATTERN.search(extra):
         sections.append(_render_user_ideogram_prompt(extra, aspect_ratio, locked))
+    else:
+        context = _render_user_ideogram_prompt(
+            "{aspect_ratio_section}{locked_regions_section}",
+            aspect_ratio,
+            locked,
+        )
+        if context:
+            sections.append(context)
+        if extra:
+            sections.append(_render_user_ideogram_prompt(extra, None, []))
     return "\n\n".join(sections), seed_elements
 
 
@@ -443,7 +453,7 @@ def _render_user_ideogram_prompt(
         ),
         "locked_regions_section": (
             "\n\nLocked regions:\n"
-            "- Preserve these regions in this exact order.\n"
+            "- Preserve these locked regions in this exact order.\n"
             "- Preserve their bbox coordinates exactly.\n"
             "- Treat each label as the semantic identity of its region.\n"
             "- Expand each label into a richer visual description, but keep "

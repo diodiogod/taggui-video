@@ -74,7 +74,8 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_list_masonry_completion_service.py`: Masonry completion handler (height reconciliation, anchoring, async UI apply).
 - `image_list_dock.py`: `ImageList` dock widget (toolbar/filter/status integration).
 - `image_viewer.py`: Main image/video preview viewer.
-- `image_tags_editor.py`: Tag editing panel for current media.
+- `image_tags_editor.py`: Tag editing panel plus quick Ideogram caption list/JSON editing, caption creation, and full-editor handoff.
+- `ideogram_caption_editor.py`: Responsive structured-caption inspector with scene/element editing, palettes, autosave state, raw JSON, and persistent Ctrl+wheel UI zoom.
 - `all_tags_editor.py`: Bulk/all-tags editor.
 - `auto_captioner.py`: Auto-caption UI integration.
 - `auto_markings.py`: Responsive auto-marking panel with persistent Ctrl+wheel UI zoom, model picker, class-to-label/action mapping, advanced inference controls, and run status/log UI.
@@ -126,6 +127,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `video/validator.py`: Video validation helpers.
 - `video/common.py`: Shared video utility functions.
 - `sidecar.py`: Canonical TagGUI sidecar path rules, legacy JSON fallback, and sidecar copy/restore helpers.
+- `ideogram_caption.py`: Ideogram 4 schema models, validation, sidecar I/O, locked-region prompt construction, merging, and JSONL export.
 - `icons.py`: Icon loading helpers.
 - `grid.py`: Grid helpers.
 - `crop_applier.py`: Crop application utilities.
