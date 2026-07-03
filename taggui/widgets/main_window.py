@@ -10243,6 +10243,7 @@ class MainWindow(QMainWindow):
             {"id": "media_viewer", "label": "Media Viewer"},
             {"id": "tagging", "label": "Tagging"},
             {"id": "marking", "label": "Image Marking"},
+            {"id": "ideogram_tagging", "label": "Ideogram Tagging"},
             {"id": "video_prep", "label": "Video Prep"},
             {"id": "auto_captioning", "label": "Auto Captioning"},
             {"id": "full_masonry", "label": "Full Masonry"},
@@ -10373,6 +10374,16 @@ class MainWindow(QMainWindow):
                 "auto_captioner": False,
                 "auto_markings": True,
                 "ideogram_caption_editor": False,
+                "pipeline_editor": True,
+            },
+            "ideogram_tagging": {
+                "toolbar": True,
+                "image_list": True,
+                "image_tags_editor": True,
+                "all_tags_editor": True,
+                "auto_captioner": False,
+                "auto_markings": False,
+                "ideogram_caption_editor": True,
                 "pipeline_editor": False,
             },
             "video_prep": {
@@ -10455,6 +10466,22 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     pass
+            elif workspace_id == "ideogram_tagging":
+                try:
+                    self.splitDockWidget(
+                        self.image_tags_editor,
+                        self.ideogram_caption_editor,
+                        Qt.Orientation.Vertical,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.tabifyDockWidget(
+                        self.ideogram_caption_editor,
+                        self.all_tags_editor,
+                    )
+                except Exception:
+                    pass
             else:
                 # Keep right-side tools grouped as tabs, but only tabify widgets
                 # that are visible in this workspace to avoid unstable hidden-dock
@@ -10499,6 +10526,18 @@ class MainWindow(QMainWindow):
                     [self.image_list, self.auto_markings],
                     [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
                     Qt.Orientation.Horizontal,
+                )
+            elif workspace_id == "ideogram_tagging":
+                self.ideogram_caption_editor.raise_()
+                self.resizeDocks(
+                    [self.image_list, self.image_tags_editor],
+                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
+                    Qt.Orientation.Horizontal,
+                )
+                self.resizeDocks(
+                    [self.image_tags_editor, self.ideogram_caption_editor],
+                    [max(190, int(self.height() * 0.40)), max(240, int(self.height() * 0.60))],
+                    Qt.Orientation.Vertical,
                 )
             elif workspace_id == "video_prep":
                 self.auto_captioner.raise_()

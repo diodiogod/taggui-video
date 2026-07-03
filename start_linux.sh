@@ -35,6 +35,7 @@ REFRESH_TORCH=0
 CUDA_OVERRIDE=""
 TORCH_VERSION="2.7.1"
 TORCHVISION_VERSION="0.22.1"
+ONNXRUNTIME_VERSION="1.22.0"
 APP_ARGS=()
 
 echo "Logging to $LOGFILE"
@@ -292,27 +293,61 @@ if [ $CLEAN_OLD -eq 1 ]; then
 fi
 
 echo "Verifying ONNX Runtime installation..."
-python -c "import onnxruntime" >/dev/null 2>&1 || {
-    echo "Repairing ONNX Runtime dependencies..."
-    pip install --upgrade --force-reinstall 'onnx>=1.16.0' 'onnxruntime==1.22.0' >> "$LOGFILE" 2>&1 || {
+ensure_onnxruntime() {
+    local onnx_package="onnxruntime"
+    if python -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
+        onnx_package="onnxruntime-gpu"
+    fi
+
+    if [ "$onnx_package" = "onnxruntime-gpu" ]; then
+        if python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); names={dist.metadata['Name'].lower() for dist in md.distributions()}; raise SystemExit(0 if 'CUDAExecutionProvider' in providers and 'onnxruntime-gpu' in names else 1)" >/dev/null 2>&1; then
+            return 0
+        fi
+    else
+        if python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); names={dist.metadata['Name'].lower() for dist in md.distributions()}; raise SystemExit(0 if 'onnxruntime' in names and 'CUDAExecutionProvider' not in providers else 1)" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    echo "Ensuring ${onnx_package} ${ONNXRUNTIME_VERSION}..."
+    pip uninstall -y onnxruntime onnxruntime-gpu >> "$LOGFILE" 2>&1 || true
+    pip install --upgrade 'onnx>=1.16.0' "${onnx_package}==${ONNXRUNTIME_VERSION}" >> "$LOGFILE" 2>&1 || {
         echo ""
         echo "======================================================"
-        echo "ERROR: Failed to repair ONNX Runtime dependencies"
+        echo "ERROR: Failed to install ${onnx_package}"
         echo "======================================================"
         echo "Check the log file for details: $LOGFILE"
         echo ""
         exit 1
     }
+
+    if [ "$onnx_package" = "onnxruntime-gpu" ]; then
+        if ! python -c "import onnxruntime as ort; raise SystemExit(0 if 'CUDAExecutionProvider' in ort.get_available_providers() else 1)" >/dev/null 2>&1; then
+            echo "WARNING: ONNX Runtime GPU installed but CUDA provider is unavailable. Falling back to CPU ONNX Runtime."
+            pip uninstall -y onnxruntime-gpu >> "$LOGFILE" 2>&1 || true
+            pip install --upgrade 'onnx>=1.16.0' "onnxruntime==${ONNXRUNTIME_VERSION}" >> "$LOGFILE" 2>&1 || {
+                echo ""
+                echo "======================================================"
+                echo "ERROR: Failed to fall back to CPU ONNX Runtime"
+                echo "======================================================"
+                echo "Check the log file for details: $LOGFILE"
+                echo ""
+                exit 1
+            }
+        fi
+    fi
+
     python -c "import onnxruntime" >/dev/null 2>&1 || {
         echo ""
         echo "======================================================"
-        echo "ERROR: ONNX Runtime is still broken after reinstall"
+        echo "ERROR: ONNX Runtime import failed after setup"
         echo "======================================================"
         echo "Check the log file for details: $LOGFILE"
         echo ""
         exit 1
     }
 }
+ensure_onnxruntime
 
 # Run TagGUI
 echo ""

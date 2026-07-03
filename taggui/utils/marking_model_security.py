@@ -18,6 +18,7 @@ from utils.settings import DEFAULT_SETTINGS, settings
 _CACHE_DIR = Path.home() / ".taggui_cache" / "marking_models"
 _TRUSTED_MODELS_SETTINGS_KEY = "trusted_marking_models_json"
 _KNOWN_MODEL_TASKS = ("semantic", "segment", "classify", "pose", "obb", "detect")
+_ONNXRUNTIME_LOGGER_QUIETED = False
 
 
 def list_marking_model_paths(models_directory_path: Path) -> list[Path]:
@@ -62,6 +63,7 @@ def configure_ultralytics_marking_runtime(model_path: Path):
     model_path = Path(model_path).expanduser()
     if model_path.suffix.lower() != ".onnx":
         return
+    _quiet_onnxruntime_warnings()
     try:
         from ultralytics.nn.backends import onnx as onnx_backend
     except Exception:
@@ -92,6 +94,23 @@ def configure_ultralytics_marking_runtime(model_path: Path):
 
     onnx_backend.check_requirements = safe_check_requirements
     onnx_backend._taggui_safe_requirements_patch = True
+
+
+def _quiet_onnxruntime_warnings():
+    global _ONNXRUNTIME_LOGGER_QUIETED
+    if _ONNXRUNTIME_LOGGER_QUIETED:
+        return
+    try:
+        import onnxruntime
+    except Exception:
+        return
+    try:
+        # Keep ONNX Runtime errors visible while suppressing provider warnings
+        # like the MemcpyTransformer CUDA message that clutters the console.
+        onnxruntime.set_default_logger_severity(3)
+    except Exception:
+        return
+    _ONNXRUNTIME_LOGGER_QUIETED = True
 
 
 def _infer_task_from_name(model_path: Path) -> str | None:

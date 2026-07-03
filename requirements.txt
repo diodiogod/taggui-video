@@ -32,7 +32,8 @@ numpy==2.2.6
 # WD Tagger
 huggingface-hub>=0.31.4
 onnx>=1.16.0
-onnxruntime==1.22.0
+# ONNX Runtime variant is installed by start_windows.bat / start_linux.sh.
+# They choose CPU or GPU automatically to match the detected Torch/CUDA setup.
 
 # ============================================
 # PyTorch stack - DO NOT ADD HERE

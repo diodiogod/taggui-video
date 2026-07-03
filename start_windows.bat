@@ -38,6 +38,7 @@ set CUDA_OVERRIDE=
 set APP_ARGS=
 set TORCH_VERSION=2.7.1
 set TORCHVISION_VERSION=0.22.1
+set ONNXRUNTIME_VERSION=1.22.0
 set NVIDIA_SMI_CMD=
 
 echo Logging to %LOGFILE%
@@ -372,30 +373,8 @@ if %CLEAN_OLD% EQU 1 (
 )
 
 echo Verifying ONNX Runtime installation...
-python -c "import onnxruntime" >nul 2>&1
-if !ERRORLEVEL! NEQ 0 (
-    echo Repairing ONNX Runtime dependencies...
-    pip install --upgrade --force-reinstall "onnx>=1.16.0" "onnxruntime==1.22.0" >> "%LOGFILE%" 2>&1
-    if !ERRORLEVEL! NEQ 0 (
-        echo.
-        echo ======================================================
-        echo ERROR: Failed to repair ONNX Runtime dependencies
-        echo ======================================================
-        echo Check the log file for details: %LOGFILE%
-        echo.
-        pause & exit /b 1
-    )
-    python -c "import onnxruntime" >nul 2>&1
-    if !ERRORLEVEL! NEQ 0 (
-        echo.
-        echo ======================================================
-        echo ERROR: ONNX Runtime is still broken after reinstall
-        echo ======================================================
-        echo Check the log file for details: %LOGFILE%
-        echo.
-        pause & exit /b 1
-    )
-)
+call :ensure_onnxruntime
+if !ERRORLEVEL! NEQ 0 exit /b 1
 
 :: Run TagGUI
 echo.
@@ -421,6 +400,70 @@ if not "%EXITCODE%"=="0" (
     pause
 )
 exit /b %EXITCODE%
+
+:ensure_onnxruntime
+set ONNX_PACKAGE=onnxruntime
+python -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
+if !ERRORLEVEL! EQU 0 set ONNX_PACKAGE=onnxruntime-gpu
+
+if /I "!ONNX_PACKAGE!"=="onnxruntime-gpu" (
+    python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); names={dist.metadata['Name'].lower() for dist in md.distributions()}; raise SystemExit(0 if 'CUDAExecutionProvider' in providers and 'onnxruntime-gpu' in names else 1)" >nul 2>&1
+) else (
+    python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); names={dist.metadata['Name'].lower() for dist in md.distributions()}; raise SystemExit(0 if 'onnxruntime' in names and 'CUDAExecutionProvider' not in providers else 1)" >nul 2>&1
+)
+if !ERRORLEVEL! EQU 0 exit /b 0
+
+set TAGGUI_PIP_TMP=%CD%\%VENV_PATH%\tmp_pip
+if not exist "!TAGGUI_PIP_TMP!" mkdir "!TAGGUI_PIP_TMP!" >nul 2>&1
+set TMP=!TAGGUI_PIP_TMP!
+set TEMP=!TAGGUI_PIP_TMP!
+
+if exist "%VENV_PATH%\Lib\site-packages\~nnxruntime-!ONNXRUNTIME_VERSION!.dist-info" (
+    rmdir /S /Q "%VENV_PATH%\Lib\site-packages\~nnxruntime-!ONNXRUNTIME_VERSION!.dist-info" >nul 2>&1
+)
+
+echo Ensuring !ONNX_PACKAGE! !ONNXRUNTIME_VERSION!...
+pip uninstall -y onnxruntime onnxruntime-gpu >> "%LOGFILE%" 2>&1
+pip install --upgrade "onnx>=1.16.0" "!ONNX_PACKAGE!==!ONNXRUNTIME_VERSION!" >> "%LOGFILE%" 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    echo.
+    echo ======================================================
+    echo ERROR: Failed to install !ONNX_PACKAGE!
+    echo ======================================================
+    echo Check the log file for details: %LOGFILE%
+    echo.
+    pause & exit /b 1
+)
+
+if /I "!ONNX_PACKAGE!"=="onnxruntime-gpu" (
+    python -c "import onnxruntime as ort; raise SystemExit(0 if 'CUDAExecutionProvider' in ort.get_available_providers() else 1)" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        echo WARNING: ONNX Runtime GPU installed but CUDA provider is unavailable. Falling back to CPU ONNX Runtime.
+        pip uninstall -y onnxruntime-gpu >> "%LOGFILE%" 2>&1
+        pip install --upgrade "onnx>=1.16.0" "onnxruntime==!ONNXRUNTIME_VERSION!" >> "%LOGFILE%" 2>&1
+        if !ERRORLEVEL! NEQ 0 (
+            echo.
+            echo ======================================================
+            echo ERROR: Failed to fall back to CPU ONNX Runtime
+            echo ======================================================
+            echo Check the log file for details: %LOGFILE%
+            echo.
+            pause & exit /b 1
+        )
+    )
+)
+
+python -c "import onnxruntime" >nul 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    echo.
+    echo ======================================================
+    echo ERROR: ONNX Runtime import failed after setup
+    echo ======================================================
+    echo Check the log file for details: %LOGFILE%
+    echo.
+    pause & exit /b 1
+)
+exit /b 0
 
 :resolve_nvidia_smi
 for /f "delims=" %%P in ('where nvidia-smi.exe 2^>nul') do (
