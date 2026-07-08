@@ -59,7 +59,8 @@ class VersionManager:
 
     def update_version_in_file(self, file_path: str, version: str) -> bool:
         relative_path = os.path.relpath(file_path, self.project_root)
-        config = self.version_files.get(relative_path)
+        normalized_relative_path = relative_path.replace("\\", "/")
+        config = self.version_files.get(normalized_relative_path)
         if config is None:
             print(f"Warning: {relative_path} is not configured for version updates")
             return False

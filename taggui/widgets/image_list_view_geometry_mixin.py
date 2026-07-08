@@ -1547,6 +1547,17 @@ class ImageListViewGeometryMixin:
             and self._drag_to_external_only_mode()
         )
         indices = [model_index]
+        if external_only:
+            try:
+                selected_indices = [
+                    index
+                    for index in self.selectedIndexes()
+                    if index.isValid() and index.column() == model_index.column()
+                ]
+            except Exception:
+                selected_indices = []
+            if any(index == model_index for index in selected_indices):
+                indices = selected_indices
         dragged_index = QPersistentModelIndex(model_index)
         dragged_path = None
         try:
@@ -1568,9 +1579,29 @@ class ImageListViewGeometryMixin:
 
         # Use an URLs-only payload for external file drags. Some targets (notably
         # browsers) mis-handle the model's text/plain fallback as dropped text.
-        if external_only and external_drag_path is not None:
-            mime_data = QMimeData()
-            mime_data.setUrls([QUrl.fromLocalFile(str(external_drag_path))])
+        if external_only:
+            external_drag_urls = []
+            if hasattr(self, "_external_drag_path_for_image_path"):
+                for index in indices:
+                    try:
+                        image = index.data(Qt.ItemDataRole.UserRole)
+                        image_path = getattr(image, "path", None)
+                    except Exception:
+                        image_path = None
+                    try:
+                        export_path = self._external_drag_path_for_image_path(image_path)
+                    except Exception:
+                        export_path = image_path
+                    if export_path is not None:
+                        external_drag_urls.append(QUrl.fromLocalFile(str(export_path)))
+            elif external_drag_path is not None:
+                external_drag_urls.append(QUrl.fromLocalFile(str(external_drag_path)))
+
+            if external_drag_urls:
+                mime_data = QMimeData()
+                mime_data.setUrls(external_drag_urls)
+            else:
+                mime_data = None
         else:
             mime_data = self.model().mimeData(indices)
         if not mime_data:

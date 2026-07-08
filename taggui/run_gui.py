@@ -296,24 +296,53 @@ def _parse_startup_launch_args(
         else:
             print(f"[STARTUP] Limited folder view requested: {load_options.describe()}")
 
+    def _normalize_target_text(value: str) -> str:
+        text = str(value or '').strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+            return text[1:-1].strip()
+        if text.endswith('"') and '"' not in text[:-1]:
+            return text[:-1].strip()
+        if text.endswith("'") and "'" not in text[:-1]:
+            return text[:-1].strip()
+        return text
+
+    non_flag_extras = [str(extra) for extra in extras if not str(extra).startswith('--')]
     raw_target = parsed.open_target or parsed.target
-    if raw_target is None and extras:
-        raw_target = next((extra for extra in extras if not str(extra).startswith('--')), None)
-    if not raw_target:
+    candidate_targets: list[str] = []
+    if raw_target:
+        if non_flag_extras:
+            candidate_targets.append(" ".join([str(raw_target), *non_flag_extras]))
+        candidate_targets.append(str(raw_target))
+    elif non_flag_extras:
+        candidate_targets.append(" ".join(non_flag_extras))
+        candidate_targets.extend(non_flag_extras)
+
+    seen_targets: set[str] = set()
+    candidate_targets = [
+        normalized
+        for normalized in (_normalize_target_text(value) for value in candidate_targets)
+        if normalized and not (normalized in seen_targets or seen_targets.add(normalized))
+    ]
+    if not candidate_targets:
         return None, None, bool(parsed.reuse_instance), load_options
 
-    candidate = Path(raw_target).expanduser()
-    try:
-        candidate = candidate.resolve()
-    except Exception:
-        candidate = candidate.absolute()
+    for target_text in candidate_targets:
+        candidate = Path(target_text).expanduser()
+        try:
+            candidate = candidate.resolve()
+        except Exception:
+            candidate = candidate.absolute()
 
-    if candidate.is_dir():
-        return candidate, None, bool(parsed.reuse_instance), load_options
-    if candidate.is_file():
-        return candidate.parent, str(candidate), bool(parsed.reuse_instance), load_options
+        if candidate.is_dir():
+            if raw_target and target_text != _normalize_target_text(str(raw_target)):
+                print(f"[STARTUP] Reconstructed split startup target: {target_text}")
+            return candidate, None, bool(parsed.reuse_instance), load_options
+        if candidate.is_file():
+            if raw_target and target_text != _normalize_target_text(str(raw_target)):
+                print(f"[STARTUP] Reconstructed split startup target: {target_text}")
+            return candidate.parent, str(candidate), bool(parsed.reuse_instance), load_options
 
-    print(f"[STARTUP] Ignoring missing startup target: {raw_target}")
+    print(f"[STARTUP] Ignoring missing startup target: {candidate_targets[0]}")
     return None, None, bool(parsed.reuse_instance), load_options
 
 

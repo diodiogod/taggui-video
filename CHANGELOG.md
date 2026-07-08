@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-07-08
+
+### Added
+
+- Roll up the latest TagGUI improvements
+- Alt-drag from the image list now sends every selected file to external apps instead of only the clicked image
+- Documentation, launcher, packaging, and bundled assets are refreshed for the current release
+- The current batch of UI, workflow, captioning, startup, and playback improvements is now published together
 ## [1.4.1] - 2026-07-03
 
 ### Added

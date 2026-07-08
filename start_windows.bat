@@ -59,28 +59,9 @@ if !ERRORLEVEL! NEQ 0 (
 
 echo Found Python
 
-:: Parse command line arguments
-for %%A in (%*) do (
-    set FORWARD_ARG=1
-    if /I "%%~A"=="--skip-git" set SKIP_GIT=1
-    if /I "%%~A"=="--skip-git" set FORWARD_ARG=0
-    if /I "%%~A"=="--clear-cache" set CLEAR_CACHE=1
-    if /I "%%~A"=="--clear-cache" set FORWARD_ARG=0
-    if /I "%%~A"=="--clean-old" set CLEAN_OLD=1
-    if /I "%%~A"=="--clean-old" set FORWARD_ARG=0
-    if /I "%%~A"=="--refresh-torch" set REFRESH_TORCH=1
-    if /I "%%~A"=="--refresh-torch" set FORWARD_ARG=0
-    if /I "%%~A"=="--crash-log" set ENABLE_CRASH_DIAG=1
-    if /I "%%~A"=="--crash-log" set FORWARD_ARG=0
-    if /I "%%~A"=="--no-crash-log" set ENABLE_CRASH_DIAG=0
-    if /I "%%~A"=="--no-crash-log" set FORWARD_ARG=0
-    set ARG=%%~A
-    if /I "!ARG:~0,7!"=="--cuda=" (
-        set CUDA_OVERRIDE=!ARG:~7!
-        set FORWARD_ARG=0
-    )
-    if !FORWARD_ARG! EQU 1 set APP_ARGS=!APP_ARGS! "%%~A"
-)
+:: Parse command line arguments.
+:: Use SHIFT instead of FOR so quoted folder paths survive intact.
+call :parse_args %*
 
 call :resolve_nvidia_smi
 
@@ -464,6 +445,30 @@ if !ERRORLEVEL! NEQ 0 (
     pause & exit /b 1
 )
 exit /b 0
+
+:parse_args
+if "%~1"=="" exit /b 0
+set FORWARD_ARG=1
+if /I "%~1"=="--skip-git" set SKIP_GIT=1
+if /I "%~1"=="--skip-git" set FORWARD_ARG=0
+if /I "%~1"=="--clear-cache" set CLEAR_CACHE=1
+if /I "%~1"=="--clear-cache" set FORWARD_ARG=0
+if /I "%~1"=="--clean-old" set CLEAN_OLD=1
+if /I "%~1"=="--clean-old" set FORWARD_ARG=0
+if /I "%~1"=="--refresh-torch" set REFRESH_TORCH=1
+if /I "%~1"=="--refresh-torch" set FORWARD_ARG=0
+if /I "%~1"=="--crash-log" set ENABLE_CRASH_DIAG=1
+if /I "%~1"=="--crash-log" set FORWARD_ARG=0
+if /I "%~1"=="--no-crash-log" set ENABLE_CRASH_DIAG=0
+if /I "%~1"=="--no-crash-log" set FORWARD_ARG=0
+set "ARG=%~1"
+if /I "%ARG:~0,7%"=="--cuda=" (
+    set "CUDA_OVERRIDE=%ARG:~7%"
+    set FORWARD_ARG=0
+)
+if %FORWARD_ARG% EQU 1 set APP_ARGS=%APP_ARGS% "%~1"
+shift
+goto parse_args
 
 :resolve_nvidia_smi
 for /f "delims=" %%P in ('where nvidia-smi.exe 2^>nul') do (

@@ -29,21 +29,41 @@ def _resolve_target(raw_target: str) -> tuple[Path | None, str | None]:
 def _launch_new_instance(directory_path: Path, select_path: str | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     if sys.platform.startswith('win'):
-        launcher = repo_root / 'start_windows.bat'
+        helper = repo_root / 'scripts' / 'windows' / 'open_in_new_taggui.ps1'
         creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     else:
         launcher = repo_root / 'start_linux.sh'
         creation_flags = 0
-    if not launcher.is_file():
+    if sys.platform.startswith('win'):
+        if not helper.is_file():
+            return 1
+    elif not launcher.is_file():
         return 1
 
     target_arg = str(select_path or directory_path)
     try:
-        subprocess.Popen(
-            [str(launcher), target_arg],
-            cwd=str(repo_root),
-            creationflags=creation_flags,
-        )
+        if sys.platform.startswith('win'):
+            subprocess.Popen(
+                [
+                    'powershell.exe',
+                    '-NoProfile',
+                    '-ExecutionPolicy',
+                    'Bypass',
+                    '-WindowStyle',
+                    'Hidden',
+                    '-File',
+                    str(helper),
+                    target_arg,
+                ],
+                cwd=str(repo_root),
+                creationflags=creation_flags,
+            )
+        else:
+            subprocess.Popen(
+                [str(launcher), target_arg],
+                cwd=str(repo_root),
+                creationflags=creation_flags,
+            )
     except Exception:
         return 1
     return 0

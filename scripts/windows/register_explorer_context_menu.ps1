@@ -66,6 +66,7 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $startBat = Join-Path $repoRoot 'start_windows.bat'
 $pythonExe = Resolve-RepoPython -RepoRoot $repoRoot
 $sendScript = Join-Path $repoRoot 'taggui\send_open_request.py'
+$openNewScript = Join-Path $repoRoot 'scripts\windows\open_in_new_taggui.ps1'
 $iconPath = Join-Path $repoRoot 'images\icon.ico'
 
 if (-not (Test-Path -LiteralPath $startBat -PathType Leaf)) {
@@ -73,6 +74,9 @@ if (-not (Test-Path -LiteralPath $startBat -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $sendScript -PathType Leaf)) {
     throw "Could not find current-window helper at '$sendScript'."
+}
+if (-not (Test-Path -LiteralPath $openNewScript -PathType Leaf)) {
+    throw "Could not find new-window helper at '$openNewScript'."
 }
 if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
     $iconPath = $startBat
@@ -84,9 +88,9 @@ $backgroundCurrentKey = 'HKCU:\Software\Classes\Directory\Background\shell\TagGU
 $backgroundNewKey = 'HKCU:\Software\Classes\Directory\Background\shell\TagGUI.NewWindow'
 
 $folderCurrentCommand = '"{0}" "{1}" "%1"' -f $pythonExe, $sendScript
-$folderNewCommand = 'cmd.exe /c "cd /d ""{0}"" && call ""{1}"" ""%1"""' -f $repoRoot, $startBat
+$folderNewCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" "%1"' -f $openNewScript
 $backgroundCurrentCommand = '"{0}" "{1}" "%V"' -f $pythonExe, $sendScript
-$backgroundNewCommand = 'cmd.exe /c "cd /d ""{0}"" && call ""{1}"" ""%V"""' -f $repoRoot, $startBat
+$backgroundNewCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" "%V"' -f $openNewScript
 
 Register-DirectCommand `
     -VerbKey $folderCurrentKey `
