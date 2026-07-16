@@ -2805,14 +2805,20 @@ class ImageIndexDB:
                 return
 
     def close(self):
-        """Close database connection."""
-        if self.conn:
+        """Close the database connection after any in-flight operation finishes."""
+        with self._db_lock:
+            conn = self.conn
+            self.conn = None
+            if conn is None:
+                return
             try:
-                self.conn.commit()
-                self.conn.close()
+                conn.commit()
             except sqlite3.Error:
                 pass
-            self.conn = None
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def __del__(self):
         """Ensure connection is closed on deletion."""
@@ -4187,7 +4193,7 @@ class ImageIndexDB:
 
     def update_image_dimensions(self, file_name: str, width: int, height: int):
         """Persist dimensions for an existing DB row without disturbing other metadata."""
-        if not self.enabled or not self.conn:
+        if not self.enabled:
             return
 
         if not file_name:
@@ -4213,8 +4219,11 @@ class ImageIndexDB:
         aspect_ratio = width / height if height > 0 else 1.0
 
         with self._db_lock:
+            conn = self.conn
+            if conn is None:
+                return
             try:
-                cursor = self.conn.cursor()
+                cursor = conn.cursor()
                 cursor.execute(
                     '''
                     UPDATE images
@@ -4223,7 +4232,7 @@ class ImageIndexDB:
                     ''',
                     (width, height, aspect_ratio, normalized_file_name),
                 )
-                self.conn.commit()
+                conn.commit()
             except sqlite3.Error as e:
                 print(f'Database image dimension write error: {e}')
 

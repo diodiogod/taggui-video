@@ -3947,12 +3947,11 @@ class ImageListModel(QAbstractListModel):
         if not pages_to_reload and preloaded_pages:
             pages_to_reload = sorted(int(page_num) for page_num in preloaded_pages.keys())
 
-        if self._db is not None:
-            try:
-                self._db.close()
-            except Exception:
-                pass
-        self._db = ImageIndexDB(self._directory_path)
+        # The refresh worker committed through its own connection. Reuse the
+        # model's live wrapper so queued thumbnail metadata writes cannot race
+        # with closing and replacing its SQLite connection.
+        if self._db is None:
+            self._db = ImageIndexDB(self._directory_path)
 
         if self._active_load_options is not None:
             refreshed_scope_rel_paths = self._db.get_limited_paths(self._active_load_options)
@@ -4883,7 +4882,9 @@ class ImageListModel(QAbstractListModel):
                             pass
                 
                 # Update DB in background 
-                if self._db and self._save_executor:
+                db = self._db
+                save_executor = self._save_executor
+                if db is not None and save_executor is not None:
                     relative_path = None
                     try:
                         if self._directory_path:
@@ -4891,8 +4892,11 @@ class ImageListModel(QAbstractListModel):
                     except Exception:
                         relative_path = None
                     persist_key = relative_path or str(image.path)
-                    self._save_executor.submit(
-                        lambda key=persist_key, w=width, h=height: self._db.update_image_dimensions(key, w, h)
+                    save_executor.submit(
+                        db.update_image_dimensions,
+                        persist_key,
+                        width,
+                        height,
                     )
 
                 # Trigger debounced dimension update signal so masonry refreshes smoothly.
@@ -5843,12 +5847,11 @@ class ImageListModel(QAbstractListModel):
             and bool(result.get('db_synced'))
             and self._active_load_options is None
         ):
-            if self._db is not None:
-                try:
-                    self._db.close()
-                except Exception:
-                    pass
-            self._db = ImageIndexDB(self._directory_path)
+            # The validation worker committed through a separate connection;
+            # the existing wrapper can observe those commits without being
+            # closed underneath page and thumbnail workers.
+            if self._db is None:
+                self._db = ImageIndexDB(self._directory_path)
             snapshot_matches = (
                 str(result.get('filter_sql') or '') == str(self._filter_sql or '')
                 and tuple(result.get('filter_bindings') or ()) == tuple(self._filter_bindings or ())
