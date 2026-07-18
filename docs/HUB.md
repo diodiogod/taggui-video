@@ -40,5 +40,6 @@ This is the main documentation map for TagGUI Video 1M.
 ## Technical References
 
 - [Startup Flags](STARTUP_FLAGS.md)
+- [Performance Architecture and Verification](PERFORMANCE_OPTIMIZATIONS.md)
 - [Skin README](../taggui/skins/README.md)
 - [Skin Property Reference](../taggui/skins/PROPERTY_REFERENCE.md)

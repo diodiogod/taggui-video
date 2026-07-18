@@ -1,0 +1,85 @@
+# Performance Audit Diary — 2026-07-17
+
+- Extended the audit window by another 30 minutes at the user's request (18:15 BRT); continued on the same isolated branch and repository-only scope.
+- Created `codex/performance-audit-20260717` from the current local `main` state to isolate all audit work.
+- Loaded the project index and identified startup, masonry, paginated model, thumbnail cache, image viewer, and video player paths as the primary audit scope.
+- Measured the hidden main-window import phase: ~14.0 s warm, with ~11.6 s caused by eager auto-captioning imports (`torch`, `transformers`, `torchvision`, and adapters).
+- Reworked the auto-captioning registry and UI metadata checks to stay lightweight at startup and resolve concrete ML classes only when captioning begins.
+- Replaced eager `bitsandbytes` initialization with a package-presence check and removed a batch-dialog dependency on the full auto-captioner module.
+- Found two remaining eager paths through auto-marking and pipeline execution; deferred their worker imports until the user actually starts those operations.
+- Re-measured the clean-process main-window import at ~1.55 s versus ~14.0 s before (~89% faster); confirmed no ML framework or execution worker is loaded by a normal GUI import.
+- Profiled full offscreen construction: repeated spell dictionaries cost ~0.72 s across five editors, so highlighters now share one read-only dictionary per language.
+- Deferred `language_tool_python` until grammar checking is invoked; startup only needs its lightweight enums and availability flag.
+- Re-ran the isolated full-startup harness: total import + QApplication + MainWindow construction improved from ~4.45 s to ~2.30 s.
+- Added focused regression coverage for lazy dependency loading, metadata/class mapping, local WD model detection, and shared spell dictionaries.
+- Benchmarked the masonry worker at ~590–624 ms for 250K items and found per-item lambda scans plus a second dataclass-to-dict pass in the core loop.
+- Replaced the shortest/tallest-column lambdas with tie-compatible loops and emitted result dictionaries directly to reduce layout CPU and peak temporary memory.
+- Re-measured 250K-item masonry at ~256–287 ms (~54–57% faster) and added a regression test covering ties, invalid ratios, spacing, and spacer placement.
+- Audited image/video rendering and kept the existing backend timers, seek coalescing, mipmap cache, and main-viewer wiring unchanged because they are already specialized and broadly coupled.
+- Deferred construction of complex Pipeline step cards while its dock is hidden; profile data remains loaded and cards build on the first show.
+- Confirmed the hidden dock starts with zero cards and builds all six default cards when shown; isolated total startup measured ~1.72 s after this change.
+- Found auto-caption model availability was scanned three times for the same compact form; deduplicated form refreshes and deferred the initial decorative cache scan until the dock is shown.
+- Qt emits show events for every tabified dock during main-window display, so moved the decorative model-cache scan to a 1.2 s post-show timer to protect first paint.
+- Deferred `huggingface_hub` itself until the delayed cache scan, removing another optional network/cache library tree from GUI import.
+- Real adapter resolution exposed a lazy-load circular import; converted worker-only type references to `TYPE_CHECKING` imports in the base, worker, Remote, WD Tagger, and Phi adapters.
+- Removed runtime NumPy/Transformers imports used only by `ModelThread` annotations so clicking Start can construct and launch the worker without blocking the UI on framework imports.
+- Applied the same worker-thread boundary to auto-marking: Ultralytics and Torch now import inside model preload/device selection rather than during the Start-button handler.
+- Audited a saved 34K-image restore and found all three 1K-item pages were built synchronously (~2.55 s); changed bootstrap to expose page 0 immediately and warm pages 1–2 through the existing page executor.
+- Benchmarked the 1M test index: `COUNT(*)` took ~0.3 ms, while fetching all 1,000,055 paths took ~3.12 s and ~168 MiB peak Python memory.
+- Changed cached paginated startup to use the DB count and materialize paths only inside delayed background validation; non-paginated scan/freshness behavior remains unchanged.
+- Exercised the real 1,000,055-row test index: `load_directory` returned with page 0 usable in ~712 ms and pages 1–2 completed through the existing background executor.
+- Moved the unchanged-directory signature check ahead of background path loading, so stable folders skip the million-string allocation entirely; changed folders retain full reconciliation.
+- Reduced changed-folder validation memory by replacing the normalized path dict-of-lists plus copied key set with one canonical map while preserving duplicate winner/removal semantics.
+- Removed per-lookup `mkdir` calls from thumbnail cache reads; hash bucket directories are now created only on writes.
+- Microbenchmarked 20K cache-path lookups at ~54 ms without directory creation versus ~3.45 s with the former `mkdir` behavior on this Windows filesystem.
+- Replaced GUI-thread thumbnail cache probes that decoded every cached pixmap with existence-only checks, and stopped the preliminary preload scan once its 50-item decision threshold is reached.
+- Made completed thumbnail assignment O(1) when the submitted row is unchanged, retaining the path scan only as a correctness fallback after sorting/reordering.
+- Replaced worker-side future removal with post-registration completion callbacks, preventing fast cache hits from leaving stale futures and preventing old row tasks from removing newer ones.
+- Profiled a cold main-window import and found optional MPV/VLC probing loaded native DLLs even with the stable Qt backend selected; deferred those probes until an experimental backend or its settings status is requested.
+- Kept `VideoPlayer` construction runtime-light even when an experimental backend is saved; native probing now starts when a video is actually loaded, preserving the existing load/play behavior.
+- Made `utils.video` exports independent and deferred `VideoEditor` resolution until an editing command, avoiding frame/SAR/batch backend imports during callback wiring.
+- Deferred Settings, Export, Find/Replace, and Batch Reorder dialog imports until their menu commands; Settings alone previously added roughly 270 ms to clean GUI import.
+- Final clean-process main-window imports measured ~721–747 ms and loaded none of Torch, Transformers, MPV, or VLC.
+- Focused startup/masonry/pipeline/thumbnail integration suite passed 39 tests; all changed Python files compiled and the patch passed `git diff --check`.
+- Full suite result was 86 passed / 9 failed; every failure maps to an untouched baseline file (compare drag, masonry submission cadence, sidecar reconciliation, or strict scroll-domain expectations).
+- Audited entry-point media-runtime and Pillow codec bootstraps; kept the cheap idempotent runtime-path discovery and codec registration because they establish DLL/decoder availability before saved-folder restoration.
+- Measured the real `run_gui` import boundary at ~702–761 ms across clean processes, again with no ML framework or optional MPV/VLC Python runtime loaded.
+- Revalidated real lazy adapter resolution after the final import changes: Remote, WD Tagger, Qwen VL, Florence PromptGen, and XComposer all resolved to their expected concrete classes.
+- Confirmed both deferred experimental playback probes still resolve successfully on demand (MPV and VLC), while player construction keeps them unloaded.
+- Considered moving the Hugging Face cache scan fully off-thread, but left it as a delayed UI task because its current helpers and combo-box updates share mutable Qt/cache state; that deserves a separately tested worker/result boundary rather than a late unsafe change.
+- Restored the original XComposer UI availability gate with `find_spec('gptqmodel')`; explicit saved IDs remain resolvable, but unavailable choices are no longer newly exposed.
+- The repository's ignored `test-1m-images` index was opened by the current app and migrated from DB v9 to v11 during benchmarking; no media files or system files were deleted or modified.
+- Completed the user-extended audit window after 18:45 BRT with the branch isolated, patch whitespace-clean, and no staging, commit, push, or system-level changes.
+- Started a second 30-minute audit pass at 20:21 BRT on the same isolated branch and repository-only scope.
+- Profiled unshown `MainWindow` construction at ~546–609 ms without profiler overhead; eager video-skin catalog parsing remained a repeatable ~70–98 ms cost.
+- Changed startup video controls to parse only the selected skin; the complete YAML catalog still refreshes when the skin menu is opened.
+- Deferred creation of the shared spell dictionary until non-empty text is highlighted or queried; empty descriptive editors no longer pay its ~100–140 ms startup cost.
+- Kept saved prompt text unhighlighted until its editor receives focus, so constructing the hidden auto-caption form does not immediately force the shared spell dictionary to load.
+- Reused the existing spawned-viewer `video_components_ready` wiring for the main viewer; player, controls, overlays, and QMedia objects now construct on the first video instead of every image-only startup.
+- Exercised the lazy main viewer with a generated temporary MP4: first-video creation emitted/wired controls correctly and the clip loaded through the existing MPV fallback path.
+- Re-measured the combined unshown constructor at ~289–350 ms; the spell dictionary stayed unloaded and the player/controls remained absent.
+- Deferred the `video_player` and `video_controls` module imports themselves, so an image-only startup no longer imports Qt Multimedia, video backends, skin YAML, or their widget classes.
+- Deferred the comparison-window module until an A/B comparison is requested; its shared video controls no longer pull the skin stack into normal startup.
+- Found OpenCV imported globally by `ImageListModel` for rare fallback/video paths; moving it to those call sites reduced fresh `MainWindow` import from ~513–680 ms to ~365–384 ms after warm-up.
+- Deferred `exifread` and `imagesize` until directory metadata work begins; their isolated import cost was ~80 ms and ~20 ms respectively, and the work still occurs inside existing load/enrichment paths.
+- Deferred the multiprocessing process-pool stack until changed-subtree scanning creates its executor; normal startup and basic image use only retain the existing thread pools.
+- Deferred prompt-history and multi-image confirmation dialog modules until their corresponding caption/marking commands.
+- Deferred fullscreen-host and secondary-browser modules until those features are opened; saved secondary-browser restoration still creates it through the same on-demand method.
+- Stopped masonry cache misses from creating the cache directory; the directory is now created only before an asynchronous cache write.
+- Verified the deferred metadata modules and subtree `ProcessPoolExecutor` still resolve correctly on their first real request.
+- Final clean-process import + `QApplication` + unshown `MainWindow` measurements were ~801–866 ms after warm-up (one colder run ~929 ms), versus ~2.30 s at the comparable first-pass checkpoint.
+- After the final command-only module deferrals and filesystem warm-up, three additional import + constructor runs measured ~699–781 ms (plus ~8 ms for `QApplication`) with all audited heavy modules still absent.
+- Profiled the remaining hidden Auto-Captioner cost (~69–75 ms); roughly 44 ms is Qt parsing its compact stylesheet, which I kept synchronous to avoid a visible unstyled flash and layout-mode race.
+- Cached the full skin-catalog parse behind a cheap file signature: the first submenu discovery remained ~75 ms, while unchanged repeat opens dropped to ~0.6–0.7 ms and changed files still invalidate by path/mtime/size.
+- Re-ran the 250K-item masonry benchmark at ~260–301 ms with identical item count and total height.
+- Focused second-pass regression coverage passed 14 tests; the full suite reached 91 passed with the same nine unrelated baseline failures recorded in the first pass.
+- Completed the second 30-minute audit window after 20:51 BRT with all work isolated on the optimization branch and no staging, commit, push, or system-level changes.
+- Started a third focused 10-minute pass after 20:53 BRT on the same isolated branch.
+- Found `VideoPlayerWidget` still imported OpenCV through both a global import and an unused `VideoValidator` import; moved OpenCV behind the existing exact-frame/capture fallback.
+- Re-measured player module import at ~87–113 ms versus ~168–177 ms before, while construction remained ~96–106 ms and OpenCV stayed absent.
+- In a fully constructed main window, first video-component creation now measured ~212–217 ms with OpenCV absent; before this refinement the deferred imports plus controls/player path was roughly ~300+ ms.
+- Exercised a generated temporary MP4 with cached metadata/preview: fast load succeeded without OpenCV, then exact-frame extraction loaded OpenCV on demand and returned the expected 48×64 RGB frame.
+- Deferred OpenCV inside `VideoValidator` as well; normal ffprobe validation no longer pays the frame-sampling dependency unless deep validation is requested.
+- Moved the settings-dependent FFmpeg acceleration helper behind decode validation too; standalone `VideoValidator` import fell from ~150–172 ms to ~40–53 ms and no longer initializes Qt settings.
+- Third-pass focused coverage reached 15 passing tests; the full suite reached 92 passed with the same nine recorded baseline failures, and the tree remained compile/whitespace clean.
+- Completed the focused 10-minute continuation after 21:03 BRT, still isolated on the optimization branch with no staging, commit, push, or system-level changes.
