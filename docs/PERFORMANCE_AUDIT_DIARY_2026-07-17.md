@@ -87,3 +87,4 @@
 - Replaced the 1.2-second post-show availability timer with true first-use discovery when the Auto-Captioner model selector is opened, avoiding the half-second UI pause for sessions that do not inspect caption models.
 - Traced repeated Ultralytics startup messages to the delayed Auto-Markings selection restore: it called `prepare_generation()`, created a real ONNX Runtime GPU session, and selection signals could repeat that work.
 - Removed startup model preloading, made selection changes bookkeeping-only, loaded models on explicit activation or Start, and reused an already prepared matching session.
+- Removed the remaining six-second Auto-Markings directory-scan timer; recursive model discovery and file stats now run when the model selector is first opened.

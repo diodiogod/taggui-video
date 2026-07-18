@@ -10,7 +10,7 @@ TAGGUI_ROOT = ROOT / "taggui"
 sys.path.insert(0, str(TAGGUI_ROOT))
 
 from PySide6.QtWidgets import QApplication
-from widgets.auto_markings import AutoMarkings
+from widgets.auto_markings import AutoMarkings, MarkingSettingsForm
 
 
 APP = QApplication.instance() or QApplication([])
@@ -30,6 +30,24 @@ class _ClassTable:
 
     def setRowCount(self, row_count):
         self.row_count = row_count
+
+
+def test_marking_directory_scan_waits_for_selector(monkeypatch):
+    scans = []
+    monkeypatch.setattr(
+        MarkingSettingsForm,
+        "get_local_model_paths",
+        lambda self: scans.append("scan"),
+    )
+
+    form = MarkingSettingsForm()
+
+    assert scans == []
+    form.model_combo_box.showPopup()
+    APP.processEvents()
+    assert scans == ["scan"]
+    form.model_combo_box.hidePopup()
+    form.deleteLater()
 
 
 def test_model_selection_change_does_not_prepare_model(tmp_path):

@@ -1,7 +1,6 @@
-import os
 from pathlib import Path
 
-from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer, QSize, QEvent
+from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QSize, QEvent
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
@@ -38,13 +37,6 @@ from widgets.auto_captioner import set_text_edit_height, restore_stdout_and_stde
 from widgets.image_list import ImageList
 
 
-def _startup_delay_ms(env_name: str, default_ms: int) -> int:
-    try:
-        return max(0, int(os.getenv(env_name, str(default_ms)) or default_ms))
-    except (TypeError, ValueError):
-        return max(0, int(default_ms))
-
-
 class CompressibleAutoMarkingsRoot(QWidget):
     def minimumSizeHint(self):
         return QSize(0, 0)
@@ -56,6 +48,8 @@ class CompressibleScrollArea(QScrollArea):
 
 
 class MarkingModelComboBox(FocusedScrollSettingsComboBox):
+    models_requested = Signal()
+
     _SORT_LABELS = {
         'name': 'Name',
         'recent': 'Recent',
@@ -91,6 +85,7 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
         self._refresh_popup_contents()
 
     def showPopup(self):
+        self.models_requested.emit()
         if self._popup is None:
             self._build_popup()
         self._refresh_popup_contents()
@@ -272,6 +267,10 @@ class MarkingSettingsForm(QWidget):
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
         self.model_combo_box.activated.connect(self._on_model_activated)
         self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
+        self.model_combo_box.models_requested.connect(
+            self._ensure_local_model_paths
+        )
+        self._models_loaded = False
         model_selector = QWidget()
         model_selector.setObjectName('autoMarkingsModelRow')
         model_selector_layout = QHBoxLayout(model_selector)
@@ -298,10 +297,6 @@ class MarkingSettingsForm(QWidget):
         self.scan_model_button.clicked.connect(self.open_selected_model_on_virustotal)
         model_selector_layout.addWidget(self.scan_model_button)
         root.addWidget(model_selector)
-        QTimer.singleShot(
-            _startup_delay_ms('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', 6000),
-            self.get_local_model_paths,
-        )
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
         self.model_warning_label = QLabel()
@@ -444,6 +439,7 @@ class MarkingSettingsForm(QWidget):
         self.model_warning_label.setVisible(bool(warning_text))
 
     def get_local_model_paths(self):
+        self._models_loaded = True
         models_directory_path = settings.value(
             'marking_models_directory_path',
             defaultValue=DEFAULT_SETTINGS['marking_models_directory_path'],
@@ -505,6 +501,10 @@ class MarkingSettingsForm(QWidget):
         if current_path != previous_path or current_text != previous_text:
             self.model_selected.emit(bool(current_text))
         return relative_paths
+
+    def _ensure_local_model_paths(self):
+        if not self._models_loaded:
+            self.get_local_model_paths()
 
     @Slot()
     def open_selected_model_on_virustotal(self):
