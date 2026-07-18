@@ -704,11 +704,6 @@ class AutoMarkings(QDockWidget):
         self.marking_settings_form.reset_class_labels_button.clicked.connect(
             self._reset_class_labels
         )
-        QTimer.singleShot(
-            _startup_delay_ms('TAGGUI_AUTO_MARKING_RESTORE_DELAY_MS', 6500),
-            self._restore_model_selection_state,
-        )
-
     def minimumSizeHint(self):
         return QSize(150, 80)
 
@@ -1036,20 +1031,26 @@ class AutoMarkings(QDockWidget):
         self.marking_settings_form.reset_class_labels_button.setEnabled(
             has_model_text
         )
-        if not has_model_text:
-            self.start_cancel_button.setEnabled(False)
+        self.start_cancel_button.setEnabled(has_model_text)
+        if self.is_marking:
             return
-        self.prepare_generation()
+        requested_model_path = (
+            self.marking_settings_form.model_combo_box.currentData()
+        )
+        if requested_model_path is None:
+            self._discard_prepared_model()
+            return
+        runtime_model_path = preferred_runtime_path(
+            Path(requested_model_path)
+        )
+        if not self._prepared_model_matches(runtime_model_path):
+            self._discard_prepared_model()
 
     @Slot()
     def _on_model_activated(self):
-        requested_model_path = self.marking_settings_form.model_combo_box.currentData()
-        if requested_model_path is None:
+        if self.marking_settings_form.model_combo_box.currentData() is None:
             return
-        requested_model_path = Path(requested_model_path)
-        if preferred_runtime_path(requested_model_path) == requested_model_path:
-            if requested_model_path.suffix.lower() == '.pt':
-                self.prepare_generation(interactive=True, purpose='inspect')
+        self.prepare_generation(interactive=True, purpose='inspect')
 
     @Slot(list)
     def _on_models_refreshed(self, model_paths: list[str]):
@@ -1080,12 +1081,6 @@ class AutoMarkings(QDockWidget):
         else:
             # Start marking.
             self.generate_markings()
-
-    @Slot()
-    def _restore_model_selection_state(self):
-        if self.marking_settings_form.model_combo_box.currentData() is None:
-            return
-        self.prepare_generation()
 
     def set_is_marking(self, is_marking: bool):
         self.is_marking = is_marking
@@ -1292,6 +1287,24 @@ class AutoMarkings(QDockWidget):
         if self.marking_settings_form.model_combo_box.findText(relative_text) >= 0:
             self.marking_settings_form.model_combo_box.setCurrentText(relative_text)
 
+    def _prepared_model_matches(self, model_path: Path) -> bool:
+        thread = self.marking_thread
+        if thread is None or thread.model is None or thread.model_path is None:
+            return False
+        try:
+            return (
+                Path(thread.model_path).expanduser().resolve()
+                == Path(model_path).expanduser().resolve()
+            )
+        except (OSError, RuntimeError):
+            return Path(thread.model_path) == Path(model_path)
+
+    def _discard_prepared_model(self):
+        self.marking_thread = None
+        class_table = self.marking_settings_form.class_table
+        class_table.setRowCount(0)
+        self.marking_settings_form.set_class_count(0)
+
     def prepare_generation(self, *, interactive: bool = False, purpose: str = 'run'):
         selected_image_indices = self.image_list.get_selected_image_indices()
         marking_settings = self.marking_settings_form.get_marking_settings()
@@ -1327,6 +1340,15 @@ class AutoMarkings(QDockWidget):
                 self.result_label.show()
                 self.start_cancel_button.setEnabled(True)
                 return
+        runtime_model_path = marking_settings.get('model_path')
+        if (
+            runtime_model_path is not None
+            and self._prepared_model_matches(Path(runtime_model_path))
+        ):
+            self.marking_thread.selected_image_indices = selected_image_indices
+            self.marking_thread.marking_settings = marking_settings
+            self.start_cancel_button.setEnabled(True)
+            return
         from auto_marking.marking_thread import MarkingThread
         self.marking_thread = MarkingThread(
             self, self.image_list_model, selected_image_indices,

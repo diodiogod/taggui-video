@@ -85,3 +85,5 @@
 - Completed the focused 10-minute continuation after 21:03 BRT, still isolated on the optimization branch with no staging, commit, push, or system-level changes.
 - Measured the deferred Hugging Face availability pass on the current 18.63 GiB cache: roughly 440 ms to import `huggingface_hub`, 70–77 ms to scan, and 525–560 ms end to end.
 - Replaced the 1.2-second post-show availability timer with true first-use discovery when the Auto-Captioner model selector is opened, avoiding the half-second UI pause for sessions that do not inspect caption models.
+- Traced repeated Ultralytics startup messages to the delayed Auto-Markings selection restore: it called `prepare_generation()`, created a real ONNX Runtime GPU session, and selection signals could repeat that work.
+- Removed startup model preloading, made selection changes bookkeeping-only, loaded models on explicit activation or Start, and reused an already prepared matching session.

@@ -50,6 +50,11 @@ Model lists and availability metadata remain lightweight. Concrete model classes
 resolve when captioning starts. Type-only worker references use
 `TYPE_CHECKING`, preventing the lazy boundary from recreating circular imports.
 
+Auto-Markings still discovers model filenames after startup, but it does not
+construct an Ultralytics or ONNX Runtime session while restoring the saved
+selection. A session is created when the user explicitly activates a model or
+starts marking, and a matching prepared session is reused by Start.
+
 The main image viewer creates its video player, controls, overlays, and media
 objects on the first video. A first video can therefore have a small one-time
 construction cost. Subsequent video switches reuse those components; decoding a
