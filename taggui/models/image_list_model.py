@@ -7,24 +7,21 @@ import subprocess
 import sys
 import os
 import time
-import multiprocessing
 from typing import List, Dict, Any, Optional
 from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from math import floor, ceil
 from pathlib import Path
 import json
 
-import cv2
-import exifread
-import imagesize
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
                             QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG, QTimer)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication
 from PIL import Image as pilimage  # Import Pillow's Image class
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import threading
 
 
@@ -63,6 +60,22 @@ import utils.target_dimension as target_dimension
 ensure_pillow_plugins_registered()
 
 UNDO_STACK_SIZE = 32
+
+
+@lru_cache(maxsize=1)
+def _get_exifread_module():
+    """Load EXIF parsing only when uncached image metadata needs it."""
+    import exifread
+
+    return exifread
+
+
+@lru_cache(maxsize=1)
+def _get_imagesize_module():
+    """Load header-based dimension parsing only when a directory is loaded."""
+    import imagesize
+
+    return imagesize
 
 # Global lock for video operations (OpenCV/ffmpeg is not thread-safe)
 _video_lock = threading.Lock()
@@ -111,6 +124,8 @@ def cv2_to_qimage(image_array) -> QImage | None:
     if image_array is None:
         return None
     try:
+        import cv2
+
         if len(image_array.shape) == 2:
             height, width = image_array.shape
             bytes_per_line = width
@@ -359,6 +374,8 @@ def fallback_decode_qimage(path: Path) -> tuple[QImage | None, tuple[int, int] |
         pass
 
     try:
+        import cv2
+
         image_array = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         qimage = cv2_to_qimage(image_array)
         if qimage is not None and not qimage.isNull():
@@ -1449,6 +1466,8 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
     """
     with _video_lock:
         try:
+            import cv2
+
             # Force software decoding (CAP_FFMPEG backend, no DXVA/D3D11 HW accel).
             # OpenCV is built with DXVA + NVD3D11 support — if hw accel is active while
             # MPV's D3D11 renderer is running, both fight over the D3D11 device and trigger
@@ -2201,6 +2220,9 @@ class ImageListModel(QAbstractListModel):
         if self._scan_process_disabled or self._scan_process_executor is not None:
             return
         try:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+
             spawn_context = multiprocessing.get_context("spawn")
             self._scan_process_executor = ProcessPoolExecutor(
                 max_workers=1,
@@ -4267,13 +4289,16 @@ class ImageListModel(QAbstractListModel):
             for image in self.images:
                 if image.thumbnail or image.thumbnail_qimage:
                     continue
-                # Quick cache check (doesn't load, just checks if file exists)
                 try:
                     mtime = image.path.stat().st_mtime
-                    if not cache.get_thumbnail(image.path, mtime, self.thumbnail_generation_width):
+                    if not cache.has_thumbnail(image.path, mtime, self.thumbnail_generation_width):
                         uncached_count += 1
                 except:
                     uncached_count += 1
+                # The exact count is only needed below this threshold. Once
+                # reached, the submission pass will inspect every candidate.
+                if uncached_count >= 50:
+                    break
 
             # Pagination mode always needs smart preload for smoothness
             # Normal mode can skip if mostly cached
@@ -4281,7 +4306,7 @@ class ImageListModel(QAbstractListModel):
                 print(f"[THUMBNAIL] Only {uncached_count} uncached, using on-demand loading")
                 return
 
-            print(f"[THUMBNAIL] {uncached_count} uncached images, starting parallel loading")
+            print(f"[THUMBNAIL] At least {uncached_count} uncached images, starting parallel loading")
             preload_limit = None  # Preload all
 
         # Cancel any existing thumbnail loading
@@ -4316,9 +4341,7 @@ class ImageListModel(QAbstractListModel):
             if cache.enabled:
                 try:
                     mtime = image.path.stat().st_mtime
-                    cache_key = cache._get_cache_key(image.path, mtime, self.thumbnail_generation_width)
-                    cache_path = cache._get_cache_path(cache_key)
-                    if cache_path.exists():
+                    if cache.has_thumbnail(image.path, mtime, self.thumbnail_generation_width):
                         skipped_cache += 1
                         continue  # Don't submit - will be loaded on-demand from cache
                 except Exception:
@@ -4328,8 +4351,7 @@ class ImageListModel(QAbstractListModel):
                 self._load_thumbnail_worker, idx, image.path, image.crop,
                 self.thumbnail_generation_width, image.is_video
             )
-            with self._thumbnail_lock:
-                self._thumbnail_futures[idx] = future
+            self._track_thumbnail_future(idx, image.path, future)
             submitted += 1
 
         if checked < total_images:
@@ -4363,8 +4385,23 @@ class ImageListModel(QAbstractListModel):
             self._load_thumbnail_worker, idx, image.path, image.crop,
             self.thumbnail_generation_width, image.is_video
         )
+        self._track_thumbnail_future(idx, image.path, future)
+
+    def _track_thumbnail_future(self, idx: int, path: Path, future):
+        """Register a thumbnail task before allowing completion cleanup."""
         with self._thumbnail_lock:
-            self._thumbnail_futures[idx] = future
+            self._thumbnail_futures[idx] = (future, path)
+        future.add_done_callback(
+            lambda completed, row=idx: self._forget_thumbnail_future(row, completed)
+        )
+
+    def _forget_thumbnail_future(self, idx: int, completed_future):
+        """Remove only the task that currently owns a row's future slot."""
+        with self._thumbnail_lock:
+            entry = self._thumbnail_futures.get(idx)
+            current_future = entry[0] if isinstance(entry, tuple) else entry
+            if current_future is completed_future:
+                self._thumbnail_futures.pop(idx, None)
 
     def _report_cache_progress(self):
         """Periodically report thumbnail cache save progress."""
@@ -4685,14 +4722,17 @@ class ImageListModel(QAbstractListModel):
             qimage, was_cached, _, resolved_path = load_thumbnail_data(path, crop, width, is_video)
 
             if qimage and not qimage.isNull():
-                # Find image by PATH, not by idx (array may have been sorted!)
-                for img in self.images:
-                    if img.path == path:
-                        if resolved_path != path:
-                            img.path = resolved_path
-                        img.thumbnail_qimage = qimage
-                        img._last_thumbnail_was_cached = was_cached
-                        break
+                # In the common case the row has not moved since submission.
+                # Preserve the path fallback for a concurrent sort/reorder.
+                img = self.images[idx] if 0 <= idx < len(self.images) else None
+                if img is None or img.path != path:
+                    img = next((candidate for candidate in self.images
+                                if candidate.path == path), None)
+                if img is not None:
+                    if resolved_path != path:
+                        img.path = resolved_path
+                    img.thumbnail_qimage = qimage
+                    img._last_thumbnail_was_cached = was_cached
 
                 # DON'T emit dataChanged - let Qt request thumbnails on-demand
                 # Emitting 1147 dataChanged signals floods the event queue
@@ -4701,11 +4741,6 @@ class ImageListModel(QAbstractListModel):
             print(f"Error in thumbnail worker for {path}: {e}")
             import traceback
             traceback.print_exc()
-        finally:
-            # Remove from futures dict
-            with self._thumbnail_lock:
-                self._thumbnail_futures.pop(idx, None)
-
     def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, qimage):
         """Worker function that saves thumbnail QImage to disk cache.
 
@@ -5403,7 +5438,6 @@ class ImageListModel(QAbstractListModel):
              from utils.image import Image
              import time
              from pathlib import Path
-             import imagesize
 
              if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
                  return
@@ -5590,7 +5624,7 @@ class ImageListModel(QAbstractListModel):
                          dimensions = get_jxl_size(full_path)
                       else:
                           # Try fast imagesize first
-                          dimensions = imagesize.get(str(full_path))
+                          dimensions = _get_imagesize_module().get(str(full_path))
                           
                           # HEURISTIC CHECK:
                           # If dimensions seem "Impossible" or "Suspicious" (Super Tall/Fat),
@@ -5908,7 +5942,7 @@ class ImageListModel(QAbstractListModel):
     def _validate_cached_paths_in_background(
         self,
         directory_path: Path,
-        cached_rel_paths: list[str],
+        cached_rel_paths: list[str] | None,
         image_suffixes: list[str],
         generation: int,
     ):
@@ -5923,23 +5957,46 @@ class ImageListModel(QAbstractListModel):
                 self.background_validation_progress.emit(label, current, maximum, done)
                 return True
 
-            norm_to_cached_paths = {}
-            for rel_path in cached_rel_paths:
-                normalized = _normalize_relative_path(rel_path)
-                norm_to_cached_paths.setdefault(normalized, []).append(rel_path)
+            stored_dir_mtimes = db.get_directory_signatures()
+            changed_roots = (
+                get_changed_directory_roots(directory_path, stored_dir_mtimes)
+                if stored_dir_mtimes
+                else [""]
+            )
+            if (
+                cached_rel_paths is None
+                and stored_dir_mtimes
+                and not changed_roots
+            ):
+                print("[CACHE] Background validation complete: no directory changes detected")
+                self._queue_path_validation_result({
+                    'generation': generation,
+                    'directory_path': directory_path,
+                    'changes_detected': False,
+                })
+                _emit_progress("", -1, 0, True)
+                return
+
+            if cached_rel_paths is None:
+                cached_rel_paths = db.get_all_paths()
 
             current_rel_map = {}
             duplicate_db_paths = []
-            for normalized, rel_variants in norm_to_cached_paths.items():
-                unique_variants = sorted(set(rel_variants))
-                current_rel_map[normalized] = unique_variants[0]
-                if len(unique_variants) > 1:
-                    duplicate_db_paths.extend(unique_variants[1:])
-            current_rel_paths = set(current_rel_map.keys())
-            stored_dir_mtimes = db.get_directory_signatures()
-
+            for rel_path in cached_rel_paths:
+                normalized = _normalize_relative_path(rel_path)
+                existing = current_rel_map.get(normalized)
+                if existing is None:
+                    current_rel_map[normalized] = rel_path
+                    continue
+                if rel_path == existing:
+                    continue
+                if rel_path < existing:
+                    duplicate_db_paths.append(existing)
+                    current_rel_map[normalized] = rel_path
+                else:
+                    duplicate_db_paths.append(rel_path)
+            current_rel_paths = current_rel_map.keys()
             if stored_dir_mtimes:
-                changed_roots = get_changed_directory_roots(directory_path, stored_dir_mtimes)
                 if not changed_roots:
                     duplicate_db_paths = sorted(set(duplicate_db_paths))
                     if duplicate_db_paths:
@@ -6129,7 +6186,11 @@ class ImageListModel(QAbstractListModel):
         # Try to load file paths from DB cache first (much faster for large folders)
         from utils.image_index_db import ImageIndexDB
         db = ImageIndexDB(directory_path)
-        cached_paths = db.get_all_paths()
+        # A COUNT is effectively free in SQLite, while materializing 1M path
+        # strings costs seconds and hundreds of MB. The paginated fast path
+        # only needs the count; its deferred validator loads paths off-thread.
+        cached_count = int(db.count() or 0)
+        cached_paths = None
         stored_dir_mtimes = db.get_directory_signatures()
         cache_stats = None
         dir_mtimes = None
@@ -6171,7 +6232,7 @@ class ImageListModel(QAbstractListModel):
                 self._load_executor.submit(
                     self._validate_cached_paths_in_background,
                     directory_path,
-                    list(cached_paths),
+                    list(cached_paths) if cached_paths is not None else None,
                     list(image_suffixes),
                     load_generation,
                 )
@@ -6211,7 +6272,6 @@ class ImageListModel(QAbstractListModel):
                 dialog.setLabelText(f"{label}\nFiles: {int(count):,}")
             QApplication.processEvents()
 
-        cached_count = len({_normalize_relative_path(rel_path) for rel_path in cached_paths})
         precomputed_count = len(precomputed_rel_paths) if precomputed_rel_paths is not None else None
         if normalized_load_options is not None and precomputed_rel_paths is not None:
             limited_precomputed_rel_paths = db.get_limited_paths(normalized_load_options)
@@ -6309,7 +6369,8 @@ class ImageListModel(QAbstractListModel):
         try:
             if precomputed_rel_paths is not None:
                 file_paths = {directory_path / rel_path for rel_path in precomputed_rel_paths}
-            elif cached_paths and len(cached_paths) > 1000:
+            elif cached_count > 1000:
+                cached_paths = db.get_all_paths()
                 _update_scan_progress("Checking folder changes...")
                 fs_count, fs_tree_mtime = get_directory_tree_stats(
                     directory_path,
@@ -6596,7 +6657,7 @@ class ImageListModel(QAbstractListModel):
                         elif str(image_path).endswith('jxl'):
                             dimensions = get_jxl_size(image_path)
                         else:
-                            dimensions = imagesize.get(str(image_path))
+                            dimensions = _get_imagesize_module().get(str(image_path))
                             if dimensions == (-1, -1):
                                 dimensions = pilimage.open(image_path).size
 
@@ -6618,7 +6679,7 @@ class ImageListModel(QAbstractListModel):
                 if not cached and not is_video:
                     try:
                         with open(image_path, 'rb') as image_file:
-                            exif_tags = exifread.process_file(
+                            exif_tags = _get_exifread_module().process_file(
                                 image_file, details=False, extract_thumbnail=False,
                                 stop_tag='Image Orientation')
                             if 'Image Orientation' in exif_tags:
@@ -6760,7 +6821,7 @@ class ImageListModel(QAbstractListModel):
                         elif str(image.path).endswith('jxl'):
                             dimensions = get_jxl_size(image.path)
                         else:
-                            dimensions = imagesize.get(str(image.path))
+                            dimensions = _get_imagesize_module().get(str(image.path))
                             if dimensions == (-1, -1):
                                 dimensions = pilimage.open(image.path).size
 
@@ -6771,7 +6832,7 @@ class ImageListModel(QAbstractListModel):
                         if not is_video:
                             try:
                                 with open(image.path, 'rb') as image_file:
-                                    exif_tags = exifread.process_file(
+                                    exif_tags = _get_exifread_module().process_file(
                                         image_file, details=False, extract_thumbnail=False,
                                         stop_tag='Image Orientation')
                                     if 'Image Orientation' in exif_tags:
@@ -7130,11 +7191,26 @@ class ImageListModel(QAbstractListModel):
         # Emit signal
         self.total_count_changed.emit(self._total_count)
 
-        # Bootstrap: Load first 3 pages immediately so UI has something to show
-        print(f"[PAGINATION] Loading first 3 pages to bootstrap UI...")
-        for page_num in range(min(3, (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
-            self._load_page_sync(page_num)
-        print(f"[PAGINATION] Loaded {len(self._pages)} pages initially")
+        # Bootstrap one page synchronously so the first 1,000 items become
+        # usable quickly. Fill the existing three-page warm window in the
+        # background; page_loaded/pages_updated already append those pages
+        # without blocking the UI thread.
+        bootstrap_page_count = min(
+            3,
+            (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE,
+        )
+        print(
+            "[PAGINATION] Loading first page synchronously; "
+            f"warming {max(0, bootstrap_page_count - 1)} adjacent page(s)..."
+        )
+        if bootstrap_page_count > 0:
+            self._load_page_sync(0)
+        for page_num in range(1, bootstrap_page_count):
+            self._request_page_load(page_num)
+        print(
+            f"[PAGINATION] Loaded {len(self._pages)} page(s) initially; "
+            f"{max(0, bootstrap_page_count - len(self._pages))} warming"
+        )
 
         # Trigger masonry calculation now that we have initial pages
         # CRITICAL: Emit pages_updated BEFORE layoutChanged so proxy invalidates first
@@ -7155,7 +7231,10 @@ class ImageListModel(QAbstractListModel):
         print(f"BUFFERED VIRTUAL PAGINATION: {self._total_count} images ready")
         print(f"Load time: {elapsed*1000:.0f}ms")
         print(f"Memory: Minimal (pages load on-demand)")
-        print(f"Pages: 0/{(total_images + self.PAGE_SIZE - 1) // self.PAGE_SIZE} loaded initially")
+        print(
+            f"Pages: {len(self._pages)}/"
+            f"{(total_images + self.PAGE_SIZE - 1) // self.PAGE_SIZE} loaded initially"
+        )
         print(f"Masonry: Calculated only for loaded pages (buffered range)")
         print(f"================================================================================")
 
@@ -9168,7 +9247,7 @@ class ImageListModel(QAbstractListModel):
                 # Only get EXIF for images, not videos
                 try:
                     with open(image_path, 'rb') as image_file:
-                        exif_tags = exifread.process_file(
+                        exif_tags = _get_exifread_module().process_file(
                             image_file, details=False, extract_thumbnail=False,
                             stop_tag='Image Orientation')
                         if 'Image Orientation' in exif_tags:

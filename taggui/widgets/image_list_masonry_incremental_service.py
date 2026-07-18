@@ -195,7 +195,13 @@ class MasonryIncrementalService:
             item_width = col_w
             item_height = int(item_width / aspect_ratio)
 
-            shortest_col = min(range(num_cols), key=lambda i: column_heights[i])
+            shortest_col = 0
+            shortest_height = column_heights[0]
+            for column_index in range(1, num_cols):
+                column_height = column_heights[column_index]
+                if column_height < shortest_height:
+                    shortest_col = column_index
+                    shortest_height = column_height
             x = shortest_col * (col_w + spacing)
             y = column_heights[shortest_col]
 
@@ -236,7 +242,13 @@ class MasonryIncrementalService:
 
             # Reverse of shortest-column downward layout: place into the column
             # whose current top boundary is lowest on screen.
-            chosen_col = max(range(num_cols), key=lambda i: column_tops[i])
+            chosen_col = 0
+            chosen_top = column_tops[0]
+            for column_index in range(1, num_cols):
+                column_top = column_tops[column_index]
+                if column_top > chosen_top:
+                    chosen_col = column_index
+                    chosen_top = column_top
             x = chosen_col * (col_w + spacing)
             y = column_tops[chosen_col] - item_height - spacing
 

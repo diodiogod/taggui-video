@@ -197,12 +197,13 @@ class ThumbnailCache:
         key_string = f"{file_path}_{mtime}_{size}"
         return hashlib.md5(key_string.encode()).hexdigest()
 
-    def _get_cache_path(self, cache_key: str) -> Path:
-        """Get cache file path for a given key."""
+    def _get_cache_path(self, cache_key: str, *, ensure_parent: bool = False) -> Path:
+        """Get a cache path, creating its hash bucket only for writes."""
         # Organize into subdirectories by first 2 chars to avoid too many files in one dir
         subdir = cache_key[:2]
         cache_subdir = self.cache_dir / subdir
-        cache_subdir.mkdir(exist_ok=True)
+        if ensure_parent:
+            cache_subdir.mkdir(parents=True, exist_ok=True)
         return cache_subdir / f"{cache_key}.webp"
 
     def get_thumbnail(self, file_path: Path, mtime: float, size: int) -> QIcon | None:
@@ -241,6 +242,14 @@ class ThumbnailCache:
                 pass
             return None
 
+    def has_thumbnail(self, file_path: Path, mtime: float, size: int) -> bool:
+        """Return whether a cache entry exists without decoding it."""
+        if not self.enabled:
+            return False
+
+        cache_key = self._get_cache_key(file_path, mtime, size)
+        return self._get_cache_path(cache_key).is_file()
+
     def save_thumbnail(self, file_path: Path, mtime: float, size: int, icon: QIcon):
         """Save thumbnail to cache from QIcon (DEPRECATED — prefer save_thumbnail_qimage)."""
         if not self.enabled or icon.isNull():
@@ -248,7 +257,9 @@ class ThumbnailCache:
         try:
             pixmap = icon.pixmap(size, size)
             if not pixmap.isNull():
-                pixmap.save(str(self._get_cache_path(self._get_cache_key(file_path, mtime, size))), 'WEBP', quality=85)
+                cache_key = self._get_cache_key(file_path, mtime, size)
+                cache_path = self._get_cache_path(cache_key, ensure_parent=True)
+                pixmap.save(str(cache_path), 'WEBP', quality=85)
         except Exception as e:
             print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
 
@@ -265,7 +276,7 @@ class ThumbnailCache:
             return
 
         cache_key = self._get_cache_key(file_path, mtime, size)
-        cache_path = self._get_cache_path(cache_key)
+        cache_path = self._get_cache_path(cache_key, ensure_parent=True)
 
         try:
             result = qimage.save(str(cache_path), 'WEBP', quality=85)

@@ -66,6 +66,7 @@ def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_column
         # Calculate positions
         column_heights = [0] * num_columns
         positioned_items = []
+        column_stride = column_width + spacing
 
         for index, aspect_ratio in items_data:
             # CHECK FOR SPACER
@@ -79,15 +80,14 @@ def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_column
                 
                 # Create a VISUAL item for the spacer so we can paint it (Loading Text) and use it as a trigger
                 full_width = (column_width + spacing) * num_columns - spacing
-                spacer_item = MasonryItem(
-                    index=-2,       # Special index for spacer
-                    x=0,
-                    y=max_h,
-                    width=int(full_width),
-                    height=int(spacer_height),
-                    aspect_ratio=1.0
-                )
-                positioned_items.append(spacer_item)
+                positioned_items.append({
+                    'index': -2,
+                    'x': 0,
+                    'y': max_h,
+                    'width': int(full_width),
+                    'height': int(spacer_height),
+                    'aspect_ratio': 1.0,
+                })
 
                 new_h = max_h + spacer_height
                 for i in range(num_columns):
@@ -112,41 +112,35 @@ def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_column
             item_height = int(item_width / aspect_ratio)
 
             # Find shortest column
-            shortest_col = min(range(num_columns), key=lambda i: column_heights[i])
+            shortest_col = 0
+            shortest_height = column_heights[0]
+            for column_index in range(1, num_columns):
+                column_height = column_heights[column_index]
+                if column_height < shortest_height:
+                    shortest_col = column_index
+                    shortest_height = column_height
 
             # Calculate position
-            x = shortest_col * (column_width + spacing)
+            x = shortest_col * column_stride
             y = column_heights[shortest_col]
 
             # Store positioned item
-            positioned_items.append(MasonryItem(
-                index=index,
-                x=x,
-                y=y,
-                width=item_width,
-                height=item_height,
-                aspect_ratio=aspect_ratio
-            ))
+            positioned_items.append({
+                'index': index,
+                'x': x,
+                'y': y,
+                'width': item_width,
+                'height': item_height,
+                'aspect_ratio': aspect_ratio,
+            })
 
             # Update column height
             column_heights[shortest_col] += item_height + spacing
 
         total_height = max(column_heights) if column_heights else 0
 
-        # Convert items to dicts manually (asdict() can crash on large datasets)
-        items_list = []
-        for item in positioned_items:
-            items_list.append({
-                'index': item.index,
-                'x': item.x,
-                'y': item.y,
-                'width': item.width,
-                'height': item.height,
-                'aspect_ratio': item.aspect_ratio
-            })
-
         result = {
-            'items': items_list,
+            'items': positioned_items,
             'total_height': total_height
         }
 
@@ -172,10 +166,11 @@ def _calculate_masonry_layout_impl(items_data, column_width, spacing, num_column
         }
 
 
-def _get_cache_path(cache_key):
-    """Get cache file path."""
+def _get_cache_path(cache_key, *, ensure_parent=False):
+    """Get a cache path, creating its directory only for a write."""
     cache_dir = Path.home() / '.taggui_cache' / 'masonry'
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    if ensure_parent:
+        cache_dir.mkdir(parents=True, exist_ok=True)
     import hashlib
     key_hash = hashlib.md5(cache_key.encode()).hexdigest()
     return cache_dir / f'{key_hash}.pkl'  # Changed from .json to .pkl
@@ -193,7 +188,7 @@ def _save_to_cache_worker(cache_path, cache_data):
 def _save_to_cache(cache_key, result, items_data, column_width, spacing, num_columns):
     """Save result to cache asynchronously in background thread."""
     try:
-        cache_path = _get_cache_path(cache_key)
+        cache_path = _get_cache_path(cache_key, ensure_parent=True)
         cache_data = {
             'cache_version': MASONRY_CACHE_VERSION,
             'column_width': column_width,
