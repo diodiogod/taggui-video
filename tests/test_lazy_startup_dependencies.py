@@ -60,6 +60,46 @@ print(json.dumps({
     assert not any(loaded.values()), loaded
 
 
+def test_model_availability_waits_for_model_selector():
+    script = """
+import json
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtWidgets import QApplication
+from widgets.auto_captioner import AutoCaptioner
+
+app = QApplication.instance() or QApplication([])
+refreshes = []
+AutoCaptioner._refresh_model_availability_ui = (
+    lambda self: refreshes.append("refresh")
+)
+dock = AutoCaptioner(None, None)
+dock.show()
+app.processEvents()
+after_show = list(refreshes)
+dock.caption_settings_form.model_combo_box.showPopup()
+app.processEvents()
+print(json.dumps({
+    "after_show": after_show,
+    "after_popup": refreshes,
+}))
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(TAGGUI_ROOT)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    state = json.loads(result.stdout.strip())
+    assert state["after_show"] == []
+    assert state["after_popup"] == ["refresh"]
+
+
 def test_video_player_import_defers_opencv_until_fallback():
     script = """
 import json

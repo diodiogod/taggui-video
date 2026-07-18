@@ -91,9 +91,9 @@ both very fast cache hits and replacement tasks.
 - The first use of a deferred feature pays its import or construction cost.
 - The first video remains limited by backend initialization, media probing,
   decoder startup, keyframe placement, and file/device throughput.
-- The delayed Hugging Face cache scan remains on the UI thread because its
-  helpers and combo-box updates share mutable state. Moving it requires a
-  separately designed worker/result boundary.
+- Hugging Face cache discovery runs when the Auto-Captioner model selector is
+  first opened, rather than during startup. It remains on the UI thread because
+  its helpers and combo-box updates share mutable state.
 - The compact Auto-Captioner stylesheet remains synchronous to avoid an
   unstyled flash and layout-mode race.
 - Entry-point media-runtime discovery and Pillow codec registration remain eager
@@ -125,8 +125,4 @@ against the target branch before treating them as regressions.
 ## Further Optimization
 
 Broad startup optimization now has diminishing returns. Future work should be
-profile-driven and preferably isolated by subsystem. The most promising separate
-projects are asynchronous Hugging Face cache discovery and instrumentation of
-time from a video click to the first presented frame. The latter should split
-component construction, backend probing, media loading, decoder readiness, and
-first-frame presentation before changing playback behavior.
+profile-driven and preferably isolated by subsystem.

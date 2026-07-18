@@ -14,7 +14,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
-- Reduce normal GUI startup work by deferring machine-learning frameworks, optional video backends, media metadata libraries, command-only dialogs, hidden workflow widgets, and secondary-window modules until their features are used
+- Reduce normal GUI startup work by deferring machine-learning frameworks, Hugging Face cache discovery, optional video backends, media metadata libraries, command-only dialogs, hidden workflow widgets, and secondary-window modules until their features are used
 - Restore cached large folders from the first page immediately, warm later pages in the background, and avoid materializing every indexed path when an unchanged directory signature is sufficient
 - Speed up large masonry layouts, thumbnail cache lookups, cached-thumbnail assignment, and repeated video-skin menu construction
 - Create the main video player and controls on the first video instead of during image-only startup, and defer OpenCV until an exact-frame or deep-validation fallback needs it

@@ -292,6 +292,14 @@ class ClickableLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class ModelAvailabilityComboBox(FocusedScrollSettingsComboBox):
+    availability_requested = Signal()
+
+    def showPopup(self):
+        self.availability_requested.emit()
+        super().showPopup()
+
+
 class CaptionSettingsForm:
     MODEL_SETTING_KEY = 'auto_captioner_model_id'
 
@@ -313,7 +321,8 @@ class CaptionSettingsForm:
     }
 
     def __init__(self, *, use_compact_style: bool = False,
-                 unload_model_callback=None):
+                 unload_model_callback=None,
+                 availability_callback=None):
         self.is_bitsandbytes_available = (
             importlib.util.find_spec('bitsandbytes') is not None
         )
@@ -346,10 +355,14 @@ class CaptionSettingsForm:
                 self.MODEL_SETTING_KEY,
                 legacy_model_id or DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
             )
-        self.model_combo_box = FocusedScrollSettingsComboBox(
+        self.model_combo_box = ModelAvailabilityComboBox(
             key=self.MODEL_SETTING_KEY,
             default=DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
         )
+        if availability_callback is not None:
+            self.model_combo_box.availability_requested.connect(
+                availability_callback
+            )
         self.model_combo_box.setEditable(True)
         self.model_combo_box.setIconSize(QSize(12, 12))
         model_combo_view = self.model_combo_box.view()
@@ -1881,12 +1894,6 @@ class AutoCaptioner(QDockWidget):
         self.captioning_status_timer.setInterval(500)
         self.captioning_status_timer.timeout.connect(
             self.refresh_captioning_status)
-        self._availability_refresh_timer = QTimer(self)
-        self._availability_refresh_timer.setSingleShot(True)
-        self._availability_refresh_timer.setInterval(1200)
-        self._availability_refresh_timer.timeout.connect(
-            self._initialize_model_availability_ui
-        )
         self.classic_caption_settings_form = None
         self.compact_caption_settings_form = None
         self.caption_settings_form = None
@@ -1961,6 +1968,7 @@ class AutoCaptioner(QDockWidget):
                 normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT
             ),
             unload_model_callback=self.unload_loaded_model,
+            availability_callback=self._initialize_model_availability_ui,
         )
         if normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT:
             self.compact_caption_settings_form = self.caption_settings_form
@@ -2294,18 +2302,6 @@ class AutoCaptioner(QDockWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_primary_button_text()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        form = self.caption_settings_form
-        if (
-            form is not None
-            and not form._availability_initialized
-            and not self._availability_refresh_timer.isActive()
-        ):
-            # Populate decorative cache-status icons after the first window
-            # paint instead of delaying it with filesystem/cache scans.
-            self._availability_refresh_timer.start()
 
     def _initialize_model_availability_ui(self):
         form = self.caption_settings_form

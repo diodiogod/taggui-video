@@ -83,3 +83,5 @@
 - Moved the settings-dependent FFmpeg acceleration helper behind decode validation too; standalone `VideoValidator` import fell from ~150–172 ms to ~40–53 ms and no longer initializes Qt settings.
 - Third-pass focused coverage reached 15 passing tests; the full suite reached 92 passed with the same nine recorded baseline failures, and the tree remained compile/whitespace clean.
 - Completed the focused 10-minute continuation after 21:03 BRT, still isolated on the optimization branch with no staging, commit, push, or system-level changes.
+- Measured the deferred Hugging Face availability pass on the current 18.63 GiB cache: roughly 440 ms to import `huggingface_hub`, 70–77 ms to scan, and 525–560 ms end to end.
+- Replaced the 1.2-second post-show availability timer with true first-use discovery when the Auto-Captioner model selector is opened, avoiding the half-second UI pause for sessions that do not inspect caption models.
