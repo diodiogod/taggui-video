@@ -140,6 +140,44 @@ def test_first_panel_interaction_uses_cached_categories(monkeypatch):
     ]
 
 
+def test_saved_model_categories_restore_without_panel_interaction(
+        tmp_path, monkeypatch):
+    model_path = tmp_path / "model.onnx"
+    model_path.touch()
+    actions = []
+
+    def setting_value(key, default=None, type=None):
+        if key == "marking_model_id":
+            return model_path.name
+        if key == "marking_models_directory_path":
+            return str(tmp_path)
+        return default
+
+    monkeypatch.setattr(auto_markings_module.settings, "value", setting_value)
+    monkeypatch.setattr(
+        auto_markings_module,
+        "get_cached_model_classes",
+        lambda path: {0: "person", 1: "hand"},
+    )
+    auto_markings = AutoMarkings.__new__(AutoMarkings)
+    auto_markings.marking_settings_form = SimpleNamespace(
+        model_combo_box=SimpleNamespace(
+            set_model_entries=lambda entries, selected_text: actions.append(
+                ("selection", entries, selected_text)
+            )
+        )
+    )
+    auto_markings._populate_model_categories = (
+        lambda classes: actions.append(("categories", classes))
+    )
+
+    auto_markings._restore_cached_categories_for_saved_model()
+
+    assert actions[0][0] == "selection"
+    assert actions[0][2] == model_path.name
+    assert actions[1] == ("categories", {0: "person", 1: "hand"})
+
+
 def test_repeated_prepare_requests_share_one_background_load(tmp_path):
     model_path = tmp_path / "model.onnx"
     model_path.touch()

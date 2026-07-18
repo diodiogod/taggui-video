@@ -29,6 +29,7 @@ from utils.marking_model_security import (
     passive_model_warning_text,
     preferred_runtime_path,
     prompt_resolve_runtime_path,
+    resolve_marking_model_value,
 )
 from auto_marking.model_cache import get_cached_model_classes
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
@@ -720,6 +721,8 @@ class AutoMarkings(QDockWidget):
         self.marking_settings_form.reset_class_labels_button.clicked.connect(
             self._reset_class_labels
         )
+        QTimer.singleShot(0, self._restore_cached_categories_for_saved_model)
+
     def minimumSizeHint(self):
         return QSize(150, 80)
 
@@ -785,6 +788,38 @@ class AutoMarkings(QDockWidget):
             self._populate_model_categories(cached_classes)
             return
         self.prepare_generation()
+
+    def _restore_cached_categories_for_saved_model(self):
+        model_value = str(
+            settings.value('marking_model_id', '', type=str) or ''
+        ).strip()
+        models_root = str(
+            settings.value(
+                'marking_models_directory_path',
+                DEFAULT_SETTINGS['marking_models_directory_path'],
+                type=str,
+            ) or ''
+        ).strip()
+        if not model_value or not models_root:
+            return
+        requested_model_path = resolve_marking_model_value(
+            model_value,
+            models_root,
+        )
+        runtime_model_path = preferred_runtime_path(requested_model_path)
+        cached_classes = get_cached_model_classes(runtime_model_path)
+        if cached_classes is None:
+            return
+
+        try:
+            modified_ns = requested_model_path.stat().st_mtime_ns
+        except OSError:
+            modified_ns = 0
+        self.marking_settings_form.model_combo_box.set_model_entries(
+            [(model_value, requested_model_path, modified_ns)],
+            selected_text=model_value,
+        )
+        self._populate_model_categories(cached_classes)
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

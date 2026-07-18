@@ -66,7 +66,9 @@ Successful model inspection stores only the small class-ID/name mapping under
 file size, and modification time, so changing the model invalidates its
 metadata automatically. An unchanged entry lets Auto-Markings and the Pipeline
 Editor display categories without opening ONNX Runtime or allocating GPU
-memory.
+memory. The saved Auto-Markings model and its categories restore immediately
+from this metadata without scanning the complete model directory or requiring
+panel interaction.
 
 Actual model runtimes use a separate in-memory cache with the same file
 signature. Auto-Markings and pipeline threads share the runtime and serialize

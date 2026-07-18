@@ -20,7 +20,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Speed up large masonry layouts, thumbnail cache lookups, cached-thumbnail assignment, and repeated video-skin menu construction
 - Create the main video player and controls on the first video instead of during image-only startup, and defer OpenCV until an exact-frame or deep-validation fallback needs it
 - Share and lazily create spell-check dictionaries, and load grammar-checking support only when grammar checking is invoked
-- Populate previously inspected YOLO categories without loading the model, and reuse unchanged model runtimes across Auto-Markings and repeated pipeline runs
+- Populate previously inspected YOLO categories automatically without panel interaction or model loading, and reuse unchanged model runtimes across Auto-Markings and repeated pipeline runs
 
 ### Fixed
 
