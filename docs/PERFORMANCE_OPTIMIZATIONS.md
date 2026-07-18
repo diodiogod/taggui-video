@@ -61,6 +61,21 @@ run on a dedicated worker; the UI receives one cached category snapshot. This
 avoids both GUI blocking and repeated ONNX backend initialization through
 multiple `YOLO.names` property reads.
 
+Successful model inspection stores only the small class-ID/name mapping under
+`.taggui_cache/marking_models`. The entry is keyed by the resolved model path,
+file size, and modification time, so changing the model invalidates its
+metadata automatically. An unchanged entry lets Auto-Markings and the Pipeline
+Editor display categories without opening ONNX Runtime or allocating GPU
+memory.
+
+Actual model runtimes use a separate in-memory cache with the same file
+signature. Auto-Markings and pipeline threads share the runtime and serialize
+inference through a per-model lock. Consequently, the first run after launching
+the application still pays the unavoidable model-loading cost, while subsequent
+pipeline runs using the same unchanged models reuse their sessions. Runtime
+entries intentionally live until application exit; persistent storage contains
+metadata only, never executable model objects.
+
 The main image viewer creates its video player, controls, overlays, and media
 objects on the first video. A first video can therefore have a small one-time
 construction cost. Subsequent video switches reuse those components; decoding a
@@ -100,6 +115,8 @@ both very fast cache hits and replacement tasks.
 ## Intentional Tradeoffs
 
 - The first use of a deferred feature pays its import or construction cost.
+- Every distinct Auto-Markings model used in a session may retain its runtime
+  and associated CPU/GPU memory until the application exits.
 - The first video remains limited by backend initialization, media probing,
   decoder startup, keyframe placement, and file/device throughput.
 - Hugging Face cache discovery runs when the Auto-Captioner model selector is

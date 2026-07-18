@@ -30,6 +30,7 @@ from utils.marking_model_security import (
     preferred_runtime_path,
     prompt_resolve_runtime_path,
 )
+from auto_marking.model_cache import get_cached_model_classes
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     FocusedScrollSettingsDoubleSpinBox,
                                     FocusedScrollSettingsSpinBox,
@@ -769,12 +770,21 @@ class AutoMarkings(QDockWidget):
             return
         self._first_interaction_handled = True
         self.marking_settings_form._ensure_local_model_paths()
-        if (
-            not self.is_marking
-            and self.marking_settings_form.model_combo_box.currentData()
-            is not None
-        ):
-            self.prepare_generation()
+        if self.is_marking:
+            return
+        requested_model_path = (
+            self.marking_settings_form.model_combo_box.currentData()
+        )
+        if requested_model_path is None:
+            return
+        runtime_model_path = preferred_runtime_path(
+            Path(requested_model_path)
+        )
+        cached_classes = get_cached_model_classes(runtime_model_path)
+        if cached_classes is not None:
+            self._populate_model_categories(cached_classes)
+            return
+        self.prepare_generation()
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -1094,7 +1104,15 @@ class AutoMarkings(QDockWidget):
 
     @Slot()
     def _on_model_activated(self):
-        if self.marking_settings_form.model_combo_box.currentData() is None:
+        requested_model_path = (
+            self.marking_settings_form.model_combo_box.currentData()
+        )
+        if requested_model_path is None:
+            return
+        runtime_model_path = preferred_runtime_path(Path(requested_model_path))
+        cached_classes = get_cached_model_classes(runtime_model_path)
+        if cached_classes is not None:
+            self._populate_model_categories(cached_classes)
             return
         self.prepare_generation(interactive=True, purpose='inspect')
 
@@ -1494,8 +1512,13 @@ class AutoMarkings(QDockWidget):
             self.result_label.show()
             self.start_cancel_button.setEnabled(True)
             return
+        self._populate_model_categories(thread.model_names)
+        if start_after_prepare:
+            QTimer.singleShot(0, self.generate_markings)
+
+    def _populate_model_categories(self, model_names: dict[int, str]):
+        class_table = self.marking_settings_form.class_table
         previous = class_table.blockSignals(True)
-        model_names = thread.model_names
         try:
             class_table.setRowCount(
                 len(model_names))
@@ -1536,8 +1559,6 @@ class AutoMarkings(QDockWidget):
         self._restore_class_actions_for_current_model()
         self.start_cancel_button.setEnabled(True)
         self.result_label.hide()
-        if start_after_prepare:
-            QTimer.singleShot(0, self.generate_markings)
 
     @Slot(QModelIndex, list)
     def _apply_generated_markings(

@@ -91,3 +91,5 @@
 - Restored automatic YOLO category population on the first real mouse, key, or wheel interaction anywhere in Auto-Markings; startup show/focus events remain ignored, and Start reuses the prepared session.
 - Traced three identical ONNX loads to three UI-side `YOLO.names` reads during category-table construction; Ultralytics can initialize the backend through that property.
 - Moved model preparation and the first category lookup to a single guarded worker job, cached the category snapshot, and made overlapping panel/selector/Start requests share the same in-flight load.
+- Added a persistent Auto-Markings class metadata cache keyed by resolved path, size, and modification time, allowing category UI to populate without constructing a model runtime.
+- Added a shared in-memory model runtime cache used by Auto-Markings and pipeline `MarkingThread` instances; unchanged models load once per application session and inference is serialized per shared runtime.

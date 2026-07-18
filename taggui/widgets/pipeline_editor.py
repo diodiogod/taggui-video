@@ -70,13 +70,12 @@ from utils.pipeline import (
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.icons import create_chain_link_icon
 from utils.marking_model_security import (
-    configure_ultralytics_marking_runtime,
-    infer_marking_model_task,
     list_marking_model_paths,
     passive_model_warning_text,
     prompt_resolve_runtime_path,
     resolve_marking_model_value,
 )
+from auto_marking.model_cache import get_cached_model_classes
 
 
 STEP_META = {
@@ -1250,21 +1249,18 @@ class PipelineStepCard(QFrame):
             if cached is not None and cached[0] == modified_ns:
                 model_classes = cached[1]
             else:
-                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                try:
-                    from ultralytics import YOLO
+                cached_classes = get_cached_model_classes(model_path)
+                if cached_classes is not None:
+                    model_classes = sorted(cached_classes.items())
+                else:
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    try:
+                        from auto_marking.model_cache import load_marking_runtime
 
-                    configure_ultralytics_marking_runtime(model_path)
-                    model = YOLO(
-                        model_path,
-                        task=infer_marking_model_task(model_path),
-                    )
-                    model_classes = [
-                        (int(class_id), str(class_name))
-                        for class_id, class_name in sorted(model.names.items())
-                    ]
-                finally:
-                    QApplication.restoreOverrideCursor()
+                        runtime = load_marking_runtime(model_path)
+                        model_classes = sorted(runtime.model_names.items())
+                    finally:
+                        QApplication.restoreOverrideCursor()
                 self._model_class_cache[cache_key] = (
                     modified_ns,
                     model_classes,
