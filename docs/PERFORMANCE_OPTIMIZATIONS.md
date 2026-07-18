@@ -53,7 +53,10 @@ resolve when captioning starts. Type-only worker references use
 Auto-Markings discovers model filenames when its selector is first opened and
 does not construct an Ultralytics or ONNX Runtime session while restoring the
 saved selection. A session is created when the user explicitly activates a
-model or starts marking, and a matching prepared session is reused by Start.
+model, starts marking, or first interacts with the Auto-Markings panel. This
+preserves automatic category population for an already-open panel without
+mistaking Qt startup show events for user intent. A matching prepared session is
+reused by Start.
 
 The main image viewer creates its video player, controls, overlays, and media
 objects on the first video. A first video can therefore have a small one-time

@@ -76,6 +76,25 @@ def test_model_selection_change_does_not_prepare_model(tmp_path):
     assert table.row_count == 0
 
 
+def test_first_panel_interaction_restores_model_categories():
+    actions = []
+    auto_markings = AutoMarkings.__new__(AutoMarkings)
+    auto_markings._first_interaction_preparation_scheduled = True
+    auto_markings._first_interaction_handled = False
+    auto_markings.is_marking = False
+    auto_markings.marking_settings_form = SimpleNamespace(
+        _ensure_local_model_paths=lambda: actions.append("scan"),
+        model_combo_box=SimpleNamespace(currentData=lambda: Path("model.onnx")),
+    )
+    auto_markings.prepare_generation = lambda: actions.append("prepare")
+
+    auto_markings._prepare_saved_model_on_first_interaction()
+
+    assert actions == ["scan", "prepare"]
+    assert auto_markings._first_interaction_handled
+    assert not auto_markings._first_interaction_preparation_scheduled
+
+
 def test_prepare_generation_reuses_matching_model(tmp_path):
     model_path = tmp_path / "model.onnx"
     model_path.touch()

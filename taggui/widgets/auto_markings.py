@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QSize, QEvent
+from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer, QSize, QEvent
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QDockWidget, QProgressBar, QPlainTextEdit,
                                QWidget, QVBoxLayout, QScrollArea,
@@ -686,6 +686,8 @@ class AutoMarkings(QDockWidget):
         layout.addWidget(self.run_panel)
         self.setWidget(container)
         self._install_ui_zoom_filters()
+        self._first_interaction_preparation_scheduled = False
+        self._first_interaction_handled = False
         self._apply_ui_zoom()
 
         self.start_cancel_button.clicked.connect(
@@ -722,6 +724,12 @@ class AutoMarkings(QDockWidget):
             child.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.KeyPress,
+            QEvent.Type.Wheel,
+        ):
+            self._schedule_first_interaction_preparation()
         if (
             event.type() == QEvent.Type.Wheel
             and event.modifiers() & Qt.KeyboardModifier.ControlModifier
@@ -732,6 +740,28 @@ class AutoMarkings(QDockWidget):
             event.accept()
             return True
         return super().eventFilter(watched, event)
+
+    def _schedule_first_interaction_preparation(self):
+        if (
+            self._first_interaction_handled
+            or self._first_interaction_preparation_scheduled
+        ):
+            return
+        self._first_interaction_preparation_scheduled = True
+        QTimer.singleShot(0, self._prepare_saved_model_on_first_interaction)
+
+    def _prepare_saved_model_on_first_interaction(self):
+        self._first_interaction_preparation_scheduled = False
+        if self._first_interaction_handled:
+            return
+        self._first_interaction_handled = True
+        self.marking_settings_form._ensure_local_model_paths()
+        if (
+            not self.is_marking
+            and self.marking_settings_form.model_combo_box.currentData()
+            is not None
+        ):
+            self.prepare_generation()
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

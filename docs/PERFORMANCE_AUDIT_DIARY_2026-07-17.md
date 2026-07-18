@@ -88,3 +88,4 @@
 - Traced repeated Ultralytics startup messages to the delayed Auto-Markings selection restore: it called `prepare_generation()`, created a real ONNX Runtime GPU session, and selection signals could repeat that work.
 - Removed startup model preloading, made selection changes bookkeeping-only, loaded models on explicit activation or Start, and reused an already prepared matching session.
 - Removed the remaining six-second Auto-Markings directory-scan timer; recursive model discovery and file stats now run when the model selector is first opened.
+- Restored automatic YOLO category population on the first real mouse, key, or wheel interaction anywhere in Auto-Markings; startup show/focus events remain ignored, and Start reuses the prepared session.
