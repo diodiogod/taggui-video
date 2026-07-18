@@ -2,11 +2,11 @@ import os
 import sys
 import time
 import weakref
-# Set environment variables BEFORE importing cv2
+# These are read when OpenCV is imported lazily for frame-accurate fallback.
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
 
-import cv2
+from functools import lru_cache
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl, QRect, QMetaObject, Q_ARG
 from PySide6.QtGui import QImage, QPixmap
@@ -16,13 +16,9 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtGui import QOpenGLContext
 
-from utils.video import VideoValidator
+from utils.video import playback_backend
 from utils.video.playback_backend import (
-    MPV_PYTHON_MODULE,
-    MPV_BACKEND_ERROR,
     MPV_RUNTIME_SEARCHED_DIRS,
-    VLC_PYTHON_MODULE,
-    VLC_BACKEND_ERROR,
     VLC_RUNTIME_SEARCHED_DIRS,
     PLAYBACK_BACKEND_MPV_EXPERIMENTAL,
     PLAYBACK_BACKEND_QT_HYBRID,
@@ -31,11 +27,18 @@ from utils.video.playback_backend import (
     resolve_runtime_playback_backend,
 )
 
-# Suppress OpenCV logs
-cv2.setLogLevel(0)
 
-mpv = MPV_PYTHON_MODULE
-vlc = VLC_PYTHON_MODULE
+@lru_cache(maxsize=1)
+def _get_cv2():
+    """Load OpenCV only when frame-accurate fallback operations need it."""
+    import cv2
+
+    cv2.setLogLevel(0)
+    return cv2
+
+
+mpv = None
+vlc = None
 
 VIDEO_DISPLAY_FIT_PRESERVE = 'preserve'
 VIDEO_DISPLAY_FIT_FILL = 'fill'
@@ -184,7 +187,9 @@ class VideoPlayerWidget(QWidget):
         self.consecutive_frame_failures = 0
         self.corruption_warning_shown = False
         self._backend_fallback_warned = False
-        self.configured_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
+        # Reading the preference is cheap; probing optional native runtimes is
+        # deferred until a video is loaded or playback is requested.
+        self.configured_playback_backend = get_configured_playback_backend()
         self.runtime_playback_backend = PLAYBACK_BACKEND_QT_HYBRID
         self.mpv_player = None
         self.mpv_widget = None
@@ -262,8 +267,6 @@ class VideoPlayerWidget(QWidget):
         self._qt_video_source_path = None
         self._qt_startup_expected_ms = 0.0
         self._qt_startup_gate_deadline_monotonic = 0.0
-        self._refresh_backend_selection()
-
         # QMediaPlayer for smooth playback
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -307,21 +310,33 @@ class VideoPlayerWidget(QWidget):
 
         Unsupported selections are safely downgraded.
         """
+        global mpv, vlc
+
         self.configured_playback_backend = get_configured_playback_backend()
         self.runtime_playback_backend = resolve_runtime_playback_backend(self.configured_playback_backend)
+        mpv = playback_backend.MPV_PYTHON_MODULE
+        vlc = playback_backend.VLC_PYTHON_MODULE
 
         if self.runtime_playback_backend != self.configured_playback_backend:
             if not self._backend_fallback_warned:
                 reason = ''
-                if self.configured_playback_backend == 'mpv_experimental' and mpv is None and MPV_BACKEND_ERROR:
-                    reason = f" Reason: {MPV_BACKEND_ERROR}"
+                if (
+                    self.configured_playback_backend == 'mpv_experimental'
+                    and mpv is None
+                    and playback_backend.MPV_BACKEND_ERROR
+                ):
+                    reason = f" Reason: {playback_backend.MPV_BACKEND_ERROR}"
                     if not MPV_RUNTIME_SEARCHED_DIRS and os.name == 'nt':
                         reason += (
                             " Hint: place mpv-1.dll in "
                             "'third_party/mpv/windows-x86_64/' or in 'venv/Scripts/'."
                         )
-                if self.configured_playback_backend == 'vlc_experimental' and vlc is None and VLC_BACKEND_ERROR:
-                    reason = f" Reason: {VLC_BACKEND_ERROR}"
+                if (
+                    self.configured_playback_backend == 'vlc_experimental'
+                    and vlc is None
+                    and playback_backend.VLC_BACKEND_ERROR
+                ):
+                    reason = f" Reason: {playback_backend.VLC_BACKEND_ERROR}"
                     if not VLC_RUNTIME_SEARCHED_DIRS and os.name == 'nt':
                         reason += (
                             " Hint: place libvlc.dll/libvlccore.dll in "
@@ -2282,6 +2297,8 @@ class VideoPlayerWidget(QWidget):
     def _open_capture_silently(self, video_path: Path):
         """Open OpenCV capture while suppressing ffmpeg chatter."""
         import sys
+        cv2 = _get_cv2()
+
         # Safely resolve file descriptors for OS-level suppression.
         # Fall back to sys.__stdout__ if sys.stdout is redirected to a Python
         # object without a fileno() (e.g. during captioning).
@@ -2400,6 +2417,7 @@ class VideoPlayerWidget(QWidget):
                 pass
             return False
         self.cap = cap
+        cv2 = _get_cv2()
         try:
             fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
         except Exception:
@@ -3145,6 +3163,7 @@ class VideoPlayerWidget(QWidget):
             return
         if not self._ensure_cap_ready() or not self.cap:
             return
+        cv2 = _get_cv2()
 
         if self.total_frames > 0:
             frame_number = max(0, min(frame_number, self.total_frames - 1))
@@ -3654,6 +3673,7 @@ class VideoPlayerWidget(QWidget):
         """Extract a specific frame as RGB numpy array for processing."""
         if not self._ensure_cap_ready() or not self.cap:
             return None
+        cv2 = _get_cv2()
 
         try:
             target_frame = self.current_frame if frame_number is None else int(frame_number)

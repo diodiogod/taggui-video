@@ -9,7 +9,12 @@ from .skin_applier import SkinApplier
 class SkinManager:
     """Manages skin loading, switching, and application."""
 
-    def __init__(self, skin_dirs: Optional[List[Path]] = None):
+    def __init__(
+        self,
+        skin_dirs: Optional[List[Path]] = None,
+        *,
+        discover_on_init: bool = True,
+    ):
         """Initialize skin manager.
 
         Args:
@@ -29,13 +34,46 @@ class SkinManager:
         self.current_applier: Optional[SkinApplier] = None
         self.current_skin_path: Optional[Path] = None  # Track current skin file path
         self.available_skins: List[Dict[str, Any]] = []
+        self._catalog_signature = None
 
-        # Load available skins
-        self.refresh_available_skins()
+        if discover_on_init:
+            self.refresh_available_skins()
+
+    def _iter_skin_files(self):
+        for skin_dir in self.skin_dirs:
+            if not skin_dir.exists():
+                continue
+            yield from skin_dir.glob('*.yaml')
+
+    def _skin_catalog_signature(self):
+        signature = []
+        for skin_path in self._iter_skin_files():
+            try:
+                stat = skin_path.stat()
+                signature.append(
+                    (str(skin_path), int(stat.st_mtime_ns), int(stat.st_size))
+                )
+            except OSError:
+                continue
+        return tuple(sorted(signature))
+
+    @staticmethod
+    def _skin_info(skin_path: Path, skin_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            'name': skin_data.get('name', skin_path.stem),
+            'author': skin_data.get('author', 'Unknown'),
+            'version': skin_data.get('version', '1.0'),
+            'path': skin_path,
+            'data': skin_data,
+        }
 
     def refresh_available_skins(self):
         """Refresh list of available skins."""
+        signature = self._skin_catalog_signature()
+        if self.available_skins and signature == self._catalog_signature:
+            return
         self.available_skins = self.loader.list_available_skins(self.skin_dirs)
+        self._catalog_signature = signature
 
     def get_available_skins(self) -> List[Dict[str, Any]]:
         """Get list of available skins.
@@ -60,6 +98,20 @@ class SkinManager:
             if skin['name'] == skin_name:
                 skin_info = skin
                 break
+
+        # Startup only needs the selected skin. In lazy-discovery mode, parse
+        # files in normal precedence order until it is found; menus explicitly
+        # refresh the complete catalog when they are opened.
+        if not skin_info and not self.available_skins:
+            for skin_path in self._iter_skin_files():
+                skin_data = self.loader.load_skin(skin_path)
+                if not skin_data:
+                    continue
+                candidate = self._skin_info(skin_path, skin_data)
+                self.available_skins.append(candidate)
+                if candidate['name'] == skin_name:
+                    skin_info = candidate
+                    break
 
         if not skin_info:
             print(f"Skin not found: {skin_name}")

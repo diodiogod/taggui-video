@@ -3,9 +3,7 @@
 import subprocess
 import json
 from pathlib import Path
-from typing import Tuple, Optional
-import cv2
-from .ffmpeg_gpu import ffmpeg_base_args
+from typing import Tuple
 
 
 class VideoValidator:
@@ -25,6 +23,8 @@ class VideoValidator:
         """
         try:
             if check_decode:
+                from .ffmpeg_gpu import ffmpeg_base_args
+
                 # More thorough check: try to decode all frames
                 cmd = [
                     *ffmpeg_base_args(),
@@ -109,6 +109,8 @@ class VideoValidator:
         """
         cap = None
         try:
+            import cv2
+
             cap = cv2.VideoCapture(str(video_path))
 
             if not cap.isOpened():

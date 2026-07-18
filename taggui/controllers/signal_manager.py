@@ -479,68 +479,19 @@ class SignalManager:
         )
 
     def connect_video_controls_signals(self):
-        """Connect video player and controls signals."""
-        video_player = self.main_window.image_viewer.video_player
-        video_controls = self.main_window.image_viewer.video_controls
+        """Connect persistent toolbar actions and lazy main-viewer video wiring."""
+        viewer = self.main_window.image_viewer
         toolbar_manager = self.main_window.toolbar_manager
         video_editing_controller = self.main_window.video_editing_controller
 
-        # Connect video controls to video player
-        def on_play_pause_requested():
-            """Handle manual play/pause toggle from user."""
-            self.main_window.toggle_viewer_play_pause(self.main_window.image_viewer)
-
-        video_controls.play_pause_requested.connect(on_play_pause_requested)
-        video_controls.stop_requested.connect(video_player.stop)
-        video_controls.frame_changed.connect(video_player.seek_to_frame)
-        video_controls.timeline_slider.scrub_started.connect(video_player.begin_timeline_scrub)
-        video_controls.timeline_slider.sliderReleased.connect(video_player.end_timeline_scrub)
-        # Connect marker preview - seeks video without updating controls
-        video_controls.marker_preview_requested.connect(video_player.seek_to_frame)
-        video_controls.skip_back_btn.clicked.connect(
-            lambda checked=False: self.main_window.image_viewer.handle_video_controls_skip_button_step('backward')
+        viewer.video_components_ready.connect(
+            self.main_window._connect_viewer_video_controls
         )
-        video_controls.skip_forward_btn.clicked.connect(
-            lambda checked=False: self.main_window.image_viewer.handle_video_controls_skip_button_step('forward')
-        )
-
-        # Connect video player updates to video controls
-        video_player.frame_changed.connect(
-            lambda frame, time_ms: self.main_window._queue_video_controls_update(
-                self.main_window.image_viewer, frame, time_ms
-            )
-        )
-        video_player.playback_started.connect(
-            lambda: video_controls.set_playing(True)
-        )
-        video_player.playback_paused.connect(
-            lambda: video_controls.set_playing(False)
-        )
-        video_player.playback_finished.connect(
-            lambda: video_controls.set_playing(False)
-        )
-
-        # Connect loop controls
-        video_controls.loop_toggled.connect(lambda enabled: self._update_loop_state())
-        video_controls.loop_start_set.connect(lambda: self._update_loop_state())
-        video_controls.loop_end_set.connect(lambda: self._update_loop_state())
-        video_controls.loop_reset.connect(
-            lambda: self._update_loop_state())
-
-        # Connect speed control
-        video_controls.speed_changed.connect(video_player.set_playback_speed)
-
-        # Connect mute control
-        video_controls.mute_toggled.connect(
-            lambda muted: video_player.set_muted(muted))
-        video_controls.volume_changed.connect(
-            lambda volume: video_player.set_volume(volume))
+        self.main_window._connect_viewer_video_controls(viewer)
 
         # Connect toolbar video editing controls
         toolbar_manager.fixed_marker_size_spinbox.valueChanged.connect(
             lambda value: self._on_marker_size_changed(value))
-        # Initialize video_controls.fixed_marker_size from saved settings
-        video_controls.fixed_marker_size = toolbar_manager.fixed_marker_size_spinbox.value()
 
         toolbar_manager.always_show_controls_action.triggered.connect(
             toolbar_manager.cycle_main_viewer_video_controls_visibility_mode
@@ -560,11 +511,6 @@ class SignalManager:
             video_editing_controller.remove_video_frame)
         toolbar_manager.repeat_frame_action.triggered.connect(
             video_editing_controller.repeat_video_frame)
-        video_controls.screenshot_requested.connect(
-            lambda: video_editing_controller.capture_current_video_frame(
-                viewer=self.main_window.image_viewer
-            )
-        )
         toolbar_manager.fix_frame_count_btn.clicked.connect(
             video_editing_controller.fix_video_frame_count)
         toolbar_manager.fix_all_folder_btn.clicked.connect(
@@ -617,7 +563,8 @@ class SignalManager:
     def _on_marker_size_changed(self, value):
         """Handle marker size changes and save to settings."""
         video_controls = self.main_window.image_viewer.video_controls
-        setattr(video_controls, 'fixed_marker_size', value)
+        if video_controls is not None:
+            setattr(video_controls, 'fixed_marker_size', value)
         settings.setValue('fixed_marker_size', value)
 
     def _update_delete_button_visibility(self):

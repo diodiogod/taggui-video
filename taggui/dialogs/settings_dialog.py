@@ -30,12 +30,9 @@ from utils.settings import (
 from utils.video.playback_backend import (
     PLAYBACK_BACKEND_CHOICES,
     PLAYBACK_BACKEND_QT_HYBRID,
-    MPV_BACKEND_AVAILABLE,
-    MPV_BACKEND_ERROR,
     MPV_RUNTIME_SEARCHED_DIRS,
-    VLC_BACKEND_AVAILABLE,
-    VLC_BACKEND_ERROR,
     VLC_RUNTIME_SEARCHED_DIRS,
+    get_playback_backend_status,
     resolve_runtime_playback_backend,
     normalize_playback_backend_name,
 )
@@ -2323,6 +2320,8 @@ class SettingsDialog(QDialog):
     def _add_gpu_video_settings(self, grid_layout: QGridLayout, start_row: int):
         """Add advanced GPU/video backend settings block."""
         row = start_row
+        mpv_available, mpv_error = get_playback_backend_status('mpv_experimental')
+        vlc_available, vlc_error = get_playback_backend_status('vlc_experimental')
 
         # Playback backend selector (migration scaffold; runtime currently falls back to qt_hybrid)
         grid_layout.addWidget(QLabel('Video playback backend'), row, 0,
@@ -2337,11 +2336,11 @@ class SettingsDialog(QDialog):
             'qt_hybrid: Current stable backend (Qt + OpenCV hybrid).\n'
             'mpv_experimental: Experimental MPV backend.\n'
             'vlc_experimental: Experimental libVLC backend.\n\n'
-            f'mpv availability in current runtime: {"yes" if MPV_BACKEND_AVAILABLE else "no"}.\n'
-            f'vlc availability in current runtime: {"yes" if VLC_BACKEND_AVAILABLE else "no"}.\n'
+            f'mpv availability in current runtime: {"yes" if mpv_available else "no"}.\n'
+            f'vlc availability in current runtime: {"yes" if vlc_available else "no"}.\n'
             'When unavailable, selected experimental backend falls back to qt_hybrid.\n'
-            + (f'\nmpv load error: {MPV_BACKEND_ERROR}' if (not MPV_BACKEND_AVAILABLE and MPV_BACKEND_ERROR) else '')
-            + (f'\nvlc load error: {VLC_BACKEND_ERROR}' if (not VLC_BACKEND_AVAILABLE and VLC_BACKEND_ERROR) else '')
+            + (f'\nmpv load error: {mpv_error}' if (not mpv_available and mpv_error) else '')
+            + (f'\nvlc load error: {vlc_error}' if (not vlc_available and vlc_error) else '')
             + (
                 f"\n\nSearched runtime dirs:\n- " + "\n- ".join(MPV_RUNTIME_SEARCHED_DIRS[:6])
                 if MPV_RUNTIME_SEARCHED_DIRS else
@@ -2629,20 +2628,21 @@ class SettingsDialog(QDialog):
     def _on_playback_backend_changed(self, backend_name: str):
         configured = normalize_playback_backend_name(backend_name)
         runtime_backend = resolve_runtime_playback_backend(configured)
+        backend_available, backend_error = get_playback_backend_status(configured)
         show_mpv_download = (
             configured == 'mpv_experimental'
-            and not MPV_BACKEND_AVAILABLE
+            and not backend_available
             and sys.platform.startswith('win')
         )
         self.mpv_download_btn.setVisible(show_mpv_download)
         if configured != runtime_backend:
             extra = ''
-            if configured == 'mpv_experimental' and MPV_BACKEND_ERROR:
-                extra = f' ({MPV_BACKEND_ERROR})'
+            if configured == 'mpv_experimental' and backend_error:
+                extra = f' ({backend_error})'
                 if not MPV_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
                     extra += " Place libmpv-2.dll in 'third_party/mpv/windows-x86_64/'."
-            elif configured == 'vlc_experimental' and VLC_BACKEND_ERROR:
-                extra = f' ({VLC_BACKEND_ERROR})'
+            elif configured == 'vlc_experimental' and backend_error:
+                extra = f' ({backend_error})'
                 if not VLC_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
                     extra += " Place libvlc.dll/libvlccore.dll in 'third_party/vlc/windows-x86_64/'."
             self.warning_label.setText(

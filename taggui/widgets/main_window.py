@@ -22,10 +22,6 @@ from controllers.video_editing_controller import VideoEditingController
 from controllers.toolbar_manager import ToolbarManager
 from controllers.menu_manager import MenuManager
 from controllers.signal_manager import SignalManager
-from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
-from dialogs.find_and_replace_dialog import FindAndReplaceDialog
-from dialogs.export_dialog import ExportDialog
-from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -71,15 +67,20 @@ from widgets.pipeline_editor import PipelineEditor
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
 from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
-from widgets.fullscreen_viewer_window import FullscreenViewerWindow
-from widgets.media_comparison_widget import MediaComparisonWidget
 from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
 from widgets.compare_drop_feedback_overlay import CompareDropFeedbackOverlay
 from widgets.video_sync_coordinator import VideoSyncCoordinator
-from widgets.secondary_browser import SecondaryBrowser
 from widgets.context_switch_manager import ContextSwitchManager
 
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
+
+
+def _is_media_comparison_widget(widget) -> bool:
+    """Identify an existing comparison without importing its command-only UI."""
+    comparison_module = sys.modules.get("widgets.media_comparison_widget")
+    if comparison_module is None:
+        return False
+    return isinstance(widget, comparison_module.MediaComparisonWidget)
 
 
 class PerfHudOverlay(QWidget):
@@ -573,7 +574,7 @@ class MainWindow(QMainWindow):
         self.post_deletion_index = None  # Track index to focus after deletion
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
         self._restore_in_progress = False
-        self._secondary_browser: SecondaryBrowser | None = None
+        self._secondary_browser = None
         self._context_switch_manager: ContextSwitchManager | None = None
         self._restore_target_global_rank = -1
         self._directory_restore_selection_path = None
@@ -882,10 +883,6 @@ class MainWindow(QMainWindow):
         # status_bar.setSizeGripEnabled(False)
         # self.image_list_model.cache_warm_progress.connect(self._update_cache_status)
         # QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
-
-        # Connect video playback signals to freeze list view during playback
-        self.image_viewer.video_player.playback_started.connect(self._freeze_list_view)
-        self.image_viewer.video_player.playback_paused.connect(self._unfreeze_list_view)
 
         # Unfreeze list view temporarily during user interaction
         # Re-freezes automatically after 200ms of idle if video is playing
@@ -3062,6 +3059,8 @@ class MainWindow(QMainWindow):
         # Keep the central area alive so dock splitter widths do not rebalance
         # while the main viewer is temporarily hosted in the fullscreen window.
         central.setVisible(True)
+
+        from widgets.fullscreen_viewer_window import FullscreenViewerWindow
 
         fullscreen_window = FullscreenViewerWindow(viewer)
         fullscreen_window.closing.connect(self._on_fullscreen_window_closing)
@@ -6466,12 +6465,12 @@ class MainWindow(QMainWindow):
     def _snapshot_window_arrangement_state(self, window: QWidget) -> dict:
         """Capture the state needed to rearrange a floating media window in-place."""
         viewer_states = []
-        allow_fit_restore = not isinstance(window, MediaComparisonWidget)
+        allow_fit_restore = not _is_media_comparison_widget(window)
         candidate_viewers = []
         try:
             if isinstance(window, FloatingViewerWindow):
                 candidate_viewers = [window.viewer]
-            elif isinstance(window, MediaComparisonWidget):
+            elif _is_media_comparison_widget(window):
                 getter = getattr(window, "_active_viewers", None)
                 candidate_viewers = getter() if callable(getter) else []
         except RuntimeError:
@@ -6665,7 +6664,7 @@ class MainWindow(QMainWindow):
                         window,
                         enable_review_slots=False,
                     )
-                elif isinstance(window, MediaComparisonWidget):
+                elif _is_media_comparison_widget(window):
                     try:
                         active_viewers = window._active_viewers()
                     except Exception:
@@ -6688,7 +6687,7 @@ class MainWindow(QMainWindow):
                     active_window.activateWindow()
                     if isinstance(active_window, FloatingViewerWindow):
                         self._activate_floating_action_target(active_window.viewer)
-                    elif isinstance(active_window, MediaComparisonWidget):
+                    elif _is_media_comparison_widget(active_window):
                         getter = getattr(active_window, "_active_viewers", None)
                         active_viewers = getter() if callable(getter) else []
                         if active_viewers:
@@ -6924,8 +6923,10 @@ class MainWindow(QMainWindow):
         target_index: QModelIndex,
         source_index: QModelIndex,
         reference_widget=None,
-    ) -> MediaComparisonWidget | None:
+    ) -> QWidget | None:
         """Spawn an A/B comparison window for two media indices."""
+        from widgets.media_comparison_widget import MediaComparisonWidget
+
         def _proxy_model_for_compare_index(index_like):
             try:
                 model = index_like.model()
@@ -6991,7 +6992,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, _after_spawn)
         return comp_widget
 
-    def _on_media_comparison_closed(self, comp_widget: MediaComparisonWidget):
+    def _on_media_comparison_closed(self, comp_widget: QWidget):
         closed_viewers = []
         try:
             closed_viewers = list(comp_widget.viewers())
@@ -7977,6 +7978,8 @@ class MainWindow(QMainWindow):
             diagnostic_print("[RESTORE][Browser2] ensure skipped; already exists", detail="verbose")
             return False
         diagnostic_print("[RESTORE][Browser2] ensure creating dock", detail="verbose")
+        from widgets.secondary_browser import SecondaryBrowser
+
         self._secondary_browser = SecondaryBrowser(
             image_width=int(settings.value(
                 'image_list_image_width',
@@ -8924,23 +8927,27 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def export_images_dialog(self):
+        from dialogs.export_dialog import ExportDialog
         export_dialog = ExportDialog(parent=self, image_list=self.image_list)
         export_dialog.exec()
         return
 
     @Slot()
     def show_settings_dialog(self):
+        from dialogs.settings_dialog import SettingsDialog
         settings_dialog = SettingsDialog(parent=self)
         settings_dialog.exec()
 
     @Slot()
     def show_find_and_replace_dialog(self):
+        from dialogs.find_and_replace_dialog import FindAndReplaceDialog
         find_and_replace_dialog = FindAndReplaceDialog(
             parent=self, image_list_model=self.image_list_model)
         find_and_replace_dialog.exec()
 
     @Slot()
     def show_batch_reorder_tags_dialog(self):
+        from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
         batch_reorder_tags_dialog = BatchReorderTagsDialog(
             parent=self, image_list_model=self.image_list_model,
             tag_counter_model=self.tag_counter_model)
