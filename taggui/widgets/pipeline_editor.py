@@ -70,13 +70,12 @@ from utils.pipeline import (
 from utils.settings import DEFAULT_SETTINGS, settings
 from utils.icons import create_chain_link_icon
 from utils.marking_model_security import (
-    configure_ultralytics_marking_runtime,
-    infer_marking_model_task,
     list_marking_model_paths,
     passive_model_warning_text,
     prompt_resolve_runtime_path,
     resolve_marking_model_value,
 )
+from auto_marking.model_cache import get_cached_model_classes
 
 
 STEP_META = {
@@ -1250,21 +1249,18 @@ class PipelineStepCard(QFrame):
             if cached is not None and cached[0] == modified_ns:
                 model_classes = cached[1]
             else:
-                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                try:
-                    from ultralytics import YOLO
+                cached_classes = get_cached_model_classes(model_path)
+                if cached_classes is not None:
+                    model_classes = sorted(cached_classes.items())
+                else:
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    try:
+                        from auto_marking.model_cache import load_marking_runtime
 
-                    configure_ultralytics_marking_runtime(model_path)
-                    model = YOLO(
-                        model_path,
-                        task=infer_marking_model_task(model_path),
-                    )
-                    model_classes = [
-                        (int(class_id), str(class_name))
-                        for class_id, class_name in sorted(model.names.items())
-                    ]
-                finally:
-                    QApplication.restoreOverrideCursor()
+                        runtime = load_marking_runtime(model_path)
+                        model_classes = sorted(runtime.model_names.items())
+                    finally:
+                        QApplication.restoreOverrideCursor()
                 self._model_class_cache[cache_key] = (
                     modified_ns,
                     model_classes,
@@ -1405,6 +1401,7 @@ class PipelineEditor(QDockWidget):
         self.store = PipelineStore()
         self.pipelines: list[PipelineDefinition] = []
         self.current_pipeline: PipelineDefinition | None = None
+        self._steps_built_for_pipeline_id: str | None = None
         self._loading = False
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1639,6 +1636,16 @@ class PipelineEditor(QDockWidget):
         super().resizeEvent(event)
         self._update_compact_visibility()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        pipeline_id = (
+            str(self.current_pipeline.id)
+            if self.current_pipeline is not None
+            else None
+        )
+        if pipeline_id != self._steps_built_for_pipeline_id:
+            self._rebuild_steps()
+
     def _update_compact_visibility(self):
         scale = self.ui_zoom / 100.0
         effective_height = self.height() / max(0.01, scale)
@@ -1815,11 +1822,16 @@ class PipelineEditor(QDockWidget):
             self._SELECTED_PIPELINE_SETTINGS_KEY,
             self.current_pipeline.id,
         )
-        self._rebuild_steps()
+        if self.isVisible():
+            self._rebuild_steps()
+        else:
+            self.step_list.clear()
+            self._steps_built_for_pipeline_id = None
 
     def _rebuild_steps(self):
         self.step_list.clear()
         if self.current_pipeline is None:
+            self._steps_built_for_pipeline_id = None
             return
         marking_models = self._marking_models()
         caption_models = self._caption_models()
@@ -1841,6 +1853,7 @@ class PipelineEditor(QDockWidget):
             self.step_list.addItem(item)
             self.step_list.setItemWidget(item, row_widget)
         self.step_list.schedule_link_connector_refresh()
+        self._steps_built_for_pipeline_id = str(self.current_pipeline.id)
 
     def _step_card(self, step_id: str):
         for row in range(self.step_list.count()):

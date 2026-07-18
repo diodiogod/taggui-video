@@ -1,4 +1,5 @@
 import gc
+import importlib.util
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -19,18 +20,19 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QMenu, QStyle, QTabWidget, QSizePolicy,
                                QVBoxLayout, QWidget)
 
-from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.model_availability import (
-    MODEL_ARTIFACT_KIND_HUGGINGFACE,
-    MODEL_ARTIFACT_KIND_WD_TAGGER,
     clear_model_availability_cache,
     get_model_install_state,
 )
-from auto_captioning.models.wd_tagger import WdTagger
-from auto_captioning.models.remote import RemoteGen
-from auto_captioning.models_list import MODELS, get_model_class
-from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
-from dialogs.prompt_history_dialog import PromptHistoryDialog
+from auto_captioning.models_list import (
+    MODEL_KIND_LOCAL,
+    MODEL_KIND_REMOTE,
+    MODEL_KIND_WD_TAGGER,
+    MODELS,
+    get_model_artifact_kind,
+    get_model_download_revision,
+    get_model_kind,
+)
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
 from utils.prompt_history import get_prompt_history
@@ -52,7 +54,6 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     SettingsPlainTextEdit)
 from utils.utils import pluralize
 from widgets.image_list import ImageList
-import torch
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -291,6 +292,14 @@ class ClickableLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class ModelAvailabilityComboBox(FocusedScrollSettingsComboBox):
+    availability_requested = Signal()
+
+    def showPopup(self):
+        self.availability_requested.emit()
+        super().showPopup()
+
+
 class CaptionSettingsForm:
     MODEL_SETTING_KEY = 'auto_captioner_model_id'
 
@@ -312,14 +321,11 @@ class CaptionSettingsForm:
     }
 
     def __init__(self, *, use_compact_style: bool = False,
-                 unload_model_callback=None):
-        try:
-            import bitsandbytes  # noqa: F401
-            self.is_bitsandbytes_available = True
-        except RuntimeError:
-            self.is_bitsandbytes_available = False
-        except Exception:
-            self.is_bitsandbytes_available = False
+                 unload_model_callback=None,
+                 availability_callback=None):
+        self.is_bitsandbytes_available = (
+            importlib.util.find_spec('bitsandbytes') is not None
+        )
 
         self.use_compact_style = use_compact_style
         self.layout_mode = load_auto_captioner_layout_mode()
@@ -332,6 +338,7 @@ class CaptionSettingsForm:
         self.compact_video_controls_row = None
         self.compact_device_gpu_row = None
         self.tabs_widget = None
+        self._availability_initialized = False
         self.general_tab = None
         self.prompting_tab = None
         self.advanced_tab = None
@@ -348,10 +355,14 @@ class CaptionSettingsForm:
                 self.MODEL_SETTING_KEY,
                 legacy_model_id or DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
             )
-        self.model_combo_box = FocusedScrollSettingsComboBox(
+        self.model_combo_box = ModelAvailabilityComboBox(
             key=self.MODEL_SETTING_KEY,
             default=DEFAULT_SETTINGS[self.MODEL_SETTING_KEY],
         )
+        if availability_callback is not None:
+            self.model_combo_box.availability_requested.connect(
+                availability_callback
+            )
         self.model_combo_box.setEditable(True)
         self.model_combo_box.setIconSize(QSize(12, 12))
         model_combo_view = self.model_combo_box.view()
@@ -910,25 +921,11 @@ class CaptionSettingsForm:
 
     @staticmethod
     def _get_model_artifact_kind(model_id: str) -> str:
-        direct_path = Path(str(model_id or '').strip()).expanduser()
-        if direct_path.is_dir():
-            if ((direct_path / 'model.onnx').is_file()
-                    and (direct_path / 'selected_tags.csv').is_file()):
-                return MODEL_ARTIFACT_KIND_WD_TAGGER
-        model_class = get_model_class(model_id)
-        return getattr(
-            model_class,
-            'model_artifact_kind',
-            MODEL_ARTIFACT_KIND_HUGGINGFACE,
-        )
+        return get_model_artifact_kind(model_id)
 
     @staticmethod
     def _get_model_revision(model_id: str) -> str | None:
-        model_class = get_model_class(model_id)
-        revision_getter = getattr(model_class, 'get_download_revision', None)
-        if callable(revision_getter):
-            return revision_getter(model_id)
-        return None
+        return get_model_download_revision(model_id)
 
     def _get_install_state(self, model_id: str):
         models_directory_path = settings.value(
@@ -963,6 +960,7 @@ class CaptionSettingsForm:
                 Qt.ItemDataRole.ToolTipRole,
             )
         self.refresh_selected_model_status()
+        self._availability_initialized = True
 
     def refresh_selected_model_status(self):
         model_id = str(self.model_combo_box.currentText() or '').strip()
@@ -1376,7 +1374,6 @@ class CaptionSettingsForm:
             root_layout.addWidget(self._build_tabs())
             root_layout.addStretch(1)
         self.show_settings_for_model(self.model_combo_box.currentText())
-        self.refresh_model_availability()
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
         self._page_cache[layout_mode] = page
         return page
@@ -1480,8 +1477,9 @@ class CaptionSettingsForm:
     def _sync_tab_visibility(self, model_id: str):
         if self.tabs_widget is None:
             return
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        is_remote_model = get_model_class(model_id) == RemoteGen
+        model_kind = get_model_kind(model_id)
+        is_wd_tagger_model = model_kind == MODEL_KIND_WD_TAGGER
+        is_remote_model = model_kind == MODEL_KIND_REMOTE
         is_local_model = not is_wd_tagger_model and not is_remote_model
         for idx, visible in (
             (0, True),
@@ -1518,8 +1516,9 @@ class CaptionSettingsForm:
 
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        is_remote_model = get_model_class(model_id) == RemoteGen
+        model_kind = get_model_kind(model_id)
+        is_wd_tagger_model = model_kind == MODEL_KIND_WD_TAGGER
+        is_remote_model = model_kind == MODEL_KIND_REMOTE
         is_local_model = not is_wd_tagger_model and not is_remote_model
         lowercase_id = model_id.lower()
         is_qwen_model = ('qwen2.5-vl' in lowercase_id
@@ -1600,8 +1599,9 @@ class CaptionSettingsForm:
     @Slot(str)
     def set_load_in_4_bit_visibility(self, device: str):
         model_id = self.model_combo_box.currentText()
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        is_remote_model = get_model_class(model_id) == RemoteGen
+        model_kind = get_model_kind(model_id)
+        is_wd_tagger_model = model_kind == MODEL_KIND_WD_TAGGER
+        is_remote_model = model_kind == MODEL_KIND_REMOTE
         if is_wd_tagger_model or is_remote_model:
             self.load_in_4_bit_container.setVisible(False)
             return
@@ -1640,7 +1640,7 @@ class CaptionSettingsForm:
         if container is None:
             return
         visible = (
-            get_model_class(self.model_combo_box.currentText()) == RemoteGen
+            get_model_kind(self.model_combo_box.currentText()) == MODEL_KIND_REMOTE
             and self.output_format_combo_box.currentText() == 'Ideogram 4 JSON'
         )
         container.setVisible(visible)
@@ -1968,6 +1968,7 @@ class AutoCaptioner(QDockWidget):
                 normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT
             ),
             unload_model_callback=self.unload_loaded_model,
+            availability_callback=self._initialize_model_availability_ui,
         )
         if normalized == AUTO_CAPTIONER_LAYOUT_MODE_COMPACT:
             self.compact_caption_settings_form = self.caption_settings_form
@@ -2039,7 +2040,8 @@ class AutoCaptioner(QDockWidget):
         self.layout_mode = normalized
         self._update_primary_button_text()
         self._update_unload_button_state()
-        self._refresh_model_availability_ui()
+        if self.isVisible():
+            self._refresh_model_availability_ui()
         self.updateGeometry()
         if persist:
             persist_auto_captioner_layout_mode(normalized)
@@ -2301,6 +2303,11 @@ class AutoCaptioner(QDockWidget):
         super().resizeEvent(event)
         self._update_primary_button_text()
 
+    def _initialize_model_availability_ui(self):
+        form = self.caption_settings_form
+        if form is not None and not form._availability_initialized:
+            self._refresh_model_availability_ui()
+
     def _update_primary_button_text(self, *, canceling: bool = False):
         if canceling:
             full_text = 'Canceling Auto-Captioning...'
@@ -2338,8 +2345,7 @@ class AutoCaptioner(QDockWidget):
             if form is None:
                 continue
             model_id = str(form.model_combo_box.currentText() or '')
-            model_class = get_model_class(model_id)
-            is_local_model = model_class not in (WdTagger, RemoteGen)
+            is_local_model = get_model_kind(model_id) == MODEL_KIND_LOCAL
             form.set_unload_button_state(
                 visible=is_local_model,
                 enabled=is_local_model and loaded_model_present and not self.is_captioning,
@@ -2347,13 +2353,16 @@ class AutoCaptioner(QDockWidget):
 
     def _refresh_model_availability_ui(self):
         clear_model_availability_cache()
+        seen_forms = set()
         for form in (
             self.caption_settings_form,
             self.classic_caption_settings_form,
             self.compact_caption_settings_form,
         ):
-            if form is not None:
-                form.refresh_model_availability()
+            if form is None or id(form) in seen_forms:
+                continue
+            seen_forms.add(id(form))
+            form.refresh_model_availability()
 
     @staticmethod
     def _format_memory_bytes(byte_count: int | float | None) -> str:
@@ -2371,6 +2380,9 @@ class AutoCaptioner(QDockWidget):
 
     @staticmethod
     def _cuda_memory_snapshot() -> tuple[int | None, int | None]:
+        torch = sys.modules.get('torch')
+        if torch is None:
+            return None, None
         if not torch.cuda.is_available():
             return None, None
         try:
@@ -2723,6 +2735,8 @@ class AutoCaptioner(QDockWidget):
     @Slot()
     def show_prompt_history(self):
         """Show prompt history dialog."""
+        from dialogs.prompt_history_dialog import PromptHistoryDialog
+
         dialog = PromptHistoryDialog(self)
         dialog.prompt_selected.connect(self.load_prompt_from_history)
         dialog.exec()
@@ -2779,6 +2793,8 @@ class AutoCaptioner(QDockWidget):
         selected_image_count = len(selected_image_indices)
         show_alert_when_finished = False
         if selected_image_count > 1:
+            from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
+
             confirmation_dialog = CaptionMultipleImagesDialog(
                 selected_image_count)
             reply = confirmation_dialog.exec()
@@ -2807,6 +2823,7 @@ class AutoCaptioner(QDockWidget):
             defaultValue=DEFAULT_SETTINGS['models_directory_path'], type=str)
         models_directory_path = (Path(models_directory_path)
                                  if models_directory_path else None)
+        from auto_captioning.captioning_thread import CaptioningThread
         self.captioning_thread = CaptioningThread(
             self, self.image_list_model, selected_image_indices,
             caption_settings, tag_separator, models_directory_path,
@@ -2903,7 +2920,8 @@ class AutoCaptioner(QDockWidget):
             del model
         gc.collect()
         gc.collect()
-        if torch.cuda.is_available():
+        torch = sys.modules.get('torch')
+        if torch is not None and torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()
             except Exception:

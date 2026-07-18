@@ -7,6 +7,13 @@ from utils.sidecar import (
     sidecar_backup_path,
 )
 
+
+def _get_loaded_video_player(main_window):
+    image_viewer = getattr(main_window, 'image_viewer', None)
+    video_player = getattr(image_viewer, 'video_player', None)
+    return video_player if video_player is not None else None
+
+
 class ImageListViewFileOpsMixin:
     def get_selected_proxy_indices(self) -> list[QModelIndex]:
         """Return unique selected proxy indices in visual row order."""
@@ -309,10 +316,11 @@ class ImageListViewFileOpsMixin:
         # Hierarchy: ImageListView -> container -> ImageList (QDockWidget) -> MainWindow
         main_window = self.parent().parent().parent()  # Get main window reference
         video_was_cleaned = False
-        if hasattr(main_window, 'image_viewer') and hasattr(main_window.image_viewer, 'video_player'):
-            video_player = main_window.image_viewer.video_player
-            if video_player.video_path:
-                currently_loaded_path = Path(video_player.video_path)
+        video_player = _get_loaded_video_player(main_window)
+        if video_player is not None:
+            video_path = getattr(video_player, 'video_path', None)
+            if video_path:
+                currently_loaded_path = Path(video_path)
                 # Check if we're deleting the currently loaded video
                 for image in selected_images:
                     if image.path == currently_loaded_path:

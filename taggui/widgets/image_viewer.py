@@ -27,8 +27,6 @@ from utils.ideogram_caption import (
     ideogram_caption_path,
 )
 from utils.rect import RectPosition
-from widgets.video_player import VideoPlayerWidget
-from widgets.video_controls import VideoControlsWidget
 from widgets.compare_divider_utils import (
     COMPARE_DIVIDER_COLOR,
     COMPARE_DIVIDER_THICKNESS_PX,
@@ -492,9 +490,9 @@ class ImageViewer(QWidget):
 
         self.view.wheelEvent = self.wheelEvent
 
-        # Spawned static-image viewers lazily create video widgets only if a
-        # video is loaded. The main viewer remains eager to preserve startup
-        # playback behavior and MPV prewarm.
+        # Video widgets are created only if a video is loaded. Signal wiring is
+        # attached through video_components_ready for both main and spawned
+        # viewers.
         self.video_player = None
         self.video_controls = None
         self._video_components_connected = False
@@ -643,9 +641,6 @@ class ImageViewer(QWidget):
         self.view.viewport().setMouseTracking(True)
         self.view.installEventFilter(self)
         self.view.viewport().installEventFilter(self)
-        if not self.is_spawned_viewer:
-            self._ensure_video_components()
-
     def set_video_loop_persistence_scope(self, scope: str):
         """Store/apply the loop persistence scope for lazily-created controls."""
         self._video_loop_persistence_scope = str(scope)
@@ -677,11 +672,13 @@ class ImageViewer(QWidget):
         self.video_controls.setGeometry(x_pos, y_pos, controls_width, controls_height)
 
     def _ensure_video_components(self):
-        """Create video-only widgets on demand for spawned static-image viewers."""
+        """Import and create video-only widgets on the first video request."""
         if self.video_player is not None and self.video_controls is not None:
             return
 
         if self.video_player is None:
+            from widgets.video_player import VideoPlayerWidget
+
             self.video_player = VideoPlayerWidget()
             QTimer.singleShot(0, lambda: (
                 self.video_player.prewarm_gl_widget(self.view)
@@ -689,6 +686,8 @@ class ImageViewer(QWidget):
             ))
 
         if self.video_controls is None:
+            from widgets.video_controls import VideoControlsWidget
+
             self.video_controls = VideoControlsWidget(self)
             self.video_controls._is_spawned_owner = self.is_spawned_viewer
             self.video_controls.setVisible(False)

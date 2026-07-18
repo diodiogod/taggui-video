@@ -1003,7 +1003,7 @@ class VideoControlsWidget(QWidget):
         self._update_mute_button()
 
         # Initialize skin system
-        self.skin_manager = SkinManager()
+        self.skin_manager = SkinManager(discover_on_init=False)
         # Load saved skin or default
         saved_skin = settings.value('video_player_skin', defaultValue='Classic', type=str)
         if not self.skin_manager.load_skin(saved_skin):

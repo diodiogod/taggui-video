@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QLineEdit,
                                QPlainTextEdit, QSlider, QSpinBox)
 
@@ -110,10 +110,32 @@ class SettingsPlainTextEdit(QPlainTextEdit):
         # Add spell checking if enabled
         spell_check_enabled = settings.value('spell_check_enabled', defaultValue=True, type=bool)
         self.spell_highlighter = SpellHighlighter(self.document())
-        self.spell_highlighter.set_enabled(spell_check_enabled)
+        self._spell_check_user_enabled = spell_check_enabled
+        # Prompt editors are populated before the window is shown. Delay the
+        # dictionary and first full-document pass until the user enters one.
+        self.spell_highlighter.set_enabled(False)
+        self._spell_check_activation_timer = QTimer(self)
+        self._spell_check_activation_timer.setSingleShot(True)
+        self._spell_check_activation_timer.setInterval(450)
+        self._spell_check_activation_timer.timeout.connect(
+            self._activate_spell_check
+        )
 
         # Load custom dictionary
         custom_dict_list = settings.value('spell_check_custom_dictionary', [], type=list)
         if custom_dict_list:
             custom_dict = set(custom_dict_list)
             self.spell_highlighter.load_custom_dictionary(custom_dict)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        if self._spell_check_user_enabled and not self.spell_highlighter.enabled:
+            self._spell_check_activation_timer.start()
+
+    def _activate_spell_check(self):
+        if (
+            self.hasFocus()
+            and self._spell_check_user_enabled
+            and not self.spell_highlighter.enabled
+        ):
+            self.spell_highlighter.set_enabled(True)

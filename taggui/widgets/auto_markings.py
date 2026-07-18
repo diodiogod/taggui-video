@@ -1,4 +1,4 @@
-import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import Signal, QModelIndex, Qt, Slot, QTimer, QSize, QEvent
@@ -29,22 +29,15 @@ from utils.marking_model_security import (
     passive_model_warning_text,
     preferred_runtime_path,
     prompt_resolve_runtime_path,
+    resolve_marking_model_value,
 )
+from auto_marking.model_cache import get_cached_model_classes
 from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     FocusedScrollSettingsDoubleSpinBox,
                                     FocusedScrollSettingsSpinBox,
                                     SettingsBigCheckBox)
 from widgets.auto_captioner import set_text_edit_height, restore_stdout_and_stderr
 from widgets.image_list import ImageList
-from auto_marking.marking_thread import MarkingThread
-from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
-
-
-def _startup_delay_ms(env_name: str, default_ms: int) -> int:
-    try:
-        return max(0, int(os.getenv(env_name, str(default_ms)) or default_ms))
-    except (TypeError, ValueError):
-        return max(0, int(default_ms))
 
 
 class CompressibleAutoMarkingsRoot(QWidget):
@@ -58,6 +51,8 @@ class CompressibleScrollArea(QScrollArea):
 
 
 class MarkingModelComboBox(FocusedScrollSettingsComboBox):
+    models_requested = Signal()
+
     _SORT_LABELS = {
         'name': 'Name',
         'recent': 'Recent',
@@ -93,6 +88,7 @@ class MarkingModelComboBox(FocusedScrollSettingsComboBox):
         self._refresh_popup_contents()
 
     def showPopup(self):
+        self.models_requested.emit()
         if self._popup is None:
             self._build_popup()
         self._refresh_popup_contents()
@@ -274,6 +270,10 @@ class MarkingSettingsForm(QWidget):
         self.model_combo_box.setPlaceholderText('Set marking model directory in "Settings..."')
         self.model_combo_box.activated.connect(self._on_model_activated)
         self.model_combo_box.currentTextChanged.connect(self._on_model_text_changed)
+        self.model_combo_box.models_requested.connect(
+            self._ensure_local_model_paths
+        )
+        self._models_loaded = False
         model_selector = QWidget()
         model_selector.setObjectName('autoMarkingsModelRow')
         model_selector_layout = QHBoxLayout(model_selector)
@@ -300,10 +300,6 @@ class MarkingSettingsForm(QWidget):
         self.scan_model_button.clicked.connect(self.open_selected_model_on_virustotal)
         model_selector_layout.addWidget(self.scan_model_button)
         root.addWidget(model_selector)
-        QTimer.singleShot(
-            _startup_delay_ms('TAGGUI_AUTO_MARKING_STARTUP_DELAY_MS', 6000),
-            self.get_local_model_paths,
-        )
         settings.change.connect(lambda key, value: self.get_local_model_paths()
             if key == 'marking_models_directory_path' else 0)
         self.model_warning_label = QLabel()
@@ -446,6 +442,7 @@ class MarkingSettingsForm(QWidget):
         self.model_warning_label.setVisible(bool(warning_text))
 
     def get_local_model_paths(self):
+        self._models_loaded = True
         models_directory_path = settings.value(
             'marking_models_directory_path',
             defaultValue=DEFAULT_SETTINGS['marking_models_directory_path'],
@@ -508,6 +505,10 @@ class MarkingSettingsForm(QWidget):
             self.model_selected.emit(bool(current_text))
         return relative_paths
 
+    def _ensure_local_model_paths(self):
+        if not self._models_loaded:
+            self.get_local_model_paths()
+
     @Slot()
     def open_selected_model_on_virustotal(self):
         selected_path = self.model_combo_box.currentData()
@@ -565,6 +566,7 @@ class MarkingSettingsForm(QWidget):
 
 class AutoMarkings(QDockWidget):
     marking_generated = Signal(QModelIndex, list)
+    _model_preparation_finished = Signal(int, object)
     _CLASS_ACTIONS_SETTINGS_KEY = CLASS_ACTIONS_SETTINGS_KEY
     _CLASS_LABELS_SETTINGS_KEY = CLASS_LABELS_SETTINGS_KEY
 
@@ -576,6 +578,17 @@ class AutoMarkings(QDockWidget):
         self.image_list = image_list
         self.is_marking = False
         self.marking_thread = None
+        self._model_preparation_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix='taggui-marking-model',
+        )
+        self._model_preparation_token = 0
+        self._model_preparation_path = None
+        self._model_preparation_future = None
+        self._start_after_model_preparation = False
+        self._model_preparation_finished.connect(
+            self._on_model_preparation_finished
+        )
         self.show_alert_when_finished = False
         self._run_marking_count = 0
         self._run_processed_image_count = 0
@@ -688,6 +701,8 @@ class AutoMarkings(QDockWidget):
         layout.addWidget(self.run_panel)
         self.setWidget(container)
         self._install_ui_zoom_filters()
+        self._first_interaction_preparation_scheduled = False
+        self._first_interaction_handled = False
         self._apply_ui_zoom()
 
         self.start_cancel_button.clicked.connect(
@@ -706,10 +721,7 @@ class AutoMarkings(QDockWidget):
         self.marking_settings_form.reset_class_labels_button.clicked.connect(
             self._reset_class_labels
         )
-        QTimer.singleShot(
-            _startup_delay_ms('TAGGUI_AUTO_MARKING_RESTORE_DELAY_MS', 6500),
-            self._restore_model_selection_state,
-        )
+        QTimer.singleShot(0, self._restore_cached_categories_for_saved_model)
 
     def minimumSizeHint(self):
         return QSize(150, 80)
@@ -729,6 +741,12 @@ class AutoMarkings(QDockWidget):
             child.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.KeyPress,
+            QEvent.Type.Wheel,
+        ):
+            self._schedule_first_interaction_preparation()
         if (
             event.type() == QEvent.Type.Wheel
             and event.modifiers() & Qt.KeyboardModifier.ControlModifier
@@ -739,6 +757,69 @@ class AutoMarkings(QDockWidget):
             event.accept()
             return True
         return super().eventFilter(watched, event)
+
+    def _schedule_first_interaction_preparation(self):
+        if (
+            self._first_interaction_handled
+            or self._first_interaction_preparation_scheduled
+        ):
+            return
+        self._first_interaction_preparation_scheduled = True
+        QTimer.singleShot(0, self._prepare_saved_model_on_first_interaction)
+
+    def _prepare_saved_model_on_first_interaction(self):
+        self._first_interaction_preparation_scheduled = False
+        if self._first_interaction_handled:
+            return
+        self._first_interaction_handled = True
+        self.marking_settings_form._ensure_local_model_paths()
+        if self.is_marking:
+            return
+        requested_model_path = (
+            self.marking_settings_form.model_combo_box.currentData()
+        )
+        if requested_model_path is None:
+            return
+        runtime_model_path = preferred_runtime_path(
+            Path(requested_model_path)
+        )
+        cached_classes = get_cached_model_classes(runtime_model_path)
+        if cached_classes is not None:
+            self._populate_model_categories(cached_classes)
+            return
+        self.prepare_generation()
+
+    def _restore_cached_categories_for_saved_model(self):
+        model_value = str(
+            settings.value('marking_model_id', '', type=str) or ''
+        ).strip()
+        models_root = str(
+            settings.value(
+                'marking_models_directory_path',
+                DEFAULT_SETTINGS['marking_models_directory_path'],
+                type=str,
+            ) or ''
+        ).strip()
+        if not model_value or not models_root:
+            return
+        requested_model_path = resolve_marking_model_value(
+            model_value,
+            models_root,
+        )
+        runtime_model_path = preferred_runtime_path(requested_model_path)
+        cached_classes = get_cached_model_classes(runtime_model_path)
+        if cached_classes is None:
+            return
+
+        try:
+            modified_ns = requested_model_path.stat().st_mtime_ns
+        except OSError:
+            modified_ns = 0
+        self.marking_settings_form.model_combo_box.set_model_entries(
+            [(model_value, requested_model_path, modified_ns)],
+            selected_text=model_value,
+        )
+        self._populate_model_categories(cached_classes)
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -1038,20 +1119,37 @@ class AutoMarkings(QDockWidget):
         self.marking_settings_form.reset_class_labels_button.setEnabled(
             has_model_text
         )
-        if not has_model_text:
-            self.start_cancel_button.setEnabled(False)
+        self.start_cancel_button.setEnabled(has_model_text)
+        if self.is_marking:
             return
-        self.prepare_generation()
+        requested_model_path = (
+            self.marking_settings_form.model_combo_box.currentData()
+        )
+        if requested_model_path is None:
+            self._discard_prepared_model()
+            return
+        runtime_model_path = preferred_runtime_path(
+            Path(requested_model_path)
+        )
+        if (
+            not self._prepared_model_matches(runtime_model_path)
+            and not self._model_preparation_matches(runtime_model_path)
+        ):
+            self._discard_prepared_model()
 
     @Slot()
     def _on_model_activated(self):
-        requested_model_path = self.marking_settings_form.model_combo_box.currentData()
+        requested_model_path = (
+            self.marking_settings_form.model_combo_box.currentData()
+        )
         if requested_model_path is None:
             return
-        requested_model_path = Path(requested_model_path)
-        if preferred_runtime_path(requested_model_path) == requested_model_path:
-            if requested_model_path.suffix.lower() == '.pt':
-                self.prepare_generation(interactive=True, purpose='inspect')
+        runtime_model_path = preferred_runtime_path(Path(requested_model_path))
+        cached_classes = get_cached_model_classes(runtime_model_path)
+        if cached_classes is not None:
+            self._populate_model_categories(cached_classes)
+            return
+        self.prepare_generation(interactive=True, purpose='inspect')
 
     @Slot(list)
     def _on_models_refreshed(self, model_paths: list[str]):
@@ -1082,12 +1180,6 @@ class AutoMarkings(QDockWidget):
         else:
             # Start marking.
             self.generate_markings()
-
-    @Slot()
-    def _restore_model_selection_state(self):
-        if self.marking_settings_form.model_combo_box.currentData() is None:
-            return
-        self.prepare_generation()
 
     def set_is_marking(self, is_marking: bool):
         self.is_marking = is_marking
@@ -1294,7 +1386,69 @@ class AutoMarkings(QDockWidget):
         if self.marking_settings_form.model_combo_box.findText(relative_text) >= 0:
             self.marking_settings_form.model_combo_box.setCurrentText(relative_text)
 
-    def prepare_generation(self, *, interactive: bool = False, purpose: str = 'run'):
+    def _prepared_model_matches(self, model_path: Path) -> bool:
+        thread = self.marking_thread
+        if thread is None or thread.model is None or thread.model_path is None:
+            return False
+        try:
+            return (
+                Path(thread.model_path).expanduser().resolve()
+                == Path(model_path).expanduser().resolve()
+            )
+        except (OSError, RuntimeError):
+            return Path(thread.model_path) == Path(model_path)
+
+    def _model_preparation_matches(self, model_path: Path) -> bool:
+        future = self._model_preparation_future
+        if future is None or future.done() or self._model_preparation_path is None:
+            return False
+        try:
+            return (
+                Path(self._model_preparation_path).expanduser().resolve()
+                == Path(model_path).expanduser().resolve()
+            )
+        except (OSError, RuntimeError):
+            return Path(self._model_preparation_path) == Path(model_path)
+
+    def _discard_prepared_model(self):
+        self._model_preparation_token += 1
+        self._model_preparation_path = None
+        self._model_preparation_future = None
+        self._start_after_model_preparation = False
+        self.marking_thread = None
+        class_table = self.marking_settings_form.class_table
+        class_table.setRowCount(0)
+        self.marking_settings_form.set_class_count(0)
+
+    def _create_marking_thread(
+            self, selected_image_indices, marking_settings):
+        from auto_marking.marking_thread import MarkingThread
+        thread = MarkingThread(
+            self, self.image_list_model, selected_image_indices,
+            marking_settings)
+        thread.text_outputted.connect(self.update_console_text_edit)
+        thread.clear_console_text_edit_requested.connect(
+            self.console_text_edit.clear)
+        thread.marking_generated.connect(self._apply_generated_markings)
+        thread.marking_result.connect(self.update_result_label)
+        thread.progress_bar_update_requested.connect(self.progress_bar.setValue)
+        thread.finished.connect(lambda: self.set_is_marking(False))
+        thread.finished.connect(self._handle_marking_finished)
+        thread.finished.connect(restore_stdout_and_stderr)
+        thread.finished.connect(self.progress_bar.hide)
+        thread.finished.connect(
+            lambda: self.start_cancel_button.setEnabled(True))
+        if self.show_alert_when_finished:
+            thread.finished.connect(self.show_alert)
+        return thread
+
+    def prepare_generation(
+            self,
+            *,
+            interactive: bool = False,
+            purpose: str = 'run',
+            start_after_prepare: bool = False,
+    ) -> bool:
         selected_image_indices = self.image_list.get_selected_image_indices()
         marking_settings = self.marking_settings_form.get_marking_settings()
         requested_model_path = marking_settings.get('requested_model_path')
@@ -1316,7 +1470,7 @@ class AutoMarkings(QDockWidget):
                 self.result_label.setText(str(exc))
                 self.result_label.show()
                 self.start_cancel_button.setEnabled(bool(requested_model_path))
-                return
+                return False
             if (not interactive
                     and Path(marking_settings['model_path']).suffix.lower() == '.pt'):
                 self.marking_thread = None
@@ -1328,45 +1482,86 @@ class AutoMarkings(QDockWidget):
                 )
                 self.result_label.show()
                 self.start_cancel_button.setEnabled(True)
-                return
-        self.marking_thread = MarkingThread(
-            self, self.image_list_model, selected_image_indices,
-            marking_settings)
-        self.marking_thread.text_outputted.connect(
-            self.update_console_text_edit)
-        self.marking_thread.clear_console_text_edit_requested.connect(
-            self.console_text_edit.clear)
-        self.marking_thread.marking_generated.connect(
-            self._apply_generated_markings)
-        self.marking_thread.marking_result.connect(
-            self.update_result_label)
-        self.marking_thread.progress_bar_update_requested.connect(
-            self.progress_bar.setValue)
-        self.marking_thread.finished.connect(
-            lambda: self.set_is_marking(False))
-        self.marking_thread.finished.connect(self._handle_marking_finished)
-        self.marking_thread.finished.connect(restore_stdout_and_stderr)
-        self.marking_thread.finished.connect(self.progress_bar.hide)
-        self.marking_thread.finished.connect(
-            lambda: self.start_cancel_button.setEnabled(True))
-        if self.show_alert_when_finished:
-            self.marking_thread.finished.connect(self.show_alert)
-        self.marking_thread.preload_model()
+                return False
+        runtime_model_path = marking_settings.get('model_path')
+        if (
+            runtime_model_path is not None
+            and self._prepared_model_matches(Path(runtime_model_path))
+        ):
+            self.marking_thread.selected_image_indices = selected_image_indices
+            self.marking_thread.marking_settings = marking_settings
+            self.start_cancel_button.setEnabled(True)
+            return True
+        if runtime_model_path is None:
+            return False
+        runtime_model_path = Path(runtime_model_path)
+        if self._model_preparation_matches(runtime_model_path):
+            self._start_after_model_preparation |= bool(start_after_prepare)
+            return False
+
+        self._model_preparation_token += 1
+        preparation_token = self._model_preparation_token
+        self._model_preparation_path = runtime_model_path
+        self._start_after_model_preparation = bool(start_after_prepare)
+        thread = self._create_marking_thread(
+            selected_image_indices,
+            marking_settings,
+        )
+        self.start_cancel_button.setEnabled(False)
+        self.result_label.setText('Loading auto-marking model...')
+        self.result_label.show()
+
+        def prepare_model():
+            try:
+                thread.preload_model()
+            except Exception as exc:
+                thread.model = None
+                thread.is_error = True
+                thread.error_message = str(exc)
+            self._model_preparation_finished.emit(
+                preparation_token,
+                thread,
+            )
+
+        self._model_preparation_future = (
+            self._model_preparation_executor.submit(prepare_model)
+        )
+        return False
+
+    @Slot(int, object)
+    def _on_model_preparation_finished(self, preparation_token, thread):
+        if preparation_token != self._model_preparation_token:
+            return
+        self._model_preparation_future = None
+        self._model_preparation_path = None
+        start_after_prepare = self._start_after_model_preparation
+        self._start_after_model_preparation = False
+        self.marking_thread = thread
         class_table = self.marking_settings_form.class_table
-        if self.marking_thread.model is None:
+        if thread.model is None:
             class_table.setRowCount(0)
             self.marking_settings_form.set_class_count(0)
-            self.start_cancel_button.setEnabled(False)
+            self.result_label.setText(
+                thread.error_message or 'Failed to load auto-marking model.'
+            )
+            self.result_label.show()
+            self.start_cancel_button.setEnabled(True)
             return
+        self._populate_model_categories(thread.model_names)
+        if start_after_prepare:
+            QTimer.singleShot(0, self.generate_markings)
+
+    def _populate_model_categories(self, model_names: dict[int, str]):
+        class_table = self.marking_settings_form.class_table
         previous = class_table.blockSignals(True)
         try:
             class_table.setRowCount(
-                len(self.marking_thread.model.names))
+                len(model_names))
             self.marking_settings_form.set_class_count(
-                len(self.marking_thread.model.names)
+                len(model_names)
             )
             for row, (class_id, class_name) in enumerate(
-                    self.marking_thread.model.names.items()):
+                    model_names.items()):
                 class_item = QTableWidgetItem(str(class_name))
                 class_item.setData(Qt.ItemDataRole.UserRole, int(class_id))
                 class_item.setFlags(
@@ -1398,6 +1593,7 @@ class AutoMarkings(QDockWidget):
         self._restore_class_labels_for_current_model()
         self._restore_class_actions_for_current_model()
         self.start_cancel_button.setEnabled(True)
+        self.result_label.hide()
 
     @Slot(QModelIndex, list)
     def _apply_generated_markings(
@@ -1451,9 +1647,10 @@ class AutoMarkings(QDockWidget):
     @Slot()
     def generate_markings(self):
         selected_image_indices = self.image_list.get_selected_image_indices()
-        self.prepare_generation(interactive=True)
-        if self.marking_thread is None or self.marking_thread.model is None:
-            self.start_cancel_button.setEnabled(False)
+        if not self.prepare_generation(
+            interactive=True,
+            start_after_prepare=True,
+        ):
             return
         self.marking_thread.selected_image_indices = selected_image_indices
         self.marking_thread.marking_settings = self.marking_settings_form.get_marking_settings()
@@ -1463,7 +1660,7 @@ class AutoMarkings(QDockWidget):
         )
         classes = {}
         for row, (class_id, class_name) in enumerate(
-                self.marking_thread.model.names.items()):
+                self.marking_thread.model_names.items()):
             label_item = self.marking_settings_form.class_table.item(row, 1)
             output_label = (
                 label_item.text().strip()
@@ -1481,6 +1678,8 @@ class AutoMarkings(QDockWidget):
                         f'{pluralize('Marking', selected_image_count)}',
             should_ask_for_confirmation=selected_image_count > 1)
         if selected_image_count > 1:
+            from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
+
             confirmation_dialog = CaptionMultipleImagesDialog(
                 selected_image_count, 'Mark', 'Markings')
             reply = confirmation_dialog.exec()

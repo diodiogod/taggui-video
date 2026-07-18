@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QModelIndex, Signal
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.models_list import get_model_class
 from models.image_list_model import ImageListModel
 from utils.enums import CaptionPosition
@@ -16,6 +18,9 @@ from utils.ideogram_caption import (
     preserve_seed_bboxes,
     save_ideogram_caption,
 )
+
+if TYPE_CHECKING:
+    from auto_captioning.auto_captioning_model import AutoCaptioningModel
 
 
 def add_caption_to_tags(tags: list[str], caption: str,

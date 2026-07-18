@@ -6,7 +6,6 @@ from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
 from PySide6.QtCore import Qt, QTimer
 from collections import deque
 
-from utils.video_editor import VideoEditor
 from utils.sidecar import (
     copy_existing_json_sidecars,
     is_taggui_metadata_dict,
@@ -17,6 +16,12 @@ from utils.sidecar import (
 )
 import subprocess
 import json
+
+
+def _video_editor_class():
+    """Resolve editing backends only when the user invokes an edit command."""
+    from utils.video_editor import VideoEditor
+    return VideoEditor
 
 
 class VideoEditingController:
@@ -504,7 +509,7 @@ class VideoEditingController:
 
             # Extract directly to the new file. Do not create a temporary full copy first,
             # otherwise the new copy incorrectly receives its own .backup files.
-            success, message = VideoEditor.extract_range_rough(
+            success, message = _video_editor_class().extract_range_rough(
                 input_path, new_path,
                 start_frame, end_frame, fps
             )
@@ -538,7 +543,7 @@ class VideoEditingController:
             self._prepare_video_for_editing(video_player)
 
             # Extract range (overwrites original, creates backup)
-            success, message = VideoEditor.extract_range_rough(
+            success, message = _video_editor_class().extract_range_rough(
                 input_path, input_path,
                 start_frame, end_frame, fps
             )
@@ -698,7 +703,7 @@ class VideoEditingController:
 
             # Extract directly to the new file so extract-as-copy does not generate
             # .backup files for the newly created clip.
-            success, message = VideoEditor.extract_range(
+            success, message = _video_editor_class().extract_range(
                 input_path, new_path,
                 start_frame, end_frame, fps,
                 reverse=reverse,
@@ -735,7 +740,7 @@ class VideoEditingController:
             self._prepare_video_for_editing(video_player)
 
             # Extract range with optional speed/FPS changes (all in one ffmpeg pass)
-            success, message = VideoEditor.extract_range(
+            success, message = _video_editor_class().extract_range(
                 input_path, input_path,
                 start_frame, end_frame, fps,
                 reverse=reverse,
@@ -881,7 +886,7 @@ class VideoEditingController:
         self._prepare_video_for_editing(video_player)
 
         # Remove range (overwrites original, creates backup)
-        success, message = VideoEditor.remove_range(
+        success, message = _video_editor_class().remove_range(
             input_path, input_path,
             start_frame, end_frame, fps
         )
@@ -924,7 +929,7 @@ class VideoEditingController:
         self._prepare_video_for_editing(video_player)
 
         # Remove frame
-        success, message = VideoEditor.remove_frame(
+        success, message = _video_editor_class().remove_frame(
             input_path, input_path,
             current_frame, fps
         )
@@ -980,7 +985,7 @@ class VideoEditingController:
         self._prepare_video_for_editing(video_player)
 
         # Repeat frame
-        success, message = VideoEditor.repeat_frame(
+        success, message = _video_editor_class().repeat_frame(
             input_path, input_path,
             current_frame, repeat_count, fps
         )
@@ -1075,7 +1080,7 @@ class VideoEditingController:
                 self._save_undo_snapshot(video_path, "Fix N*4+1 frame count (single)")
 
                 # Fix frame count
-                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+                success, message = _video_editor_class().fix_frame_count_to_n4_plus_1(
                     video_path, video_path, fps, repeat_last, None
                 )
 
@@ -1188,7 +1193,7 @@ class VideoEditingController:
                 self._save_undo_snapshot(video_path, "Fix N*4+1 frame count (batch)")
 
                 # Fix frame count
-                success, message = VideoEditor.fix_frame_count_to_n4_plus_1(
+                success, message = _video_editor_class().fix_frame_count_to_n4_plus_1(
                     video_path, video_path, fps, repeat_last, None
                 )
 
@@ -1250,7 +1255,7 @@ class VideoEditingController:
         # Scan for non-square SAR videos
         non_square_videos = []
         for video_path in video_paths:
-            sar_num, sar_den, dims = VideoEditor.check_sar(video_path)
+            sar_num, sar_den, dims = _video_editor_class().check_sar(video_path)
             if sar_num and sar_den and sar_num != sar_den:
                 non_square_videos.append((video_path, sar_num, sar_den))
 
@@ -1287,7 +1292,7 @@ class VideoEditingController:
             progress.setValue(current)
             return progress.wasCanceled()
 
-        success_count, error_count, errors = VideoEditor.batch_fix_sar(
+        success_count, error_count, errors = _video_editor_class().batch_fix_sar(
             [v[0] for v in non_square_videos],
             progress_callback=update_progress
         )
@@ -1331,7 +1336,7 @@ class VideoEditingController:
             return
 
         # Scan for non-square SAR videos
-        non_square_videos = VideoEditor.scan_directory_for_non_square_sar(
+        non_square_videos = _video_editor_class().scan_directory_for_non_square_sar(
             self.main_window.directory_path, video_extensions
         )
 
@@ -1369,7 +1374,7 @@ class VideoEditingController:
             progress.setValue(current)
             return progress.wasCanceled()
 
-        success_count, error_count, errors = VideoEditor.batch_fix_sar(
+        success_count, error_count, errors = _video_editor_class().batch_fix_sar(
             [v[0] for v in non_square_videos],
             progress_callback=update_progress_all
         )
@@ -1514,7 +1519,7 @@ class VideoEditingController:
         self._prepare_video_for_editing(video_player)
 
         # Apply speed change
-        success, message = VideoEditor.change_speed(
+        success, message = _video_editor_class().change_speed(
             input_path, input_path,
             final_speed, target_fps
         )
@@ -1621,7 +1626,7 @@ class VideoEditingController:
         self._prepare_video_for_editing(video_player)
 
         # Apply FPS change
-        success, message = VideoEditor.change_fps(
+        success, message = _video_editor_class().change_fps(
             input_path, input_path,
             target_fps
         )

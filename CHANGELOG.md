@@ -5,6 +5,46 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-07-18
+
+### Added
+
+- Preserve responsive Auto-Markings categories and reuse models across repeated pipeline runs
+
+### Changed
+
+- Improve startup and interactive responsiveness
+- Improve startup by loading optional features only when needed
+- Improve large indexed folders, masonry layouts, thumbnails, and repeated skin menus
+
+### Fixed
+
+- Introduce performance architecture documentation and focused regression coverage
+- Fix image deletion before video controls have been initialized
+## [Unreleased]
+
+### Added
+
+- Add regression coverage for lazy startup dependencies, deferred video components, masonry layout behavior, thumbnail task bookkeeping, and skin-catalog caching
+- Add a technical performance guide documenting the optimized boundaries, measured results, tradeoffs, and release checklist
+- Add a file-signature-aware Auto-Markings class metadata cache and a shared in-session model runtime cache
+
+### Changed
+
+- Reduce normal GUI startup work by deferring machine-learning frameworks, Hugging Face cache discovery, optional video backends, media metadata libraries, command-only dialogs, hidden workflow widgets, and secondary-window modules until their features are used
+- Restore cached large folders from the first page immediately, warm later pages in the background, and avoid materializing every indexed path when an unchanged directory signature is sufficient
+- Speed up large masonry layouts, thumbnail cache lookups, cached-thumbnail assignment, and repeated video-skin menu construction
+- Create the main video player and controls on the first video instead of during image-only startup, and defer OpenCV until an exact-frame or deep-validation fallback needs it
+- Share and lazily create spell-check dictionaries, and load grammar-checking support only when grammar checking is invoked
+- Populate previously inspected YOLO categories automatically without panel interaction or model loading, and reuse unchanged model runtimes across Auto-Markings and repeated pipeline runs
+
+### Fixed
+
+- Prevent fast thumbnail completions from leaving stale futures or an older task from removing a newer task for the same row
+- Preserve lazy caption-model resolution without circular runtime imports
+- Stop startup restoration and repeated category reads from constructing duplicate Auto-Markings ONNX sessions; prepare the saved model asynchronously on the first genuine panel interaction
+- Allow image deletion before the lazy video player has been constructed
+
 ## [1.4.2] - 2026-07-08
 
 ### Added

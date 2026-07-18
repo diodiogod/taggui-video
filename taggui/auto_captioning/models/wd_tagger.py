@@ -4,6 +4,7 @@ import csv
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import huggingface_hub
 import numpy as np
@@ -15,10 +16,12 @@ except Exception as exc:
     InferenceSession = None
     _ONNXRUNTIME_IMPORT_ERROR = exc
 
-import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.model_availability import MODEL_ARTIFACT_KIND_WD_TAGGER
 from utils.image import Image
+
+if TYPE_CHECKING:
+    import auto_captioning.captioning_thread as captioning_thread
 
 KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
             '>_<', '3_3', '6_9', '>_o', '@_@', '^_^', 'o_o', 'u_u', 'x_x',

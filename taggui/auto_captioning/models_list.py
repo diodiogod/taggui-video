@@ -1,29 +1,26 @@
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
-from auto_captioning.models.cogvlm import Cogvlm
-from auto_captioning.models.cogvlm2 import Cogvlm2
-from auto_captioning.models.florence_2 import Florence2, Florence2Promptgen
-from auto_captioning.models.gemma_4 import Gemma4
-from auto_captioning.models.joycaption import Joycaption
-from auto_captioning.models.kosmos_2 import Kosmos2
-from auto_captioning.models.llava_1_point_5 import Llava1Point5
-from auto_captioning.models.llava_llama_3 import LlavaLlama3
-from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
-                                               LlavaNextVicuna)
-from auto_captioning.models.moondream import Moondream1, Moondream2
-from auto_captioning.models.phi_3_vision import Phi3Vision
-from auto_captioning.models.wd_tagger import WdTagger
-from auto_captioning.models.remote import RemoteGen
-try:
-    from auto_captioning.models.qwen_vl import QwenVL
-    has_qwen_vl = True
-except Exception:
-    has_qwen_vl = False
-try:
-    from auto_captioning.models.xcomposer2 import Xcomposer2, Xcomposer2_4khd
-    hasgptqmodel = True
-except:
-    hasgptqmodel = False
-    print("GPTQModel failed to install")
+"""Lightweight auto-captioning model registry.
+
+Keep model metadata importable by the GUI without importing torch,
+transformers, torchvision, or every model adapter during application startup.
+Concrete model classes are resolved only when captioning actually starts.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from importlib import import_module
+from importlib.util import find_spec
+from pathlib import Path
+
+from auto_captioning.model_availability import (
+    MODEL_ARTIFACT_KIND_HUGGINGFACE,
+    MODEL_ARTIFACT_KIND_REMOTE,
+    MODEL_ARTIFACT_KIND_WD_TAGGER,
+)
+
+MODEL_KIND_LOCAL = 'local'
+MODEL_KIND_REMOTE = 'remote'
+MODEL_KIND_WD_TAGGER = 'wd_tagger'
 
 MODELS = [
     # Qwen VL — native video + image captioning (requires qwen-vl-utils)
@@ -31,7 +28,7 @@ MODELS = [
     'Qwen/Qwen2.5-VL-7B-Instruct',
     'Qwen/Qwen3.5-4B',
     'Qwen/Qwen3.5-9B',
-    'huihui-ai/Huihui-Qwen3.5-9B-abliterated',  # uncensored abliterated variant
+    'huihui-ai/Huihui-Qwen3.5-9B-abliterated',
     'google/gemma-4-E2B-it',
     'google/gemma-4-E4B-it',
     'google/gemma-4-26B-A4B-it',
@@ -77,58 +74,105 @@ MODELS = [
     'Salesforce/blip2-flan-t5-xl',
     'Salesforce/blip2-flan-t5-xxl',
     'microsoft/kosmos-2-patch14-224',
-    'Remote'
+    'Remote',
 ]
-if hasgptqmodel:
-    MODELS.extend(
-    ['internlm/internlm-xcomposer2-vl-7b-4bit',
-    'internlm/internlm-xcomposer2-vl-7b',
-    'internlm/internlm-xcomposer2-vl-1_8b',
-    'internlm/internlm-xcomposer2-4khd-7b']
-    )
 
-def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
-    lowercase_model_id = model_id.lower()
-    if has_qwen_vl:
-        if 'qwen2.5-vl' in lowercase_model_id or 'qwen3.5' in lowercase_model_id:
-            return QwenVL
-    if 'gemma-4' in lowercase_model_id:
-        return Gemma4
-    if 'cogvlm2' in lowercase_model_id:
-        return Cogvlm2
-    if 'cogvlm' in lowercase_model_id:
-        return Cogvlm
-    if 'florence' in lowercase_model_id:
-        if 'promptgen' in lowercase_model_id:
-            return Florence2Promptgen
-        return Florence2
-    if 'joycaption' in lowercase_model_id:
-        return Joycaption
-    if 'kosmos' in lowercase_model_id:
-        return Kosmos2
-    if 'llava-v1.6-34b' in lowercase_model_id:
-        return LlavaNext34b
-    if 'llava-v1.6-mistral' in lowercase_model_id:
-        return LlavaNextMistral
-    if 'llava-v1.6-vicuna' in lowercase_model_id:
-        return LlavaNextVicuna
-    if 'llava-llama-3' in lowercase_model_id:
-        return LlavaLlama3
-    if 'llava' in lowercase_model_id:
-        return Llava1Point5
-    if 'moondream1' in lowercase_model_id:
-        return Moondream1
-    if 'moondream2' in lowercase_model_id:
-        return Moondream2
-    if 'phi-3' in lowercase_model_id:
-        return Phi3Vision
+if find_spec('gptqmodel') is not None:
+    MODELS.extend([
+        'internlm/internlm-xcomposer2-vl-7b-4bit',
+        'internlm/internlm-xcomposer2-vl-7b',
+        'internlm/internlm-xcomposer2-vl-1_8b',
+        'internlm/internlm-xcomposer2-4khd-7b',
+    ])
+
+
+def get_model_kind(model_id: str) -> str:
+    """Classify a model without importing its implementation."""
+    model_id_text = str(model_id or '').strip()
+    model_path = Path(model_id_text).expanduser()
+    if (
+        model_path.is_dir()
+        and (model_path / 'model.onnx').is_file()
+        and (model_path / 'selected_tags.csv').is_file()
+    ):
+        return MODEL_KIND_WD_TAGGER
+
+    lowercase_model_id = model_id_text.lower()
     if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
-        return WdTagger
-    if hasgptqmodel:
-        if 'xcomposer2' in lowercase_model_id:
-            if '4khd' in lowercase_model_id:
-                return Xcomposer2_4khd
-            return Xcomposer2
+        return MODEL_KIND_WD_TAGGER
     if 'remote' in lowercase_model_id:
-        return RemoteGen
-    return AutoCaptioningModel
+        return MODEL_KIND_REMOTE
+    return MODEL_KIND_LOCAL
+
+
+def get_model_artifact_kind(model_id: str) -> str:
+    model_kind = get_model_kind(model_id)
+    if model_kind == MODEL_KIND_WD_TAGGER:
+        return MODEL_ARTIFACT_KIND_WD_TAGGER
+    if model_kind == MODEL_KIND_REMOTE:
+        return MODEL_ARTIFACT_KIND_REMOTE
+    return MODEL_ARTIFACT_KIND_HUGGINGFACE
+
+
+def get_model_download_revision(model_id: str) -> str | None:
+    """Return download-only metadata without importing the model adapter."""
+    if 'moondream2' in str(model_id or '').lower():
+        return '2024-08-26'
+    return None
+
+
+def _load_model_class(module_name: str, class_name: str):
+    return getattr(import_module(module_name), class_name)
+
+
+@lru_cache(maxsize=None)
+def get_model_class(model_id: str):
+    """Resolve a concrete model class on first use."""
+    lowercase_model_id = str(model_id or '').lower()
+
+    module_name = 'auto_captioning.auto_captioning_model'
+    class_name = 'AutoCaptioningModel'
+    if 'qwen2.5-vl' in lowercase_model_id or 'qwen3.5' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.qwen_vl', 'QwenVL'
+    elif 'gemma-4' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.gemma_4', 'Gemma4'
+    elif 'cogvlm2' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.cogvlm2', 'Cogvlm2'
+    elif 'cogvlm' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.cogvlm', 'Cogvlm'
+    elif 'florence' in lowercase_model_id:
+        module_name = 'auto_captioning.models.florence_2'
+        class_name = (
+            'Florence2Promptgen'
+            if 'promptgen' in lowercase_model_id
+            else 'Florence2'
+        )
+    elif 'joycaption' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.joycaption', 'Joycaption'
+    elif 'kosmos' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.kosmos_2', 'Kosmos2'
+    elif 'llava-v1.6-34b' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.llava_next', 'LlavaNext34b'
+    elif 'llava-v1.6-mistral' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.llava_next', 'LlavaNextMistral'
+    elif 'llava-v1.6-vicuna' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.llava_next', 'LlavaNextVicuna'
+    elif 'llava-llama-3' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.llava_llama_3', 'LlavaLlama3'
+    elif 'llava' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.llava_1_point_5', 'Llava1Point5'
+    elif 'moondream1' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.moondream', 'Moondream1'
+    elif 'moondream2' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.moondream', 'Moondream2'
+    elif 'phi-3' in lowercase_model_id:
+        module_name, class_name = 'auto_captioning.models.phi_3_vision', 'Phi3Vision'
+    elif get_model_kind(model_id) == MODEL_KIND_WD_TAGGER:
+        module_name, class_name = 'auto_captioning.models.wd_tagger', 'WdTagger'
+    elif 'xcomposer2' in lowercase_model_id:
+        module_name = 'auto_captioning.models.xcomposer2'
+        class_name = 'Xcomposer2_4khd' if '4khd' in lowercase_model_id else 'Xcomposer2'
+    elif get_model_kind(model_id) == MODEL_KIND_REMOTE:
+        module_name, class_name = 'auto_captioning.models.remote', 'RemoteGen'
+
+    return _load_model_class(module_name, class_name)

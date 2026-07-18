@@ -1,19 +1,21 @@
+from __future__ import annotations
+
 from PySide6.QtCore import QModelIndex, QThread, Signal, Qt
 
 from PIL import Image as PILImage
 import pillow_jxl
 
-import torch
-from ultralytics import YOLO
 from pathlib import Path
+import threading
+from typing import TYPE_CHECKING
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
 from utils.ModelThread import ModelThread
-from utils.marking_model_security import (
-    configure_ultralytics_marking_runtime,
-    infer_marking_model_task,
-)
+from auto_marking.model_cache import load_marking_runtime
+
+if TYPE_CHECKING:
+    from ultralytics import YOLO
 
 
 class MarkingThread(ModelThread):
@@ -29,6 +31,8 @@ class MarkingThread(ModelThread):
         super().__init__(parent, image_list_model, selected_image_indices)
         self.marking_settings = marking_settings
         self.model: YOLO | None = None
+        self.model_names: dict[int, str] = {}
+        self.runtime = None
         self.model_path = marking_settings.get('model_path')
         self.text = {
             'Generating': 'Marking',
@@ -154,7 +158,7 @@ class MarkingThread(ModelThread):
                     ),
                     marking_type,
                 )
-                for class_id, class_name in self.model.names.items()
+                for class_id, class_name in self.model_names.items()
                 if not requested_names
                 or str(class_name).strip().casefold() in requested_names
             }
@@ -166,15 +170,15 @@ class MarkingThread(ModelThread):
             self.is_error = True
             self.model = None
             return
-        configure_ultralytics_marking_runtime(self.model_path)
-        self.model = YOLO(
-            self.model_path,
-            task=infer_marking_model_task(self.model_path),
-        )
-        self.device = self._preferred_device_for_model(self.model_path)
+        self.runtime = load_marking_runtime(self.model_path)
+        self.model = self.runtime.model
+        self.model_names = dict(self.runtime.model_names)
+        self.device = self.runtime.device
 
     @staticmethod
     def _preferred_device_for_model(model_path: str) -> str:
+        import torch
+
         if not torch.cuda.is_available():
             return 'cpu'
         if Path(str(model_path)).suffix.lower() != '.onnx':
@@ -187,13 +191,21 @@ class MarkingThread(ModelThread):
         return 'cuda' if 'CUDAExecutionProvider' in providers else 'cpu'
 
     def _predict_with_device(self, pil_image, device: str):
-        return self.model.predict(source=pil_image,
-                                  conf=self.marking_settings['conf'],
-                                  iou=self.marking_settings['iou'],
-                                  max_det=self.marking_settings['max_det'],
-                                  classes=list(self.marking_settings['classes'].keys()),
-                                  retina_masks=True,
-                                  device=device)
+        lock = (
+            self.runtime.inference_lock
+            if self.runtime is not None
+            else threading.RLock()
+        )
+        with lock:
+            return self.model.predict(
+                source=pil_image,
+                conf=self.marking_settings['conf'],
+                iou=self.marking_settings['iou'],
+                max_det=self.marking_settings['max_det'],
+                classes=list(self.marking_settings['classes'].keys()),
+                retina_masks=True,
+                device=device,
+            )
 
     def get_model_inputs(self, image: Image):
         return '', {}
