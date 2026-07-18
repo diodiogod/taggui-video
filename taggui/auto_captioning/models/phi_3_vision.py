@@ -1,9 +1,13 @@
+from typing import TYPE_CHECKING
+
 import torch
 from transformers import AutoModelForCausalLM, BatchFeature
 
-import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
+
+if TYPE_CHECKING:
+    import auto_captioning.captioning_thread as captioning_thread
 
 
 class Phi3Vision(AutoCaptioningModel):

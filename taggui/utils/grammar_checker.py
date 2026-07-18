@@ -6,13 +6,10 @@ Provides on-demand grammar, style, and punctuation checking.
 
 from dataclasses import dataclass
 from enum import Enum
+from importlib.util import find_spec
 from typing import List, Optional
 
-try:
-    import language_tool_python
-    LANGUAGE_TOOL_AVAILABLE = True
-except ImportError:
-    LANGUAGE_TOOL_AVAILABLE = False
+LANGUAGE_TOOL_AVAILABLE = find_spec('language_tool_python') is not None
 
 
 class GrammarCheckMode(Enum):
@@ -61,7 +58,7 @@ class GrammarChecker:
                  language: str = 'en-US'):
         self.mode = mode
         self.language = language
-        self._tool: Optional[language_tool_python.LanguageTool] = None
+        self._tool: Optional[object] = None
 
         if not LANGUAGE_TOOL_AVAILABLE:
             self.mode = GrammarCheckMode.DISABLED
@@ -75,6 +72,8 @@ class GrammarChecker:
             return
 
         try:
+            import language_tool_python
+
             if self.mode == GrammarCheckMode.FREE_API:
                 # Use public API (requires internet)
                 self._tool = language_tool_python.LanguageToolPublicAPI(self.language)

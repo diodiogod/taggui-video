@@ -1,13 +1,26 @@
 import re
 
 from PySide6.QtCore import Slot
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QMessageBox, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from models.image_list_model import ImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.settings_widgets import SettingsBigCheckBox, SettingsLineEdit
 from utils.utils import get_confirmation_dialog_reply
-from widgets.auto_captioner import HorizontalLine
+
+
+def _horizontal_line() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFrameShadow(QFrame.Shadow.Raised)
+    return line
 
 
 class BatchReorderTagsDialog(QDialog):
@@ -56,7 +69,7 @@ class BatchReorderTagsDialog(QDialog):
                     do_not_reorder_first_tag_check_box.isChecked())))
         top_buttons_layout.addWidget(shuffle_button)
         top_layout.addLayout(top_buttons_layout)
-        horizontal_line = HorizontalLine()
+        horizontal_line = _horizontal_line()
         middle_layout = QHBoxLayout()
         middle_layout.setContentsMargins(20, 20, 20, 20)
         middle_layout.setSpacing(20)
@@ -71,7 +84,7 @@ class BatchReorderTagsDialog(QDialog):
                 lambda: self.image_list_model.sort_sentences_down(
                     separate_newline_check_box.isChecked())))
         middle_layout.addWidget(sort_sentences_button)
-        horizontal_line2 = HorizontalLine()
+        horizontal_line2 = _horizontal_line()
         bottom_layout = QVBoxLayout()
         bottom_layout.setContentsMargins(20, 20, 20, 20)
         bottom_layout.setSpacing(20)

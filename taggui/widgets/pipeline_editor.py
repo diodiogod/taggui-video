@@ -1405,6 +1405,7 @@ class PipelineEditor(QDockWidget):
         self.store = PipelineStore()
         self.pipelines: list[PipelineDefinition] = []
         self.current_pipeline: PipelineDefinition | None = None
+        self._steps_built_for_pipeline_id: str | None = None
         self._loading = False
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1639,6 +1640,16 @@ class PipelineEditor(QDockWidget):
         super().resizeEvent(event)
         self._update_compact_visibility()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        pipeline_id = (
+            str(self.current_pipeline.id)
+            if self.current_pipeline is not None
+            else None
+        )
+        if pipeline_id != self._steps_built_for_pipeline_id:
+            self._rebuild_steps()
+
     def _update_compact_visibility(self):
         scale = self.ui_zoom / 100.0
         effective_height = self.height() / max(0.01, scale)
@@ -1815,11 +1826,16 @@ class PipelineEditor(QDockWidget):
             self._SELECTED_PIPELINE_SETTINGS_KEY,
             self.current_pipeline.id,
         )
-        self._rebuild_steps()
+        if self.isVisible():
+            self._rebuild_steps()
+        else:
+            self.step_list.clear()
+            self._steps_built_for_pipeline_id = None
 
     def _rebuild_steps(self):
         self.step_list.clear()
         if self.current_pipeline is None:
+            self._steps_built_for_pipeline_id = None
             return
         marking_models = self._marking_models()
         caption_models = self._caption_models()
@@ -1841,6 +1857,7 @@ class PipelineEditor(QDockWidget):
             self.step_list.addItem(item)
             self.step_list.setItemWidget(item, row_widget)
         self.step_list.schedule_link_connector_refresh()
+        self._steps_built_for_pipeline_id = str(self.current_pipeline.id)
 
     def _step_card(self, step_id: str):
         for row in range(self.step_list.count()):

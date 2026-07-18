@@ -6,8 +6,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QObject, Qt, QTimer, Signal
 
-from auto_captioning.captioning_thread import CaptioningThread
-from auto_marking.marking_thread import MarkingThread
 from utils.auto_marking_preferences import saved_class_labels_for_model
 from utils.ideogram_caption import (
     IdeogramCaptionError,
@@ -127,6 +125,8 @@ class PipelineRunner(QObject):
             self._finish(False, f"{title} failed: {exc}")
 
     def _start_auto_mark(self, step: PipelineStep):
+        from auto_marking.marking_thread import MarkingThread
+
         model_value = str(step.settings.get("model") or "").strip()
         if not model_value:
             model_value = str(
@@ -293,6 +293,7 @@ class PipelineRunner(QObject):
         for entry in group_results.values():
             markings = list(entry["markings"])
             raw_count += len(markings)
+            from auto_marking.marking_thread import MarkingThread
             fused = MarkingThread._merge_overlapping_markings(
                 markings,
                 threshold,
@@ -357,6 +358,8 @@ class PipelineRunner(QObject):
         return len(unique)
 
     def _start_auto_caption(self, step: PipelineStep):
+        from auto_captioning.captioning_thread import CaptioningThread
+
         form = self.main_window.auto_captioner.caption_settings_form
         caption_settings = form.get_caption_settings()
         model_id = str(step.settings.get("model") or "").strip()

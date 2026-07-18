@@ -5,16 +5,22 @@ Provides red underlines for misspelled words with context menu suggestions.
 """
 
 import re
+from functools import lru_cache
+from importlib.util import find_spec
 from typing import Set
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor
 
-try:
+SPELL_CHECKER_AVAILABLE = find_spec("spellchecker") is not None
+
+
+@lru_cache(maxsize=8)
+def _get_spell_checker(language: str):
+    """Share immutable language dictionaries between editor highlighters."""
     from spellchecker import SpellChecker
-    SPELL_CHECKER_AVAILABLE = True
-except ImportError:
-    SPELL_CHECKER_AVAILABLE = False
+
+    return SpellChecker(language=language)
 
 
 class SpellHighlighter(QSyntaxHighlighter):
@@ -30,26 +36,29 @@ class SpellHighlighter(QSyntaxHighlighter):
 
     def __init__(self, parent=None, language='en', custom_words: Set[str] = None):
         super().__init__(parent)
-
-        if not SPELL_CHECKER_AVAILABLE:
-            # Graceful degradation if spell checker not installed
-            self.enabled = False
-            return
-
-        self.enabled = True
-        self.spell_checker = SpellChecker(language=language)
-
-        # Custom dictionary for whitelisted words
+        self.enabled = SPELL_CHECKER_AVAILABLE
+        self._language = language
+        self.spell_checker = None
         self.custom_words = set(custom_words) if custom_words else set()
 
-        # Format for misspelled words (red wavy underline)
         self.error_format = QTextCharFormat()
         self.error_format.setUnderlineColor(QColor(Qt.red))
         self.error_format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
 
+    def _ensure_spell_checker(self):
+        if self.spell_checker is None and SPELL_CHECKER_AVAILABLE:
+            self.spell_checker = _get_spell_checker(self._language)
+        return self.spell_checker
+
     def highlightBlock(self, text):
         """Highlight misspelled words in the given text block."""
         if not self.enabled:
+            return
+
+        if self.WORD_PATTERN.search(text) is None:
+            return
+        spell_checker = self._ensure_spell_checker()
+        if spell_checker is None:
             return
 
         # Find all words in the text
@@ -72,14 +81,14 @@ class SpellHighlighter(QSyntaxHighlighter):
                 for part in parts:
                     if len(part) <= 2:  # Skip short parts
                         continue
-                    if part.lower() not in self.custom_words and self.spell_checker.unknown([part.lower()]):
+                    if part.lower() not in self.custom_words and spell_checker.unknown([part.lower()]):
                         all_valid = False
                         break
                 if all_valid:
                     continue
 
             # Check spelling (case-insensitive)
-            if self.spell_checker.unknown([word.lower()]):
+            if spell_checker.unknown([word.lower()]):
                 # Mark as misspelled
                 self.setFormat(match.start(), match.end() - match.start(),
                              self.error_format)
@@ -100,8 +109,12 @@ class SpellHighlighter(QSyntaxHighlighter):
         if not self.enabled:
             return []
 
+        spell_checker = self._ensure_spell_checker()
+        if spell_checker is None:
+            return []
+
         # Get candidates from spell checker
-        candidates = self.spell_checker.candidates(word.lower())
+        candidates = spell_checker.candidates(word.lower())
 
         if not candidates:
             return []
@@ -121,12 +134,16 @@ class SpellHighlighter(QSyntaxHighlighter):
         if word.lower() in self.custom_words:
             return False
 
+        spell_checker = self._ensure_spell_checker()
+        if spell_checker is None:
+            return False
+
         # Check with spell checker
-        return bool(self.spell_checker.unknown([word.lower()]))
+        return bool(spell_checker.unknown([word.lower()]))
 
     def set_enabled(self, enabled: bool):
         """Enable or disable spell checking."""
-        self.enabled = enabled
+        self.enabled = bool(enabled and SPELL_CHECKER_AVAILABLE)
         self.rehighlight()
 
     def save_custom_dictionary(self) -> Set[str]:

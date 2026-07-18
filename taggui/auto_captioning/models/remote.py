@@ -5,6 +5,7 @@ import math
 import re
 from itertools import cycle
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 import cv2
 import requests
@@ -15,7 +16,8 @@ from auto_captioning.model_availability import MODEL_ARTIFACT_KIND_REMOTE
 from models.image_list_model import _video_lock
 from utils.ideogram_caption import ideogram_caption_response_format
 from utils.image import Image
-import auto_captioning.captioning_thread as captioning_thread
+if TYPE_CHECKING:
+    import auto_captioning.captioning_thread as captioning_thread
 
 
 class RemoteGen(AutoCaptioningModel):

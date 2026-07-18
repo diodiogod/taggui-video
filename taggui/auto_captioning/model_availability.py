@@ -4,10 +4,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from huggingface_hub import scan_cache_dir
-from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
-from huggingface_hub.errors import CacheNotFound
-
 MODEL_ARTIFACT_KIND_HUGGINGFACE = 'huggingface'
 MODEL_ARTIFACT_KIND_REMOTE = 'remote'
 MODEL_ARTIFACT_KIND_WD_TAGGER = 'wd_tagger'
@@ -219,6 +215,13 @@ def _get_cached_snapshot_paths(repo_id: str,
 
 
 def _get_hf_cache_index() -> dict[str, list[dict]]:
+    try:
+        from huggingface_hub import scan_cache_dir
+        from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
+        from huggingface_hub.errors import CacheNotFound
+    except ImportError:
+        return {}
+
     cache_root = str(Path(HUGGINGFACE_HUB_CACHE))
     cached_index = _CACHE_INDEX.get(cache_root)
     if cached_index is not None:

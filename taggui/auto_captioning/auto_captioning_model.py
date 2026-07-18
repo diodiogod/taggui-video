@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter, sleep
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -23,7 +24,6 @@ except ImportError:
     from transformers import AutoModelForVision2Seq
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
-import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.model_availability import (
     MODEL_ARTIFACT_KIND_HUGGINGFACE,
     MODEL_ARTIFACT_KIND_WD_TAGGER,
@@ -34,6 +34,9 @@ from auto_captioning.model_availability import (
 from models.image_list_model import _video_lock
 from utils.enums import CaptionDevice
 from utils.image import Image
+
+if TYPE_CHECKING:
+    import auto_captioning.captioning_thread as captioning_thread
 
 
 class CaptionGenerationError(RuntimeError):

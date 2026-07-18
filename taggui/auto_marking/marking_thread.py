@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 from PySide6.QtCore import QModelIndex, QThread, Signal, Qt
 
 from PIL import Image as PILImage
 import pillow_jxl
 
-import torch
-from ultralytics import YOLO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
@@ -14,6 +15,9 @@ from utils.marking_model_security import (
     configure_ultralytics_marking_runtime,
     infer_marking_model_task,
 )
+
+if TYPE_CHECKING:
+    from ultralytics import YOLO
 
 
 class MarkingThread(ModelThread):
@@ -160,6 +164,8 @@ class MarkingThread(ModelThread):
             }
 
     def preload_model(self):
+        from ultralytics import YOLO
+
         self.model_path = self.marking_settings.get('model_path')
         if self.model_path is None:
             self.error_message = 'Model path not set'
@@ -175,6 +181,8 @@ class MarkingThread(ModelThread):
 
     @staticmethod
     def _preferred_device_for_model(model_path: str) -> str:
+        import torch
+
         if not torch.cuda.is_available():
             return 'cpu'
         if Path(str(model_path)).suffix.lower() != '.onnx':

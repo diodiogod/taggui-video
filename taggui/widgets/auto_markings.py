@@ -36,8 +36,6 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     SettingsBigCheckBox)
 from widgets.auto_captioner import set_text_edit_height, restore_stdout_and_stderr
 from widgets.image_list import ImageList
-from auto_marking.marking_thread import MarkingThread
-from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 
 
 def _startup_delay_ms(env_name: str, default_ms: int) -> int:
@@ -1329,6 +1327,7 @@ class AutoMarkings(QDockWidget):
                 self.result_label.show()
                 self.start_cancel_button.setEnabled(True)
                 return
+        from auto_marking.marking_thread import MarkingThread
         self.marking_thread = MarkingThread(
             self, self.image_list_model, selected_image_indices,
             marking_settings)
@@ -1481,6 +1480,8 @@ class AutoMarkings(QDockWidget):
                         f'{pluralize('Marking', selected_image_count)}',
             should_ask_for_confirmation=selected_image_count > 1)
         if selected_image_count > 1:
+            from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
+
             confirmation_dialog = CaptionMultipleImagesDialog(
                 selected_image_count, 'Mark', 'Markings')
             reply = confirmation_dialog.exec()

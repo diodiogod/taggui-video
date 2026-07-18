@@ -1,15 +1,20 @@
+from __future__ import annotations
+
 from abc import abstractmethod
 from datetime import datetime
 from time import perf_counter
 import subprocess
+from typing import TYPE_CHECKING
 
-import numpy as np
 from PIL import UnidentifiedImageError
-from transformers import BatchFeature
 from PySide6.QtCore import QModelIndex, QThread, Qt, Signal
 
 from utils.image import Image
 from models.image_list_model import ImageListModel
+
+if TYPE_CHECKING:
+    import numpy as np
+    from transformers import BatchFeature
 
 def format_duration(seconds: float) -> str:
     seconds_per_minute = 60
