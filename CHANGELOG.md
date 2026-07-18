@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-07-18
+
+### Added
+
+- Preserve responsive Auto-Markings categories and reuse models across repeated pipeline runs
+
+### Changed
+
+- Improve startup and interactive responsiveness
+- Improve startup by loading optional features only when needed
+- Improve large indexed folders, masonry layouts, thumbnails, and repeated skin menus
+
+### Fixed
+
+- Introduce performance architecture documentation and focused regression coverage
+- Fix image deletion before video controls have been initialized
 ## [Unreleased]
 
 ### Added
