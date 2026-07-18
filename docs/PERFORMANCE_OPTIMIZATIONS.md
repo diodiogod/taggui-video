@@ -56,7 +56,10 @@ saved selection. A session is created when the user explicitly activates a
 model, starts marking, or first interacts with the Auto-Markings panel. This
 preserves automatic category population for an already-open panel without
 mistaking Qt startup show events for user intent. A matching prepared session is
-reused by Start.
+reused by Start. Model construction and the first Ultralytics category lookup
+run on a dedicated worker; the UI receives one cached category snapshot. This
+avoids both GUI blocking and repeated ONNX backend initialization through
+multiple `YOLO.names` property reads.
 
 The main image viewer creates its video player, controls, overlays, and media
 objects on the first video. A first video can therefore have a small one-time

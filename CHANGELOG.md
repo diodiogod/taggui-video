@@ -24,7 +24,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Prevent fast thumbnail completions from leaving stale futures or an older task from removing a newer task for the same row
 - Preserve lazy caption-model resolution without circular runtime imports
-- Stop startup restoration and repeated selection signals from constructing duplicate Auto-Markings ONNX sessions; load the saved model and its categories on the first genuine panel interaction
+- Stop startup restoration and repeated category reads from constructing duplicate Auto-Markings ONNX sessions; prepare the saved model asynchronously on the first genuine panel interaction
 
 ## [1.4.2] - 2026-07-08
 

@@ -33,6 +33,7 @@ class MarkingThread(ModelThread):
         super().__init__(parent, image_list_model, selected_image_indices)
         self.marking_settings = marking_settings
         self.model: YOLO | None = None
+        self.model_names: dict[int, str] = {}
         self.model_path = marking_settings.get('model_path')
         self.text = {
             'Generating': 'Marking',
@@ -158,7 +159,7 @@ class MarkingThread(ModelThread):
                     ),
                     marking_type,
                 )
-                for class_id, class_name in self.model.names.items()
+                for class_id, class_name in self.model_names.items()
                 if not requested_names
                 or str(class_name).strip().casefold() in requested_names
             }
@@ -177,6 +178,12 @@ class MarkingThread(ModelThread):
             self.model_path,
             task=infer_marking_model_task(self.model_path),
         )
+        # Accessing ``YOLO.names`` can initialize an ONNX backend. Capture it
+        # once on the preparation worker instead of repeatedly from the UI.
+        self.model_names = {
+            int(class_id): str(class_name)
+            for class_id, class_name in self.model.names.items()
+        }
         self.device = self._preferred_device_for_model(self.model_path)
 
     @staticmethod

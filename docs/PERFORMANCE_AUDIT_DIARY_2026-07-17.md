@@ -89,3 +89,5 @@
 - Removed startup model preloading, made selection changes bookkeeping-only, loaded models on explicit activation or Start, and reused an already prepared matching session.
 - Removed the remaining six-second Auto-Markings directory-scan timer; recursive model discovery and file stats now run when the model selector is first opened.
 - Restored automatic YOLO category population on the first real mouse, key, or wheel interaction anywhere in Auto-Markings; startup show/focus events remain ignored, and Start reuses the prepared session.
+- Traced three identical ONNX loads to three UI-side `YOLO.names` reads during category-table construction; Ultralytics can initialize the backend through that property.
+- Moved model preparation and the first category lookup to a single guarded worker job, cached the category snapshot, and made overlapping panel/selector/Start requests share the same in-flight load.

@@ -24,6 +24,18 @@ class _Button:
         self.enabled = bool(enabled)
 
 
+class _Label:
+    def __init__(self):
+        self.text = ""
+        self.visible = False
+
+    def setText(self, text):
+        self.text = text
+
+    def show(self):
+        self.visible = True
+
+
 class _ClassTable:
     def __init__(self):
         self.row_count = None
@@ -58,6 +70,10 @@ def test_model_selection_change_does_not_prepare_model(tmp_path):
     auto_markings = AutoMarkings.__new__(AutoMarkings)
     auto_markings.is_marking = False
     auto_markings.marking_thread = None
+    auto_markings._model_preparation_future = None
+    auto_markings._model_preparation_path = None
+    auto_markings._model_preparation_token = 0
+    auto_markings._start_after_model_preparation = False
     auto_markings.start_cancel_button = _Button()
     auto_markings.prepare_generation = lambda *args, **kwargs: prepared.append(
         (args, kwargs)
@@ -93,6 +109,52 @@ def test_first_panel_interaction_restores_model_categories():
     assert actions == ["scan", "prepare"]
     assert auto_markings._first_interaction_handled
     assert not auto_markings._first_interaction_preparation_scheduled
+
+
+def test_repeated_prepare_requests_share_one_background_load(tmp_path):
+    model_path = tmp_path / "model.onnx"
+    model_path.touch()
+
+    class PendingFuture:
+        def done(self):
+            return False
+
+    class Executor:
+        def __init__(self):
+            self.submissions = []
+
+        def submit(self, callback):
+            self.submissions.append(callback)
+            return PendingFuture()
+
+    executor = Executor()
+    auto_markings = AutoMarkings.__new__(AutoMarkings)
+    auto_markings.marking_thread = None
+    auto_markings._model_preparation_executor = executor
+    auto_markings._model_preparation_future = None
+    auto_markings._model_preparation_path = None
+    auto_markings._model_preparation_token = 0
+    auto_markings._start_after_model_preparation = False
+    auto_markings.image_list = SimpleNamespace(
+        get_selected_image_indices=lambda: []
+    )
+    auto_markings.marking_settings_form = SimpleNamespace(
+        get_marking_settings=lambda: {
+            "model_path": model_path,
+            "requested_model_path": model_path,
+        }
+    )
+    auto_markings.start_cancel_button = _Button()
+    auto_markings.result_label = _Label()
+    auto_markings._create_marking_thread = (
+        lambda selected, settings: SimpleNamespace(preload_model=lambda: None)
+    )
+
+    assert not auto_markings.prepare_generation()
+    assert not auto_markings.prepare_generation(start_after_prepare=True)
+
+    assert len(executor.submissions) == 1
+    assert auto_markings._start_after_model_preparation
 
 
 def test_prepare_generation_reuses_matching_model(tmp_path):
