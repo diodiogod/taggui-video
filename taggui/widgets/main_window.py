@@ -83,6 +83,12 @@ def _is_media_comparison_widget(widget) -> bool:
     return isinstance(widget, comparison_module.MediaComparisonWidget)
 
 
+def _get_loaded_video_player(main_window):
+    """Return the constructed video player, if lazy video support has created one."""
+    image_viewer = getattr(main_window, 'image_viewer', None)
+    return getattr(image_viewer, 'video_player', None)
+
+
 class PerfHudOverlay(QWidget):
     """Small translucent HUD with sparkline for UI timing diagnostics."""
 
@@ -3501,11 +3507,12 @@ class MainWindow(QMainWindow):
             return
 
         video_was_cleaned = False
-        if hasattr(self, 'image_viewer') and hasattr(self.image_viewer, 'video_player'):
-            video_player = self.image_viewer.video_player
-            if video_player.video_path:
+        video_player = _get_loaded_video_player(self)
+        if video_player is not None:
+            video_path = getattr(video_player, 'video_path', None)
+            if video_path:
                 try:
-                    current_video_path = Path(video_player.video_path)
+                    current_video_path = Path(video_path)
                 except Exception:
                     current_video_path = None
                 if current_video_path is not None and current_video_path in unique_images_by_path:

@@ -8,6 +8,7 @@ TAGGUI_ROOT = ROOT / "taggui"
 sys.path.insert(0, str(TAGGUI_ROOT))
 
 from widgets.image_list_view_file_ops_mixin import _get_loaded_video_player
+from widgets.main_window import _get_loaded_video_player as _get_global_delete_video_player
 
 
 def test_delete_supports_viewer_without_constructed_video_player():
@@ -25,3 +26,11 @@ def test_delete_finds_constructed_video_player():
     )
 
     assert _get_loaded_video_player(main_window) is player
+
+
+def test_global_delete_supports_viewer_without_constructed_video_player():
+    main_window = SimpleNamespace(
+        image_viewer=SimpleNamespace(video_player=None)
+    )
+
+    assert _get_global_delete_video_player(main_window) is None
