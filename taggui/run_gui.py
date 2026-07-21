@@ -234,11 +234,6 @@ def _configure_qt_graphics_stack():
     except Exception:
         pass
     try:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
-    except Exception:
-        pass
-
-    try:
         format_hint = QSurfaceFormat()
         format_hint.setSwapInterval(1)
         QSurfaceFormat.setDefaultFormat(format_hint)
