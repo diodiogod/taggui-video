@@ -230,10 +230,6 @@ def _configure_qt_graphics_stack():
     os.environ.setdefault('QT_OPENGL', 'desktop')
 
     try:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
-    except Exception:
-        pass
-    try:
         format_hint = QSurfaceFormat()
         format_hint.setSwapInterval(1)
         QSurfaceFormat.setDefaultFormat(format_hint)

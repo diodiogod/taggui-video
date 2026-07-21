@@ -14,6 +14,14 @@ from auto_captioning import models_list
 from utils import spell_highlighter
 
 
+def test_qt_startup_keeps_desktop_opengl_without_forcing_global_attributes():
+    source = (TAGGUI_ROOT / "run_gui.py").read_text(encoding="utf-8")
+
+    assert "os.environ.setdefault('QT_OPENGL', 'desktop')" in source
+    assert "AA_UseDesktopOpenGL" not in source
+    assert "AA_ShareOpenGLContexts" not in source
+
+
 def test_main_window_import_defers_heavy_media_and_spell_modules():
     script = """
 import json
