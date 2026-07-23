@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TAGGUI_ROOT = ROOT / 'taggui'
 sys.path.insert(0, str(TAGGUI_ROOT))
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from models.image_list_model import ImageListModel
@@ -69,6 +70,35 @@ def test_adjacent_bootstrap_pages_wait_for_page_zero(tmp_path, monkeypatch):
     finally:
         if model._db is not None:
             model._db.close()
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
+
+
+def test_initial_page_completion_reuses_existing_debounce_timer(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    model = ImageListModel(256, ', ')
+    enrichment_requests = []
+    model._paginated_mode = True
+    model._pages = {0: []}
+    model._bootstrap_complete = True
+    model._initial_page_load_pending = True
+    model._initial_warm_pages = ()
+    model._post_bootstrap_debounce_timer = QTimer()
+    model._post_bootstrap_debounce_timer.setSingleShot(True)
+    model._post_bootstrap_debounce_timer.timeout.connect(model._emit_pages_updated)
+    monkeypatch.setattr(
+        model,
+        '_start_paginated_enrichment',
+        lambda **kwargs: enrichment_requests.append(kwargs),
+    )
+
+    try:
+        model._on_page_loaded_signal(0)
+
+        assert model._initial_page_load_pending is False
+        assert enrichment_requests == [{'window_pages': {0}, 'scope': 'window'}]
+    finally:
         model.shutdown_background_workers()
         model.deleteLater()
         app.processEvents()

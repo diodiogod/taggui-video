@@ -3649,7 +3649,6 @@ class ImageListModel(QAbstractListModel):
             # Bootstrap phase: trigger layout updates so user sees images appear
             # Use layoutChanged here (not pages_updated) because Qt needs to know about new items
             if not hasattr(self, '_page_load_debounce_timer'):
-                from PySide6.QtCore import QTimer
                 self._page_load_debounce_timer = QTimer()
                 self._page_load_debounce_timer.setSingleShot(True)
                 self._page_load_debounce_timer.timeout.connect(lambda: self.layoutChanged.emit())
@@ -3661,7 +3660,6 @@ class ImageListModel(QAbstractListModel):
             # After bootstrap: trigger masonry recalc for newly loaded pages
             # Use debounce to batch multiple page loads together
             if not hasattr(self, '_post_bootstrap_debounce_timer'):
-                from PySide6.QtCore import QTimer
                 self._post_bootstrap_debounce_timer = QTimer()
                 self._post_bootstrap_debounce_timer.setSingleShot(True)
                 self._post_bootstrap_debounce_timer.timeout.connect(self._emit_pages_updated)
