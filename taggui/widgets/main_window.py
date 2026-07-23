@@ -7271,6 +7271,12 @@ class MainWindow(QMainWindow):
                        save_path_to_settings: bool = False,
                        select_path: str | None = None,
                        load_options: LimitedLoadOptions | None = None):
+        ui_load_started_at = time.perf_counter()
+
+        def _log_ui_load_stage(label: str):
+            elapsed_ms = (time.perf_counter() - ui_load_started_at) * 1000.0
+            print(f"[LOAD] {label}: {elapsed_ms:.0f}ms")
+
         self._load_session_id += 1
         load_session_id = self._load_session_id
         self.directory_path = path.resolve()
@@ -7304,15 +7310,28 @@ class MainWindow(QMainWindow):
                 select_path = folder_saved_path
         self._directory_restore_selection_path = str(select_path) if select_path else None
 
+        # Apply the saved folder view before the model queues its first page.
+        # Replaying sort/media state after pagination starts can discard that
+        # background request and synchronously rebuild up to three pages on the
+        # UI thread, freezing the freshly shown window.
+        self._apply_folder_view_preferences(self.directory_path)
+        if self._current_directory_load_options is None:
+            startup_sort = str(self.image_list.sort_combo_box.currentText() or 'Default')
+            startup_sort_field, startup_sort_dir = self._ui_sort_to_db_sort(startup_sort)
+            self.image_list_model._sort_field = startup_sort_field
+            self.image_list_model._sort_dir = startup_sort_dir
+        startup_media_type = str(
+            self.image_list.media_type_combo_box.currentText() or 'All'
+        )
+        self.image_list_model.set_media_type_filter(startup_media_type)
+
         self.image_list_model.load_directory(
             path,
             load_options=self._current_directory_load_options,
         )
+        _log_ui_load_stage('model-bootstrap-returned')
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
-
-        # Restore folder-specific sort/media preferences, if present.
-        self._apply_folder_view_preferences(self.directory_path)
 
         # Track unfiltered total right after load to detect media-filter empty states.
         source_total_before_media_filter = (
@@ -7327,6 +7346,7 @@ class MainWindow(QMainWindow):
         media_type = self.image_list.media_type_combo_box.currentText()
         self.proxy_image_list_model.set_media_type_filter(media_type)
         self.delayed_filter()
+        _log_ui_load_stage('filters-applied')
         # Folder-load fallback only: if persisted media filter empties results
         # on a non-empty folder, reset to All to avoid "looks stuck" confusion.
         if (media_type != 'All'
@@ -7363,6 +7383,7 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     self.image_list._on_sort_changed(saved_sort, preserve_selection=False)
+        _log_ui_load_stage('sort-state-ready')
         self._save_folder_view_preferences()
 
         if self._current_directory_load_options is not None:
@@ -7533,6 +7554,7 @@ class MainWindow(QMainWindow):
         self._update_refresh_new_media_action_state()
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
+        _log_ui_load_stage('ui-setup-returned')
 
     def _capture_reload_restore_state(self) -> tuple[str, int, str | None]:
         """Capture filter and selection state before a directory refresh."""

@@ -57,6 +57,7 @@ class ControlsToggleStrip(QFrame):
         self._floating_mode = False
         self._activity_active = False
         self._activity_message = ''
+        self._title_text = str(title or 'Images')
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 2, 0)
         layout.setSpacing(2)
@@ -87,11 +88,14 @@ class ControlsToggleStrip(QFrame):
         self.set_floating_mode(False)
 
     def set_title(self, title: str):
-        self.title_label.setText(str(title or 'Images'))
+        self._title_text = str(title or 'Images')
+        if not self._activity_active:
+            self.title_label.setText(self._title_text)
 
     def set_activity_state(self, active: bool, message: str = ''):
         self._activity_active = bool(active)
         self._activity_message = str(message or '')
+        self.title_label.setText('' if self._activity_active else self._title_text)
         tooltip = self._activity_message or self._toggle_tooltip
         if self._activity_active:
             self.setToolTip(tooltip)
@@ -446,6 +450,8 @@ class ImageList(QDockWidget):
         super().__init__()
         self.proxy_image_list_model = proxy_image_list_model
         self._background_activity_active = False
+        self._background_activity_status = ''
+        self._initial_page_activity_active = False
         self._default_sort_dirs = {
             'Default': 'ASC',
             'Name': 'ASC',
@@ -679,6 +685,13 @@ class ImageList(QDockWidget):
             source_model.background_validation_progress.connect(
                 self._on_background_validation_progress
             )
+        if source_model is not None and hasattr(source_model, 'initial_page_load_started'):
+            source_model.initial_page_load_started.connect(
+                self._on_initial_page_load_started
+            )
+            source_model.initial_page_load_finished.connect(
+                self._on_initial_page_load_finished
+            )
         if source_model is not None and initial_random_seed > 0:
             source_model._random_seed = initial_random_seed
         self.sort_combo_box.set_sort_direction(self._sort_dir)
@@ -695,13 +708,15 @@ class ImageList(QDockWidget):
     def _on_background_validation_progress(self, label: str, current: int, maximum: int, done: bool):
         if done:
             self._background_activity_active = False
-            self.controls_toggle_strip.set_activity_state(False)
+            self._background_activity_status = ''
+            self._refresh_title_strip_activity()
             return
         self._background_activity_active = True
         status = str(label or 'Updating folder index...')
         if maximum and maximum > 0 and current >= 0:
             status = f"{status} {int(current):,}/{int(maximum):,}"
-        self.controls_toggle_strip.set_activity_state(True, status)
+        self._background_activity_status = status
+        self._refresh_title_strip_activity()
 
         # DISABLED: Cache warming causes UI blocking
         # Connect cache warming signal to update cache status label
@@ -711,6 +726,31 @@ class ImageList(QDockWidget):
         #     # Trigger initial update
         #     QTimer.singleShot(1000, lambda: self._update_cache_status(0, 0))
         self.update_thumbnail_size_controls()
+
+    @Slot()
+    def _on_initial_page_load_started(self):
+        self._initial_page_activity_active = True
+        self._refresh_title_strip_activity()
+
+    @Slot()
+    def _on_initial_page_load_finished(self):
+        self._initial_page_activity_active = False
+        self._refresh_title_strip_activity()
+
+    def _refresh_title_strip_activity(self):
+        if self._initial_page_activity_active:
+            self.controls_toggle_strip.set_activity_state(
+                True,
+                'Loading initial media page...',
+            )
+            return
+        if self._background_activity_active:
+            self.controls_toggle_strip.set_activity_state(
+                True,
+                self._background_activity_status,
+            )
+            return
+        self.controls_toggle_strip.set_activity_state(False)
 
     def set_title_strip_height(self, height: int):
         self.controls_toggle_strip.set_strip_height(height)

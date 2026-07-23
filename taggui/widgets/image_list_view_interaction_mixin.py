@@ -514,12 +514,18 @@ class ImageListViewInteractionMixin:
         if loaded_pages:
             nearest_loaded_gap = min(abs(int(page) - int(target_page)) for page in loaded_pages)
         target_page_loaded = int(target_page) in set(loaded_pages)
+        loading_pages = set(getattr(source_model, "_loading_pages", set()) or set())
+        target_page_loading = int(target_page) in loading_pages
         deep_unloaded_jump = bool(
             (not target_page_loaded)
             and loaded_pages
             and nearest_loaded_gap > 2
         )
-        sync_target_page = not deep_unloaded_jump
+        sync_target_page = bool(
+            not deep_unloaded_jump
+            and not target_page_loading
+            and str(reason or "") != "startup_restore"
+        )
         self._mark_selection_log_source(str(reason), hold_s=20.0)
         self._selected_global_index = int(target_global)
         self._selected_global_lock_value = int(target_global)

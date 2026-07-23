@@ -2173,6 +2173,8 @@ class ImageListModel(QAbstractListModel):
 
     # Signals for pagination
     page_loaded = Signal(int)  # Emitted when a page finishes loading (page_num)
+    initial_page_load_started = Signal()
+    initial_page_load_finished = Signal()
     total_count_changed = Signal(int)  # Emitted when total image count changes
     indexing_progress = Signal(int, int)  # (current, total) during initial indexing
     # DISABLED: Cache warming causes UI blocking
@@ -3610,6 +3612,18 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode:
             return
 
+        initial_page_finished = bool(
+            int(page_num) == 0
+            and getattr(self, '_initial_page_load_pending', False)
+        )
+        if initial_page_finished:
+            self._initial_page_load_pending = False
+            self.initial_page_load_finished.emit()
+            warm_pages = tuple(getattr(self, '_initial_warm_pages', ()) or ())
+            self._initial_warm_pages = ()
+            for warm_page_num in warm_pages:
+                self._request_page_load(int(warm_page_num))
+
         try:
             if int(page_num) == int(getattr(self, "_page_load_priority_page", -1) or -1):
                 self._page_load_priority_page = None
@@ -3656,6 +3670,13 @@ class ImageListModel(QAbstractListModel):
             # This batches rapid page loads during scrolling
             self._post_bootstrap_debounce_timer.stop()
             self._post_bootstrap_debounce_timer.start(300)
+
+        if initial_page_finished:
+            self._start_paginated_enrichment(
+                window_pages={0},
+                scope='window',
+            )
+            QTimer.singleShot(0, self._finalize_paginated_bootstrap_refresh)
 
     def _emit_pages_updated(self):
         """Emit pages_updated signal with current loaded pages (safe alternative to layoutChanged)."""
@@ -6169,6 +6190,11 @@ class ImageListModel(QAbstractListModel):
         new_images = []  # Build new image list without clearing old one
         normalized_load_options = _normalize_limited_load_options(load_options)
         self._active_load_options = normalized_load_options
+        # A folder load starts with the UI's empty text filter. Clear any SQL
+        # text predicate left by the previous folder before page zero is queued;
+        # otherwise the subsequent UI reset has to rebuild the page again.
+        self._text_filter_sql = ''
+        self._text_filter_bindings = ()
         self._set_scope_from_rel_paths(None)
         if normalized_load_options is not None:
             print(f"[LIMIT] Requested limited folder view: {normalized_load_options.describe()}")
@@ -7191,22 +7217,22 @@ class ImageListModel(QAbstractListModel):
         # Emit signal
         self.total_count_changed.emit(self._total_count)
 
-        # Bootstrap one page synchronously so the first 1,000 items become
-        # usable quickly. Fill the existing three-page warm window in the
-        # background; page_loaded/pages_updated already append those pages
-        # without blocking the UI thread.
+        # Load the entire bootstrap window in the background. A page can require
+        # hundreds of filesystem checks and sidecar reads, so even page zero
+        # must not block Qt's paint/event loop after the empty shell is shown.
         bootstrap_page_count = min(
             3,
             (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE,
         )
         print(
-            "[PAGINATION] Loading first page synchronously; "
+            "[PAGINATION] Loading first page in background; "
             f"warming {max(0, bootstrap_page_count - 1)} adjacent page(s)..."
         )
-        if bootstrap_page_count > 0:
-            self._load_page_sync(0)
-        for page_num in range(1, bootstrap_page_count):
-            self._request_page_load(page_num)
+        self._initial_page_load_pending = bootstrap_page_count > 0
+        self._initial_warm_pages = tuple(range(1, bootstrap_page_count))
+        if self._initial_page_load_pending:
+            self.initial_page_load_started.emit()
+            self._request_page_load(0)
         print(
             f"[PAGINATION] Loaded {len(self._pages)} page(s) initially; "
             f"{max(0, bootstrap_page_count - len(self._pages))} warming"
@@ -7216,11 +7242,6 @@ class ImageListModel(QAbstractListModel):
         # CRITICAL: Emit pages_updated BEFORE layoutChanged so proxy invalidates first
         # Otherwise proxy.rowCount() returns 0 during masonry calculation
         self._emit_paginated_layout_refresh()
-        if self._pages:
-            self._start_paginated_enrichment(
-                window_pages={0},
-                scope='window',
-            )
         QTimer.singleShot(
             250,
             lambda path=Path(directory_path): self._schedule_paginated_maintenance(path),
