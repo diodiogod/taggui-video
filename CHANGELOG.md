@@ -5,6 +5,25 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] - 2026-07-23
+
+### Added
+
+- Keep the interface responsive while the first paginated media page loads
+- Prevent startup sort, filter, and selection restoration from reintroducing synchronous page work
+- Simplify the red loading strip by hiding its title during activity
+
+### Changed
+
+- Improve startup responsiveness and file-operation reliability
+
+### Fixed
+
+- Fix delete and move operations before the lazy video player has been opened
+
+### Removed
+
+- Eliminate multi-GPU OpenGL initialization stalls while retaining accelerated image rendering and MPV playback
 ## [1.4.3] - 2026-07-18
 
 ### Added
