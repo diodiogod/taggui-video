@@ -60,6 +60,45 @@ class StrictScrollDomainService:
         except Exception:
             return False
 
+    def _fully_materialized_scroll_max(self, source_model=None):
+        """Return the real masonry tail when every scoped page is resident."""
+        source_model = self._resolve_source_model(source_model)
+        if (
+            not source_model
+            or not getattr(source_model, "_paginated_mode", False)
+        ):
+            return None
+        try:
+            total_items = int(getattr(source_model, "_total_count", 0) or 0)
+            page_size = int(getattr(source_model, "PAGE_SIZE", 0) or 0)
+            if total_items <= 0 or page_size <= 0:
+                return None
+            total_pages = max(1, (total_items + page_size - 1) // page_size)
+            pages = getattr(source_model, "_pages", {})
+            if not isinstance(pages, dict):
+                return None
+            expected_pages = set(range(total_pages))
+            if not expected_pages.issubset(set(int(page) for page in pages)):
+                return None
+            loading_pages = set(getattr(source_model, "_loading_pages", set()) or set())
+            if expected_pages.intersection(loading_pages):
+                return None
+            real_items = [
+                item
+                for item in (getattr(self._view, "_masonry_items", None) or [])
+                if int(item.get("index", -1)) >= 0
+            ]
+            if not real_items:
+                return None
+            tail_bottom = max(
+                int(item.get("y", 0)) + int(item.get("height", 0))
+                for item in real_items
+            )
+            viewport_height = max(1, int(self._view.viewport().height()))
+            return max(1, tail_bottom - viewport_height)
+        except Exception:
+            return None
+
     def estimate_strict_virtual_scroll_max(self, source_model=None) -> int:
         """Estimate a stable virtual scrollbar max for strict mode drag mapping."""
         try:
@@ -96,6 +135,19 @@ class StrictScrollDomainService:
 
     def get_strict_scroll_domain_max(self, source_model=None, *, include_drag_baseline: bool = False) -> int:
         """Return a robust strict-mode virtual scroll max used for page ownership mapping."""
+        source_model = self._resolve_source_model(source_model)
+        actual_max = self._fully_materialized_scroll_max(source_model)
+        if actual_max is not None:
+            return int(actual_max)
+        if self._is_tiny_paginated_dataset(source_model):
+            # Small datasets have a finite, fully local scroll domain.  Retaining
+            # a floor captured from a previous/larger layout makes the thumb map
+            # into spacer space and turns page 0 into a bogus remote target.
+            return max(
+                1,
+                int(self.get_strict_min_domain(source_model)),
+                int(self.estimate_strict_virtual_scroll_max(source_model)),
+            )
         domain_max = max(
             1,
             int(self.get_strict_min_domain(source_model)),
@@ -123,6 +175,10 @@ class StrictScrollDomainService:
             if total_items <= 0:
                 return max(1, int(self._view.verticalScrollBar().maximum()))
 
+            actual_max = self._fully_materialized_scroll_max(source_model)
+            if actual_max is not None:
+                return int(actual_max)
+
             import math
             metrics = self._get_column_metrics()
             num_cols = int(metrics["num_columns"])
@@ -139,11 +195,12 @@ class StrictScrollDomainService:
             else:
                 domain = max(10000, domain, int(self.get_strict_min_domain(source_model)))
 
-            domain = max(
-                int(domain),
-                int(getattr(self._view, "_strict_scroll_max_floor", 0) or 0),
-                int(getattr(self._view, "_strict_drag_frozen_max", 0) or 0),
-            )
+            if not tiny_dataset:
+                domain = max(
+                    int(domain),
+                    int(getattr(self._view, "_strict_scroll_max_floor", 0) or 0),
+                    int(getattr(self._view, "_strict_drag_frozen_max", 0) or 0),
+                )
             return max(1, int(domain))
         except Exception:
             return max(10000, int(self._view.verticalScrollBar().maximum()))

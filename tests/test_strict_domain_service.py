@@ -34,6 +34,8 @@ class FakeSourceModel:
         self._total_count = total_count
         self.PAGE_SIZE = page_size
         self._paginated_mode = paginated
+        self._pages = {}
+        self._loading_pages = set()
 
 
 class FakeProxyModel:
@@ -52,6 +54,7 @@ class FakeView:
         self._strict_scroll_max_floor = 0
         self._strict_drag_frozen_max = 0
         self._drag_scroll_max_baseline = 0
+        self._masonry_items = []
         self._source_model = source_model
         self._scrollbar = FakeScrollBar(maximum=scrollbar_max, width=15, visible=True)
         self._viewport = FakeViewport(width=viewport_w, height=viewport_h)
@@ -87,26 +90,77 @@ def test_estimate_strict_virtual_scroll_max_uses_paginated_formula():
 
 
 def test_get_strict_min_domain_applies_headroom_and_floor():
-    view = FakeView(source_model=FakeSourceModel(total_count=900), viewport_w=1000, viewport_h=500)
+    view = FakeView(source_model=FakeSourceModel(total_count=2900), viewport_w=1000, viewport_h=500)
     service = StrictScrollDomainService(view)
 
-    # estimate=9700 => int(9700 * 1.10) = 10670
-    assert service.get_strict_min_domain() == 10670
+    # cols=9, rows=323, estimate=32446 => int(estimate * 1.10)
+    assert service.get_strict_min_domain() == 35690
 
     tiny = FakeView(source_model=FakeSourceModel(total_count=1), viewport_w=300, viewport_h=2000)
     tiny_service = StrictScrollDomainService(tiny)
-    assert tiny_service.get_strict_min_domain() == 10000
+    assert tiny_service.get_strict_min_domain() == 1
 
 
 def test_get_strict_scroll_domain_max_respects_floors_and_drag_baseline():
-    view = FakeView(source_model=FakeSourceModel(total_count=900), viewport_w=1000, viewport_h=500)
-    view._strict_scroll_max_floor = 20000
-    view._strict_drag_frozen_max = 15000
-    view._drag_scroll_max_baseline = 25000
+    view = FakeView(source_model=FakeSourceModel(total_count=3900), viewport_w=1000, viewport_h=500)
+    view._strict_scroll_max_floor = 60000
+    view._strict_drag_frozen_max = 55000
+    view._drag_scroll_max_baseline = 65000
     service = StrictScrollDomainService(view)
 
-    assert service.get_strict_scroll_domain_max() == 20000
-    assert service.get_strict_scroll_domain_max(include_drag_baseline=True) == 25000
+    assert service.get_strict_scroll_domain_max() == 60000
+    assert service.get_strict_scroll_domain_max(include_drag_baseline=True) == 65000
+
+
+def test_tiny_dataset_ignores_stale_large_dataset_domain_floors():
+    view = FakeView(source_model=FakeSourceModel(total_count=1000), viewport_w=1000, viewport_h=500)
+    view._strict_scroll_max_floor = 80000
+    view._strict_drag_frozen_max = 70000
+    view._drag_scroll_max_baseline = 90000
+    service = StrictScrollDomainService(view)
+
+    assert service.get_strict_scroll_domain_max(include_drag_baseline=True) == 10924
+    assert service.strict_canonical_domain_max() == 10924
+
+
+def test_tiny_dataset_uses_real_loaded_masonry_tail_when_available():
+    source = FakeSourceModel(total_count=1000)
+    source._pages = {0: [object()] * 997}
+    view = FakeView(source_model=source, viewport_h=500)
+    view._strict_scroll_max_floor = 80000
+    view._masonry_items = [
+        {"index": 0, "y": 0, "height": 100},
+        {"index": 996, "y": 8500, "height": 125},
+    ]
+    service = StrictScrollDomainService(view)
+
+    assert service.get_strict_scroll_domain_max(include_drag_baseline=True) == 8125
+    assert service.strict_canonical_domain_max() == 8125
+
+
+def test_two_page_dataset_uses_real_tail_when_both_pages_are_loaded():
+    source = FakeSourceModel(total_count=1300)
+    source._pages = {0: [object()] * 1000, 1: [object()] * 297}
+    view = FakeView(source_model=source, viewport_h=500)
+    view._strict_scroll_max_floor = 80000
+    view._masonry_items = [
+        {"index": 0, "y": 0, "height": 100},
+        {"index": 1296, "y": 12000, "height": 150},
+    ]
+    service = StrictScrollDomainService(view)
+
+    assert service.get_strict_scroll_domain_max(include_drag_baseline=True) == 11650
+    assert service.strict_canonical_domain_max() == 11650
+
+
+def test_two_page_dataset_keeps_virtual_domain_until_all_pages_are_loaded():
+    source = FakeSourceModel(total_count=1300)
+    source._pages = {0: [object()] * 1000}
+    view = FakeView(source_model=source, viewport_h=500)
+    view._masonry_items = [{"index": 999, "y": 9000, "height": 100}]
+    service = StrictScrollDomainService(view)
+
+    assert service.get_strict_scroll_domain_max() > 9100
 
 
 def test_strict_canonical_domain_max_uses_masonry_avg_height():

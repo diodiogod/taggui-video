@@ -504,11 +504,21 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
 
+        total_items = int(getattr(source_model, "_total_count", 0) or 0)
         page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
         target_page = max(0, int(target_global) // max(1, page_size))
+        # The cached path index can briefly be ahead of the database while
+        # background reconciliation is pending. If the target page is already
+        # resident, clamp to its real tail instead of requesting a nonexistent
+        # row or treating it as an unloaded target window.
+        pages = getattr(source_model, "_pages", {})
+        loaded_page = pages.get(target_page, []) if isinstance(pages, dict) else []
+        if loaded_page:
+            page_start = target_page * page_size
+            page_tail = page_start + len(loaded_page) - 1
+            target_global = min(int(target_global), int(page_tail))
         prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
         publish_target_page_now = str(reason or "") in {"index_input", "page_drag"}
-        total_items = int(getattr(source_model, "_total_count", 0) or 0)
         loaded_pages = sorted(getattr(source_model, "_pages", {}).keys()) if hasattr(source_model, "_pages") else []
         nearest_loaded_gap = 0
         if loaded_pages:
