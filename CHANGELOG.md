@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.6] - 2026-07-24
+
+### Added
+
+- Make the volume popup clearer over both bright and dark videos
+- Allow one continuous press-and-hold gesture to adjust volume
+- Start volume changes only after the pointer enters the slider track
+
+### Changed
+
+- Improve video playback and volume controls
+
+### Fixed
+
+- Fix intermittent play and pause button clicks
 ## [1.4.5] - 2026-07-23
 
 ### Added

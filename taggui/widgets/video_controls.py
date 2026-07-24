@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, Signal, Slot, QEvent, QTimer, QPointF, QRectF
 from PySide6.QtGui import QIcon, QPainter, QPolygonF, QColor, QPen
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox, QStyle, QStyleOptionSlider,
-                               QSizePolicy, QGraphicsDropShadowEffect)
+                               QSizePolicy)
 from utils.settings import settings, DEFAULT_SETTINGS
 from skins.engine import SkinManager
 
@@ -315,6 +315,8 @@ class _HoldableMuteButton(QPushButton):
     """Mute button that distinguishes click from press-and-hold."""
 
     hold_requested = Signal()
+    hold_dragged = Signal(object)
+    hold_released = Signal(object)
 
     def __init__(self, label: str, parent=None):
         super().__init__(label, parent)
@@ -324,6 +326,7 @@ class _HoldableMuteButton(QPushButton):
         self._hold_timer.timeout.connect(self._emit_hold_requested)
         self._hold_active = False
         self._press_active = False
+        self._hold_event_filter_installed = False
 
     def _emit_hold_requested(self):
         if not self._press_active:
@@ -332,6 +335,40 @@ class _HoldableMuteButton(QPushButton):
             return
         self._hold_active = True
         self.hold_requested.emit()
+        # Native Popup windows take the button's implicit mouse grab. Track the
+        # remainder of this gesture at application scope instead.
+        app = QApplication.instance()
+        if app is not None and not self._hold_event_filter_installed:
+            app.installEventFilter(self)
+            self._hold_event_filter_installed = True
+
+    def _finish_hold_gesture(self, global_pos):
+        if not self._hold_active:
+            return
+        self._hold_active = False
+        self._press_active = False
+        self._hold_timer.stop()
+        self.hold_released.emit(global_pos)
+        if self._hold_event_filter_installed:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+            self._hold_event_filter_installed = False
+        self.setDown(False)
+
+    def eventFilter(self, watched, event):
+        if self._hold_active:
+            event_type = event.type()
+            if event_type == QEvent.Type.MouseMove:
+                self.hold_dragged.emit(event.globalPosition().toPoint())
+            elif (
+                event_type == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self._finish_hold_gesture(event.globalPosition().toPoint())
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -340,13 +377,19 @@ class _HoldableMuteButton(QPushButton):
             self._hold_timer.start()
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if self._press_active and self._hold_active:
+            self.hold_dragged.emit(event.globalPosition().toPoint())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_active = False
             self._hold_timer.stop()
             if self._hold_active:
-                self._hold_active = False
-                self.setDown(False)
+                self._finish_hold_gesture(event.globalPosition().toPoint())
                 event.accept()
                 return
         super().mouseReleaseEvent(event)
@@ -363,13 +406,13 @@ class _VolumePopup(QFrame):
         self.setObjectName("videoVolumePopup")
         self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._hold_drag_engaged = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(9, 10, 9, 9)
+        layout.setSpacing(7)
 
         self.volume_slider = QSlider(Qt.Orientation.Vertical)
         self.volume_slider.setRange(0, 100)
@@ -377,20 +420,20 @@ class _VolumePopup(QFrame):
         self.volume_slider.setPageStep(10)
         self.volume_slider.setTickPosition(QSlider.TickPosition.NoTicks)
         self.volume_slider.setInvertedAppearance(False)
-        self.volume_slider.setFixedSize(22, 92)
+        self.volume_slider.setFixedSize(34, 104)
         self.volume_slider.valueChanged.connect(self._on_slider_changed)
 
         self.value_label = QLabel("100%")
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.value_label.setFixedHeight(22)
         self.value_label.setStyleSheet("""
             QLabel {
-                color: #F2FFF6;
-                background-color: rgba(76, 175, 80, 42);
-                border: 1px solid rgba(76, 175, 80, 120);
-                border-radius: 6px;
-                font-size: 9px;
-                font-weight: 700;
-                padding: 1px 5px;
+                color: #F4F7FA;
+                background-color: rgba(255, 255, 255, 20);
+                border: none;
+                border-radius: 7px;
+                font-size: 10px;
+                font-weight: 600;
             }
         """)
 
@@ -399,35 +442,45 @@ class _VolumePopup(QFrame):
 
         self.setStyleSheet("""
             QFrame#videoVolumePopup {
-                background-color: rgba(22, 24, 28, 220);
-                border: 1px solid rgba(160, 190, 255, 85);
-                border-radius: 9px;
+                background: transparent;
+                border: none;
+                border-radius: 12px;
             }
             QSlider::groove:vertical {
-                background: rgba(255, 255, 255, 26);
-                width: 5px;
-                border-radius: 2px;
+                background: rgba(255, 255, 255, 82);
+                width: 6px;
+                border-radius: 3px;
+            }
+            QSlider::add-page:vertical {
+                background: #4CAF60;
+                width: 6px;
+                border-radius: 3px;
             }
             QSlider::handle:vertical {
-                background: #F2F7FF;
-                border: 1px solid rgba(84, 194, 106, 180);
-                height: 12px;
-                margin: 0 -4px;
-                border-radius: 6px;
+                background: #FFFFFF;
+                border: 2px solid #4CAF60;
+                height: 14px;
+                margin: 0 -5px;
+                border-radius: 8px;
             }
             QSlider::handle:vertical:hover {
                 background: #FFFFFF;
-                border-color: rgba(111, 214, 125, 220);
+                border-color: #72D681;
             }
         """)
 
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(18)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(0, 0, 0, 130))
-        self.setGraphicsEffect(shadow)
+        self.setFixedSize(52, 152)
 
-        self.setFixedSize(34, 118)
+    def paintEvent(self, event):
+        """Paint a stable panel on native translucent popup windows."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        panel_rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(QColor(255, 255, 255, 58), 1))
+        painter.setBrush(QColor(20, 22, 26, 246))
+        painter.drawRoundedRect(panel_rect, 11, 11)
+        painter.end()
+        super().paintEvent(event)
 
     def _on_slider_changed(self, value: int):
         clamped = max(0, min(100, int(value)))
@@ -440,6 +493,31 @@ class _VolumePopup(QFrame):
         self.volume_slider.setValue(int(round(normalized * 100.0)))
         self.volume_slider.blockSignals(False)
         self.value_label.setText(f"{int(round(normalized * 100.0))}%")
+
+    def begin_hold_drag(self):
+        self._hold_drag_engaged = False
+
+    def update_hold_drag(self, global_pos):
+        slider_pos = self.volume_slider.mapFromGlobal(global_pos)
+        if not self._hold_drag_engaged:
+            if not self.volume_slider.rect().contains(slider_pos):
+                return
+            self._hold_drag_engaged = True
+
+        handle_length = 14
+        slider_span = max(1, self.volume_slider.height() - handle_length)
+        handle_center = handle_length / 2.0
+        position = max(
+            0.0,
+            min(float(slider_span), float(slider_pos.y()) - handle_center),
+        )
+        target = 1.0 - (position / float(slider_span))
+        self.volume_slider.setValue(int(round(target * 100.0)))
+
+    def end_hold_drag(self):
+        if not self._hold_drag_engaged:
+            return
+        self._hold_drag_engaged = False
 
     def show_near(self, anchor_widget: QWidget, volume: float):
         self.set_volume(volume)
@@ -643,6 +721,8 @@ class VideoControlsWidget(QWidget):
             }
         """)
         self.mute_btn.hold_requested.connect(self._show_volume_popup)
+        self.mute_btn.hold_dragged.connect(self._drag_volume_popup)
+        self.mute_btn.hold_released.connect(self._end_volume_popup_drag)
         self.mute_btn.clicked.connect(self._toggle_mute)
 
         # Frame navigation with icons
@@ -1293,6 +1373,17 @@ class VideoControlsWidget(QWidget):
         finally:
             self._overlay_reposition_in_progress = False
 
+        # The timeline and other components are repositioned after the transport
+        # buttons and can otherwise cover their visible edges. Reassert the
+        # transport stacking order only after every sibling has been positioned.
+        for component_id in getattr(self, '_top_row_button_map', {}):
+            widget = self._component_widgets.get(component_id)
+            if self._qt_widget_alive(widget):
+                try:
+                    widget.raise_()
+                except RuntimeError:
+                    pass
+
         try:
             should_retry = bool(invalid_anchor_found and self._qt_widget_alive(self) and self.isVisible())
         except RuntimeError:
@@ -1309,6 +1400,10 @@ class VideoControlsWidget(QWidget):
         slot = QWidget(self)
         slot.setAutoFillBackground(False)
         slot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        if component_id not in self._slot_managed_components:
+            # These slots only reserve layout space. The real widget is a sibling
+            # positioned from the slot geometry, so the slot must not steal clicks.
+            slot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         if stretch > 0:
             slot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         else:
@@ -1468,6 +1563,17 @@ class VideoControlsWidget(QWidget):
             self._volume_popup.closed.connect(self._on_volume_popup_closed)
         self._stop_parent_hide_timer()
         self._volume_popup.show_near(self.mute_btn, self.volume_level)
+        self._volume_popup.begin_hold_drag()
+
+    def _drag_volume_popup(self, global_pos):
+        popup = self._volume_popup
+        if popup is not None:
+            popup.update_hold_drag(global_pos)
+
+    def _end_volume_popup_drag(self, _global_pos):
+        popup = self._volume_popup
+        if popup is not None:
+            popup.end_hold_drag()
 
     def _hide_volume_popup(self):
         popup = self._volume_popup
