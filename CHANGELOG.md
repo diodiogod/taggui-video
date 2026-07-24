@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.5] - 2026-07-23
+
+### Added
+
+- Stop limited image sets from scrolling beyond their final image
+- Make Home, End, index jumps, and scrollbar dragging work reliably in one-page and multi-page limited folders
+- Prevent empty-tail scrolling from jumping back to the first image
+
+### Changed
+
+- Improve pagination stability and limited-folder navigation
+
+### Fixed
+
+- Fix a crash during asynchronous initial page completion
 ## [1.4.4] - 2026-07-23
 
 ### Added
