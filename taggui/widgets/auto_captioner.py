@@ -25,13 +25,14 @@ from auto_captioning.model_availability import (
     get_model_install_state,
 )
 from auto_captioning.models_list import (
-    MODEL_KIND_LOCAL,
+    MODEL_KIND_CAMIE_TAGGER,
     MODEL_KIND_REMOTE,
     MODEL_KIND_WD_TAGGER,
     MODELS,
     get_model_artifact_kind,
     get_model_download_revision,
     get_model_kind,
+    is_tagger_model,
 )
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
@@ -52,6 +53,7 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     FocusedScrollSettingsSpinBox,
                                     SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsPlainTextEdit)
+from utils.ModelThread import ModelThreadOutputStream
 from utils.utils import pluralize
 from widgets.image_list import ImageList
 
@@ -302,6 +304,8 @@ class ModelAvailabilityComboBox(FocusedScrollSettingsComboBox):
 
 class CaptionSettingsForm:
     MODEL_SETTING_KEY = 'auto_captioner_model_id'
+    WD_TAGGER_THRESHOLD_KEY = 'wd_tagger_min_probability'
+    CAMIE_TAGGER_THRESHOLD_KEY = 'camie_tagger_min_probability'
 
     GENERATION_DEFAULTS = {
         'min_new_tokens': 1,
@@ -585,6 +589,7 @@ class CaptionSettingsForm:
         )
 
         self.device_label = QLabel('Device')
+        self.gpu_index_label = QLabel('GPU index')
         self.device_combo_box = FocusedScrollSettingsComboBox(key='device')
         self.device_combo_box.addItems(list(CaptionDevice))
 
@@ -651,7 +656,11 @@ class CaptionSettingsForm:
         )
 
         self.min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
-            key='wd_tagger_min_probability', default=0.4, minimum=0.01, maximum=1)
+            key=self.WD_TAGGER_THRESHOLD_KEY,
+            default=0.4,
+            minimum=0.01,
+            maximum=1,
+        )
         self.min_probability_spin_box.setSingleStep(0.01)
         self.max_tags_spin_box = FocusedScrollSettingsSpinBox(
             key='wd_tagger_max_tags', default=30, minimum=1, maximum=999)
@@ -1100,6 +1109,7 @@ class CaptionSettingsForm:
         form.addRow('Caption position', self.caption_position_combo_box)
         form.addRow(self.skip_hash_container)
         form.addRow(self.device_label, self.device_combo_box)
+        form.addRow(self.gpu_index_label, self.gpu_index_spin_box)
         form.addRow(self.load_in_4_bit_container)
         form.addRow(self.remove_tag_separators_container)
         form.addRow(self.remove_new_lines_container)
@@ -1173,9 +1183,6 @@ class CaptionSettingsForm:
         form.addRow('Top-p', self.top_p_spin_box)
         form.addRow('Repetition penalty', self.repetition_penalty_spin_box)
         form.addRow('No repeat n-gram size', self.no_repeat_ngram_size_spin_box)
-        if not self.use_compact_style:
-            form.addRow(HorizontalLine())
-            form.addRow('GPU index', self.gpu_index_spin_box)
         return container
 
     def _build_compact_prompting_form(self) -> QWidget:
@@ -1470,7 +1477,7 @@ class CaptionSettingsForm:
         tabs.addTab(self.general_tab, 'General')
         tabs.addTab(self.prompting_tab, 'Prompting')
         tabs.addTab(self.advanced_tab, 'Advanced')
-        tabs.addTab(self.wd_tagger_tab, 'WD Tagger')
+        tabs.addTab(self.wd_tagger_tab, 'Tagger')
         self._sync_tab_visibility(self.model_combo_box.currentText())
         return tabs
 
@@ -1478,14 +1485,14 @@ class CaptionSettingsForm:
         if self.tabs_widget is None:
             return
         model_kind = get_model_kind(model_id)
-        is_wd_tagger_model = model_kind == MODEL_KIND_WD_TAGGER
+        is_tagger_model_selected = is_tagger_model(model_id)
         is_remote_model = model_kind == MODEL_KIND_REMOTE
-        is_local_model = not is_wd_tagger_model and not is_remote_model
+        is_local_model = not is_tagger_model_selected and not is_remote_model
         for idx, visible in (
             (0, True),
-            (1, not is_wd_tagger_model),
+            (1, not is_tagger_model_selected),
             (2, is_local_model),
-            (3, is_wd_tagger_model),
+            (3, is_tagger_model_selected),
         ):
             try:
                 self.tabs_widget.setTabVisible(idx, visible)
@@ -1507,9 +1514,14 @@ class CaptionSettingsForm:
         config_paths = set(models_directory_path.glob('**/config.json'))
         selected_tags_paths = set(
             models_directory_path.glob('**/selected_tags.csv'))
-        model_directory_paths = [str(path.parent) for path
-                                 in config_paths | selected_tags_paths]
-        model_directory_paths.sort()
+        camie_metadata_paths = set(
+            models_directory_path.glob('**/camie-tagger-v2-metadata.json'))
+        model_directory_paths = sorted({
+            str(path.parent)
+            for path in (
+                config_paths | selected_tags_paths | camie_metadata_paths
+            )
+        })
         print(f'Loaded {len(model_directory_paths)} model '
               f'{pluralize("path", len(model_directory_paths))}.')
         return model_directory_paths
@@ -1517,15 +1529,35 @@ class CaptionSettingsForm:
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
         model_kind = get_model_kind(model_id)
-        is_wd_tagger_model = model_kind == MODEL_KIND_WD_TAGGER
+        is_tagger_model_selected = is_tagger_model(model_id)
         is_remote_model = model_kind == MODEL_KIND_REMOTE
-        is_local_model = not is_wd_tagger_model and not is_remote_model
+        is_local_model = not is_tagger_model_selected and not is_remote_model
+        supports_device_selection = (
+            is_local_model or model_kind == MODEL_KIND_CAMIE_TAGGER
+        )
         lowercase_id = model_id.lower()
         is_qwen_model = ('qwen2.5-vl' in lowercase_id
                          or 'qwen3.5' in lowercase_id)
         is_gemma_model = 'gemma-4' in lowercase_id
+        if model_kind == MODEL_KIND_CAMIE_TAGGER:
+            self.min_probability_spin_box.set_settings_key(
+                self.CAMIE_TAGGER_THRESHOLD_KEY,
+                default=0.49,
+            )
+            self.min_probability_spin_box.setToolTip(
+                'Camie Tagger v2 recommends 0.49 for balanced rare-tag '
+                'coverage. This value is stored separately from WD Tagger.'
+            )
+        elif model_kind == MODEL_KIND_WD_TAGGER:
+            self.min_probability_spin_box.set_settings_key(
+                self.WD_TAGGER_THRESHOLD_KEY,
+                default=0.4,
+            )
+            self.min_probability_spin_box.setToolTip('')
 
-        self.wd_tagger_settings_form_container.setVisible(is_wd_tagger_model)
+        self.wd_tagger_settings_form_container.setVisible(
+            is_tagger_model_selected,
+        )
 
         if self.use_compact_style:
             for widget in [self.system_prompt_container,
@@ -1536,7 +1568,7 @@ class CaptionSettingsForm:
                            self.remove_tag_separators_container,
                            self.remove_new_lines_container,
                            self.limit_to_crop_container]:
-                widget.setVisible(not is_wd_tagger_model)
+                widget.setVisible(not is_tagger_model_selected)
         else:
             for widget in [self.system_prompt_label, self.system_prompt_text_edit,
                            self.prompt_label, self.prompt_text_edit,
@@ -1544,17 +1576,21 @@ class CaptionSettingsForm:
                            self.caption_start_label, self.caption_start_line_edit,
                            self.remove_tag_separators_container,
                            self.remove_new_lines_container]:
-                widget.setVisible(not is_wd_tagger_model)
+                widget.setVisible(not is_tagger_model_selected)
 
         if self.use_compact_style:
             for widget in [self.load_in_4_bit_container,
                            self.advanced_settings_form_container]:
                 widget.setVisible(is_local_model)
             if self.compact_device_gpu_row is not None:
-                self.compact_device_gpu_row.setVisible(is_local_model)
+                self.compact_device_gpu_row.setVisible(
+                    supports_device_selection,
+                )
         else:
             for widget in [self.device_label, self.device_combo_box,
-                           self.load_in_4_bit_container,
+                           self.gpu_index_label, self.gpu_index_spin_box]:
+                widget.setVisible(supports_device_selection)
+            for widget in [self.load_in_4_bit_container,
                            self.horizontal_line,
                            self.toggle_advanced_settings_form_button,
                            self.advanced_settings_form_container]:
@@ -1589,9 +1625,10 @@ class CaptionSettingsForm:
                 self.disable_thinking_container,
                 is_qwen_model or is_gemma_model)
 
+        can_unload_model = not is_remote_model
         self.set_unload_button_state(
-            visible=is_local_model,
-            enabled=is_local_model,
+            visible=can_unload_model,
+            enabled=can_unload_model,
         )
 
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
@@ -1600,9 +1637,9 @@ class CaptionSettingsForm:
     def set_load_in_4_bit_visibility(self, device: str):
         model_id = self.model_combo_box.currentText()
         model_kind = get_model_kind(model_id)
-        is_wd_tagger_model = model_kind == MODEL_KIND_WD_TAGGER
+        is_tagger_model_selected = is_tagger_model(model_id)
         is_remote_model = model_kind == MODEL_KIND_REMOTE
-        if is_wd_tagger_model or is_remote_model:
+        if is_tagger_model_selected or is_remote_model:
             self.load_in_4_bit_container.setVisible(False)
             return
         is_load_in_4_bit_available = (self.is_bitsandbytes_available
@@ -1828,10 +1865,12 @@ class AutoCaptioner(QDockWidget):
         self.image_viewer = image_viewer
         self.is_captioning = False
         self.captioning_thread = None
+        self._stdout_output_stream = ModelThreadOutputStream(sys.stdout)
+        self._stderr_output_stream = ModelThreadOutputStream(sys.stderr)
         self.processor = None
         self.model = None
         self.model_id: str | None = None
-        self.model_device_type: str | None = None
+        self.model_device: str | None = None
         self.is_model_loaded_in_4_bit = None
         self.layout_mode = normalize_auto_captioner_layout_mode(
             load_auto_captioner_layout_mode())
@@ -2345,10 +2384,13 @@ class AutoCaptioner(QDockWidget):
             if form is None:
                 continue
             model_id = str(form.model_combo_box.currentText() or '')
-            is_local_model = get_model_kind(model_id) == MODEL_KIND_LOCAL
+            can_unload_model = (
+                get_model_kind(model_id) != MODEL_KIND_REMOTE
+            )
             form.set_unload_button_state(
-                visible=is_local_model,
-                enabled=is_local_model and loaded_model_present and not self.is_captioning,
+                visible=can_unload_model,
+                enabled=(can_unload_model and loaded_model_present
+                         and not self.is_captioning),
             )
 
     def _refresh_model_availability_ui(self):
@@ -2828,6 +2870,7 @@ class AutoCaptioner(QDockWidget):
             self, self.image_list_model, selected_image_indices,
             caption_settings, tag_separator, models_directory_path,
             self.image_viewer)
+        finished_thread = self.captioning_thread
         self.captioning_thread.text_outputted.connect(
             self.update_console_text_edit)
         self.captioning_thread.clear_console_text_edit_requested.connect(
@@ -2843,20 +2886,56 @@ class AutoCaptioner(QDockWidget):
             lambda: self.set_is_captioning(False))
         self.captioning_thread.finished.connect(self._update_unload_button_state)
         self.captioning_thread.finished.connect(self._refresh_model_availability_ui)
-        self.captioning_thread.finished.connect(restore_stdout_and_stderr)
+        self.captioning_thread.finished.connect(
+            lambda: self._restore_captioning_output_streams(finished_thread)
+        )
         self.captioning_thread.finished.connect(self.finalize_captioning_status)
         self.captioning_thread.finished.connect(self.progress_bar.hide)
         self.captioning_thread.finished.connect(
             lambda: self.start_cancel_button.setEnabled(True))
         if show_alert_when_finished:
             self.captioning_thread.finished.connect(self.show_alert)
+        self.captioning_thread.finished.connect(
+            lambda: self._release_finished_captioning_thread(finished_thread)
+        )
         # Redirect `stdout` and `stderr` so that the outputs are displayed in
         # the console text edit.
-        sys.stdout = self.captioning_thread
-        sys.stderr = self.captioning_thread
+        self._stdout_output_stream.attach(self.captioning_thread)
+        self._stderr_output_stream.attach(self.captioning_thread)
+        sys.stdout = self._stdout_output_stream
+        sys.stderr = self._stderr_output_stream
         self.captioning_thread.start()
         self.refresh_captioning_status()
         self.captioning_status_timer.start()
+
+    def _restore_captioning_output_streams(self, thread):
+        stdout_detached = self._stdout_output_stream.detach(thread)
+        stderr_detached = self._stderr_output_stream.detach(thread)
+        if stdout_detached and sys.stdout is self._stdout_output_stream:
+            sys.stdout = self._stdout_output_stream.fallback_stream
+        if stderr_detached and sys.stderr is self._stderr_output_stream:
+            sys.stderr = self._stderr_output_stream.fallback_stream
+
+    def _release_finished_captioning_thread(self, thread):
+        if thread is None:
+            return
+        model_wrapper = getattr(thread, 'model', None)
+        if model_wrapper is not None:
+            try:
+                model_wrapper.processor = None
+                model_wrapper.model = None
+            except Exception:
+                pass
+        try:
+            thread.model = None
+        except Exception:
+            pass
+        if self.captioning_thread is thread:
+            self.captioning_thread = None
+        try:
+            thread.deleteLater()
+        except RuntimeError:
+            pass
 
     @Slot()
     def unload_loaded_model(self):
@@ -2882,7 +2961,7 @@ class AutoCaptioner(QDockWidget):
         self.processor = None
         self.model = None
         self.model_id = None
-        self.model_device_type = None
+        self.model_device = None
         self.is_model_loaded_in_4_bit = None
         if thread_model_wrapper is not None:
             try:

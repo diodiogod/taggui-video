@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TAGGUI_ROOT = ROOT / "taggui"
 sys.path.insert(0, str(TAGGUI_ROOT))
 
-from auto_captioning import models_list
+from auto_captioning import model_availability, models_list
 from utils import spell_highlighter
 
 
@@ -148,6 +148,8 @@ def test_model_registry_import_does_not_load_ml_frameworks():
     assert "ultralytics" not in sys.modules
     assert "auto_captioning.auto_captioning_model" not in sys.modules
     assert "auto_captioning.captioning_thread" not in sys.modules
+    assert "auto_captioning.models.camie_tagger" not in sys.modules
+    assert "Camais03/camie-tagger-v2" in models_list.MODELS
     xcomposer_visible = any("xcomposer2" in model for model in models_list.MODELS)
     assert xcomposer_visible is (find_spec("gptqmodel") is not None)
 
@@ -158,7 +160,21 @@ def test_model_metadata_is_resolved_without_concrete_classes(tmp_path):
     (wd_model / "model.onnx").touch()
     (wd_model / "selected_tags.csv").touch()
 
+    camie_model = tmp_path / "camie-model"
+    camie_model.mkdir()
+    (camie_model / "camie-tagger-v2.onnx").touch()
+    (camie_model / "camie-tagger-v2-metadata.json").touch()
+
     assert models_list.get_model_kind("Remote") == models_list.MODEL_KIND_REMOTE
+    assert (
+        models_list.get_model_kind("Camais03/camie-tagger-v2")
+        == models_list.MODEL_KIND_CAMIE_TAGGER
+    )
+    assert (
+        models_list.get_model_kind(str(camie_model))
+        == models_list.MODEL_KIND_CAMIE_TAGGER
+    )
+    assert models_list.is_tagger_model("Camais03/camie-tagger-v2")
     assert (
         models_list.get_model_kind("SmilingWolf/wd-vit-tagger-v3")
         == models_list.MODEL_KIND_WD_TAGGER
@@ -172,8 +188,39 @@ def test_model_metadata_is_resolved_without_concrete_classes(tmp_path):
         == models_list.MODEL_ARTIFACT_KIND_REMOTE
     )
     assert (
+        models_list.get_model_artifact_kind("Camais03/camie-tagger-v2")
+        == model_availability.MODEL_ARTIFACT_KIND_CAMIE_TAGGER
+    )
+    assert (
         models_list.get_model_download_revision("vikhyatk/moondream2")
         == "2024-08-26"
+    )
+    assert (
+        models_list.get_model_download_revision("Camais03/camie-tagger-v2")
+        == model_availability.CAMIE_TAGGER_REVISION
+    )
+
+
+def test_camie_model_availability_requires_both_artifacts(tmp_path):
+    model_dir = tmp_path / "camie-model"
+    model_dir.mkdir()
+    model_path = model_dir / "camie-tagger-v2.onnx"
+    metadata_path = model_dir / "camie-tagger-v2-metadata.json"
+
+    model_path.touch()
+    assert (
+        models_list.get_model_kind(str(model_dir))
+        == models_list.MODEL_KIND_CAMIE_TAGGER
+    )
+    assert not model_availability.is_model_directory_complete(
+        model_dir,
+        model_availability.MODEL_ARTIFACT_KIND_CAMIE_TAGGER,
+    )
+
+    metadata_path.touch()
+    assert model_availability.is_model_directory_complete(
+        model_dir,
+        model_availability.MODEL_ARTIFACT_KIND_CAMIE_TAGGER,
     )
 
 
@@ -203,10 +250,16 @@ def test_model_class_resolution_uses_expected_lazy_adapter(monkeypatch):
             "auto_captioning.models.llava_next",
             "LlavaNextVicuna",
         )
+        assert models_list.get_model_class(
+            "Camais03/camie-tagger-v2"
+        ) == (
+            "auto_captioning.models.camie_tagger",
+            "CamieTagger",
+        )
     finally:
         models_list.get_model_class.cache_clear()
 
-    assert len(resolutions) == 3
+    assert len(resolutions) == 4
 
 
 def test_spell_dictionary_is_shared_per_language():

@@ -13,14 +13,22 @@ from importlib.util import find_spec
 from pathlib import Path
 
 from auto_captioning.model_availability import (
+    CAMIE_TAGGER_MODEL_ID,
+    CAMIE_TAGGER_REVISION,
+    MODEL_ARTIFACT_KIND_CAMIE_TAGGER,
     MODEL_ARTIFACT_KIND_HUGGINGFACE,
     MODEL_ARTIFACT_KIND_REMOTE,
     MODEL_ARTIFACT_KIND_WD_TAGGER,
 )
 
+MODEL_KIND_CAMIE_TAGGER = 'camie_tagger'
 MODEL_KIND_LOCAL = 'local'
 MODEL_KIND_REMOTE = 'remote'
 MODEL_KIND_WD_TAGGER = 'wd_tagger'
+TAGGER_MODEL_KINDS = frozenset({
+    MODEL_KIND_CAMIE_TAGGER,
+    MODEL_KIND_WD_TAGGER,
+})
 
 MODELS = [
     # Qwen VL — native video + image captioning (requires qwen-vl-utils)
@@ -51,6 +59,7 @@ MODELS = [
     'xtuner/llava-llama-3-8b-v1_1-transformers',
     'vikhyatk/moondream2',
     'vikhyatk/moondream1',
+    CAMIE_TAGGER_MODEL_ID,
     'SmilingWolf/wd-eva02-large-tagger-v3',
     'SmilingWolf/wd-vit-large-tagger-v3',
     'SmilingWolf/wd-swinv2-tagger-v3',
@@ -92,12 +101,22 @@ def get_model_kind(model_id: str) -> str:
     model_path = Path(model_id_text).expanduser()
     if (
         model_path.is_dir()
+        and (
+            (model_path / 'camie-tagger-v2.onnx').is_file()
+            or (model_path / 'camie-tagger-v2-metadata.json').is_file()
+        )
+    ):
+        return MODEL_KIND_CAMIE_TAGGER
+    if (
+        model_path.is_dir()
         and (model_path / 'model.onnx').is_file()
         and (model_path / 'selected_tags.csv').is_file()
     ):
         return MODEL_KIND_WD_TAGGER
 
     lowercase_model_id = model_id_text.lower()
+    if 'camie' in lowercase_model_id and 'tagger' in lowercase_model_id:
+        return MODEL_KIND_CAMIE_TAGGER
     if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
         return MODEL_KIND_WD_TAGGER
     if 'remote' in lowercase_model_id:
@@ -105,8 +124,14 @@ def get_model_kind(model_id: str) -> str:
     return MODEL_KIND_LOCAL
 
 
+def is_tagger_model(model_id: str) -> bool:
+    return get_model_kind(model_id) in TAGGER_MODEL_KINDS
+
+
 def get_model_artifact_kind(model_id: str) -> str:
     model_kind = get_model_kind(model_id)
+    if model_kind == MODEL_KIND_CAMIE_TAGGER:
+        return MODEL_ARTIFACT_KIND_CAMIE_TAGGER
     if model_kind == MODEL_KIND_WD_TAGGER:
         return MODEL_ARTIFACT_KIND_WD_TAGGER
     if model_kind == MODEL_KIND_REMOTE:
@@ -116,7 +141,10 @@ def get_model_artifact_kind(model_id: str) -> str:
 
 def get_model_download_revision(model_id: str) -> str | None:
     """Return download-only metadata without importing the model adapter."""
-    if 'moondream2' in str(model_id or '').lower():
+    lowercase_model_id = str(model_id or '').lower()
+    if lowercase_model_id == CAMIE_TAGGER_MODEL_ID.lower():
+        return CAMIE_TAGGER_REVISION
+    if 'moondream2' in lowercase_model_id:
         return '2024-08-26'
     return None
 
@@ -129,6 +157,7 @@ def _load_model_class(module_name: str, class_name: str):
 def get_model_class(model_id: str):
     """Resolve a concrete model class on first use."""
     lowercase_model_id = str(model_id or '').lower()
+    model_kind = get_model_kind(model_id)
 
     module_name = 'auto_captioning.auto_captioning_model'
     class_name = 'AutoCaptioningModel'
@@ -167,12 +196,17 @@ def get_model_class(model_id: str):
         module_name, class_name = 'auto_captioning.models.moondream', 'Moondream2'
     elif 'phi-3' in lowercase_model_id:
         module_name, class_name = 'auto_captioning.models.phi_3_vision', 'Phi3Vision'
-    elif get_model_kind(model_id) == MODEL_KIND_WD_TAGGER:
+    elif model_kind == MODEL_KIND_CAMIE_TAGGER:
+        module_name, class_name = (
+            'auto_captioning.models.camie_tagger',
+            'CamieTagger',
+        )
+    elif model_kind == MODEL_KIND_WD_TAGGER:
         module_name, class_name = 'auto_captioning.models.wd_tagger', 'WdTagger'
     elif 'xcomposer2' in lowercase_model_id:
         module_name = 'auto_captioning.models.xcomposer2'
         class_name = 'Xcomposer2_4khd' if '4khd' in lowercase_model_id else 'Xcomposer2'
-    elif get_model_kind(model_id) == MODEL_KIND_REMOTE:
+    elif model_kind == MODEL_KIND_REMOTE:
         module_name, class_name = 'auto_captioning.models.remote', 'RemoteGen'
 
     return _load_model_class(module_name, class_name)

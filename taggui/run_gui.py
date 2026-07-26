@@ -11,6 +11,13 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+if (
+    len(sys.argv) > 1
+    and sys.argv[1] == '--taggui-model-download-worker'
+):
+    from auto_captioning.model_download_worker import main as download_model
+    raise SystemExit(download_model(sys.argv[2:]))
+
 CRASH_LOG_PATH = os.path.abspath('taggui_crash.log')
 FATAL_LOG_PATH = os.path.abspath('taggui_fatal.log')
 IMPORT_CRASH_LOG_PATH = os.path.abspath('taggui_import_crash.log')

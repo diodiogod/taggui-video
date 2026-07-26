@@ -4,6 +4,7 @@ from abc import abstractmethod
 from datetime import datetime
 from time import perf_counter
 import subprocess
+import weakref
 from typing import TYPE_CHECKING
 
 from PIL import UnidentifiedImageError
@@ -15,6 +16,77 @@ from models.image_list_model import ImageListModel
 if TYPE_CHECKING:
     import numpy as np
     from transformers import BatchFeature
+
+
+class ModelThreadOutputStream:
+    """File-like stream that forwards text without retaining a model thread."""
+
+    def __init__(self, fallback_stream=None):
+        self._thread_ref = None
+        self._fallback_stream = fallback_stream
+
+    @property
+    def fallback_stream(self):
+        return self._fallback_stream
+
+    def attach(self, thread: 'ModelThread'):
+        self._thread_ref = weakref.ref(thread)
+
+    def detach(self, thread: 'ModelThread' | None = None) -> bool:
+        current_thread = (
+            self._thread_ref()
+            if self._thread_ref is not None else None
+        )
+        if thread is not None and current_thread is not thread:
+            return False
+        self._thread_ref = None
+        return True
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._fallback_stream, 'encoding', None) or 'utf-8'
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._fallback_stream, 'errors', None) or 'replace'
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    def write(self, text: str) -> int:
+        text = str(text)
+        thread = (
+            self._thread_ref()
+            if self._thread_ref is not None else None
+        )
+        if thread is not None:
+            try:
+                thread.write(text)
+                return len(text)
+            except RuntimeError:
+                pass
+        if self._fallback_stream is not None:
+            result = self._fallback_stream.write(text)
+            return len(text) if result is None else result
+        return len(text)
+
+    def flush(self):
+        if self._fallback_stream is not None:
+            self._fallback_stream.flush()
+
+    def isatty(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return False
+
+    def seekable(self) -> bool:
+        return False
+
 
 def format_duration(seconds: float) -> str:
     seconds_per_minute = 60
@@ -207,8 +279,17 @@ class ModelThread(QThread):
             # Show the error message in the console text edit.
             raise exception
 
-    def write(self, text: str):
+    def write(self, text: str) -> int:
         self.text_outputted.emit(text)
+        return len(text)
+
+    @staticmethod
+    def flush():
+        """Satisfy the standard text-stream interface used by logging."""
+
+    @staticmethod
+    def isatty() -> bool:
+        return False
 
     def set_external_process(self, process: subprocess.Popen | None):
         self.external_process = process

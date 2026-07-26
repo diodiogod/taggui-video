@@ -26,10 +26,13 @@ from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
 from auto_captioning.model_availability import (
     MODEL_ARTIFACT_KIND_HUGGINGFACE,
-    MODEL_ARTIFACT_KIND_WD_TAGGER,
     clear_model_availability_cache,
+    get_model_artifact_filenames,
     get_model_install_state,
     get_models_directory_target_path,
+)
+from auto_captioning.model_download_worker import (
+    MODEL_DOWNLOAD_WORKER_FLAG,
 )
 from models.image_list_model import _video_lock
 from utils.enums import CaptionDevice
@@ -67,42 +70,28 @@ def replace_template_variables(text: str, image: Image, skip_hash: bool) -> str:
     return text
 
 
-_HF_DOWNLOAD_HELPER_SCRIPT = r"""
-import json
-import sys
-import traceback
-from pathlib import Path
-
-from huggingface_hub import hf_hub_download, snapshot_download
-
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-result_path = Path(sys.argv[2])
-error_path = Path(sys.argv[3])
-
-try:
-    mode = payload.pop('mode')
-    if mode == 'snapshot':
-        result = snapshot_download(**payload)
-    elif mode == 'files':
-        repo_id = payload.pop('repo_id')
-        filenames = payload.pop('filenames')
-        local_dir = payload.get('local_dir')
-        last_path = ''
-        for filename in filenames:
-            last_path = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                **payload,
-            )
-        result = local_dir or str(Path(last_path).parent)
-    else:
-        raise RuntimeError(f'Unsupported download mode: {mode}')
-    result_path.write_text(str(result or ''), encoding='utf-8')
-except Exception:
-    error_path.write_text(traceback.format_exc(), encoding='utf-8')
-    raise
-"""
+def _build_hf_download_command(
+        payload_path: Path,
+        result_path: Path,
+        error_path: Path) -> list[str]:
+    worker_arguments = [
+        str(payload_path),
+        str(result_path),
+        str(error_path),
+    ]
+    if getattr(sys, 'frozen', False):
+        return [
+            sys.executable,
+            MODEL_DOWNLOAD_WORKER_FLAG,
+            *worker_arguments,
+        ]
+    worker_path = Path(__file__).with_name('model_download_worker.py')
+    return [
+        sys.executable,
+        '-u',
+        str(worker_path),
+        *worker_arguments,
+    ]
 
 
 class AutoCaptioningModel:
@@ -116,6 +105,7 @@ class AutoCaptioningModel:
     transformers_model_class = AutoModelForVision2Seq
     image_mode = 'RGB'
     model_artifact_kind = MODEL_ARTIFACT_KIND_HUGGINGFACE
+    supports_structured_output = True
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',
@@ -299,11 +289,14 @@ class AutoCaptioningModel:
         else:
             print(f'Downloading model files for {model_id}...')
 
-        if self.model_artifact_kind == MODEL_ARTIFACT_KIND_WD_TAGGER:
+        artifact_filenames = get_model_artifact_filenames(
+            self.model_artifact_kind,
+        )
+        if artifact_filenames is not None:
             payload = {
                 'mode': 'files',
                 'repo_id': model_id,
-                'filenames': ['model.onnx', 'selected_tags.csv'],
+                'filenames': list(artifact_filenames),
                 'revision': revision,
             }
         else:
@@ -339,8 +332,11 @@ class AutoCaptioningModel:
         payload_path.write_text(json.dumps(payload), encoding='utf-8')
 
         process = subprocess.Popen(
-            [sys.executable, '-u', '-c', _HF_DOWNLOAD_HELPER_SCRIPT,
-             str(payload_path), str(result_path), str(error_path)],
+            _build_hf_download_command(
+                payload_path,
+                result_path,
+                error_path,
+            ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -401,8 +397,8 @@ class AutoCaptioningModel:
         # Only GPUs support 4-bit quantization.
         self.load_in_4_bit = self.load_in_4_bit and self.device.type == 'cuda'
         if (model and self.thread_parent.model_id == self.model_id
-                and (self.thread_parent.model_device_type
-                     == self.device.type)
+                and (self.thread_parent.model_device
+                     == str(self.device))
                 and (self.thread_parent.is_model_loaded_in_4_bit
                      == self.load_in_4_bit)):
             self.processor = processor
@@ -424,7 +420,7 @@ class AutoCaptioningModel:
         self.model = self.get_model()
         self.thread_parent.model = self.model
         self.thread_parent.model_id = self.model_id
-        self.thread_parent.model_device_type = self.device.type
+        self.thread_parent.model_device = str(self.device)
         self.thread_parent.is_model_loaded_in_4_bit = self.load_in_4_bit
 
     def monkey_patch_after_loading(self):

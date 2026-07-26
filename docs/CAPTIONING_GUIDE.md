@@ -18,7 +18,7 @@ Current code indicates support for:
 - manual prompt-driven captioning
 - batch caption generation for multiple selected files
 - local model discovery
-- WD tagger-style tag generation
+- image-tagger generation with WD Tagger and Camie Tagger v2
 - prompt history
 - crop-limited captioning
 - Ideogram 4 structured JSON captions with normalized bounding boxes
@@ -53,7 +53,8 @@ Existing Ideogram regions are sent to the captioning model as locked hints.
 Their order and bounding boxes are preserved while the model expands their
 labels into visual descriptions and adds other visible objects or text. If no
 Ideogram sidecar exists, current TagGUI markings are used as the initial locked
-regions. WD Tagger is not compatible with this output format.
+regions. Image taggers such as WD Tagger and Camie Tagger v2 are not
+compatible with this output format.
 
 Open `View -> Ideogram 4 Caption` to:
 
@@ -150,7 +151,8 @@ That means the result should include `cat` and one of `orange`, `white`, or `bla
 
 ### Tags to Exclude
 
-This field is especially relevant for WD tagger-style models.
+This field is especially relevant for tagging-focused models such as WD Tagger
+and Camie Tagger v2.
 
 Use it to suppress specific tags from the generated output.
 
@@ -175,6 +177,8 @@ Common local-model files include:
 
 - `config.json`
 - WD tagger support files such as `selected_tags.csv`
+- Camie Tagger v2 support files:
+  `camie-tagger-v2.onnx` and `camie-tagger-v2-metadata.json`
 
 ## Model Coverage
 
@@ -182,6 +186,7 @@ TagGUI includes a broad set of captioning backends, including examples like:
 
 - CogVLM
 - CogVLM2
+- Camie Tagger v2
 - Florence-2
 - Florence-2 PromptGen
 - Gemma 4
@@ -203,7 +208,10 @@ Broadly, the current model families behave like this:
 - Remote generation:
   the remote backend extracts frames inside TagGUI and sends them as an ordered sequence of images to the API endpoint.
 - Tagging-focused models:
-  WD Tagger models generate tag-style outputs instead of prose captions.
+  WD Tagger and Camie Tagger v2 generate tag-style outputs instead of prose
+  captions. Camie uses its refined ONNX predictions and omits rating labels
+  from saved tags. Its author-recommended macro threshold rounds to `0.49`,
+  which TagGUI uses as Camie's initial minimum-probability setting.
 
 Other useful notes:
 

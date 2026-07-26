@@ -44,7 +44,9 @@ If the Auto-Captioner starts an Ideogram caption without an existing sidecar, cu
 
 Set `Output format` to `Ideogram 4 JSON`. TagGUI builds an image-specific prompt containing the aspect ratio and any existing Ideogram or marking regions. The generated result is validated and written to the preferred sidecar.
 
-Local vision-language models and the `Remote` OpenAI-compatible backend can be used. WD Tagger is not compatible with Ideogram JSON output.
+Local vision-language models and the `Remote` OpenAI-compatible backend can be
+used. Image taggers such as WD Tagger and Camie Tagger v2 are not compatible
+with Ideogram JSON output.
 
 For remote generation, `Enforce JSON schema (remote)` optionally sends an OpenAI-compatible `response_format` schema. LM Studio supports this option. Leave it disabled for models or servers that reject structured output. Schema enforcement guarantees structure, not accurate descriptions or bounding boxes.
 

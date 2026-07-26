@@ -71,9 +71,10 @@ class CaptioningThread(ModelThread):
         structured_output = (
             self.caption_settings.get('output_format') == 'Ideogram 4 JSON'
         )
-        if structured_output and model_class.__name__ == 'WdTagger':
+        if (structured_output
+                and not model_class.supports_structured_output):
             self.error_message = (
-                'WD Tagger does not support Ideogram 4 structured JSON. '
+                'Image taggers do not support Ideogram 4 structured JSON. '
                 'Choose a vision-language model or Remote.'
             )
             self.is_error = True

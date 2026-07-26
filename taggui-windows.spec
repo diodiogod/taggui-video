@@ -23,6 +23,7 @@ if os.path.isdir('third_party/vlc'):
             datas.append((src, dst))
 
 hiddenimports = [
+    'auto_captioning.models.camie_tagger',
     'timm.models.layers',
     'xformers._C',
 ]

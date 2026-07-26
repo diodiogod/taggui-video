@@ -106,6 +106,7 @@ class WdTaggerModel:
 class WdTagger(AutoCaptioningModel):
     image_mode = 'RGBA'
     model_artifact_kind = MODEL_ARTIFACT_KIND_WD_TAGGER
+    supports_structured_output = False
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',

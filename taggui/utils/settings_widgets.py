@@ -62,14 +62,38 @@ class SettingsSlider(QSlider):
 
 
 class FocusedScrollSettingsDoubleSpinBox(FocusedScrollMixin, QDoubleSpinBox):
-    def __init__(self, key: str, default: float, minimum: float,
+    def __init__(self, key: str | None, default: float, minimum: float,
                  maximum: float):
         super().__init__()
+        self.key = key
+        self.default = default
         # The range must be set here so that the setting value is not clamped
         # by the default range.
         self.setRange(minimum, maximum)
-        self.setValue(settings.value(key, default, type=float))
-        self.valueChanged.connect(lambda value: settings.setValue(key, value))
+        self.set_settings_key(key, default=default)
+        self.valueChanged.connect(self._persist_value)
+
+    def set_settings_key(
+            self,
+            key: str | None,
+            *,
+            default: float | None = None):
+        self.key = key
+        if default is not None:
+            self.default = default
+        value = (
+            settings.value(key, self.default, type=float)
+            if key is not None else self.default
+        )
+        signals_were_blocked = self.blockSignals(True)
+        try:
+            self.setValue(value)
+        finally:
+            self.blockSignals(signals_were_blocked)
+
+    def _persist_value(self, value: float):
+        if self.key is not None:
+            settings.setValue(self.key, value)
 
 
 class SettingsSpinBox(QSpinBox):

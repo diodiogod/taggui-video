@@ -7,6 +7,20 @@ from pathlib import Path
 MODEL_ARTIFACT_KIND_HUGGINGFACE = 'huggingface'
 MODEL_ARTIFACT_KIND_REMOTE = 'remote'
 MODEL_ARTIFACT_KIND_WD_TAGGER = 'wd_tagger'
+MODEL_ARTIFACT_KIND_CAMIE_TAGGER = 'camie_tagger'
+CAMIE_TAGGER_MODEL_ID = 'Camais03/camie-tagger-v2'
+CAMIE_TAGGER_REVISION = '7d40c1b85b86ab4f607b2caf26b1b50c99db743e'
+
+_MODEL_ARTIFACT_FILENAMES = {
+    MODEL_ARTIFACT_KIND_WD_TAGGER: (
+        'model.onnx',
+        'selected_tags.csv',
+    ),
+    MODEL_ARTIFACT_KIND_CAMIE_TAGGER: (
+        'camie-tagger-v2.onnx',
+        'camie-tagger-v2-metadata.json',
+    ),
+}
 
 _CACHE_INDEX: dict[str, dict[str, list[dict]]] = {}
 
@@ -22,6 +36,10 @@ class ModelInstallState:
 
 def clear_model_availability_cache():
     _CACHE_INDEX.clear()
+
+
+def get_model_artifact_filenames(artifact_kind: str) -> tuple[str, ...] | None:
+    return _MODEL_ARTIFACT_FILENAMES.get(artifact_kind)
 
 
 def get_models_directory_target_path(models_directory_path: Path | None,
@@ -126,9 +144,10 @@ def get_model_install_state(model_id: str,
 def is_model_directory_complete(model_dir: Path, artifact_kind: str) -> bool:
     if not model_dir.is_dir():
         return False
-    if artifact_kind == MODEL_ARTIFACT_KIND_WD_TAGGER:
-        return ((model_dir / 'model.onnx').is_file()
-                and (model_dir / 'selected_tags.csv').is_file())
+    artifact_filenames = get_model_artifact_filenames(artifact_kind)
+    if artifact_filenames is not None:
+        return all((model_dir / filename).is_file()
+                   for filename in artifact_filenames)
     if not (model_dir / 'config.json').is_file():
         return False
     if not _has_complete_model_weights(model_dir):
