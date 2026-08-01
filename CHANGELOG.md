@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.9] - 2026-08-01
+
+### Added
+
+- Make very large image selections safe to process
+- Preserve large selections when navigating or adjusting individual selected images
+- Process Selected, Filtered, and All scopes consistently in pipelines and exports
+- Avoid silently applying loaded-only tools to just the visible page
+
+### Fixed
+
+- Fix Invert Selection for paginated folders containing hundreds of thousands or millions of images
+- Improve selection guidance and regression coverage for large datasets
 ## [1.4.8] - 2026-08-01
 
 ### Added
