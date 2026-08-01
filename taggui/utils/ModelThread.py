@@ -189,8 +189,17 @@ class ModelThread(QThread):
                 print(f"Canceled {self.text['generating']}.")
                 self.current_stage = 'canceled'
                 return
-            image: Image = self.image_list_model.data(image_index,
-                                                      Qt.ItemDataRole.UserRole)
+            image: Image | None = None
+            data_getter = getattr(image_index, 'data', None)
+            if callable(data_getter):
+                image = data_getter(Qt.ItemDataRole.UserRole)
+            if image is None:
+                image = self.image_list_model.data(
+                    image_index,
+                    Qt.ItemDataRole.UserRole,
+                )
+            if image is None:
+                continue
             self.current_item_index = i + 1
             self.current_item_name = image.path.name
             self.current_item_started_at = start_time

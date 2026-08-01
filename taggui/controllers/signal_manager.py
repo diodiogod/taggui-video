@@ -406,12 +406,26 @@ class SignalManager:
         image_tags_editor = self.main_window.image_tags_editor
         menu_manager = self.main_window.menu_manager
 
+        def apply_generated_caption(image_reference, _caption, tags):
+            image_list_model.record_streaming_paginated_tag_history(
+                image_reference
+            )
+            image_list_model.update_image_tags(image_reference, tags)
+
+        auto_captioner.caption_generated.connect(apply_generated_caption)
+        def reload_generated_tags_if_loaded(image_reference, *_):
+            image_index = image_list_model.get_loaded_index_for_reference(
+                image_reference
+            )
+            if image_index.isValid():
+                image_tags_editor.reload_image_tags_if_changed(
+                    image_index,
+                    image_index,
+                )
+
         auto_captioner.caption_generated.connect(
-            lambda image_index, _, tags:
-            image_list_model.update_image_tags(image_index, tags))
-        auto_captioner.caption_generated.connect(
-            lambda image_index, *_:
-            image_tags_editor.reload_image_tags_if_changed(image_index, image_index))
+            reload_generated_tags_if_loaded
+        )
         auto_captioner.structured_caption_generated.connect(
             lambda image_index, _caption:
             self.main_window.ideogram_caption_editor.reload_generated_caption(

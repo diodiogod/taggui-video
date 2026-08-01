@@ -22,7 +22,7 @@ class MarkingThread(ModelThread):
     # The image index, the caption, and the tags with the caption added. The
     # third parameter must be declared as `list` instead of `list[str]` for it
     # to work.
-    marking_generated = Signal(QModelIndex, list)
+    marking_generated = Signal(object, list)
     marking_result = Signal(str, int)
 
     def __init__(self, parent, image_list_model: ImageListModel,

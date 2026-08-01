@@ -50,8 +50,8 @@ class CaptioningThread(ModelThread):
     # The image index, the caption, and the tags with the caption added. The
     # third parameter must be declared as `list` instead of `list[str]` for it
     # to work.
-    caption_generated = Signal(QModelIndex, str, list)
-    structured_caption_generated = Signal(QModelIndex, object)
+    caption_generated = Signal(object, str, list)
+    structured_caption_generated = Signal(object, object)
 
     def __init__(self, parent, image_list_model: ImageListModel,
                  selected_image_indices: list[QModelIndex],

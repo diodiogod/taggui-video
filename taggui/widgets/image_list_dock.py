@@ -568,6 +568,16 @@ class ImageList(QDockWidget):
         self.list_view.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.list_view.selectionModel().selectionChanged.connect(
+            lambda *_: self.update_image_index_label(
+                self.list_view.currentIndex()
+            )
+        )
+        self.list_view.selection_summary_changed.connect(
+            lambda: self.update_image_index_label(
+                self.list_view.currentIndex()
+            )
+        )
 
         # Status bar with image index (left) and cache status (right) on same line
         self.image_index_label = ClickableLabel()
@@ -883,9 +893,39 @@ class ImageList(QDockWidget):
         if source_model and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
             denom = unfiltered_image_count
 
-        label_text = f'Image {current_pos} / {denom}'
+        label_text = f'Image {current_pos:,} / {denom:,}'
         if image_count != unfiltered_image_count and denom != unfiltered_image_count:
-            label_text += f' ({unfiltered_image_count} total)'
+            label_text += f' ({unfiltered_image_count:,} total)'
+        selected_count = self.list_view.get_selected_image_count()
+        if selected_count > 1:
+            is_all_selected = (
+                getattr(self.list_view, '_virtual_select_all_active', False)
+                and getattr(
+                    self.list_view,
+                    '_virtual_selection_mode',
+                    'all_except',
+                ) == 'all_except'
+                and not getattr(
+                    self.list_view,
+                    '_virtual_selection_paths',
+                    {},
+                )
+            )
+            if is_all_selected:
+                label_text += f' · All {selected_count:,} selected'
+            else:
+                label_text += f' · {selected_count:,} selected'
+            if getattr(self.list_view, '_virtual_select_all_active', False):
+                self.image_index_label.setToolTip(
+                    'Click to jump to image index. Dataset-wide selections '
+                    'are streamed by Auto-Captioner and Auto-Markings.'
+                )
+            else:
+                self.image_index_label.setToolTip(
+                    'Click to jump to image index'
+                )
+        else:
+            self.image_index_label.setToolTip('Click to jump to image index')
         self.image_index_label.setText(label_text)
 
     @Slot()
@@ -1044,6 +1084,12 @@ class ImageList(QDockWidget):
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
         return self.list_view.get_selected_image_indices()
+
+    def get_selected_image_batch(self):
+        return self.list_view.get_selected_image_batch()
+
+    def get_selected_image_count(self) -> int:
+        return self.list_view.get_selected_image_count()
 
     def _normalize_sort_dir(self, sort_by: str, sort_dir: str | None = None) -> str:
         normalized_sort = str(sort_by or 'Default')

@@ -2289,6 +2289,7 @@ class ImageListModel(QAbstractListModel):
         self.images: list[Image] = []
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
+        self._streaming_paginated_tag_history = None
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
 
@@ -3024,6 +3025,30 @@ class ImageListModel(QAbstractListModel):
             bindings=filter_bindings if filter_bindings is not None else self._filter_bindings,
             random_seed=random_seed if random_seed is not None else self._random_seed,
         )
+        return self._images_from_db_rows(rows, active_db, base_dir)
+
+    def _load_images_from_db_ids(
+        self,
+        image_ids: list[int],
+        *,
+        db: ImageIndexDB | None = None,
+        directory_path: Path | None = None,
+    ) -> tuple[list[Image], list[str]]:
+        """Load a stable ordered batch of images by database ID."""
+        active_db = db or self._db
+        base_dir = directory_path or self._directory_path
+        if not active_db or not base_dir or not image_ids:
+            return [], []
+        rows = active_db.get_images_by_ids(image_ids)
+        return self._images_from_db_rows(rows, active_db, base_dir)
+
+    def _images_from_db_rows(
+        self,
+        rows: list[dict],
+        active_db: ImageIndexDB,
+        base_dir: Path,
+    ) -> tuple[list[Image], list[str]]:
+        """Build Image objects from DB rows for pages and background batches."""
         images = []
         missing_rel_paths: list[str] = []
         sidecar_reaction_updates: list[tuple[float, bool, bool, float | None, int]] = []
@@ -3115,6 +3140,45 @@ class ImageListModel(QAbstractListModel):
                 pass
 
         return images, missing_rel_paths
+
+    def create_paginated_image_batch(
+        self,
+        *,
+        selection_mode: str = 'all_except',
+        selection_paths: tuple[str, ...] = (),
+    ):
+        """Create a repeatable batch for the current filtered paginated domain."""
+        if not self._paginated_mode or not self._db or not self._directory_path:
+            return None
+        from models.image_batch import PaginatedImageBatch
+
+        relative_paths = []
+        for selection_path in selection_paths:
+            path = Path(selection_path)
+            try:
+                path = path.relative_to(self._directory_path)
+            except ValueError:
+                pass
+            relative_paths.append(str(path))
+        selected_path_count = len(set(relative_paths))
+        count = (
+            selected_path_count
+            if selection_mode == 'only'
+            else max(0, int(self._total_count) - selected_path_count)
+        )
+
+        return PaginatedImageBatch(
+            model=self,
+            directory_path=Path(self._directory_path),
+            count=count,
+            sort_field=str(self._sort_field),
+            sort_dir=str(self._sort_dir),
+            filter_sql=str(self._filter_sql or ''),
+            filter_bindings=tuple(self._filter_bindings or ()),
+            random_seed=int(self._random_seed or 0),
+            selection_mode=selection_mode,
+            selection_paths=tuple(relative_paths),
+        )
 
     @staticmethod
     def _filter_internal_db_tags(tags: list[str] | None) -> list[str]:
@@ -7379,6 +7443,56 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    def begin_streaming_paginated_tag_history(
+        self,
+        action_name: str,
+        should_ask_for_confirmation: bool,
+    ):
+        """Start an incremental tag undo snapshot for a paginated model job."""
+        self._streaming_paginated_tag_history = {
+            'action_name': str(action_name),
+            'should_ask_for_confirmation': bool(should_ask_for_confirmation),
+            'snapshot': {},
+        }
+
+    def record_streaming_paginated_tag_history(self, image_reference):
+        """Record one image's pre-change tags at most once during a model job."""
+        history = self._streaming_paginated_tag_history
+        if not self._paginated_mode or history is None or not self._directory_path:
+            return
+        image = self.resolve_image_reference(image_reference)
+        if image is None:
+            return
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except ValueError:
+            rel_path = image.path.name
+        snapshot = history['snapshot']
+        if rel_path in snapshot:
+            return
+        try:
+            snapshot[rel_path] = self._read_sidecar_tags(
+                image.path,
+                preserve_empty=True,
+            )
+        except OSError:
+            snapshot[rel_path] = list(image.tags)
+
+    def commit_streaming_paginated_tag_history(self):
+        """Commit the incrementally captured tag history after a model job."""
+        history = self._streaming_paginated_tag_history
+        self._streaming_paginated_tag_history = None
+        if not history or not history['snapshot']:
+            return
+        self.undo_stack.append(HistoryItem(
+            history['action_name'],
+            [],
+            history['should_ask_for_confirmation'],
+            paginated_snapshot=dict(history['snapshot']),
+        ))
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+
     def _capture_history_image_state(self, image: Image) -> dict[str, Any]:
         return {
             'tags': image.tags.copy(),
@@ -7639,13 +7753,21 @@ class ImageListModel(QAbstractListModel):
             self.refresh_ideogram_caption_index_for_image(image)
         return image_index
 
-    def _capture_paginated_tag_snapshot(self) -> dict[str, list[str]]:
-        """Capture current tag state for all paths in paginated mode."""
+    def _capture_paginated_tag_snapshot(
+        self,
+        relative_paths=None,
+    ) -> dict[str, list[str]]:
+        """Capture current tag state for selected paths in paginated mode."""
         snapshot: dict[str, list[str]] = {}
         if not self._db or not self._directory_path:
             return snapshot
 
-        for rel_path in self._db.get_all_paths():
+        paths_to_capture = (
+            relative_paths
+            if relative_paths is not None
+            else self._db.get_all_paths()
+        )
+        for rel_path in paths_to_capture:
             path = self._directory_path / rel_path
             try:
                 snapshot[str(rel_path)] = self._read_sidecar_tags(
@@ -8078,7 +8200,9 @@ class ImageListModel(QAbstractListModel):
                 history_item.action_name,
                 [],
                 history_item.should_ask_for_confirmation,
-                paginated_snapshot=self._capture_paginated_tag_snapshot(),
+                paginated_snapshot=self._capture_paginated_tag_snapshot(
+                    history_item.paginated_snapshot.keys()
+                ),
             ))
             self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
             self.update_undo_and_redo_actions_requested.emit()
@@ -8968,13 +9092,51 @@ class ImageListModel(QAbstractListModel):
 
         return changed_image_count, removed_tag_count
 
-    def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
-        image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+    def resolve_image_reference(self, image_reference) -> Image | None:
+        """Resolve either a Qt model index or a stable background batch item."""
+        data_getter = getattr(image_reference, 'data', None)
+        if callable(data_getter):
+            try:
+                image = data_getter(Qt.ItemDataRole.UserRole)
+            except (RuntimeError, TypeError):
+                image = None
+            if isinstance(image, Image):
+                return image
+        if isinstance(image_reference, Image):
+            return image_reference
+        return None
+
+    def get_loaded_index_for_reference(self, image_reference) -> QModelIndex:
+        """Return a live source index when the referenced image is loaded."""
+        if isinstance(image_reference, QModelIndex):
+            try:
+                if image_reference.isValid() and image_reference.model() is self:
+                    return image_reference
+            except RuntimeError:
+                pass
+        image = self.resolve_image_reference(image_reference)
+        if image is None:
+            return QModelIndex()
+        row = self.get_loaded_row_for_path(image.path)
+        if row < 0:
+            return QModelIndex()
+        index = self.index(row, 0)
+        loaded_image = self.data(index, Qt.ItemDataRole.UserRole)
+        if loaded_image is not None and loaded_image.path == image.path:
+            return index
+        return QModelIndex()
+
+    def update_image_tags(self, image_index, tags: list[str]):
+        image = self.resolve_image_reference(image_index)
+        if image is None:
+            return
         if image.tags == tags:
             return
         image.tags = tags
         self.write_image_tags_to_disk(image)
-        self.dataChanged.emit(image_index, image_index)
+        loaded_index = self.get_loaded_index_for_reference(image_index)
+        if loaded_index.isValid():
+            self.dataChanged.emit(loaded_index, loaded_index)
 
     def refresh_ideogram_caption_index_for_image(self, image: Image | None):
         """Refresh DB-searchable Ideogram text for a saved structured caption."""
@@ -9218,8 +9380,10 @@ class ImageListModel(QAbstractListModel):
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
 
-    def add_image_markings(self, image_index: QModelIndex, markings: list[dict]):
-        image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+    def add_image_markings(self, image_index, markings: list[dict]):
+        image = self.resolve_image_reference(image_index)
+        if image is None:
+            return
         for marking in markings:
             marking_type = {
                 'hint': ImageMarking.HINT,
@@ -9233,8 +9397,11 @@ class ImageListModel(QAbstractListModel):
                                           rect=QRect(top_left, bottom_right),
                                           confidence=marking['confidence']))
         if len(markings) > 0:
-            self.dataChanged.emit(image_index, image_index)
+            loaded_index = self.get_loaded_index_for_reference(image_index)
+            if loaded_index.isValid():
+                self.dataChanged.emit(loaded_index, loaded_index)
             self.write_meta_to_disk(image)
+            self._save_markings_to_db(image)
 
     def add_image(self, image_path: Path):
         """

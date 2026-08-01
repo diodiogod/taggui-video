@@ -3231,6 +3231,36 @@ class ImageIndexDB:
             print(f'Database query error: {e}')
             return []
 
+    def get_ordered_image_ids(
+        self,
+        sort_field: str = 'mtime',
+        sort_dir: str = 'DESC',
+        filter_sql: str = '',
+        bindings: tuple = (),
+        **kwargs,
+    ) -> List[int]:
+        """Snapshot ordered IDs for a stable long-running batch operation."""
+        if not self._ensure_connection():
+            return []
+
+        _, _, _, order_clause = self._resolve_sort_order(
+            sort_field,
+            sort_dir,
+            **kwargs,
+        )
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                query = 'SELECT id FROM images'
+                if filter_sql:
+                    query += f' WHERE {filter_sql}'
+                query += f' ORDER BY {order_clause}'
+                cursor.execute(query, self._normalize_bindings(bindings))
+                return [int(row[0]) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f'Database ordered-ID query error: {e}')
+            return []
+
     def get_ordered_aspect_ratios(self, sort_field: str = 'mtime', sort_dir: str = 'DESC',
                                  filter_sql: str = '', bindings: tuple = (), **kwargs) -> List[float]:
         """
@@ -3322,27 +3352,58 @@ class ImageIndexDB:
             return []
 
         try:
-            cursor = self.conn.cursor()
-            result = []
-            
-            # Batch queries to avoid SQLite limit (usually 999)
-            batch_size = 50
-            for i in range(0, len(image_ids), batch_size):
-                batch = image_ids[i:i + batch_size]
-                placeholders = ','.join('?' * len(batch))
-                cursor.execute(f'''
-                    SELECT id, file_name, width, height, aspect_ratio, is_video,
-                           video_fps, video_duration, video_frame_count, mtime, rating,
-                           love, bomb, reaction_updated_at,
-                           review_rank, review_flags, review_updated_at
-                    FROM images WHERE id IN ({placeholders})
-                ''', batch)
-                result.extend([dict(row) for row in cursor.fetchall()])
-            
-            return result
+            ordered_ids = [int(image_id) for image_id in image_ids]
+            rows_by_id: dict[int, Dict[str, Any]] = {}
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                # Stay below SQLite's common 999-variable limit.
+                batch_size = 500
+                for i in range(0, len(ordered_ids), batch_size):
+                    batch = ordered_ids[i:i + batch_size]
+                    placeholders = ','.join('?' * len(batch))
+                    cursor.execute(f'''
+                        SELECT id, file_name, width, height, aspect_ratio, is_video,
+                               video_fps, video_duration, video_frame_count, mtime, rating,
+                               love, bomb, reaction_updated_at,
+                               review_rank, review_flags, review_updated_at,
+                               file_size, file_type, ctime
+                        FROM images WHERE id IN ({placeholders})
+                    ''', batch)
+                    for row in cursor.fetchall():
+                        item = dict(row)
+                        rows_by_id[int(item['id'])] = item
+
+            return [rows_by_id[image_id] for image_id in ordered_ids
+                    if image_id in rows_by_id]
         except sqlite3.Error as e:
             print(f'Database query error: {e}')
             return []
+
+    def get_image_ids_for_paths(self, file_names) -> Dict[str, int]:
+        """Resolve many relative file names without one query per path."""
+        normalized_paths = [str(file_name) for file_name in file_names if file_name]
+        if not self.enabled or not self._ensure_connection() or not normalized_paths:
+            return {}
+
+        result: Dict[str, int] = {}
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                batch_size = 500
+                for offset in range(0, len(normalized_paths), batch_size):
+                    batch = normalized_paths[offset:offset + batch_size]
+                    placeholders = ','.join('?' * len(batch))
+                    cursor.execute(
+                        f'SELECT file_name, id FROM images '
+                        f'WHERE file_name IN ({placeholders})',
+                        tuple(batch),
+                    )
+                    for row in cursor.fetchall():
+                        result[str(row[0])] = int(row[1])
+            return result
+        except sqlite3.Error as e:
+            print(f'Database path-ID query error: {e}')
+            return {}
 
     def get_all_paths(self) -> List[str]:
         """Get all cached file paths (for fast reboot without rescanning)."""

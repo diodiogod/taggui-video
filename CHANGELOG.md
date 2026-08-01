@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.8] - 2026-08-01
+
+### Added
+
+- Select All and Invert Selection now cover the complete filtered dataset, including images not currently loaded as thumbnails
+- Auto-Captioner and Auto-Markings can process those selections in stable database-backed batches
+- The image footer shows useful multi-selection totals without cluttering single-image navigation
+- Large paginated caption runs no longer scan every caption file before model startup
+
+### Changed
+
+- Improve large-dataset batch selection
 ## [1.4.7] - 2026-07-26
 
 ### Added

@@ -622,6 +622,37 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def invert_selection(self):
+        source_model = self.proxy_image_list_model.sourceModel()
+        if (
+            source_model is not None
+            and getattr(source_model, '_paginated_mode', False)
+        ):
+            if getattr(self, '_virtual_select_all_active', False):
+                current_mode = getattr(
+                    self,
+                    '_virtual_selection_mode',
+                    'all_except',
+                )
+                self._virtual_selection_mode = (
+                    'only' if current_mode == 'all_except' else 'all_except'
+                )
+            else:
+                selected_paths = {}
+                for index in self.selectedIndexes():
+                    image = index.data(Qt.ItemDataRole.UserRole)
+                    if image is None or not getattr(image, 'path', None):
+                        continue
+                    path_text = str(image.path)
+                    selected_paths[self._virtual_selection_path_key(path_text)] = (
+                        path_text
+                    )
+                self._virtual_select_all_active = True
+                self._virtual_selection_mode = 'all_except'
+                self._virtual_selection_paths = selected_paths
+            self._restore_virtual_selection_for_loaded_rows()
+            return
+
+        self.clear_virtual_all_selection()
         selected_proxy_rows = {index.row() for index in self.selectedIndexes()}
         all_proxy_rows = set(range(self.proxy_image_list_model.rowCount()))
         unselected_proxy_rows = all_proxy_rows - selected_proxy_rows
@@ -633,6 +664,116 @@ class ImageListViewPaintSelectionMixin:
         self.setCurrentIndex(self.model().index(first_unselected_proxy_row, 0))
         self.selectionModel().select(
             item_selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+
+    @Slot()
+    def selectAll(self):
+        source_model = self.proxy_image_list_model.sourceModel()
+        self._virtual_select_all_active = bool(
+            source_model is not None
+            and getattr(source_model, '_paginated_mode', False)
+        )
+        self._virtual_selection_mode = (
+            'all_except' if self._virtual_select_all_active else None
+        )
+        self._virtual_selection_paths = {}
+        self._apply_virtual_selection_to_loaded_rows()
+        self.selection_summary_changed.emit()
+
+
+    @Slot()
+    def clear_virtual_all_selection(self):
+        if not getattr(self, '_virtual_select_all_active', False):
+            return
+        self._virtual_select_all_active = False
+        self._virtual_selection_mode = None
+        self._virtual_selection_paths = {}
+        self.selection_summary_changed.emit()
+
+
+    def clearSelection(self):
+        self.clear_virtual_all_selection()
+        QListView.clearSelection(self)
+
+
+    def _restore_virtual_selection_for_loaded_rows(self, *_args):
+        if not getattr(self, '_virtual_select_all_active', False):
+            return
+        self._apply_virtual_selection_to_loaded_rows()
+        self.selection_summary_changed.emit()
+
+
+    @staticmethod
+    def _virtual_selection_path_key(path) -> str:
+        return str(path or '').replace('\\', '/').casefold()
+
+
+    def _apply_virtual_selection_to_loaded_rows(self):
+        if not getattr(self, '_virtual_select_all_active', False):
+            QListView.selectAll(self)
+            return
+
+        mode = getattr(self, '_virtual_selection_mode', 'all_except')
+        path_map = getattr(self, '_virtual_selection_paths', {}) or {}
+        path_keys = set(path_map)
+        self._applying_virtual_select_all = True
+        try:
+            selection_model = self.selectionModel()
+            if mode == 'all_except':
+                QListView.selectAll(self)
+                selection_flag = QItemSelectionModel.SelectionFlag.Deselect
+            else:
+                QListView.clearSelection(self)
+                selection_flag = QItemSelectionModel.SelectionFlag.Select
+
+            for row in range(self.proxy_image_list_model.rowCount()):
+                index = self.proxy_image_list_model.index(row, 0)
+                image = index.data(Qt.ItemDataRole.UserRole)
+                if image is None or not getattr(image, 'path', None):
+                    continue
+                if self._virtual_selection_path_key(image.path) in path_keys:
+                    selection_model.select(index, selection_flag)
+        finally:
+            self._applying_virtual_select_all = False
+
+
+    def get_selected_image_count(self) -> int:
+        source_model = self.proxy_image_list_model.sourceModel()
+        if (
+            getattr(self, '_virtual_select_all_active', False)
+            and source_model is not None
+            and getattr(source_model, '_paginated_mode', False)
+        ):
+            total_count = int(getattr(source_model, '_total_count', 0) or 0)
+            path_count = len(
+                getattr(self, '_virtual_selection_paths', {}) or {}
+            )
+            if getattr(self, '_virtual_selection_mode', 'all_except') == 'only':
+                return min(total_count, path_count)
+            return max(0, total_count - path_count)
+        return len(self.selectedIndexes())
+
+
+    def get_selected_image_batch(self):
+        source_model = self.proxy_image_list_model.sourceModel()
+        if (
+            getattr(self, '_virtual_select_all_active', False)
+            and source_model is not None
+            and getattr(source_model, '_paginated_mode', False)
+        ):
+            batch = source_model.create_paginated_image_batch(
+                selection_mode=getattr(
+                    self,
+                    '_virtual_selection_mode',
+                    'all_except',
+                ),
+                selection_paths=tuple(
+                    (getattr(self, '_virtual_selection_paths', {}) or {}).values()
+                ),
+            )
+            if batch is not None:
+                return batch
+        return self.get_selected_image_indices()
 
 
     def get_selected_images(self) -> list[Image]:

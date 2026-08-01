@@ -1,0 +1,288 @@
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'taggui'))
+
+from models.image_batch import ImageBatchItem, PaginatedImageBatch
+from models.image_list_model import ImageListModel
+from utils.image import Image
+from utils.image_index_db import ImageIndexDB
+from widgets.image_list_view_paint_selection_mixin import (
+    ImageListViewPaintSelectionMixin,
+)
+
+
+class _FakeSourceModel:
+    _paginated_mode = True
+    _total_count = 400_000
+
+
+class _FakeProxyModel:
+    def sourceModel(self):
+        return _FakeSourceModel()
+
+
+class _FakeView:
+    proxy_image_list_model = _FakeProxyModel()
+    _virtual_select_all_active = True
+
+    def selectedIndexes(self):
+        return [object()] * 4_000
+
+
+class _FakeIndex:
+    def __init__(self, image):
+        self.image = image
+
+    def data(self, role):
+        return self.image if role == Qt.ItemDataRole.UserRole else None
+
+
+class _FakeInvertView:
+    proxy_image_list_model = _FakeProxyModel()
+    _virtual_select_all_active = False
+    _virtual_selection_mode = None
+    _virtual_selection_paths = {}
+    _virtual_selection_path_key = staticmethod(
+        ImageListViewPaintSelectionMixin._virtual_selection_path_key
+    )
+
+    def __init__(self, images):
+        self._indexes = [_FakeIndex(image) for image in images]
+        self.restores = 0
+
+    def selectedIndexes(self):
+        return list(self._indexes)
+
+    def _restore_virtual_selection_for_loaded_rows(self):
+        self.restores += 1
+
+
+def test_virtual_selection_count_uses_filtered_dataset_total():
+    count = ImageListViewPaintSelectionMixin.get_selected_image_count(
+        _FakeView()
+    )
+
+    assert count == 400_000
+
+
+def test_invert_selection_tracks_excluded_paths_for_paginated_dataset(tmp_path):
+    images = [
+        Image(tmp_path / 'one.png', (1, 1), []),
+        Image(tmp_path / 'two.png', (1, 1), []),
+    ]
+    view = _FakeInvertView(images)
+
+    ImageListViewPaintSelectionMixin.invert_selection(view)
+
+    assert view._virtual_select_all_active is True
+    assert view._virtual_selection_mode == 'all_except'
+    assert set(view._virtual_selection_paths.values()) == {
+        str(image.path) for image in images
+    }
+    assert ImageListViewPaintSelectionMixin.get_selected_image_count(view) == (
+        399_998
+    )
+
+    ImageListViewPaintSelectionMixin.invert_selection(view)
+
+    assert view._virtual_selection_mode == 'only'
+    assert ImageListViewPaintSelectionMixin.get_selected_image_count(view) == 2
+    assert view.restores == 2
+
+
+def test_paginated_batch_snapshots_ids_and_loads_in_chunks(monkeypatch, tmp_path):
+    opened_databases = []
+
+    class _FakeDatabase:
+        def __init__(self, directory_path):
+            self.directory_path = directory_path
+            self.closed = False
+            opened_databases.append(self)
+
+        def get_ordered_image_ids(self, **kwargs):
+            self.query = kwargs
+            return [5, 2, 9]
+
+        def get_image_ids_for_paths(self, paths):
+            return {'two.png': 2} if tuple(paths) == ('two.png',) else {}
+
+        def close(self):
+            self.closed = True
+
+    class _FakeModel:
+        def __init__(self):
+            self.chunks = []
+
+        def _load_images_from_db_ids(
+            self,
+            image_ids,
+            *,
+            db,
+            directory_path,
+        ):
+            self.chunks.append(list(image_ids))
+            return (
+                [Image(Path(directory_path) / f'{image_id}.png', (1, 1), [])
+                 for image_id in image_ids],
+                [],
+            )
+
+    monkeypatch.setattr('models.image_batch.ImageIndexDB', _FakeDatabase)
+    model = _FakeModel()
+    batch = PaginatedImageBatch(
+        model=model,
+        directory_path=tmp_path,
+        count=3,
+        sort_field='file_name',
+        sort_dir='ASC',
+        filter_sql='is_video = 0',
+        filter_bindings=(),
+        random_seed=123,
+        chunk_size=2,
+    )
+
+    items = list(batch)
+
+    assert len(batch) == 3
+    assert model.chunks == [[5, 2], [9]]
+    assert [item.data(Qt.ItemDataRole.UserRole).path.name for item in items] == [
+        '5.png',
+        '2.png',
+        '9.png',
+    ]
+    assert opened_databases[0].query['filter_sql'] == 'is_video = 0'
+    assert opened_databases[0].closed is True
+
+
+def test_batch_item_exposes_image_through_qt_data_role(tmp_path):
+    image = Image(tmp_path / 'image.png', (10, 20), ['tag'])
+    item = ImageBatchItem(image)
+
+    assert item.data(Qt.ItemDataRole.UserRole) is image
+    assert item.data(Qt.ItemDataRole.DisplayRole) is None
+
+
+def test_paginated_batch_excludes_inverted_paths(monkeypatch, tmp_path):
+    class _FakeDatabase:
+        def __init__(self, _directory_path):
+            pass
+
+        def get_ordered_image_ids(self, **_kwargs):
+            return [1, 2, 3]
+
+        def get_image_ids_for_paths(self, paths):
+            assert tuple(paths) == ('two.png',)
+            return {'two.png': 2}
+
+        def close(self):
+            pass
+
+    class _FakeModel:
+        def _load_images_from_db_ids(
+            self,
+            image_ids,
+            *,
+            db,
+            directory_path,
+        ):
+            return (
+                [Image(Path(directory_path) / f'{image_id}.png', (1, 1), [])
+                 for image_id in image_ids],
+                [],
+            )
+
+    monkeypatch.setattr('models.image_batch.ImageIndexDB', _FakeDatabase)
+    batch = PaginatedImageBatch(
+        model=_FakeModel(),
+        directory_path=tmp_path,
+        count=2,
+        sort_field='id',
+        sort_dir='ASC',
+        filter_sql='',
+        filter_bindings=(),
+        random_seed=0,
+        selection_mode='all_except',
+        selection_paths=('two.png',),
+    )
+
+    assert [item.image.path.name for item in batch] == ['1.png', '3.png']
+
+
+def test_database_batch_snapshot_preserves_requested_id_order(tmp_path):
+    paths = [tmp_path / name for name in ('c.png', 'a.png', 'b.png')]
+    for path in paths:
+        path.write_bytes(b'')
+
+    database = ImageIndexDB(tmp_path)
+    try:
+        database.bulk_insert_files(paths, tmp_path)
+        ordered_ids = database.get_ordered_image_ids(
+            sort_field='file_name',
+            sort_dir='ASC',
+        )
+        rows = database.get_images_by_ids(list(reversed(ordered_ids)))
+
+        assert [row['file_name'] for row in rows] == [
+            'c.png',
+            'b.png',
+            'a.png',
+        ]
+    finally:
+        database.close()
+
+
+def test_unloaded_batch_item_can_persist_generated_tags(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    media_path = tmp_path / 'unloaded.png'
+    media_path.write_bytes(b'')
+    image = Image(media_path, (10, 20), ['old'])
+    model = ImageListModel(256, ', ')
+
+    try:
+        model.update_image_tags(ImageBatchItem(image), ['generated', 'tag'])
+
+        assert image.tags == ['generated', 'tag']
+        assert media_path.with_suffix('.txt').read_text(encoding='utf-8') == (
+            'generated, tag'
+        )
+    finally:
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
+
+
+def test_paginated_caption_history_is_recorded_incrementally(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    media_path = tmp_path / 'unloaded.png'
+    media_path.write_bytes(b'')
+    media_path.with_suffix('.txt').write_text('original', encoding='utf-8')
+    image = Image(media_path, (10, 20), ['original'])
+    model = ImageListModel(256, ', ')
+    model._paginated_mode = True
+    model._directory_path = tmp_path
+    reference = ImageBatchItem(image)
+
+    try:
+        model.begin_streaming_paginated_tag_history(
+            'Generate Captions',
+            True,
+        )
+        model.record_streaming_paginated_tag_history(reference)
+        model.update_image_tags(reference, ['generated'])
+        model.commit_streaming_paginated_tag_history()
+
+        history = model.undo_stack[-1]
+        assert history.action_name == 'Generate Captions'
+        assert history.paginated_snapshot == {'unloaded.png': ['original']}
+    finally:
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()

@@ -1852,9 +1852,19 @@ def restore_stdout_and_stderr():
 
 
 class AutoCaptioner(QDockWidget):
-    caption_generated = Signal(QModelIndex, str, list)
-    structured_caption_generated = Signal(QModelIndex, object)
+    caption_generated = Signal(object, str, list)
+    structured_caption_generated = Signal(object, object)
     layout_mode_changed = Signal(str)
+
+    def _selected_image_batch(self):
+        batch_getter = getattr(
+            self.image_list,
+            'get_selected_image_batch',
+            None,
+        )
+        if callable(batch_getter):
+            return batch_getter()
+        return self.image_list.get_selected_image_indices()
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList,
@@ -2831,7 +2841,7 @@ class AutoCaptioner(QDockWidget):
         if forced_words and forced_words.strip():
             field_history.add_value('forced_words', forced_words.strip())
 
-        selected_image_indices = self.image_list.get_selected_image_indices()
+        selected_image_indices = self._selected_image_batch()
         selected_image_count = len(selected_image_indices)
         show_alert_when_finished = False
         if selected_image_count > 1:
@@ -2851,10 +2861,19 @@ class AutoCaptioner(QDockWidget):
             caption_settings.get('output_format') != 'Ideogram 4 JSON'
             and caption_settings['caption_position'] != CaptionPosition.DO_NOT_ADD
         ):
-            self.image_list_model.add_to_undo_stack(
-                action_name=f'Generate '
-                            f'{pluralize("Caption", selected_image_count)}',
-                should_ask_for_confirmation=selected_image_count > 1)
+            action_name = (
+                f'Generate {pluralize("Caption", selected_image_count)}'
+            )
+            if self.image_list_model.is_paginated:
+                self.image_list_model.begin_streaming_paginated_tag_history(
+                    action_name=action_name,
+                    should_ask_for_confirmation=selected_image_count > 1,
+                )
+            else:
+                self.image_list_model.add_to_undo_stack(
+                    action_name=action_name,
+                    should_ask_for_confirmation=selected_image_count > 1,
+                )
         if selected_image_count > 0:
             self._set_progress_bar_mode(selected_image_count)
             self.status_label.setText('Starting captioning...')
@@ -2884,6 +2903,9 @@ class AutoCaptioner(QDockWidget):
             self.progress_bar.setValue)
         self.captioning_thread.finished.connect(
             lambda: self.set_is_captioning(False))
+        self.captioning_thread.finished.connect(
+            self.image_list_model.commit_streaming_paginated_tag_history
+        )
         self.captioning_thread.finished.connect(self._update_unload_button_state)
         self.captioning_thread.finished.connect(self._refresh_model_availability_ui)
         self.captioning_thread.finished.connect(

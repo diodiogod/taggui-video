@@ -68,6 +68,7 @@ class ImageListView(
     tags_paste_requested = Signal(list, list)
     directory_reload_requested = Signal()
     layout_ready = Signal()  # Emitted when masonry layout is fully calculated and applied
+    selection_summary_changed = Signal()
 
     def __init__(self, parent, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
@@ -75,6 +76,10 @@ class ImageListView(
         self.proxy_image_list_model = proxy_image_list_model
         self.tag_separator = tag_separator
         self.setModel(proxy_image_list_model)
+        self._virtual_select_all_active = False
+        self._virtual_selection_mode = None
+        self._virtual_selection_paths = {}
+        self._applying_virtual_select_all = False
         self.delegate = ImageDelegate(self)
         self.setItemDelegate(self.delegate)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -92,11 +97,15 @@ class ImageListView(
         # Use source model signals since proxy may not forward modelAboutToBeReset
         source_model.modelAboutToBeReset.connect(self._disable_updates)
         source_model.modelReset.connect(self._enable_updates)
+        source_model.modelReset.connect(self.clear_virtual_all_selection)
 
         # Recalculate masonry layout when model changes (including filter changes)
         proxy_image_list_model.modelReset.connect(lambda: self._recalculate_masonry_if_needed("modelReset"))
         proxy_image_list_model.layoutChanged.connect(lambda: self._on_layout_changed())
         proxy_image_list_model.filter_changed.connect(self._on_filter_changed)
+        proxy_image_list_model.filter_changed.connect(
+            self.clear_virtual_all_selection
+        )
 
         # Handle dimension updates from enrichment (prefer local incremental reflow)
         source_model.dimensions_updated.connect(self._on_dimensions_updated)
@@ -108,6 +117,9 @@ class ImageListView(
 
         # Handle buffered mode page updates (avoids layoutChanged crash!)
         proxy_image_list_model.pages_updated.connect(self._on_pages_updated)
+        proxy_image_list_model.pages_updated.connect(
+            self._restore_virtual_selection_for_loaded_rows
+        )
 
         # Cache status now shown in main window status bar (not floating labels here)
 

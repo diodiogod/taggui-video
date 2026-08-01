@@ -1196,6 +1196,9 @@ class ImageListViewInteractionMixin:
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
 
         if event.button() == Qt.MouseButton.LeftButton:
+            self.clear_virtual_all_selection()
+
+        if event.button() == Qt.MouseButton.LeftButton:
             start_index = self.indexAt(event.pos())
             if start_index.isValid():
                 self._spawn_drag_start_pos = event.pos()
@@ -2055,6 +2058,12 @@ class ImageListViewInteractionMixin:
         """Handle keyboard events in the image list."""
         # Clear click-selection freeze so keyboard nav propagates normally.
         self._user_click_selection_frozen_until = 0.0
+        is_virtual_selection_shortcut = (
+            event.key() in (Qt.Key.Key_A, Qt.Key.Key_I)
+            and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        )
+        if not is_virtual_selection_shortcut:
+            self.clear_virtual_all_selection()
         if (
             event.key() == Qt.Key.Key_Escape
             and event.modifiers() == Qt.KeyboardModifier.NoModifier

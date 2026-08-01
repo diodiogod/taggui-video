@@ -565,10 +565,20 @@ class MarkingSettingsForm(QWidget):
         self.class_table.setMinimumHeight(max(90, round(140 * scale)))
 
 class AutoMarkings(QDockWidget):
-    marking_generated = Signal(QModelIndex, list)
+    marking_generated = Signal(object, list)
     _model_preparation_finished = Signal(int, object)
     _CLASS_ACTIONS_SETTINGS_KEY = CLASS_ACTIONS_SETTINGS_KEY
     _CLASS_LABELS_SETTINGS_KEY = CLASS_LABELS_SETTINGS_KEY
+
+    def _selected_image_batch(self):
+        batch_getter = getattr(
+            self.image_list,
+            'get_selected_image_batch',
+            None,
+        )
+        if callable(batch_getter):
+            return batch_getter()
+        return self.image_list.get_selected_image_indices()
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList, parent):
@@ -1449,7 +1459,7 @@ class AutoMarkings(QDockWidget):
             purpose: str = 'run',
             start_after_prepare: bool = False,
     ) -> bool:
-        selected_image_indices = self.image_list.get_selected_image_indices()
+        selected_image_indices = self._selected_image_batch()
         marking_settings = self.marking_settings_form.get_marking_settings()
         requested_model_path = marking_settings.get('requested_model_path')
         if requested_model_path is not None:
@@ -1646,7 +1656,7 @@ class AutoMarkings(QDockWidget):
 
     @Slot()
     def generate_markings(self):
-        selected_image_indices = self.image_list.get_selected_image_indices()
+        selected_image_indices = self._selected_image_batch()
         if not self.prepare_generation(
             interactive=True,
             start_after_prepare=True,
@@ -1673,10 +1683,6 @@ class AutoMarkings(QDockWidget):
                 classes[class_id] = (output_label, combo)
         self.marking_thread.marking_settings['classes'] = classes
         selected_image_count = len(selected_image_indices)
-        self.image_list_model.add_to_undo_stack(
-            action_name=f'Generate '
-                        f'{pluralize('Marking', selected_image_count)}',
-            should_ask_for_confirmation=selected_image_count > 1)
         if selected_image_count > 1:
             from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 
@@ -1687,6 +1693,11 @@ class AutoMarkings(QDockWidget):
                 return
             self.show_alert_when_finished = (confirmation_dialog
                                              .show_alert_check_box.isChecked())
+        if not self.image_list_model.is_paginated:
+            self.image_list_model.add_to_undo_stack(
+                action_name=f'Generate '
+                            f'{pluralize('Marking', selected_image_count)}',
+                should_ask_for_confirmation=selected_image_count > 1)
         self._run_marking_count = 0
         self._run_processed_image_count = 0
         self._run_expected_image_count = selected_image_count
