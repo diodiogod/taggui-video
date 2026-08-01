@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -40,11 +40,22 @@ class PaginatedImageBatch:
     selection_mode: str = 'all_except'
     selection_paths: tuple[str, ...] = ()
     chunk_size: int = 500
+    _snapshot_ids: tuple[int, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __len__(self) -> int:
         return max(0, int(self.count))
 
-    def __iter__(self) -> Iterator[ImageBatchItem]:
+    def snapshot_ids(self) -> tuple[int, ...]:
+        """Return one stable ID snapshot shared by every pass over the batch."""
+        cached = self._snapshot_ids
+        if cached is not None:
+            return cached
+
         database = ImageIndexDB(self.directory_path)
         try:
             image_ids = database.get_ordered_image_ids(
@@ -70,9 +81,20 @@ class PaginatedImageBatch:
                     ]
             elif self.selection_mode == 'only':
                 image_ids = []
+        finally:
+            database.close()
+
+        snapshot = tuple(int(image_id) for image_id in image_ids)
+        object.__setattr__(self, '_snapshot_ids', snapshot)
+        return snapshot
+
+    def __iter__(self) -> Iterator[ImageBatchItem]:
+        image_ids = self.snapshot_ids()
+        database = ImageIndexDB(self.directory_path)
+        try:
             chunk_size = max(1, int(self.chunk_size))
             for offset in range(0, len(image_ids), chunk_size):
-                chunk = image_ids[offset:offset + chunk_size]
+                chunk = list(image_ids[offset:offset + chunk_size])
                 images, _missing_paths = self.model._load_images_from_db_ids(
                     chunk,
                     db=database,
@@ -82,3 +104,20 @@ class PaginatedImageBatch:
                     yield ImageBatchItem(image)
         finally:
             database.close()
+
+    def iter_images(self) -> Iterator[Image]:
+        for item in self:
+            yield item.image
+
+
+@dataclass(frozen=True)
+class ImageBatchView:
+    """Length-aware image iterator for consumers that do not use references."""
+
+    batch: PaginatedImageBatch
+
+    def __len__(self) -> int:
+        return len(self.batch)
+
+    def __iter__(self) -> Iterator[Image]:
+        yield from self.batch.iter_images()

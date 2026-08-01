@@ -1,8 +1,8 @@
 import re
 
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtWidgets import (QDialog, QGridLayout, QLabel, QPushButton,
-                               QVBoxLayout)
+from PySide6.QtWidgets import (QDialog, QGridLayout, QLabel, QMessageBox,
+                               QPushButton, QVBoxLayout)
 
 from models.image_list_model import ImageListModel, Scope
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsComboBox,
@@ -67,6 +67,12 @@ class FindAndReplaceDialog(QDialog):
         self.replace_button.setText('Replace')
         self.replace_button.setEnabled(False)
 
+    def _scope_is_supported(self, scope: Scope | str) -> bool:
+        return bool(
+            not self.image_list_model.is_paginated
+            or scope == Scope.ALL_IMAGES
+        )
+
     @Slot()
     def display_match_count(self):
         text = self.find_text_line_edit.text()
@@ -75,6 +81,12 @@ class FindAndReplaceDialog(QDialog):
             return
         self.replace_button.setEnabled(True)
         scope = self.scope_combo_box.currentText()
+        if not self._scope_is_supported(scope):
+            self.replace_button.setText(
+                'Selected/filtered scope unavailable for paginated folders'
+            )
+            self.replace_button.setEnabled(False)
+            return
         whole_tags_only = self.whole_tags_only_check_box.isChecked()
         use_regex = self.use_regex_check_box.isChecked()
         try:
@@ -89,6 +101,15 @@ class FindAndReplaceDialog(QDialog):
     @Slot()
     def replace(self):
         scope = self.scope_combo_box.currentText()
+        if not self._scope_is_supported(scope):
+            QMessageBox.warning(
+                self,
+                'Paginated Scope',
+                'Find and Replace cannot safely use Selected Images or '
+                'Filtered Images in a paginated folder yet. No captions were '
+                'changed. Use All Images or a smaller non-paginated folder.',
+            )
+            return
         use_regex = self.use_regex_check_box.isChecked()
         if self.whole_tags_only_check_box.isChecked():
             replace_text = self.replace_text_line_edit.text()

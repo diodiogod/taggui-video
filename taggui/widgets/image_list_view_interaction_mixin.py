@@ -410,14 +410,9 @@ class ImageListViewInteractionMixin:
                         else src_idx
                     )
                     if proxy_idx.isValid():
-                        sel_model = self.selectionModel()
-                        if sel_model is not None:
-                            sel_model.setCurrentIndex(
-                                proxy_idx,
-                                QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                            )
-                        else:
-                            self.setCurrentIndex(proxy_idx)
+                        self.set_current_index_preserving_virtual_selection(
+                            proxy_idx
+                        )
                         selection_owner = getattr(self, "_secondary_browser_owner", None)
                         if selection_owner is not None and hasattr(selection_owner, "commit_thumbnail_click_selection"):
                             selection_owner.commit_thumbnail_click_selection(proxy_idx)
@@ -595,11 +590,7 @@ class ImageListViewInteractionMixin:
             proxy_idx = QModelIndex()
 
         if proxy_idx.isValid():
-            sel_model = self.selectionModel()
-            if sel_model is not None:
-                sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
-            else:
-                self.setCurrentIndex(proxy_idx)
+            self.set_current_index_preserving_virtual_selection(proxy_idx)
 
         mw = self._main_window_host()
         if (
@@ -857,9 +848,8 @@ class ImageListViewInteractionMixin:
             try:
                 sel_model = self.selectionModel()
                 if sel_model is not None and sel_model.currentIndex() != proxy_idx:
-                    sel_model.setCurrentIndex(
-                        proxy_idx,
-                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    self.set_current_index_preserving_virtual_selection(
+                        proxy_idx
                     )
                 elif sel_model is None and self.currentIndex() != proxy_idx:
                     self.setCurrentIndex(proxy_idx)
@@ -1196,9 +1186,6 @@ class ImageListViewInteractionMixin:
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
 
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clear_virtual_all_selection()
-
-        if event.button() == Qt.MouseButton.LeftButton:
             start_index = self.indexAt(event.pos())
             if start_index.isValid():
                 self._spawn_drag_start_pos = event.pos()
@@ -1336,7 +1323,12 @@ class ImageListViewInteractionMixin:
                             index,
                             QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
                         )
+                        self.update_virtual_selection_for_toggle(
+                            index,
+                            was_selected=was_selected,
+                        )
                     elif modifiers & Qt.ShiftModifier:
+                        self.clear_virtual_all_selection()
                         current = self.currentIndex()
                         if current.isValid():
                             start_row = min(current.row(), index.row())
@@ -1353,6 +1345,7 @@ class ImageListViewInteractionMixin:
                                 QItemSelectionModel.SelectionFlag.ClearAndSelect,
                             )
                     else:
+                        self.clear_virtual_all_selection()
                         sel_model.setCurrentIndex(
                                 index,
                                 QItemSelectionModel.SelectionFlag.ClearAndSelect,
@@ -1608,6 +1601,11 @@ class ImageListViewInteractionMixin:
                         # print(f"[DEBUG] Ctrl+Click: selecting row={index.row()}")
                         self.selectionModel().select(index, QItemSelectionModel.Select)
 
+                    self.update_virtual_selection_for_toggle(
+                        index,
+                        was_selected=was_selected,
+                    )
+
                     # Debug: show all selected indices
                     # all_selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]
                     # print(f"[DEBUG] After Ctrl+Click, all selected rows: {all_selected}")
@@ -1615,6 +1613,7 @@ class ImageListViewInteractionMixin:
                     # Force repaint to show selection changes
                     self.viewport().update()
                 elif modifiers & Qt.ShiftModifier:
+                    self.clear_virtual_all_selection()
                     # Shift+Click: range selection
                     current = self.currentIndex()
                     if current.isValid():
@@ -1657,6 +1656,8 @@ class ImageListViewInteractionMixin:
                             and sel_model.isSelected(index)
                             and len(self.selectedIndexes()) > 1
                         )
+                        if not preserve_multi_drag:
+                            self.clear_virtual_all_selection()
                         self._preserve_multi_selection_on_drag_candidate = bool(preserve_multi_drag)
                         self._suppress_masonry_auto_scroll_once = True
                         if preserve_multi_drag:
@@ -1930,6 +1931,7 @@ class ImageListViewInteractionMixin:
                     sel_model = self.selectionModel()
                     if sel_model is not None:
                         try:
+                            self.clear_virtual_all_selection()
                             self._suppress_masonry_auto_scroll_once = True
                             sel_model.setCurrentIndex(
                                 commit_index,
@@ -2062,7 +2064,22 @@ class ImageListViewInteractionMixin:
             event.key() in (Qt.Key.Key_A, Qt.Key.Key_I)
             and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         )
-        if not is_virtual_selection_shortcut:
+        selection_reset_keys = {
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Space,
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+            Qt.Key.Key_PageUp,
+            Qt.Key.Key_PageDown,
+        }
+        if (
+            not is_virtual_selection_shortcut
+            and event.key() in selection_reset_keys
+        ):
             self.clear_virtual_all_selection()
         if (
             event.key() == Qt.Key.Key_Escape
@@ -2080,6 +2097,11 @@ class ImageListViewInteractionMixin:
                 if parent:
                     parent = parent.parent()
                 try:
+                    if not self.ensure_materialized_selection(
+                        'Deletion marking'
+                    ):
+                        event.accept()
+                        return
                     parent.toggle_deletion_marking()
                     event.accept()
                     return
@@ -2186,14 +2208,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 next_index = QModelIndex()
             if next_index.isValid():
-                sel_model = self.selectionModel()
-                if sel_model is not None:
-                    sel_model.setCurrentIndex(
-                        next_index,
-                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                    )
-                else:
-                    self.setCurrentIndex(next_index)
+                self.set_current_index_preserving_virtual_selection(next_index)
                 self.scrollTo(next_index, QAbstractItemView.ScrollHint.EnsureVisible)
                 event.accept()
                 return
@@ -2352,11 +2367,7 @@ class ImageListViewInteractionMixin:
                 pass
             return False
 
-        sel_model = self.selectionModel()
-        if sel_model:
-            sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
-        else:
-            self.setCurrentIndex(proxy_idx)
+        self.set_current_index_preserving_virtual_selection(proxy_idx)
 
         paginated_masonry_active = bool(
             self.use_masonry
@@ -2994,11 +3005,7 @@ class ImageListViewInteractionMixin:
                 proxy_idx = QModelIndex()
 
         if proxy_idx.isValid():
-            sel_model = self.selectionModel()
-            if sel_model is not None:
-                sel_model.setCurrentIndex(proxy_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
-            else:
-                self.setCurrentIndex(proxy_idx)
+            self.set_current_index_preserving_virtual_selection(proxy_idx)
 
         if strict_paginated_masonry:
             print(

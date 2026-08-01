@@ -95,6 +95,13 @@ class TagInputBox(QLineEdit):
             if normalized_tags:
                 self.ideogram_tags_addition_requested.emit(normalized_tags)
             return
+        selection_guard = getattr(
+            self.image_list,
+            'ensure_materialized_selection',
+            None,
+        )
+        if callable(selection_guard) and not selection_guard('Add Tags'):
+            return
         selected_image_indices = self.image_list.get_selected_image_indices()
         selected_image_count = len(selected_image_indices)
         if len(tags) == 1 and selected_image_count == 1:

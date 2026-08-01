@@ -3722,6 +3722,15 @@ class MainWindow(QMainWindow):
             return self._target_context_from_viewer(active_viewer)
         return self._rating_reaction_target_context()
 
+    @staticmethod
+    def _ensure_materialized_target_selection(
+        target_context: dict,
+        action_name: str,
+    ) -> bool:
+        list_view = target_context.get('list_view')
+        guard = getattr(list_view, 'ensure_materialized_selection', None)
+        return not callable(guard) or bool(guard(action_name))
+
     def _apply_review_rank_from_viewer(self, viewer: ImageViewer | None, rank: int):
         if viewer is None:
             return
@@ -3949,6 +3958,11 @@ class MainWindow(QMainWindow):
             return
         else:
             target_context = self._review_target_context()
+            if not self._ensure_materialized_target_selection(
+                target_context,
+                'Clear Review Marks',
+            ):
+                return
             targets = list(target_context.get('images') or [])
             action_name = 'Clear review marks'
 
@@ -9452,6 +9466,11 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._rating_reaction_target_context()
+        if not self._ensure_materialized_target_selection(
+            target_context,
+            'Change Ratings',
+        ):
+            return
         targets = list(target_context.get('images') or [])
         if not targets:
             return
@@ -9552,6 +9571,11 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._rating_reaction_target_context()
+        if not self._ensure_materialized_target_selection(
+            target_context,
+            'Change Reactions',
+        ):
+            return
         targets = list(target_context.get('images') or [])
         if not targets:
             return
@@ -9635,6 +9659,11 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._review_target_context()
+        if not self._ensure_materialized_target_selection(
+            target_context,
+            'Change Review Rank',
+        ):
+            return
         targets = list(target_context.get('images') or [])
         if not targets:
             return
@@ -9671,6 +9700,11 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._review_target_context()
+        if not self._ensure_materialized_target_selection(
+            target_context,
+            'Change Review Mark',
+        ):
+            return
         targets = list(target_context.get('images') or [])
         if not targets:
             return
@@ -9915,6 +9949,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def add_tag_to_selected_images(self, tag: str):
+        if not self.image_list.ensure_materialized_selection('Add Tags'):
+            return
         selected_image_indices = self.image_list.get_selected_image_indices()
         self.image_list_model.add_tags([tag], selected_image_indices)
         self.image_tags_editor.select_last_tag()

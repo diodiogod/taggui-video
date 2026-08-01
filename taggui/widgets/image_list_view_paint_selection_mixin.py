@@ -691,6 +691,84 @@ class ImageListViewPaintSelectionMixin:
         self.selection_summary_changed.emit()
 
 
+    def has_virtual_dataset_selection(self) -> bool:
+        source_model = self.proxy_image_list_model.sourceModel()
+        return bool(
+            getattr(self, '_virtual_select_all_active', False)
+            and source_model is not None
+            and getattr(source_model, '_paginated_mode', False)
+        )
+
+
+    def ensure_materialized_selection(self, action_name: str) -> bool:
+        """Reject loaded-row-only actions while a dataset selection is active."""
+        if not self.has_virtual_dataset_selection():
+            return True
+        QMessageBox.warning(
+            self,
+            'Dataset-wide Selection',
+            f'{action_name} cannot safely run on a dataset-wide selection yet.\n\n'
+            'No images were changed. Clear the selection and explicitly select '
+            'loaded items, or use Auto-Captioner, Auto-Markings, Pipeline, or '
+            'Export, which stream dataset-wide selections.',
+        )
+        return False
+
+
+    def update_virtual_selection_for_toggle(
+        self,
+        proxy_index: QModelIndex,
+        *,
+        was_selected: bool,
+    ) -> bool:
+        """Record one Ctrl-click as an inclusion/exclusion in virtual state."""
+        if not self.has_virtual_dataset_selection() or not proxy_index.isValid():
+            return False
+        image = proxy_index.data(Qt.ItemDataRole.UserRole)
+        if image is None or not getattr(image, 'path', None):
+            return False
+
+        path_text = str(image.path)
+        path_key = self._virtual_selection_path_key(path_text)
+        path_map = dict(getattr(self, '_virtual_selection_paths', {}) or {})
+        mode = getattr(self, '_virtual_selection_mode', 'all_except')
+        if mode == 'only':
+            if was_selected:
+                path_map.pop(path_key, None)
+            else:
+                path_map[path_key] = path_text
+        else:
+            if was_selected:
+                path_map[path_key] = path_text
+            else:
+                path_map.pop(path_key, None)
+        self._virtual_selection_paths = path_map
+        self.selection_summary_changed.emit()
+        return True
+
+
+    def set_current_index_preserving_virtual_selection(
+        self,
+        proxy_index: QModelIndex,
+    ):
+        """Move the current row without collapsing a logical dataset selection."""
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            self.setCurrentIndex(proxy_index)
+            return
+        if self.has_virtual_dataset_selection():
+            selection_model.setCurrentIndex(
+                proxy_index,
+                QItemSelectionModel.SelectionFlag.NoUpdate,
+            )
+            self._restore_virtual_selection_for_loaded_rows()
+            return
+        selection_model.setCurrentIndex(
+            proxy_index,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
+
+
     def clearSelection(self):
         self.clear_virtual_all_selection()
         QListView.clearSelection(self)
@@ -757,19 +835,32 @@ class ImageListViewPaintSelectionMixin:
     def get_selected_image_batch(self):
         source_model = self.proxy_image_list_model.sourceModel()
         if (
-            getattr(self, '_virtual_select_all_active', False)
-            and source_model is not None
+            source_model is not None
             and getattr(source_model, '_paginated_mode', False)
         ):
-            batch = source_model.create_paginated_image_batch(
-                selection_mode=getattr(
+            is_virtual = getattr(self, '_virtual_select_all_active', False)
+            if is_virtual:
+                selection_mode = getattr(
                     self,
                     '_virtual_selection_mode',
                     'all_except',
-                ),
-                selection_paths=tuple(
+                )
+                selection_paths = tuple(
                     (getattr(self, '_virtual_selection_paths', {}) or {}).values()
-                ),
+                )
+            else:
+                selection_mode = 'only'
+                selection_paths = tuple(
+                    str(image.path)
+                    for image in (
+                        index.data(Qt.ItemDataRole.UserRole)
+                        for index in self.selectedIndexes()
+                    )
+                    if image is not None and getattr(image, 'path', None)
+                )
+            batch = source_model.create_paginated_image_batch(
+                selection_mode=selection_mode,
+                selection_paths=selection_paths,
             )
             if batch is not None:
                 return batch
@@ -785,6 +876,8 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def copy_selected_image_tags(self):
+        if not self.ensure_materialized_selection('Copy Tags'):
+            return
         selected_images = self.get_selected_images()
         selected_image_captions = [self.tag_separator.join(image.tags)
                                    for image in selected_images]
@@ -792,6 +885,11 @@ class ImageListViewPaintSelectionMixin:
 
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
+        if self.has_virtual_dataset_selection():
+            raise RuntimeError(
+                'Dataset-wide selections cannot be represented as QModelIndex values; '
+                'use get_selected_image_batch().'
+            )
         selected_image_proxy_indices = self.selectedIndexes()
         # print(f"[DEBUG] get_selected_image_indices: proxy indices = {[idx.row() for idx in selected_image_proxy_indices]}")
         selected_image_indices = [
@@ -803,7 +901,9 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def paste_tags(self):
-        selected_image_count = len(self.selectedIndexes())
+        if not self.ensure_materialized_selection('Paste Tags'):
+            return
+        selected_image_count = self.get_selected_image_count()
         if selected_image_count > 1:
             reply = get_confirmation_dialog_reply(
                 title='Paste Tags',
@@ -818,6 +918,8 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def copy_selected_image_file_names(self):
+        if not self.ensure_materialized_selection('Copy File Names'):
+            return
         selected_images = self.get_selected_images()
         selected_image_file_names = [image.path.name
                                      for image in selected_images]
@@ -826,6 +928,8 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def copy_selected_image_paths(self):
+        if not self.ensure_materialized_selection('Copy Paths'):
+            return
         selected_images = self.get_selected_images()
         selected_image_paths = [str(image.path) for image in selected_images]
         QApplication.clipboard().setText('\n'.join(selected_image_paths))
@@ -833,6 +937,8 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def move_selected_images(self):
+        if not self.ensure_materialized_selection('Move Images'):
+            return
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
         caption = (f'Select directory to move {selected_image_count} selected '

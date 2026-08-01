@@ -44,7 +44,7 @@ class PipelineRunner(QObject):
         self.main_window = main_window
         self.image_list_model = main_window.image_list_model
         self.pipeline: PipelineDefinition | None = None
-        self.image_indices: list[QModelIndex] = []
+        self.image_indices = []
         self.steps: list[PipelineStep] = []
         self.step_index = -1
         self.active_thread = None
@@ -52,18 +52,31 @@ class PipelineRunner(QObject):
         self.cancel_requested = False
         self._linked_marking_results: dict[str, dict[str, dict]] = {}
         self._auto_mark_results: dict[str, dict[str, int]] = {}
+        self._sync_iterator = None
+        self._sync_position = 0
+        self._sync_added_total = 0
+        self._sync_failures: list[str] = []
+        self._sync_failure_count = 0
 
     def run_pipeline(
         self,
         pipeline: PipelineDefinition,
-        image_indices: list[QModelIndex],
+        image_indices,
         image_list_model=None,
     ) -> bool:
         if self.is_running:
             return False
         pipeline.validate()
-        valid_indices = [index for index in image_indices if index.isValid()]
-        if not valid_indices:
+        if image_indices is None:
+            valid_indices = []
+        elif hasattr(image_indices, 'snapshot_ids'):
+            valid_indices = image_indices
+        else:
+            valid_indices = [
+                index for index in image_indices
+                if self._reference_is_valid(index)
+            ]
+        if len(valid_indices) == 0:
             self.finished.emit(False, "No images are available in the selected scope.")
             return False
         self.pipeline = pipeline
@@ -73,10 +86,27 @@ class PipelineRunner(QObject):
         if not self.steps:
             self.finished.emit(False, "The pipeline has no enabled steps.")
             return False
+        if (
+            hasattr(valid_indices, 'snapshot_ids')
+            and len(valid_indices) > 10_000
+            and any(
+                step.type == 'auto_mark'
+                and str(step.settings.get('merge_group') or '')
+                for step in self.steps
+            )
+        ):
+            self.finished.emit(
+                False,
+                'Linked auto-marking pipelines are limited to 10,000 virtual '
+                'items because merging retains detections between model passes. '
+                'Use an unlinked model or narrow the filter.',
+            )
+            return False
         self.step_index = -1
         self.cancel_requested = False
         self._linked_marking_results = {}
         self._auto_mark_results = {}
+        self._sync_iterator = None
         self.is_running = True
         self.running_changed.emit(True)
         self.log_message.emit(
@@ -84,6 +114,20 @@ class PipelineRunner(QObject):
         )
         QTimer.singleShot(0, self._advance)
         return True
+
+    @staticmethod
+    def _reference_is_valid(image_reference) -> bool:
+        validator = getattr(image_reference, 'isValid', None)
+        if callable(validator):
+            try:
+                return bool(validator())
+            except RuntimeError:
+                return False
+        data_getter = getattr(image_reference, 'data', None)
+        return callable(data_getter)
+
+    def _resolve_image(self, image_reference):
+        return self.image_list_model.resolve_image_reference(image_reference)
 
     def cancel(self):
         if not self.is_running:
@@ -172,9 +216,12 @@ class PipelineRunner(QObject):
             ),
             "classes": None,
         }
-        if not merge_group or self._is_first_merge_group_step(merge_group):
+        if (
+            not self.image_list_model.is_paginated
+            and (not merge_group or self._is_first_merge_group_step(merge_group))
+        ):
             images = [
-                self.image_list_model.data(index, Qt.ItemDataRole.UserRole)
+                self._resolve_image(index)
                 for index in self.image_indices
             ]
             self.image_list_model.add_images_to_undo_stack(
@@ -261,10 +308,7 @@ class PipelineRunner(QObject):
         image_index: QModelIndex,
         markings: list[dict],
     ):
-        image = self.image_list_model.data(
-            image_index,
-            Qt.ItemDataRole.UserRole,
-        )
+        image = self._resolve_image(image_index)
         if image is None:
             return
         entry = self._linked_marking_results.setdefault(
@@ -313,10 +357,7 @@ class PipelineRunner(QObject):
         image_index: QModelIndex,
         markings: list[dict],
     ) -> int:
-        image = self.image_list_model.data(
-            image_index,
-            Qt.ItemDataRole.UserRole,
-        )
+        image = self._resolve_image(image_index)
         if image is None:
             return 0
         existing = {
@@ -400,10 +441,14 @@ class PipelineRunner(QObject):
     ):
         self.image_list_model.update_image_tags(image_index, tags)
         if self._target_browser_is_active():
-            self.main_window.image_tags_editor.reload_image_tags_if_changed(
-                image_index,
-                image_index,
+            loaded_index = self.image_list_model.get_loaded_index_for_reference(
+                image_index
             )
+            if loaded_index.isValid():
+                self.main_window.image_tags_editor.reload_image_tags_if_changed(
+                    loaded_index,
+                    loaded_index,
+                )
 
     def _apply_structured_caption_result(
         self,
@@ -483,50 +528,92 @@ class PipelineRunner(QObject):
         QTimer.singleShot(0, self._advance)
 
     def _run_build_ideogram(self):
-        added_total = 0
-        failures = []
-        for position, index in enumerate(self.image_indices, start=1):
+        self._sync_iterator = iter(self.image_indices)
+        self._sync_position = 0
+        self._sync_added_total = 0
+        self._sync_failures = []
+        self._sync_failure_count = 0
+        self._run_build_ideogram_chunk()
+
+    def _run_build_ideogram_chunk(self):
+        chunk_count = 0
+        while chunk_count < 25:
             if self.cancel_requested:
                 self._finish(False, "Pipeline canceled.")
                 return
-            image = self.image_list_model.data(
-                index, Qt.ItemDataRole.UserRole
-            )
+            try:
+                index = next(self._sync_iterator)
+            except StopIteration:
+                self.log_message.emit(
+                    f"Added {self._sync_added_total} Ideogram region(s)."
+                )
+                if self._sync_failures:
+                    suffix = (
+                        f"; and {self._sync_failure_count - len(self._sync_failures)} more"
+                        if self._sync_failure_count > len(self._sync_failures)
+                        else ""
+                    )
+                    self.log_message.emit(
+                        "Skipped: " + "; ".join(self._sync_failures) + suffix
+                    )
+                self._sync_iterator = None
+                self._refresh_ideogram_ui()
+                QTimer.singleShot(0, self._advance)
+                return
+
+            self._sync_position += 1
+            chunk_count += 1
+            image = self._resolve_image(index)
             if image is None:
                 continue
             try:
                 _caption, added = merge_image_markings_into_ideogram(image)
-                added_total += added
+                self._sync_added_total += added
                 self.image_list_model.refresh_ideogram_caption_index_for_image(
                     image
                 )
             except (IdeogramCaptionError, OSError) as exc:
-                failures.append(f"{image.path.name}: {exc}")
+                self._sync_failure_count += 1
+                if len(self._sync_failures) < 5:
+                    self._sync_failures.append(f"{image.path.name}: {exc}")
             self.progress_changed.emit(
-                position, len(self.image_indices), "Build Ideogram Regions"
+                self._sync_position,
+                len(self.image_indices),
+                "Build Ideogram Regions",
             )
-        self.log_message.emit(f"Added {added_total} Ideogram region(s).")
-        if failures:
-            self.log_message.emit("Skipped: " + "; ".join(failures[:5]))
-        self._refresh_ideogram_ui()
-        QTimer.singleShot(0, self._advance)
+        QTimer.singleShot(0, self._run_build_ideogram_chunk)
 
     def _run_save(self):
-        for position, index in enumerate(self.image_indices, start=1):
-            image = self.image_list_model.data(
-                index, Qt.ItemDataRole.UserRole
-            )
+        self._sync_iterator = iter(self.image_indices)
+        self._sync_position = 0
+        self._run_save_chunk()
+
+    def _run_save_chunk(self):
+        chunk_count = 0
+        while chunk_count < 50:
+            if self.cancel_requested:
+                self._finish(False, "Pipeline canceled.")
+                return
+            try:
+                index = next(self._sync_iterator)
+            except StopIteration:
+                self._sync_iterator = None
+                QTimer.singleShot(0, self._advance)
+                return
+            self._sync_position += 1
+            chunk_count += 1
+            image = self._resolve_image(index)
             if image is None:
                 continue
             self.image_list_model.refresh_search_indexes_for_image(
                 image
             )
             self.progress_changed.emit(
-                position,
+                self._sync_position,
                 len(self.image_indices),
                 "Synchronize Search Indexes",
             )
-        QTimer.singleShot(0, self._advance)
+        QTimer.singleShot(0, self._run_save_chunk)
 
     def _refresh_ideogram_ui(self):
         self.main_window.image_viewer.refresh_ideogram_caption_overlays()

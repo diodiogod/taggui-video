@@ -3146,11 +3146,36 @@ class ImageListModel(QAbstractListModel):
         *,
         selection_mode: str = 'all_except',
         selection_paths: tuple[str, ...] = (),
+        filter_sql: str | None = None,
+        filter_bindings: tuple | None = None,
+        domain_count: int | None = None,
     ):
-        """Create a repeatable batch for the current filtered paginated domain."""
+        """Create a repeatable batch for a paginated database domain."""
         if not self._paginated_mode or not self._db or not self._directory_path:
             return None
         from models.image_batch import PaginatedImageBatch
+
+        effective_filter_sql = (
+            str(self._filter_sql or '')
+            if filter_sql is None
+            else str(filter_sql or '')
+        )
+        effective_bindings = (
+            tuple(self._filter_bindings or ())
+            if filter_bindings is None
+            else tuple(filter_bindings or ())
+        )
+        if domain_count is None:
+            if (
+                effective_filter_sql == str(self._filter_sql or '')
+                and effective_bindings == tuple(self._filter_bindings or ())
+            ):
+                domain_count = int(self._total_count or 0)
+            else:
+                domain_count = int(self._db.count(
+                    filter_sql=effective_filter_sql,
+                    bindings=effective_bindings,
+                ) or 0)
 
         relative_paths = []
         for selection_path in selection_paths:
@@ -3164,7 +3189,7 @@ class ImageListModel(QAbstractListModel):
         count = (
             selected_path_count
             if selection_mode == 'only'
-            else max(0, int(self._total_count) - selected_path_count)
+            else max(0, int(domain_count) - selected_path_count)
         )
 
         return PaginatedImageBatch(
@@ -3173,11 +3198,20 @@ class ImageListModel(QAbstractListModel):
             count=count,
             sort_field=str(self._sort_field),
             sort_dir=str(self._sort_dir),
-            filter_sql=str(self._filter_sql or ''),
-            filter_bindings=tuple(self._filter_bindings or ()),
+            filter_sql=effective_filter_sql,
+            filter_bindings=effective_bindings,
             random_seed=int(self._random_seed or 0),
             selection_mode=selection_mode,
             selection_paths=tuple(relative_paths),
+        )
+
+    def create_paginated_domain_batch(self, *, filtered: bool = True):
+        """Create a batch for the filtered view or its unfiltered folder scope."""
+        if filtered:
+            return self.create_paginated_image_batch()
+        return self.create_paginated_image_batch(
+            filter_sql=str(self._scope_sql or ''),
+            filter_bindings=tuple(self._scope_bindings or ()),
         )
 
     @staticmethod

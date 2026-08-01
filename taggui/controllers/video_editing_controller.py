@@ -1000,6 +1000,10 @@ class VideoEditingController:
 
     def fix_video_frame_count(self):
         """Fix video frame count to follow N*4+1 rule for selected videos."""
+        if not self.main_window.image_list.ensure_materialized_selection(
+            'Fix Video Frame Count'
+        ):
+            return
         # Get selected videos from image list
         selected_indices = self.main_window.image_list.get_selected_image_indices()
 
@@ -1233,6 +1237,10 @@ class VideoEditingController:
 
     def fix_sar_selected(self):
         """Fix non-square pixels (SAR) for selected videos."""
+        if not self.main_window.image_list.ensure_materialized_selection(
+            'Fix Video Sample Aspect Ratio'
+        ):
+            return
         # Get selected videos from image list
         selected_indices = self.main_window.image_list.get_selected_image_indices()
 

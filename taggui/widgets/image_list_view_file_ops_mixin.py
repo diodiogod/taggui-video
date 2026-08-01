@@ -38,6 +38,8 @@ class ImageListViewFileOpsMixin:
     @Slot()
     def open_selected_items_in_masonry_wall(self):
         """Open the current selection in a floating masonry review wall."""
+        if not self.ensure_materialized_selection('Open Selection in Masonry Wall'):
+            return
         resolve_main_window = getattr(self, "_main_window_host", None)
         main_window = resolve_main_window() if callable(resolve_main_window) else self.window()
         opener = getattr(main_window, 'open_selection_masonry_wall', None)
@@ -202,6 +204,8 @@ class ImageListViewFileOpsMixin:
             self._delete_sibling_file_safely(sibling)
 
     def copy_selected_images(self):
+        if not self.ensure_materialized_selection('Copy Images'):
+            return
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
         caption = (f'Select directory to copy {selected_image_count} selected '
@@ -227,6 +231,8 @@ class ImageListViewFileOpsMixin:
 
     @Slot()
     def duplicate_selected_images(self):
+        if not self.ensure_materialized_selection('Duplicate Images'):
+            return
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
         if selected_image_count == 0:
@@ -286,6 +292,8 @@ class ImageListViewFileOpsMixin:
 
     @Slot()
     def delete_selected_images(self):
+        if not self.ensure_materialized_selection('Delete Images'):
+            return
         selected_images = self.get_selected_images()
         selected_image_count = len(selected_images)
         title = f'Delete {pluralize("Image", selected_image_count)}'
@@ -422,6 +430,8 @@ class ImageListViewFileOpsMixin:
 
     @Slot()
     def open_image(self):
+        if not self.ensure_materialized_selection('Open Image'):
+            return
         selected_images = self.get_selected_images()
         image_path = selected_images[0].path
         self._open_in_system_default_app(image_path)
@@ -429,6 +439,8 @@ class ImageListViewFileOpsMixin:
 
     @Slot()
     def open_folder(self):
+        if not self.ensure_materialized_selection('Open Folder'):
+            return
         selected_images = self.get_selected_images()
         if selected_images:
             file_path = selected_images[0].path
@@ -441,6 +453,8 @@ class ImageListViewFileOpsMixin:
         from PySide6.QtWidgets import QMessageBox
         import shutil
 
+        if not self.ensure_materialized_selection('Restore Backups'):
+            return
         selected_images = self.get_selected_images()
         if not selected_images:
             return
@@ -510,7 +524,7 @@ class ImageListViewFileOpsMixin:
 
     @Slot()
     def update_context_menu_actions(self):
-        selected_image_count = len(self.selectedIndexes())
+        selected_image_count = self.get_selected_image_count()
         open_selection_wall_action_name = (
             f'Open {selected_image_count} Selected {pluralize("Item", selected_image_count)} in Masonry Wall'
         )

@@ -382,7 +382,16 @@ class SecondaryBrowser(QObject):
         self._update_title()
 
     def get_selected_image_indices(self) -> list[QModelIndex]:
-        return self._sel.selectedIndexes()
+        return self.dock.get_selected_image_indices()
+
+    def get_selected_image_batch(self):
+        return self.dock.get_selected_image_batch()
+
+    def get_selected_image_count(self) -> int:
+        return self.dock.get_selected_image_count()
+
+    def ensure_materialized_selection(self, action_name: str) -> bool:
+        return self.dock.ensure_materialized_selection(action_name)
 
     def _settings_key(self, name: str) -> str:
         return f"{self._settings_prefix}{_PREFIX}{name}"

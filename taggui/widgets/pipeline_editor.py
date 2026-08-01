@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 from controllers.pipeline_runner import PipelineRunner
+from models.image_batch import ImageBatchItem
 from auto_captioning.models_list import MODELS
 from widgets.auto_markings import MarkingModelComboBox
 from utils.auto_marking_preferences import saved_class_labels_for_model
@@ -2391,15 +2392,28 @@ class PipelineEditor(QDockWidget):
             self.main_window.image_list,
         )
 
-    def _scope_indices(self) -> tuple[object, list[QModelIndex]]:
+    def _scope_indices(self) -> tuple[object, object]:
         scope = self.scope_combo.currentText()
         source_model, proxy_model, image_list = self._active_browser_models()
         if scope == "Current image":
             current = image_list.list_view.currentIndex()
+            if current.isValid() and getattr(source_model, '_paginated_mode', False):
+                image = current.data(Qt.ItemDataRole.UserRole)
+                return (
+                    source_model,
+                    [ImageBatchItem(image)] if image is not None else [],
+                )
             indices = [proxy_model.mapToSource(current)] if current.isValid() else []
             return source_model, indices
         if scope == "Selected images":
+            batch_getter = getattr(image_list, 'get_selected_image_batch', None)
+            if callable(batch_getter):
+                return source_model, batch_getter()
             return source_model, image_list.get_selected_image_indices()
+        if getattr(source_model, '_paginated_mode', False):
+            return source_model, source_model.create_paginated_domain_batch(
+                filtered=(scope == "Filtered images")
+            )
         if scope == "Filtered images":
             indices = []
             for row in range(proxy_model.rowCount()):

@@ -918,7 +918,8 @@ class ImageList(QDockWidget):
             if getattr(self.list_view, '_virtual_select_all_active', False):
                 self.image_index_label.setToolTip(
                     'Click to jump to image index. Dataset-wide selections '
-                    'are streamed by Auto-Captioner and Auto-Markings.'
+                    'are streamed by Auto-Captioner, Auto-Markings, Pipeline, '
+                    'and Export. Unsupported actions stop before changing files.'
                 )
             else:
                 self.image_index_label.setToolTip(
@@ -1090,6 +1091,9 @@ class ImageList(QDockWidget):
 
     def get_selected_image_count(self) -> int:
         return self.list_view.get_selected_image_count()
+
+    def ensure_materialized_selection(self, action_name: str) -> bool:
+        return self.list_view.ensure_materialized_selection(action_name)
 
     def _normalize_sort_dir(self, sort_by: str, sort_dir: str | None = None) -> str:
         normalized_sort = str(sort_by or 'Default')
@@ -1823,6 +1827,8 @@ class ImageList(QDockWidget):
     @Slot()
     def toggle_deletion_marking(self):
         """Toggle the deletion marking for selected images."""
+        if not self.list_view.ensure_materialized_selection('Deletion Marking'):
+            return
         selected_indices = self.list_view.selectedIndexes()
         print(f"[DEBUG] toggle_deletion_marking called, selected_indices: {len(selected_indices)}")
         if not selected_indices:

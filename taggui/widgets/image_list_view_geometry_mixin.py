@@ -1546,6 +1546,11 @@ class ImageListViewGeometryMixin:
             hasattr(self, "_drag_to_external_only_mode")
             and self._drag_to_external_only_mode()
         )
+        if (
+            external_only
+            and not self.ensure_materialized_selection('Drag Selected Files')
+        ):
+            return
         indices = [model_index]
         if external_only:
             try:

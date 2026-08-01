@@ -1,4 +1,5 @@
 from collections import defaultdict
+from itertools import islice
 import os
 import io
 from math import ceil, floor
@@ -24,6 +25,7 @@ from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
 import utils.target_dimension as target_dimension
 from utils.grid import Grid
 from widgets.image_list import ImageList
+from models.image_batch import ImageBatchView, PaginatedImageBatch
 
 try:
     import pillow_jxl
@@ -326,6 +328,10 @@ class ExportDialog(QDialog):
         self.statistics_table.itemDoubleClicked.connect(self.set_filter)
         grid_layout.addWidget(self.statistics_table, grid_row, 1,
                               Qt.AlignmentFlag.AlignLeft)
+        grid_row += 1
+        self.statistics_note = QLabel('')
+        self.statistics_note.setWordWrap(True)
+        grid_layout.addWidget(self.statistics_note, grid_row, 1)
 
         self.layout.addLayout(grid_layout)
 
@@ -436,14 +442,26 @@ class ExportDialog(QDialog):
 
         image_list = self.get_image_list()
         image_dimensions = defaultdict(int)
-        for this_image in image_list:
-            if this_image.crop is not None:
-                this_image.target_dimension = target_dimension.get(
-                    this_image.crop.size())
-            else:
-                this_image.target_dimension = target_dimension.get(
-                    QSize(*this_image.dimensions))
+        sample_limit = 5_000
+        is_streamed_batch = isinstance(image_list, ImageBatchView)
+        is_sampled = is_streamed_batch and len(image_list) > sample_limit
+        statistics_images = (
+            islice(iter(image_list), sample_limit)
+            if is_sampled
+            else iter(image_list)
+        )
+        sampled_count = 0
+        for this_image in statistics_images:
+            sampled_count += 1
+            self._set_target_dimension(this_image)
             image_dimensions[this_image.target_dimension.toTuple()] += 1
+        if is_sampled:
+            self.statistics_note.setText(
+                f'Statistics sample the first {sampled_count:,} of '
+                f'{len(image_list):,} images. Export still processes the full scope.'
+            )
+        else:
+            self.statistics_note.clear()
         self.image_list.proxy_image_list_model.invalidate()
 
         sorted_dimensions = sorted(
@@ -591,6 +609,7 @@ class ExportDialog(QDialog):
         self.progress_bar.setMaximum(len(image_list))
         for image_index, image_entry in enumerate(image_list):
             self.progress_bar.setValue(image_index)
+            self._set_target_dimension(image_entry)
             if export_keep_dir_structure:
                 relative_path = image_entry.path.relative_to(directory_path)
                 export_path = export_directory_path / relative_path
@@ -845,16 +864,47 @@ class ExportDialog(QDialog):
                         shutil.copy(export_mask_path, export_mask_path.with_suffix(suffix))
         self.close()
 
+    @staticmethod
+    def _set_target_dimension(image_entry):
+        if image_entry.crop is not None:
+            image_entry.target_dimension = target_dimension.get(
+                image_entry.crop.size()
+            )
+        else:
+            image_entry.target_dimension = target_dimension.get(
+                QSize(*image_entry.dimensions)
+            )
+
     def get_image_list(self):
         image_list_view = self.image_list.list_view
-        if settings.value('export_filter') == ExportFilter.FILTERED:
+        export_filter = settings.value('export_filter')
+        source_model = image_list_view.proxy_image_list_model.sourceModel()
+        if getattr(source_model, '_paginated_mode', False):
+            batch = None
+            if export_filter == ExportFilter.FILTERED:
+                batch = source_model.create_paginated_domain_batch(filtered=True)
+            elif export_filter == ExportFilter.SELECTED:
+                selected_batch = image_list_view.get_selected_image_batch()
+                if isinstance(selected_batch, PaginatedImageBatch):
+                    batch = selected_batch
+                else:
+                    return [
+                        image_index.data(Qt.ItemDataRole.UserRole)
+                        for image_index in selected_batch
+                    ]
+            else:
+                batch = source_model.create_paginated_domain_batch(filtered=False)
+            if batch is not None:
+                return ImageBatchView(batch)
+
+        if export_filter == ExportFilter.FILTERED:
             image_list = []
             for row in range(image_list_view.proxy_image_list_model.sourceModel().rowCount()):
                 source_index = image_list_view.proxy_image_list_model.sourceModel().index(row, 0)
                 proxy_index = image_list_view.proxy_image_list_model.mapFromSource(source_index)
                 if proxy_index.isValid():
                     image_list.append(source_index.data(Qt.ItemDataRole.UserRole))
-        elif settings.value('export_filter') == ExportFilter.SELECTED:
+        elif export_filter == ExportFilter.SELECTED:
             image_list = [image_index.data(Qt.ItemDataRole.UserRole)
                           for image_index in image_list_view.get_selected_image_indices()]
         else: # ExportFilter.NONE

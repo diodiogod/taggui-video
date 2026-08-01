@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import Qt
@@ -10,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'taggui'))
 
-from models.image_batch import ImageBatchItem, PaginatedImageBatch
+from models.image_batch import ImageBatchItem, ImageBatchView, PaginatedImageBatch
 from models.image_list_model import ImageListModel
 from utils.image import Image
 from utils.image_index_db import ImageIndexDB
@@ -44,6 +46,17 @@ class _FakeIndex:
     def data(self, role):
         return self.image if role == Qt.ItemDataRole.UserRole else None
 
+    def isValid(self):
+        return True
+
+
+class _FakeSignal:
+    def __init__(self):
+        self.emissions = 0
+
+    def emit(self):
+        self.emissions += 1
+
 
 class _FakeInvertView:
     proxy_image_list_model = _FakeProxyModel()
@@ -73,6 +86,14 @@ def test_virtual_selection_count_uses_filtered_dataset_total():
     assert count == 400_000
 
 
+def test_virtual_selection_cannot_be_silently_materialized_as_qmodelindices():
+    view = _FakeView()
+    view.has_virtual_dataset_selection = lambda: True
+
+    with pytest.raises(RuntimeError, match='get_selected_image_batch'):
+        ImageListViewPaintSelectionMixin.get_selected_image_indices(view)
+
+
 def test_invert_selection_tracks_excluded_paths_for_paginated_dataset(tmp_path):
     images = [
         Image(tmp_path / 'one.png', (1, 1), []),
@@ -96,6 +117,70 @@ def test_invert_selection_tracks_excluded_paths_for_paginated_dataset(tmp_path):
     assert view._virtual_selection_mode == 'only'
     assert ImageListViewPaintSelectionMixin.get_selected_image_count(view) == 2
     assert view.restores == 2
+
+
+def test_virtual_ctrl_toggle_records_exclusions_and_inclusions(tmp_path):
+    image = Image(tmp_path / 'one.png', (1, 1), [])
+    view = _FakeInvertView([image])
+    view._virtual_select_all_active = True
+    view._virtual_selection_mode = 'all_except'
+    view.selection_summary_changed = _FakeSignal()
+    view.has_virtual_dataset_selection = lambda: True
+    index = _FakeIndex(image)
+
+    assert ImageListViewPaintSelectionMixin.update_virtual_selection_for_toggle(
+        view,
+        index,
+        was_selected=True,
+    )
+    assert view._virtual_selection_paths == {
+        str(image.path).replace('\\', '/').casefold(): str(image.path)
+    }
+    assert ImageListViewPaintSelectionMixin.get_selected_image_count(view) == 399_999
+
+    assert ImageListViewPaintSelectionMixin.update_virtual_selection_for_toggle(
+        view,
+        index,
+        was_selected=False,
+    )
+    assert view._virtual_selection_paths == {}
+    assert ImageListViewPaintSelectionMixin.get_selected_image_count(view) == 400_000
+    assert view.selection_summary_changed.emissions == 2
+
+
+def test_explicit_paginated_selection_uses_stable_path_batch(tmp_path):
+    image = Image(tmp_path / 'one.png', (1, 1), [])
+
+    class _Source:
+        _paginated_mode = True
+
+        def create_paginated_image_batch(self, **kwargs):
+            self.kwargs = kwargs
+            return 'batch'
+
+    source = _Source()
+
+    class _Proxy:
+        def sourceModel(self):
+            return source
+
+    class _View:
+        proxy_image_list_model = _Proxy()
+        _virtual_select_all_active = False
+
+        def selectedIndexes(self):
+            return [_FakeIndex(image)]
+
+        def get_selected_image_indices(self):
+            raise AssertionError('QModelIndex fallback should not be used')
+
+    result = ImageListViewPaintSelectionMixin.get_selected_image_batch(_View())
+
+    assert result == 'batch'
+    assert source.kwargs == {
+        'selection_mode': 'only',
+        'selection_paths': (str(image.path),),
+    }
 
 
 def test_paginated_batch_snapshots_ids_and_loads_in_chunks(monkeypatch, tmp_path):
@@ -160,6 +245,59 @@ def test_paginated_batch_snapshots_ids_and_loads_in_chunks(monkeypatch, tmp_path
     ]
     assert opened_databases[0].query['filter_sql'] == 'is_video = 0'
     assert opened_databases[0].closed is True
+
+
+def test_paginated_batch_reuses_one_id_snapshot(monkeypatch, tmp_path):
+    query_count = 0
+
+    class _FakeDatabase:
+        def __init__(self, _directory_path):
+            pass
+
+        def get_ordered_image_ids(self, **_kwargs):
+            nonlocal query_count
+            query_count += 1
+            return [3, 1]
+
+        def get_image_ids_for_paths(self, _paths):
+            return {}
+
+        def close(self):
+            pass
+
+    class _FakeModel:
+        def _load_images_from_db_ids(
+            self,
+            image_ids,
+            *,
+            db,
+            directory_path,
+        ):
+            return (
+                [Image(Path(directory_path) / f'{image_id}.png', (1, 1), [])
+                 for image_id in image_ids],
+                [],
+            )
+
+    monkeypatch.setattr('models.image_batch.ImageIndexDB', _FakeDatabase)
+    batch = PaginatedImageBatch(
+        model=_FakeModel(),
+        directory_path=tmp_path,
+        count=2,
+        sort_field='id',
+        sort_dir='ASC',
+        filter_sql='',
+        filter_bindings=(),
+        random_seed=0,
+    )
+
+    assert [item.image.path.name for item in batch] == ['3.png', '1.png']
+    assert [item.image.path.name for item in batch] == ['3.png', '1.png']
+    assert query_count == 1
+
+    image_view = ImageBatchView(batch)
+    assert len(image_view) == 2
+    assert [image.path.name for image in image_view] == ['3.png', '1.png']
 
 
 def test_batch_item_exposes_image_through_qt_data_role(tmp_path):
