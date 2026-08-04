@@ -299,6 +299,9 @@ class ImageListView(
         self._spawn_drag_index = QPersistentModelIndex()
         self._spawn_drag_active = False
         self._spawn_drag_external_only = False
+        self._qt_drag_active = False
+        self._active_qt_drag = None
+        self._active_qt_drag_mime = None
         self._suppress_selection_commit_until_release = False
         self._spawn_drag_active_index = QPersistentModelIndex()
         self._spawn_drag_last_global_pos = QPoint()

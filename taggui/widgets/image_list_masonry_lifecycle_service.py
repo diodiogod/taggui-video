@@ -22,6 +22,10 @@ class MasonryLifecycleService:
         _timestamp = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
         del _timestamp
 
+        if bool(getattr(self._view, "_qt_drag_active", False)):
+            self._view._masonry_recalc_timer.start(100)
+            return
+
         current_time = time.time()
         time_since_last_key = (current_time - self._view._last_filter_keystroke_time) * 1000
         if time_since_last_key < 50:
@@ -58,6 +62,10 @@ class MasonryLifecycleService:
 
     def check_masonry_completion(self):
         """Check whether async masonry calculation has completed."""
+        if bool(getattr(self._view, "_qt_drag_active", False)):
+            QTimer.singleShot(50, self._view._check_masonry_completion)
+            return
+
         source_model = self._source_model()
         if self._view._masonry_calc_future and self._view._masonry_calc_future.done():
             try:

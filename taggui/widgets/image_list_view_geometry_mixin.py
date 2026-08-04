@@ -3,6 +3,7 @@ import math
 from PySide6.QtCore import Property
 from PySide6.QtWidgets import QDockWidget, QMainWindow
 from utils.diagnostic_logging import append_crash_context, diagnostic_print
+from widgets.image_list_qt_drag_session_service import QtDragSessionService
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -1540,7 +1541,7 @@ class ImageListViewGeometryMixin:
 
     def _start_spawn_drag_for_index(self, model_index: QModelIndex, supportedActions: Qt.DropAction):
         """Start drag/spawn flow from one explicit index (selection-independent)."""
-        if not model_index.isValid():
+        if not model_index.isValid() or bool(getattr(self, "_qt_drag_active", False)):
             return
         external_only = bool(
             hasattr(self, "_drag_to_external_only_mode")
@@ -1703,11 +1704,38 @@ class ImageListViewGeometryMixin:
         )
         diagnostic_print(drag_message, detail="essential")
         append_crash_context(drag_message)
-        drag = QDrag(self)
-        drag.setMimeData(mime_data)
-        drag.setPixmap(drag_pixmap)
-        drag.setHotSpot(drag_pixmap.rect().center())
-        drop_action = drag.exec(supportedActions)
+        drag_session_service = QtDragSessionService(self)
+        drag_session_state = drag_session_service.begin()
+        if drag_session_state is None:
+            return
+
+        drag = None
+        try:
+            drag = QDrag(self)
+            drag.setMimeData(mime_data)
+            drag.setPixmap(drag_pixmap)
+            drag.setHotSpot(drag_pixmap.rect().center())
+            # Keep Python wrappers strongly reachable for the whole native OLE
+            # operation. Explicitly retire the parent-owned QDrag afterward so old
+            # COM data objects cannot accumulate across repeated external drags.
+            self._active_qt_drag = drag
+            self._active_qt_drag_mime = mime_data
+            if external_only and (supportedActions & Qt.DropAction.CopyAction):
+                drop_action = drag.exec(supportedActions, Qt.DropAction.CopyAction)
+            else:
+                drop_action = drag.exec(supportedActions)
+        finally:
+            self._active_qt_drag_mime = None
+            self._active_qt_drag = None
+            drag_session_service.finish(drag_session_state)
+            finish_tracking = getattr(self, "_finish_qt_drag_gesture_tracking", None)
+            if callable(finish_tracking):
+                finish_tracking()
+            if drag is not None:
+                try:
+                    drag.deleteLater()
+                except RuntimeError:
+                    pass
         try:
             drop_action_text = str(drop_action)
         except Exception:
@@ -1731,6 +1759,8 @@ class ImageListViewGeometryMixin:
             self._spawn_floating_from_drag_index(live_index, source_pixmap)
 
     def startDrag(self, supportedActions: Qt.DropAction):
+        if bool(getattr(self, "_qt_drag_active", False)):
+            return
         indices = self.selectedIndexes()
         if not indices:
             return

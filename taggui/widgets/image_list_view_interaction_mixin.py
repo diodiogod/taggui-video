@@ -255,6 +255,14 @@ class ImageListViewInteractionMixin:
         self._spawn_drag_origin_global_pos = QPoint()
         self._spawn_drag_external_only = False
 
+    def _finish_qt_drag_gesture_tracking(self):
+        """Mirror mouse-release cleanup after Qt's native drag loop exits."""
+        self._clear_spawn_drag_tracking()
+        self._pending_click_commit_index = QPersistentModelIndex()
+        self._pending_click_commit_global = None
+        self._suppress_selection_commit_until_release = False
+        self._preserve_multi_selection_on_drag_candidate = False
+
     def _clear_explicit_jump_tracking(self):
         self._pending_explicit_jump_kind = None
         self._last_explicit_jump_kind = None
@@ -1715,6 +1723,12 @@ class ImageListViewInteractionMixin:
 
     def mouseMoveEvent(self, event):
         """Handle thumbnail drag gestures and prevent rubber-band in masonry mode."""
+        if bool(getattr(self, "_qt_drag_active", False)):
+            # QDrag.exec() pumps Windows messages from a nested native loop.
+            # Never let those re-enter the thumbnail gesture state machine.
+            event.accept()
+            return
+
         if bool(getattr(self, "_spawn_drag_active", False)):
             # Internal spawn-drag is armed; wait for release (event or poll timer).
             self._spawn_drag_last_global_pos = self._event_global_point(event)

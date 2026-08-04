@@ -7932,6 +7932,17 @@ class MainWindow(QMainWindow):
         """Emit refresh diagnostics without creating UI chrome."""
         print(f"[REFRESH_NEW_UI] {message}")
 
+    def _native_qt_drag_active(self) -> bool:
+        """Return whether either browser owns an active native Qt drag loop."""
+        primary_dock = getattr(self, 'image_list', None)
+        secondary = getattr(self, '_secondary_browser', None)
+        secondary_dock = getattr(secondary, 'dock', None) if secondary is not None else None
+        for dock in (primary_dock, secondary_dock):
+            view = getattr(dock, 'list_view', None) if dock is not None else None
+            if view is not None and bool(getattr(view, '_qt_drag_active', False)):
+                return True
+        return False
+
     def _schedule_auto_refresh_new_media_after_limited_load(
         self,
         *,
@@ -8859,6 +8870,17 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def _on_new_media_refresh_finished(self, refresh_stats: dict):
+        if self._native_qt_drag_active():
+            # QDrag.exec() pumps a nested Windows message loop. Applying this
+            # result resets buffered model rows, so wait until OLE releases the
+            # source view and then apply the exact same result.
+            deferred_stats = dict(refresh_stats or {})
+            QTimer.singleShot(
+                50,
+                lambda stats=deferred_stats: self._on_new_media_refresh_finished(stats),
+            )
+            return
+
         self._update_refresh_new_media_action_state()
 
         pending_state = self._pending_new_media_refresh_state or {}

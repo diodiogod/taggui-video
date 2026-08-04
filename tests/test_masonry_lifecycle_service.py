@@ -53,6 +53,7 @@ class FakeView:
         self._masonry_calc_future = None
         self._masonry_start_time = 0.0
         self._masonry_poll_counter = 0
+        self._qt_drag_active = False
         self.calculate_calls = 0
         self.complete_calls = []
         self.log_messages = []
@@ -83,6 +84,17 @@ def test_do_recalculate_masonry_restarts_timer_for_recent_keystroke(monkeypatch)
     service.do_recalculate_masonry()
 
     assert view._masonry_recalc_timer.started == [500]
+    assert view.calculate_calls == 0
+
+
+def test_do_recalculate_masonry_defers_during_native_qt_drag():
+    view = FakeView(source_model=FakeSourceModel())
+    view._qt_drag_active = True
+    service = MasonryLifecycleService(view)
+
+    service.do_recalculate_masonry()
+
+    assert view._masonry_recalc_timer.started == [100]
     assert view.calculate_calls == 0
 
 
@@ -135,6 +147,26 @@ def test_check_masonry_completion_done_path_calls_completion_handler():
     service.check_masonry_completion()
 
     assert view.complete_calls == [{"ok": True}]
+
+
+def test_check_masonry_completion_defers_during_native_qt_drag(monkeypatch):
+    class TimerSpy:
+        calls = []
+
+        @staticmethod
+        def singleShot(delay, callback):
+            TimerSpy.calls.append((delay, callback))
+
+    monkeypatch.setattr(lifecycle_module, "QTimer", TimerSpy)
+    view = FakeView(source_model=FakeSourceModel())
+    view._qt_drag_active = True
+    view._masonry_calc_future = FakeFuture(done=True, result={"ok": True})
+    service = MasonryLifecycleService(view)
+
+    service.check_masonry_completion()
+
+    assert TimerSpy.calls == [(50, view._check_masonry_completion)]
+    assert view.complete_calls == []
 
 
 def test_check_masonry_completion_watchdog_resets_stuck_state(monkeypatch):

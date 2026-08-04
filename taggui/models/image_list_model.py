@@ -2172,7 +2172,7 @@ class ImageListModel(QAbstractListModel):
         return None
 
     # Signals for pagination
-    page_loaded = Signal(int)  # Emitted when a page finishes loading (page_num)
+    page_loaded = Signal(int, int)  # page_num, page-load generation
     initial_page_load_started = Signal()
     initial_page_load_finished = Signal()
     total_count_changed = Signal(int)  # Emitted when total image count changes
@@ -2190,7 +2190,7 @@ class ImageListModel(QAbstractListModel):
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
     thumbnail_updates_ready = Signal()  # Batched visual refresh for paginated thumbnails
-    stale_index_paths_detected = Signal(list, int)  # rel_paths, page_num
+    stale_index_paths_detected = Signal(list, int, int)  # rel_paths, page_num, generation
 
     # Default threshold for enabling pagination mode (overridden by settings)
     PAGINATION_THRESHOLD = 0  # Will be loaded from settings
@@ -2300,6 +2300,7 @@ class ImageListModel(QAbstractListModel):
         self._page_load_order: list = []  # LRU tracking
         self._loading_pages: set = set()  # Pages currently being loaded
         self._page_load_lock = threading.RLock()
+        self._page_load_generation = 0
         self._protected_page_window: tuple[int, int] | None = None
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
@@ -2905,10 +2906,32 @@ class ImageListModel(QAbstractListModel):
             if page_num in self._pages or page_num in self._loading_pages:
                 return  # Already loaded or loading
             self._loading_pages.add(page_num)
+            generation = int(self._page_load_generation)
+            load_snapshot = {
+                'db': self._db,
+                'directory_path': self._directory_path,
+                'sort_field': self._sort_field,
+                'sort_dir': self._sort_dir,
+                'filter_sql': self._filter_sql,
+                'filter_bindings': tuple(self._filter_bindings or ()),
+                'random_seed': self._random_seed,
+            }
 
         # Submit background load
         # print(f"[PAGE request] Requesting Page {page_num}")
-        self._page_executor.submit(self._load_page_async, page_num)
+        self._page_executor.submit(
+            self._load_page_async,
+            page_num,
+            generation,
+            load_snapshot,
+        )
+
+    def _advance_page_load_generation(self) -> int:
+        """Invalidate page workers owned by the previous model state."""
+        with self._page_load_lock:
+            self._page_load_generation += 1
+            self._loading_pages.clear()
+            return int(self._page_load_generation)
 
     def set_page_protection_window(self, start_page: int, end_page: int):
         """Protect active page window from LRU eviction churn."""
@@ -2969,25 +2992,47 @@ class ImageListModel(QAbstractListModel):
         # support safe cancellation once submitted; eviction handles stale pages.
         return
 
-    def _load_page_async(self, page_num: int):
+    def _load_page_async(
+        self,
+        page_num: int,
+        generation: int,
+        load_snapshot: dict,
+    ):
         """Load a page in background thread."""
         try:
-            # Check for cancellation
             with self._page_load_lock:
-                if page_num not in self._loading_pages:
+                if (
+                    generation != self._page_load_generation
+                    or page_num not in self._loading_pages
+                ):
                     return
 
-            if not self._db:
+            active_db = load_snapshot.get('db')
+            if not active_db:
                 return
 
-            images, missing_rel_paths = self._load_images_from_db(page_num)
-            self._store_page(page_num, images)
+            images, missing_rel_paths = self._load_images_from_db(
+                page_num,
+                db=active_db,
+                directory_path=load_snapshot.get('directory_path'),
+                sort_field=load_snapshot.get('sort_field'),
+                sort_dir=load_snapshot.get('sort_dir'),
+                filter_sql=load_snapshot.get('filter_sql'),
+                filter_bindings=load_snapshot.get('filter_bindings'),
+                random_seed=load_snapshot.get('random_seed'),
+            )
+            if not self._store_page(page_num, images, generation=generation):
+                return
             if missing_rel_paths:
-                self.stale_index_paths_detected.emit(missing_rel_paths, int(page_num))
+                self.stale_index_paths_detected.emit(
+                    missing_rel_paths,
+                    int(page_num),
+                    int(generation),
+                )
             # print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
-            self.page_loaded.emit(page_num)
+            self.page_loaded.emit(int(page_num), int(generation))
             # print(f"[ASYNC_LOAD] Signal emitted for Page {page_num}")
 
         except Exception as e:
@@ -2996,7 +3041,8 @@ class ImageListModel(QAbstractListModel):
             traceback.print_exc()
         finally:
             with self._page_load_lock:
-                self._loading_pages.discard(page_num)
+                if generation == self._page_load_generation:
+                    self._loading_pages.discard(page_num)
 
     def _load_images_from_db(
         self,
@@ -3292,6 +3338,7 @@ class ImageListModel(QAbstractListModel):
             return
 
         # Update total count based on combined filter
+        self._advance_page_load_generation()
         self._total_count = self._db.count(
             filter_sql=self._filter_sql, bindings=self._filter_bindings)
 
@@ -3521,9 +3568,17 @@ class ImageListModel(QAbstractListModel):
 
         return "", ()
 
-    def _store_page(self, page_num: int, images: list[Image]):
+    def _store_page(
+        self,
+        page_num: int,
+        images: list[Image],
+        *,
+        generation: int | None = None,
+    ) -> bool:
         """Store a loaded page and evict old pages if needed."""
         with self._page_load_lock:
+            if generation is not None and generation != self._page_load_generation:
+                return False
             self._pages[page_num] = images
             if page_num not in self._page_load_order:
                 self._page_load_order.append(page_num)
@@ -3537,6 +3592,7 @@ class ImageListModel(QAbstractListModel):
                     "_evict_old_pages",
                     Qt.ConnectionType.QueuedConnection
                 )
+        return True
 
     @Slot()
     def _evict_old_pages(self):
@@ -3705,9 +3761,18 @@ class ImageListModel(QAbstractListModel):
             return True
         return super().event(event)
 
-    def _on_page_loaded_signal(self, page_num: int):
+    def _on_page_loaded_signal(
+        self,
+        page_num: int,
+        generation: int | None = None,
+    ):
         """Called on main thread when a page finishes loading (via signal)."""
         if not self._paginated_mode:
+            return
+        if (
+            generation is not None
+            and int(generation) != int(self._page_load_generation)
+        ):
             return
 
         initial_page_finished = bool(
@@ -3798,16 +3863,27 @@ class ImageListModel(QAbstractListModel):
         if self._paginated_mode:
             QTimer.singleShot(0, self._finalize_paginated_bootstrap_refresh)
 
-    @Slot(list, int)
-    def _on_stale_index_paths_detected(self, rel_paths: list, page_num: int):
+    @Slot(list, int, int)
+    def _on_stale_index_paths_detected(
+        self,
+        rel_paths: list,
+        page_num: int,
+        generation: int | None = None,
+    ):
         """Reconcile stale DB rows discovered during asynchronous page loads."""
         if not self._paginated_mode:
+            return
+        if (
+            generation is not None
+            and int(generation) != int(self._page_load_generation)
+        ):
             return
 
         removed_count, new_total = self._prune_stale_index_paths(rel_paths)
         if removed_count <= 0:
             return
 
+        self._advance_page_load_generation()
         with self._page_load_lock:
             current_pages = sorted(self._pages.keys())
             self._pages.clear()
@@ -4203,6 +4279,10 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode:
             return []
 
+        # Page workers capture DB/query state at submission time. Invalidate
+        # them before rebuilding so no queued completion can mutate this reset.
+        self._advance_page_load_generation()
+
         total_pages = max(0, (int(new_total) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
         pages_to_reload = {
             int(page_num) for page_num in self._pages.keys()
@@ -4229,7 +4309,6 @@ class ImageListModel(QAbstractListModel):
         try:
             with self._page_load_lock:
                 self._pages.clear()
-                self._loading_pages.clear()
                 self._page_load_order.clear()
             self.images = []
             self._total_count = int(new_total)
@@ -5996,7 +6075,6 @@ class ImageListModel(QAbstractListModel):
         if (
             self._paginated_mode
             and bool(result.get('db_synced'))
-            and self._active_load_options is None
         ):
             # The validation worker committed through a separate connection;
             # the existing wrapper can observe those commits without being
@@ -6012,7 +6090,19 @@ class ImageListModel(QAbstractListModel):
             )
             preloaded_pages = None
             new_total = None
-            if snapshot_matches:
+            if self._active_load_options is not None:
+                refreshed_scope_rel_paths = self._db.get_limited_paths(
+                    self._active_load_options
+                )
+                self._set_scope_from_rel_paths(refreshed_scope_rel_paths)
+                new_total = int(self._db.count(
+                    filter_sql=self._filter_sql,
+                    bindings=self._filter_bindings,
+                ) or 0)
+                self._path_validation_satisfied_generation = int(
+                    self._path_validation_generation
+                )
+            elif snapshot_matches:
                 preloaded_pages = {
                     int(page_num): list(images or [])
                     for page_num, images in (result.get('preloaded_pages') or {}).items()
@@ -7207,6 +7297,9 @@ class ImageListModel(QAbstractListModel):
         """
         import time
 
+        # A previous page request may still be running when background
+        # validation or a folder switch enters this method.
+        self._advance_page_load_generation()
         total_images = int(preindexed_count if preindexed_count is not None else len(image_paths or []))
 
         # Initialize database
@@ -8532,6 +8625,7 @@ class ImageListModel(QAbstractListModel):
 
     def _reload_loaded_pages_after_paginated_tag_change(self):
         """Reload currently loaded pages after a paginated bulk tag update."""
+        self._advance_page_load_generation()
         current_pages = list(self._pages.keys())
         self._pages.clear()
         self._page_load_order.clear()
