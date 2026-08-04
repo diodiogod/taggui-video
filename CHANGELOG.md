@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.10] - 2026-08-03
+
+### Added
+
+- Prevent crashes while dragging media to external applications
+- Prevent limited folder views from crashing when new files are discovered
+- Keep thumbnails, masonry layout, and background enrichment synchronized after refreshes
+- Preserve existing drag, pagination, and automatic validation behavior
+
+### Changed
+
+- Improve stability during dragging and background folder refreshes
 ## [1.4.9] - 2026-08-01
 
 ### Added
