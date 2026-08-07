@@ -35,6 +35,7 @@ class QtDragSessionService:
         state = {
             "source_model": source_model,
             "pause_thumbnail_loading": getattr(source_model, "_pause_thumbnail_loading", None),
+            "model_drag_active": getattr(source_model, "_native_qt_drag_active", None),
             "enrichment_timer": enrichment_timer,
             "timer_was_active": timer_was_active,
             "timer_interval_ms": timer_interval_ms,
@@ -47,6 +48,8 @@ class QtDragSessionService:
         }
 
         self._view._qt_drag_active = True
+        if source_model is not None:
+            source_model._native_qt_drag_active = True
         if source_model is not None and hasattr(source_model, "_pause_thumbnail_loading"):
             source_model._pause_thumbnail_loading = True
         if enrichment_timer is not None:
@@ -64,6 +67,9 @@ class QtDragSessionService:
         try:
             source_model = state.get("source_model")
             previous_pause = state.get("pause_thumbnail_loading")
+            previous_model_drag_active = state.get("model_drag_active")
+            if source_model is not None:
+                source_model._native_qt_drag_active = bool(previous_model_drag_active)
             if (
                 source_model is not None
                 and previous_pause is not None

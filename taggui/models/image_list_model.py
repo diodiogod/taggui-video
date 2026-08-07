@@ -2308,6 +2308,8 @@ class ImageListModel(QAbstractListModel):
         self._path_validation_satisfied_generation = -1
         self._pending_path_validation_result = None
         self._path_validation_lock = threading.Lock()
+        self._native_qt_drag_active = False
+        self._path_validation_drag_retry_pending = False
         self._background_validation_dialog = None
         self._sidecar_meta_cache: dict[str, tuple[float, int, dict | None]] = {}
         self._sidecar_meta_cache_lock = threading.Lock()
@@ -6028,6 +6030,12 @@ class ImageListModel(QAbstractListModel):
     @Slot()
     def _apply_pending_path_validation(self):
         """Apply the latest completed background path-validation result."""
+        if self._native_qt_drag_active:
+            if not self._path_validation_drag_retry_pending:
+                self._path_validation_drag_retry_pending = True
+                QTimer.singleShot(50, self._retry_pending_path_validation_after_drag)
+            return
+
         with self._path_validation_lock:
             result = self._pending_path_validation_result
             self._pending_path_validation_result = None
@@ -6145,6 +6153,12 @@ class ImageListModel(QAbstractListModel):
             'ideogram_updates_count': ideogram_updates,
         })
         self.background_validation_progress.emit("", -1, 0, True)
+
+    @Slot()
+    def _retry_pending_path_validation_after_drag(self):
+        """Apply a validation result after Qt's native drag loop has exited."""
+        self._path_validation_drag_retry_pending = False
+        self._apply_pending_path_validation()
 
     def _validate_cached_paths_in_background(
         self,

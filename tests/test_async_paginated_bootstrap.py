@@ -13,6 +13,7 @@ sys.path.insert(0, str(TAGGUI_ROOT))
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from models import image_list_model as image_list_model_module
 from models.image_list_model import ImageListModel
 from utils.load_options import LimitedLoadOptions
 
@@ -215,6 +216,47 @@ def test_limited_validation_refreshes_current_model_without_folder_reload(
         assert model._path_validation_satisfied_generation == 7
     finally:
         model._db = None
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
+
+
+def test_background_validation_apply_waits_for_native_drag(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    model = ImageListModel(256, ', ')
+
+    class TimerSpy:
+        calls = []
+
+        @staticmethod
+        def singleShot(delay, callback):
+            TimerSpy.calls.append((delay, callback))
+
+    monkeypatch.setattr(image_list_model_module, 'QTimer', TimerSpy)
+    model._native_qt_drag_active = True
+    model._pending_path_validation_result = {'generation': 1}
+
+    try:
+        model._apply_pending_path_validation()
+        model._apply_pending_path_validation()
+
+        assert model._pending_path_validation_result == {'generation': 1}
+        assert model._path_validation_drag_retry_pending is True
+        assert len(TimerSpy.calls) == 1
+        assert TimerSpy.calls[0][0] == 50
+
+        applied = []
+        monkeypatch.setattr(
+            model,
+            '_apply_pending_path_validation',
+            lambda: applied.append(True),
+        )
+        model._native_qt_drag_active = False
+        TimerSpy.calls[0][1]()
+
+        assert model._path_validation_drag_retry_pending is False
+        assert applied == [True]
+    finally:
         model.shutdown_background_workers()
         model.deleteLater()
         app.processEvents()

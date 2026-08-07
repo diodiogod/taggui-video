@@ -27,6 +27,7 @@ class FakeSourceModel:
     def __init__(self, timer):
         self._pause_thumbnail_loading = False
         self._enrichment_timer = timer
+        self._native_qt_drag_active = False
 
 
 class FakeView:
@@ -49,6 +50,7 @@ def test_drag_session_pauses_churn_and_restores_pointer_interaction():
 
     assert state is not None
     assert view._qt_drag_active is True
+    assert source_model._native_qt_drag_active is True
     assert source_model._pause_thumbnail_loading is True
     assert timer.stop_calls == 1
     assert service.begin() is None
@@ -56,6 +58,7 @@ def test_drag_session_pauses_churn_and_restores_pointer_interaction():
     service.finish(state)
 
     assert view._qt_drag_active is False
+    assert source_model._native_qt_drag_active is False
     assert source_model._pause_thumbnail_loading is False
     assert timer.started == [500]
 
@@ -71,5 +74,6 @@ def test_drag_session_preserves_preexisting_timer_state():
     service.finish(state)
 
     assert source_model._pause_thumbnail_loading is True
+    assert source_model._native_qt_drag_active is False
     assert timer.started == [100]
     assert view._qt_drag_active is False
