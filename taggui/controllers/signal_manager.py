@@ -116,11 +116,15 @@ class SignalManager:
                                                               ImageMarking.CROP]))
 
         image_viewer.accept_crop_addition.connect(toolbar_manager.add_crop_action.setEnabled)
-        # Enable/disable apply crop button based on whether crop exists (inverse of add_crop)
+        # Keep the split button available for folder-wide cropping while only
+        # disabling the menu's current-file entry when this image has no crop.
         image_viewer.accept_crop_addition.connect(
-            lambda can_add: toolbar_manager.apply_crop_btn.setEnabled(not can_add))
-        # Connect apply crop button to the apply_crop_to_file method
+            lambda can_add: toolbar_manager.apply_crop_current_action.setEnabled(not can_add))
         toolbar_manager.apply_crop_btn.clicked.connect(image_viewer.apply_crop_to_file)
+        toolbar_manager.apply_crop_current_action.triggered.connect(
+            image_viewer.apply_crop_to_file)
+        toolbar_manager.apply_crop_all_action.triggered.connect(
+            image_viewer.apply_all_crops_to_folder)
 
         image_viewer.scene.selectionChanged.connect(lambda:
             self.main_window.is_running and toolbar_manager.delete_marking_action.setEnabled(

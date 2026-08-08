@@ -9522,10 +9522,20 @@ class ImageListModel(QAbstractListModel):
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
 
-    def add_image_markings(self, image_index, markings: list[dict]):
-        image = self.resolve_image_reference(image_index)
-        if image is None:
-            return
+    def add_image_markings(self, image_index, markings: list[dict]) -> Image | None:
+        referenced_image = self.resolve_image_reference(image_index)
+        if referenced_image is None:
+            return None
+        loaded_index = self.get_loaded_index_for_reference(image_index)
+        loaded_image = (
+            loaded_index.data(Qt.ItemDataRole.UserRole)
+            if loaded_index.isValid()
+            else None
+        )
+        # Paginated batches materialize detached Image objects. Prefer the live
+        # model object when the same path is currently loaded so the viewer can
+        # display generated markings immediately instead of waiting for reload.
+        image = loaded_image if isinstance(loaded_image, Image) else referenced_image
         for marking in markings:
             marking_type = {
                 'hint': ImageMarking.HINT,
@@ -9539,11 +9549,11 @@ class ImageListModel(QAbstractListModel):
                                           rect=QRect(top_left, bottom_right),
                                           confidence=marking['confidence']))
         if len(markings) > 0:
-            loaded_index = self.get_loaded_index_for_reference(image_index)
             if loaded_index.isValid():
                 self.dataChanged.emit(loaded_index, loaded_index)
             self.write_meta_to_disk(image)
             self._save_markings_to_db(image)
+        return image
 
     def add_image(self, image_path: Path):
         """

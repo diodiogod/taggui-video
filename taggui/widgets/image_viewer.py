@@ -5331,6 +5331,124 @@ class ImageViewer(QWidget):
             self.scene.removeItem(item)
 
     @Slot()
+    def apply_all_crops_to_folder(self):
+        """Destructively apply every saved crop in the loaded folder."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
+        from utils.crop_applier import apply_crop
+
+        source_model = self.proxy_image_list_model.sourceModel()
+        if source_model is None:
+            QMessageBox.warning(self, 'No Folder', 'No folder is currently loaded.')
+            return
+
+        image_source = None
+        if getattr(source_model, '_paginated_mode', False):
+            image_source = source_model.create_paginated_domain_batch(filtered=False)
+        if image_source is None:
+            image_source = list(getattr(source_model, 'images', []))
+
+        total_images = len(image_source)
+        scan_progress = QProgressDialog(
+            'Finding saved crops in the loaded folder…',
+            'Cancel',
+            0,
+            total_images,
+            self,
+        )
+        scan_progress.setWindowTitle('Apply Folder Crops')
+        scan_progress.setMinimumDuration(250)
+        crop_targets: list[tuple[Image, QRect]] = []
+        for position, image_reference in enumerate(image_source, start=1):
+            if scan_progress.wasCanceled():
+                scan_progress.close()
+                return
+            image = source_model.resolve_image_reference(image_reference)
+            if image is not None and image.crop is not None:
+                crop_targets.append((image, QRect(image.crop)))
+            scan_progress.setValue(position)
+            if position % 25 == 0:
+                QApplication.processEvents()
+        scan_progress.setValue(total_images)
+        scan_progress.close()
+
+        if not crop_targets:
+            QMessageBox.information(
+                self,
+                'No Saved Crops',
+                'No files in the loaded folder have saved crop boxes.',
+            )
+            return
+
+        target_count = len(crop_targets)
+        reply = QMessageBox.question(
+            self,
+            'Apply All Folder Crops - Destructive Operation',
+            f'This will permanently crop {target_count} file(s) in the loaded folder.\n\n'
+            'Each original file and its TagGUI sidecar will be backed up before '
+            'it is changed. Successfully applied crop boxes will be cleared.\n\n'
+            '⚠️ This modifies your working directory, not an export.\n'
+            '💡 Use File → Export for a non-destructive workflow.\n\n'
+            'Continue?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog(
+            'Applying saved crops…',
+            'Cancel',
+            0,
+            target_count,
+            self,
+        )
+        progress.setWindowTitle('Apply Folder Crops')
+        progress.setMinimumDuration(0)
+        succeeded = 0
+        failures: list[str] = []
+        canceled = False
+
+        for position, (image, crop_rect) in enumerate(crop_targets, start=1):
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                canceled = True
+                break
+            progress.setLabelText(f'Cropping {image.path.name}…')
+            success, message = apply_crop(Path(image.path), crop_rect)
+            if success:
+                succeeded += 1
+                image.crop = None
+                image.target_dimension = None
+                image.thumbnail = None
+                source_model.write_meta_to_disk(image)
+            else:
+                failures.append(message)
+            progress.setValue(position)
+
+        progress.close()
+        if succeeded:
+            self.directory_reload_requested.emit()
+
+        summary = f'Applied {succeeded} of {target_count} saved crop(s).'
+        if canceled:
+            summary += '\nThe operation was canceled; files already cropped were kept.'
+        if failures:
+            visible_failures = '\n'.join(f'• {failure}' for failure in failures[:10])
+            summary += f'\n\n{len(failures)} failure(s):\n{visible_failures}'
+            if len(failures) > 10:
+                summary += f'\n• …and {len(failures) - 10} more.'
+
+        if failures:
+            QMessageBox.warning(self, 'Folder Crop Completed with Errors', summary)
+        else:
+            QMessageBox.information(
+                self,
+                'Folder Crop Canceled' if canceled else 'Folder Crop Complete',
+                summary,
+            )
+
+    @Slot()
     def apply_crop_to_file(self):
         """Apply the crop directly to the file (destructive operation with backup)."""
         from PySide6.QtWidgets import QMessageBox

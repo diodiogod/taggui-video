@@ -1610,10 +1610,9 @@ class AutoMarkings(QDockWidget):
             self, image_index: QModelIndex, markings: list[dict]):
         thread = self.sender()
         target_model = getattr(thread, 'image_list_model', self.image_list_model)
-        target_model.add_image_markings(image_index, markings)
-        image = image_index.data(Qt.ItemDataRole.UserRole)
+        image = target_model.add_image_markings(image_index, markings)
         viewer = getattr(self.main_window, 'image_viewer', None)
-        if viewer is not None:
+        if viewer is not None and image is not None:
             viewer.refresh_marking_overlays(image)
         self.marking_generated.emit(image_index, markings)
 

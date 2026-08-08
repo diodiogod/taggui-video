@@ -391,11 +391,12 @@ class PipelineRunner(QObject):
             existing.add(key)
             unique.append(marking)
         if unique:
-            self.image_list_model.add_image_markings(
+            image = self.image_list_model.add_image_markings(
                 image_index,
                 unique,
             )
-            self.main_window.image_viewer.refresh_marking_overlays(image)
+            if image is not None:
+                self.main_window.image_viewer.refresh_marking_overlays(image)
         return len(unique)
 
     def _start_auto_caption(self, step: PipelineStep):

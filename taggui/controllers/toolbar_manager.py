@@ -1,6 +1,7 @@
 """Manager for main window toolbar setup."""
 
-from PySide6.QtWidgets import QToolBar, QPushButton, QWidget, QHBoxLayout, QLabel, QSpinBox, QMenu, QSizePolicy
+from PySide6.QtWidgets import (QToolBar, QPushButton, QToolButton, QWidget,
+                               QHBoxLayout, QLabel, QSpinBox, QMenu, QSizePolicy)
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PySide6.QtCore import Qt, QTimer
 
@@ -60,6 +61,8 @@ class ToolbarManager:
         self.add_action_group = None
         self.add_crop_action = None
         self.apply_crop_btn = None
+        self.apply_crop_current_action = None
+        self.apply_crop_all_action = None
         self.add_hint_action = None
         self.add_exclude_action = None
         self.add_include_action = None
@@ -458,30 +461,41 @@ class ToolbarManager:
         )
         toolbar.addAction(self.add_crop_action)
 
-        self.apply_crop_btn = QPushButton('✂')
+        self.apply_crop_btn = QToolButton()
+        self.apply_crop_btn.setText('✂')
         self.apply_crop_btn.setToolTip(
-            'Apply crop to file (destructive, creates backup)'
+            'Apply current crop to file; use the arrow for folder-wide cropping'
         )
-        self.apply_crop_btn.setMaximumWidth(32)
+        self.apply_crop_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
+        crop_menu = QMenu(self.apply_crop_btn)
+        self.apply_crop_current_action = crop_menu.addAction(
+            'Apply crop to current file'
+        )
+        self.apply_crop_all_action = crop_menu.addAction(
+            'Apply all saved crops in loaded folder…'
+        )
+        self.apply_crop_btn.setMenu(crop_menu)
+        self.apply_crop_btn.setMaximumWidth(52)
         self.apply_crop_btn.setMaximumHeight(32)
         self.apply_crop_btn.setStyleSheet("""
-            QPushButton {
+            QToolButton {
                 font-size: 18px;
                 border: 2px solid #555;
                 border-radius: 4px;
                 background-color: #2b2b2b;
                 padding: 2px;
             }
-            QPushButton:hover {
+            QToolButton:hover {
                 border-color: #2196F3;
                 background-color: #353535;
             }
-            QPushButton:disabled {
+            QToolButton:disabled {
                 color: #555;
                 border-color: #333;
             }
         """)
-        self.apply_crop_btn.setEnabled(False)
         toolbar.addWidget(self.apply_crop_btn)
 
         self.add_hint_action = QAction(
