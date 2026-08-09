@@ -127,7 +127,7 @@ class QwenVL(AutoCaptioningModel):
         return [
             {
                 'role': 'system',
-                'content': self.caption_settings.get('system_prompt', '').strip()
+                'content': self.get_system_prompt(image)
             },
             {'role': 'user', 'content': content}
         ]

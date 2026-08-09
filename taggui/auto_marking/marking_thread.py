@@ -233,10 +233,22 @@ class MarkingThread(ModelThread):
                                                  r.boxes.conf.to('cpu').tolist()):
                 marking = self.marking_settings['classes'].get(class_id)
                 if marking is not None:
-                    markings.append({'box': box,
-                                     'label': marking[0],
-                                     'type': marking[1],
-                                     'confidence': round(confidence, 3)})
+                    generated = {'box': box,
+                                 'label': marking[0],
+                                 'type': marking[1],
+                                 'confidence': round(confidence, 3)}
+                    if marking[1] == 'crop out':
+                        generated['crop_padding_percent'] = float(
+                            self.marking_settings.get(
+                                'crop_padding_percent', 1.0
+                            )
+                        )
+                        generated['crop_minimum_retained_percent'] = float(
+                            self.marking_settings.get(
+                                'crop_minimum_retained_percent', 75.0
+                            )
+                        )
+                    markings.append(generated)
         if self.marking_settings.get('merge_overlaps'):
             markings = self._merge_overlapping_markings(
                 markings,

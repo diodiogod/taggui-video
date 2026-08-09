@@ -1109,7 +1109,9 @@ class PipelineStepCard(QFrame):
                 selected_text=selected_model,
             )
             self.marking_type_combo = QComboBox()
-            self.marking_type_combo.addItems(["hint", "exclude", "include"])
+            self.marking_type_combo.addItems(
+                ["hint", "exclude", "include", "crop out"]
+            )
             self.marking_type_combo.setCurrentText(str(self.step.settings.get("marking_type", "hint")))
             class_names = self.step.settings.get("class_names", "")
             if isinstance(class_names, list):

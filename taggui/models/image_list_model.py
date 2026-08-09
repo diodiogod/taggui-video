@@ -9,7 +9,7 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from math import floor, ceil
@@ -1524,6 +1524,7 @@ class HistoryItem:
     paginated_snapshot: dict[str, list[str]] | None = None
     image_snapshots: list[dict[str, Any]] | None = None
     ideogram_sidecar_snapshots: list[dict[str, Any]] | None = None
+    created_at_ns: int = field(default_factory=time.monotonic_ns)
 
 
 class Scope(str, Enum):
@@ -7792,8 +7793,27 @@ class ImageListModel(QAbstractListModel):
             try:
                 image_path = str(getattr(target_image, 'path', '') or '')
                 if not target_path or image_path == target_path:
-                    index = self.images.index(target_image)
-                    return target_image, index
+                    try:
+                        index = self.images.index(target_image)
+                    except ValueError:
+                        index = -1
+                    if index >= 0:
+                        return target_image, index
+
+                    # A proxy/paginated viewer can own a valid loaded Image
+                    # instance that is not identity-present in self.images.
+                    # The snapshot is still authoritative and must not be
+                    # silently discarded when undo consumes the history item.
+                    try:
+                        loaded_row = self.get_loaded_row_for_path(target_image.path)
+                    except (AttributeError, TypeError, ValueError):
+                        loaded_row = -1
+                    if loaded_row >= 0:
+                        loaded_index = self.index(loaded_row, 0)
+                        loaded_image = loaded_index.data(Qt.ItemDataRole.UserRole)
+                        if loaded_image is not None:
+                            return loaded_image, loaded_row
+                    return target_image, None
             except ValueError:
                 pass
             except Exception:
@@ -8344,6 +8364,7 @@ class ImageListModel(QAbstractListModel):
                 paginated_snapshot=self._capture_paginated_tag_snapshot(
                     history_item.paginated_snapshot.keys()
                 ),
+                created_at_ns=history_item.created_at_ns,
             ))
             self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
             self.update_undo_and_redo_actions_requested.emit()
@@ -8368,6 +8389,7 @@ class ImageListModel(QAbstractListModel):
                     [],
                     history_item.should_ask_for_confirmation,
                     ideogram_sidecar_snapshots=reverse_snapshots,
+                    created_at_ns=history_item.created_at_ns,
                 ))
             if changed_image_indices:
                 changed_image_indices = sorted(set(changed_image_indices))
@@ -8405,6 +8427,7 @@ class ImageListModel(QAbstractListModel):
                     [],
                     history_item.should_ask_for_confirmation,
                     image_snapshots=reverse_snapshots,
+                    created_at_ns=history_item.created_at_ns,
                 ))
             if changed_image_indices:
                 changed_image_indices = sorted(set(changed_image_indices))
@@ -8431,7 +8454,8 @@ class ImageListModel(QAbstractListModel):
                  'loop_end_frame': image.loop_end_frame} for image in self.images]
         destination_stack.append(HistoryItem(
             history_item.action_name, tags,
-            history_item.should_ask_for_confirmation))
+            history_item.should_ask_for_confirmation,
+            created_at_ns=history_item.created_at_ns))
         changed_image_indices = []
         for image_index, (image, history_image_tags) in enumerate(
                 zip(self.images, history_item.tags)):
@@ -9523,6 +9547,8 @@ class ImageListModel(QAbstractListModel):
                                   self.index(changed_image_indices[-1]))
 
     def add_image_markings(self, image_index, markings: list[dict]) -> Image | None:
+        from utils.auto_crop import calculate_crop_avoiding_boxes
+
         referenced_image = self.resolve_image_reference(image_index)
         if referenced_image is None:
             return None
@@ -9536,7 +9562,15 @@ class ImageListModel(QAbstractListModel):
         # model object when the same path is currently loaded so the viewer can
         # display generated markings immediately instead of waiting for reload.
         image = loaded_image if isinstance(loaded_image, Image) else referenced_image
-        for marking in markings:
+        regular_markings = [
+            marking for marking in markings
+            if str(marking.get('type')) != 'crop out'
+        ]
+        crop_out_markings = [
+            marking for marking in markings
+            if str(marking.get('type')) == 'crop out'
+        ]
+        for marking in regular_markings:
             marking_type = {
                 'hint': ImageMarking.HINT,
                 'include': ImageMarking.INCLUDE,
@@ -9548,7 +9582,29 @@ class ImageListModel(QAbstractListModel):
                                           type=marking_type,
                                           rect=QRect(top_left, bottom_right),
                                           confidence=marking['confidence']))
-        if len(markings) > 0:
+        crop_created = False
+        if crop_out_markings and image.crop is None:
+            crop_settings = crop_out_markings[0]
+            generated_crop = calculate_crop_avoiding_boxes(
+                image.valid_dimensions(),
+                [marking.get('box', []) for marking in crop_out_markings],
+                padding_percent=float(
+                    crop_settings.get('crop_padding_percent', 1.0)
+                ),
+                minimum_retained_percent=float(
+                    crop_settings.get(
+                        'crop_minimum_retained_percent', 75.0
+                    )
+                ),
+            )
+            if generated_crop is not None:
+                image.crop = generated_crop
+                image.target_dimension = target_dimension.get(
+                    generated_crop.size()
+                )
+                image.thumbnail = None
+                crop_created = True
+        if regular_markings or crop_created:
             if loaded_index.isValid():
                 self.dataChanged.emit(loaded_index, loaded_index)
             self.write_meta_to_disk(image)

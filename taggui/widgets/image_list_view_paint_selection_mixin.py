@@ -518,8 +518,11 @@ class ImageListViewPaintSelectionMixin:
                     # Fast scroll optimization removed because it prevented placeholders from showing
                     self.itemDelegate().paint(painter, option, index)
 
-                    # Draw selection border on top
-                    if is_selected or is_current:
+                    # Draw the selection border only for selected items. The
+                    # current item may be intentionally deselected after a
+                    # Ctrl+click, so treating it as selected leaves a stale
+                    # selection highlight on screen.
+                    if is_selected:
                         painter.save()
                         pen = QPen(QColor(0, 120, 215), 4 if is_current else 2)
                         painter.setPen(pen)
@@ -689,6 +692,205 @@ class ImageListViewPaintSelectionMixin:
         self._virtual_selection_mode = None
         self._virtual_selection_paths = {}
         self.selection_summary_changed.emit()
+
+
+    def _selection_path_entries(self, indexes) -> tuple[tuple[str, str], ...]:
+        entries = {}
+        for index in indexes:
+            image = index.data(Qt.ItemDataRole.UserRole)
+            path = getattr(image, 'path', None) if image is not None else None
+            if path is None:
+                continue
+            path_text = str(path)
+            entries[self._virtual_selection_path_key(path_text)] = path_text
+        return tuple(sorted(entries.items()))
+
+
+    def _capture_selection_snapshot(self):
+        """Capture selection by media path instead of volatile model row."""
+        current = self.currentIndex()
+        current_entries = self._selection_path_entries([current]) if current.isValid() else ()
+        current_path = current_entries[0] if current_entries else None
+        virtual_paths = tuple(
+            sorted((getattr(self, '_virtual_selection_paths', {}) or {}).items())
+        )
+        return (
+            bool(getattr(self, '_virtual_select_all_active', False)),
+            str(getattr(self, '_virtual_selection_mode', '') or ''),
+            virtual_paths,
+            self._selection_path_entries(self.selectedIndexes()),
+            current_path,
+        )
+
+
+    def _on_selection_history_changed(self, *_args):
+        """Coalesce one user selection gesture into one undo entry."""
+        if (
+            getattr(self, '_selection_history_suspended', False)
+            or getattr(self, '_model_resetting', False)
+        ):
+            return
+
+        snapshot = self._capture_selection_snapshot()
+        if self._selection_history_current is None:
+            self._selection_history_current = snapshot
+            return
+        if self._selection_history_pending_before is None:
+            if snapshot == self._selection_history_current:
+                return
+            self._selection_history_pending_before = self._selection_history_current
+        self._selection_history_pending_after = snapshot
+        if self._selection_history_flush_scheduled:
+            return
+        self._selection_history_flush_scheduled = True
+        QTimer.singleShot(0, self._flush_selection_history_pending)
+
+
+    def _flush_selection_history_pending(self):
+        self._selection_history_flush_scheduled = False
+        before = self._selection_history_pending_before
+        after = self._selection_history_pending_after
+        self._selection_history_pending_before = None
+        self._selection_history_pending_after = None
+        if before is None or after is None or before == after:
+            return
+
+        self._selection_history.append(before)
+        del self._selection_history[:-32]
+        timestamps = getattr(self, '_selection_history_timestamps', None)
+        if timestamps is None:
+            self._selection_history_timestamps = []
+            timestamps = self._selection_history_timestamps
+        timestamps.append(time.monotonic_ns())
+        del timestamps[:-32]
+        self._selection_redo_history.clear()
+        getattr(self, '_selection_redo_timestamps', []).clear()
+        self._selection_history_current = after
+        self.selection_history_changed.emit()
+
+
+    def _flush_selection_history(self):
+        if getattr(self, '_selection_history_flush_scheduled', False):
+            self._flush_selection_history_pending()
+
+
+    def can_undo_selection(self) -> bool:
+        self._flush_selection_history()
+        return bool(getattr(self, '_selection_history', []))
+
+
+    def can_redo_selection(self) -> bool:
+        self._flush_selection_history()
+        return bool(getattr(self, '_selection_redo_history', []))
+
+
+    def selection_undo_timestamp(self) -> int:
+        self._flush_selection_history()
+        timestamps = getattr(self, '_selection_history_timestamps', [])
+        return int(timestamps[-1]) if timestamps else 0
+
+
+    def selection_redo_timestamp(self) -> int:
+        self._flush_selection_history()
+        timestamps = getattr(self, '_selection_redo_timestamps', [])
+        return int(timestamps[-1]) if timestamps else 0
+
+
+    def _restore_selection_snapshot(self, snapshot):
+        virtual_active, virtual_mode, virtual_paths, selected_paths, current_path = snapshot
+        selected_keys = {key for key, _path in selected_paths}
+        current_key = current_path[0] if current_path else None
+        model = self.model()
+        selection_model = self.selectionModel()
+        if model is None or selection_model is None:
+            return
+
+        self._selection_history_suspended = True
+        try:
+            if virtual_active:
+                self._virtual_select_all_active = True
+                self._virtual_selection_mode = virtual_mode or 'all_except'
+                self._virtual_selection_paths = dict(virtual_paths)
+                self._apply_virtual_selection_to_loaded_rows()
+            else:
+                self._virtual_select_all_active = False
+                self._virtual_selection_mode = None
+                self._virtual_selection_paths = {}
+                selection_model.clearSelection()
+                current_match = None
+                first_selected = None
+                for row in range(model.rowCount()):
+                    index = model.index(row, 0)
+                    path_entries = self._selection_path_entries([index])
+                    path_key = path_entries[0][0] if path_entries else None
+                    if path_key == current_key:
+                        current_match = index
+                    if path_key in selected_keys:
+                        selection_model.select(index, QItemSelectionModel.Select)
+                        if first_selected is None:
+                            first_selected = index
+                current_match = current_match or first_selected
+                if current_match is not None and current_match.isValid():
+                    selection_model.setCurrentIndex(
+                        current_match,
+                        QItemSelectionModel.NoUpdate,
+                    )
+
+            if virtual_active and current_key is not None:
+                for row in range(model.rowCount()):
+                    index = model.index(row, 0)
+                    path_entries = self._selection_path_entries([index])
+                    if path_entries and path_entries[0][0] == current_key:
+                        selection_model.setCurrentIndex(
+                            index,
+                            QItemSelectionModel.NoUpdate,
+                        )
+                        break
+            self._selection_history_current = snapshot
+            self.viewport().update()
+            self.selection_summary_changed.emit()
+        finally:
+            self._selection_history_suspended = False
+
+
+    def undo_selection(self) -> bool:
+        self._flush_selection_history()
+        if not self._selection_history:
+            return False
+        current = self._selection_history_current or self._capture_selection_snapshot()
+        target = self._selection_history.pop()
+        timestamps = getattr(self, '_selection_history_timestamps', [])
+        action_timestamp = timestamps.pop() if timestamps else time.monotonic_ns()
+        self._selection_redo_history.append(current)
+        redo_timestamps = getattr(self, '_selection_redo_timestamps', None)
+        if redo_timestamps is None:
+            self._selection_redo_timestamps = []
+            redo_timestamps = self._selection_redo_timestamps
+        redo_timestamps.append(action_timestamp)
+        self._restore_selection_snapshot(target)
+        self.selection_history_changed.emit()
+        return True
+
+
+    def redo_selection(self) -> bool:
+        self._flush_selection_history()
+        if not self._selection_redo_history:
+            return False
+        current = self._selection_history_current or self._capture_selection_snapshot()
+        target = self._selection_redo_history.pop()
+        redo_timestamps = getattr(self, '_selection_redo_timestamps', [])
+        action_timestamp = (
+            redo_timestamps.pop() if redo_timestamps else time.monotonic_ns()
+        )
+        self._selection_history.append(current)
+        timestamps = getattr(self, '_selection_history_timestamps', None)
+        if timestamps is None:
+            self._selection_history_timestamps = []
+            timestamps = self._selection_history_timestamps
+        timestamps.append(action_timestamp)
+        self._restore_selection_snapshot(target)
+        self.selection_history_changed.emit()
+        return True
 
 
     def has_virtual_dataset_selection(self) -> bool:

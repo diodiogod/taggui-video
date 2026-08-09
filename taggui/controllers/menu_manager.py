@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -581,6 +582,12 @@ class MenuManager:
         self.rating_widget = None
         self.love_button = None
         self.bomb_button = None
+        self._latest_unified_action_timestamp = 0
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(
+                lambda *_args: self.update_undo_and_redo_actions()
+            )
 
     def create_menus(self):
         """Create and setup menu bar."""
@@ -734,6 +741,15 @@ class MenuManager:
         export_action.triggered.connect(self.main_window.export_images_dialog)
         file_menu.addAction(export_action)
 
+        apply_marking_effects_action = QAction(
+            'Apply Exclude Markings to Source Images…',
+            parent=self.main_window,
+        )
+        apply_marking_effects_action.triggered.connect(
+            self.main_window.marking_effects_controller.apply_exclude_markings
+        )
+        file_menu.addAction(apply_marking_effects_action)
+
         settings_action = QAction('Settings...', parent=self.main_window)
         settings_action.setShortcut(QKeySequence('Ctrl+Alt+S'))
         settings_action.triggered.connect(self.main_window.show_settings_dialog)
@@ -749,16 +765,12 @@ class MenuManager:
         edit_menu = menu_bar.addMenu('Edit')
 
         self.undo_action.setShortcut(QKeySequence('Ctrl+Z'))
-        self.undo_action.triggered.connect(
-            lambda: self._active_image_list_model().undo()
-        )
+        self.undo_action.triggered.connect(self.undo_active_context)
         self.undo_action.setDisabled(True)
         edit_menu.addAction(self.undo_action)
 
         self.redo_action.setShortcut(QKeySequence('Ctrl+Y'))
-        self.redo_action.triggered.connect(
-            lambda: self._active_image_list_model().redo()
-        )
+        self.redo_action.triggered.connect(self.redo_active_context)
         self.redo_action.setDisabled(True)
         edit_menu.addAction(self.redo_action)
 
@@ -1068,22 +1080,150 @@ class MenuManager:
 
     def update_undo_and_redo_actions(self):
         """Update undo/redo menu action text and enabled state."""
-        image_list_model = self._active_image_list_model()
-        if image_list_model.undo_stack:
-            undo_action_name = image_list_model.undo_stack[-1].action_name
-            self.undo_action.setText(f'Undo "{undo_action_name}"')
-            self.undo_action.setDisabled(False)
-        else:
+        undo_candidates = self._unified_history_candidates(is_undo=True)
+        newest_timestamp = max(
+            (candidate[0] for candidate in undo_candidates),
+            default=0,
+        )
+        if newest_timestamp > self._latest_unified_action_timestamp:
+            if self._latest_unified_action_timestamp > 0:
+                self._clear_unified_redo_histories()
+            self._latest_unified_action_timestamp = newest_timestamp
+        redo_candidates = self._unified_history_candidates(is_undo=False)
+        undo_candidate = max(undo_candidates, default=None, key=lambda item: item[0])
+        # Redo follows the reverse of the undo sequence, so the oldest original
+        # timestamp currently exposed by a provider is the next valid action.
+        redo_candidate = min(redo_candidates, default=None, key=lambda item: item[0])
+        if undo_candidate is None:
             self.undo_action.setText('Undo')
             self.undo_action.setDisabled(True)
-
-        if image_list_model.redo_stack:
-            redo_action_name = image_list_model.redo_stack[-1].action_name
-            self.redo_action.setText(f'Redo "{redo_action_name}"')
-            self.redo_action.setDisabled(False)
         else:
+            self.undo_action.setText(f'Undo "{undo_candidate[1]}"')
+            self.undo_action.setDisabled(False)
+        if redo_candidate is None:
             self.redo_action.setText('Redo')
             self.redo_action.setDisabled(True)
+        else:
+            self.redo_action.setText(f'Redo "{redo_candidate[1]}"')
+            self.redo_action.setDisabled(False)
+
+    def _selection_history_views(self):
+        views = [
+            getattr(getattr(self.main_window, 'image_list', None), 'list_view', None),
+            getattr(
+                getattr(getattr(self.main_window, '_secondary_browser', None), 'dock', None),
+                'list_view',
+                None,
+            ),
+        ]
+        return [view for view in views if view is not None]
+
+    def _unified_history_candidates(self, *, is_undo: bool):
+        candidates = []
+        model = self._active_image_list_model()
+        stack = model.undo_stack if is_undo else model.redo_stack
+        if stack:
+            item = stack[-1]
+            candidates.append((
+                int(getattr(item, 'created_at_ns', 0) or 0),
+                str(item.action_name),
+                ('model', model),
+            ))
+        for view in self._selection_history_views():
+            can_apply = (
+                view.can_undo_selection() if is_undo
+                else view.can_redo_selection()
+            )
+            if can_apply:
+                timestamp = (
+                    view.selection_undo_timestamp() if is_undo
+                    else view.selection_redo_timestamp()
+                )
+                candidates.append((timestamp, 'Selection', ('selection', view)))
+        effects = self.main_window.marking_effects_controller
+        can_apply_effect = effects.can_undo() if is_undo else effects.can_redo()
+        if can_apply_effect:
+            candidates.append((
+                effects.undo_timestamp() if is_undo else effects.redo_timestamp(),
+                effects.undo_action_name() if is_undo else effects.redo_action_name(),
+                ('effect', effects),
+            ))
+        return candidates
+
+    def _clear_unified_redo_histories(self):
+        models = [
+            getattr(self.main_window, 'image_list_model', None),
+            getattr(
+                getattr(self.main_window, '_secondary_browser', None),
+                'image_list_model',
+                None,
+            ),
+        ]
+        for model in models:
+            if model is not None:
+                model.redo_stack.clear()
+        for view in self._selection_history_views():
+            view._selection_redo_history.clear()
+            getattr(view, '_selection_redo_timestamps', []).clear()
+        self.main_window.marking_effects_controller.clear_redo()
+
+    def _focused_image_list_view(self):
+        """Return the thumbnail list that currently owns keyboard focus."""
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None:
+            return None
+
+        candidates = [
+            getattr(getattr(self.main_window, 'image_list', None), 'list_view', None),
+            getattr(
+                getattr(getattr(self.main_window, '_secondary_browser', None), 'dock', None),
+                'list_view',
+                None,
+            ),
+        ]
+        for view in candidates:
+            if view is None:
+                continue
+            try:
+                if focus_widget is view or view.isAncestorOf(focus_widget):
+                    return view
+            except RuntimeError:
+                continue
+        return None
+
+    def undo_active_context(self):
+        candidate = max(
+            self._unified_history_candidates(is_undo=True),
+            default=None,
+            key=lambda item: item[0],
+        )
+        if candidate is None:
+            return
+        provider_type, provider = candidate[2]
+        if provider_type == 'selection':
+            provider.undo_selection()
+        elif provider_type == 'effect':
+            provider.undo_last_effect(confirm=False)
+        else:
+            provider.undo()
+        self.update_undo_and_redo_actions()
+
+    def redo_active_context(self):
+        candidate = min(
+            self._unified_history_candidates(is_undo=False),
+            default=None,
+            key=lambda item: item[0],
+        )
+        if candidate is None:
+            return
+        provider_type, provider = candidate[2]
+        if provider_type == 'selection':
+            provider.redo_selection()
+        elif provider_type == 'effect':
+            provider.redo_last_effect()
+        else:
+            provider.redo()
+        self.update_undo_and_redo_actions()
 
     def _active_image_list_model(self):
         manager = getattr(self.main_window, '_context_switch_manager', None)

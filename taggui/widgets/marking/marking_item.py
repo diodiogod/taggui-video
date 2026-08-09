@@ -98,18 +98,31 @@ class MarkingItem(QGraphicsRectItem):
         # Instance variable for sticky snapping feature
         self.last_snapped_bucket_size = None
 
-        if rect_type in [ImageMarking.INCLUDE, ImageMarking.EXCLUDE]:
+        self.area = None
+        if rect_type in {ImageMarking.INCLUDE, ImageMarking.EXCLUDE}:
+            self.set_rect_type(rect_type)
+        if interactive:
+            MarkingItem.handle_selected = RectPosition.BR
+
+    def set_rect_type(self, rect_type: ImageMarking):
+        """Apply a marking type and keep every visual layer in sync."""
+        self.rect_type = rect_type
+        self.color = marking_colors[rect_type]
+        uses_area = rect_type in {ImageMarking.INCLUDE, ImageMarking.EXCLUDE}
+        if uses_area and self.area is None:
             self.area = QGraphicsRectItem(self)
-            self.area.setVisible(self.show_marking_latent)
             self.area.setFlag(QGraphicsItem.ItemStacksBehindParent)
             self.area.setZValue(1)
+            self.area.setPen(Qt.NoPen)
+        if self.area is not None:
             area_color = QColor(self.color)
             area_color.setAlpha(127)
             self.area.setBrush(area_color)
-            self.area.setPen(Qt.NoPen)
-            self.move()
-        if interactive:
-            MarkingItem.handle_selected = RectPosition.BR
+            self.area.setVisible(uses_area and self.show_marking_latent)
+        if self.label is not None and self.label.parentItem() is not None:
+            self.label.parentItem().setBrush(self.color)
+        self.move()
+        self.update()
 
     def _proxy_source_model(self):
         try:
@@ -190,7 +203,10 @@ class MarkingItem(QGraphicsRectItem):
             self.move()
         elif (event.button() == Qt.MouseButton.RightButton and
                 MarkingItem.handle_selected != RectPosition.NONE):
-            pass
+            # Let the owning view receive the context-menu gesture. Accepting
+            # the press here swallows it before ImageGraphicsView can show its
+            # marking type actions.
+            event.ignore()
         else:
             event.ignore()
 

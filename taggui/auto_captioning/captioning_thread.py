@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QModelIndex, Signal
 
+from auto_captioning.auto_captioning_model import replace_template_variables
 from auto_captioning.models_list import get_model_class
 from models.image_list_model import ImageListModel
 from utils.enums import CaptionPosition
@@ -116,9 +117,14 @@ class CaptioningThread(ModelThread):
 
     def get_model_inputs(self, image: Image):
         if self.caption_settings.get('output_format') == 'Ideogram 4 JSON':
+            user_prompt = replace_template_variables(
+                self.caption_settings.get('prompt', ''),
+                image,
+                bool(self.caption_settings.get('skip_hash', True)),
+            )
             image_prompt, seed_elements = build_ideogram_caption_prompt(
                 image,
-                user_prompt=self.caption_settings.get('prompt', ''),
+                user_prompt=user_prompt,
             )
             self._ideogram_seed_elements = seed_elements
         else:

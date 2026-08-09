@@ -4495,6 +4495,12 @@ class ImageViewer(QWidget):
         current_image.markings = self._deduplicated_markings(
             current_image.markings
         )
+        if current_image.crop is not None and self.crop_marking is None:
+            self.add_rectangle(
+                current_image.crop,
+                ImageMarking.CROP,
+                interactive=False,
+            )
         for marking in current_image.markings:
             self.add_rectangle(
                 marking.rect,
@@ -4506,6 +4512,17 @@ class ImageViewer(QWidget):
         self._apply_marking_ideogram_overlay_priority()
         self.scene.invalidate()
         self.view.viewport().update()
+
+    def rebuild_marking_overlays(self, image: Image | None = None):
+        """Rebuild marking graphics after metadata history is restored."""
+        if not self.proxy_image_index.isValid():
+            return
+        current_image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+        if current_image is None or (image is not None and current_image is not image):
+            return
+        self._clear_marking_items_from_scene()
+        self._clear_hud_crop_if_alive()
+        self.refresh_marking_overlays(current_image)
 
     def update_marking_overlay_geometry(
         self,
@@ -4713,16 +4730,39 @@ class ImageViewer(QWidget):
         for item in items:
             if new_marking == ImageMarking.NONE:
                 # default: toggle between all types
-                item.rect_type = {ImageMarking.HINT: ImageMarking.EXCLUDE,
-                                  ImageMarking.INCLUDE: ImageMarking.HINT,
-                                  ImageMarking.EXCLUDE: ImageMarking.INCLUDE
-                                 }[item.rect_type]
+                target_type = {ImageMarking.HINT: ImageMarking.EXCLUDE,
+                               ImageMarking.INCLUDE: ImageMarking.HINT,
+                               ImageMarking.EXCLUDE: ImageMarking.INCLUDE
+                              }[item.rect_type]
             else:
-                item.rect_type = new_marking
-            item.color = marking_colors[item.rect_type]
-            item.label.parentItem().setBrush(item.color)
+                target_type = new_marking
+            self._rename_default_marking_label(item, target_type)
+            item.set_rect_type(target_type)
             self.marking_changed(item)
-            item.update()
+
+    @staticmethod
+    def _rename_default_marking_label(item: MarkingItem, target_type: ImageMarking):
+        """Rename generated type labels while preserving meaningful custom names."""
+        if item.label is None:
+            return
+        rendered_label = item.label.toPlainText()
+        match = re.match(r'^(.*?)(:\s*\d*\.\d+)?$', rendered_label)
+        base_label = (match.group(1) if match else rendered_label).strip()
+        suffix = (match.group(2) or '') if match else ''
+        default_aliases = {
+            'hint', 'include', 'inclusion', 'exclude', 'exclusion',
+            'include in mask', 'exclude from mask',
+        }
+        if base_label.casefold() not in default_aliases:
+            return
+        replacement = {
+            ImageMarking.HINT: 'hint',
+            ImageMarking.INCLUDE: 'include',
+            ImageMarking.EXCLUDE: 'exclude',
+        }[target_type]
+        item.label.setPlainText(f'{replacement}{suffix}')
+        item.label._sync_background_rect()
+        item.setData(0, replacement)
 
     @Slot(bool)
     def show_marking(self, checked: bool):

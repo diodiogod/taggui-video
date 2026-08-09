@@ -59,6 +59,7 @@ def replace_template_variable(match: re.Match, image: Image, skip_hash: bool) ->
         return image.path.stem
     if template_variable in ('directory', 'folder'):
         return image.path.parent.name
+    return match.group(0)
 
 
 def replace_template_variables(text: str, image: Image, skip_hash: bool) -> str:
@@ -447,6 +448,12 @@ class AutoCaptioningModel:
             image_prompt = self.prompt
         image_prompt = self.format_prompt(image_prompt)
         return image_prompt
+
+    def get_system_prompt(self, image: Image) -> str:
+        system_prompt = self.caption_settings.get('system_prompt', '')
+        return replace_template_variables(
+            system_prompt, image, self.skip_hash
+        ).strip()
 
     def get_input_text(self, image_prompt: str) -> str:
         if image_prompt and self.caption_start:

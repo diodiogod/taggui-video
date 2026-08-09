@@ -69,6 +69,7 @@ class ImageListView(
     directory_reload_requested = Signal()
     layout_ready = Signal()  # Emitted when masonry layout is fully calculated and applied
     selection_summary_changed = Signal()
+    selection_history_changed = Signal()
 
     def __init__(self, parent, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
@@ -289,6 +290,15 @@ class ImageListView(
         self._painted_hit_regions_scroll_offset = 0  # Scroll offset when snapshot was captured
         self._selected_rows_cache: set[int] = set()
         self._selected_global_rows_cache: set[int] = set()
+        self._selection_history: list = []
+        self._selection_redo_history: list = []
+        self._selection_history_timestamps: list[int] = []
+        self._selection_redo_timestamps: list[int] = []
+        self._selection_history_current = None
+        self._selection_history_pending_before = None
+        self._selection_history_pending_after = None
+        self._selection_history_flush_scheduled = False
+        self._selection_history_suspended = False
         self._current_proxy_row_cache = -1
         self._current_global_row_cache = -1
         self._model_resetting = False
@@ -448,6 +458,8 @@ class ImageListView(
             self.update_context_menu_actions)
         self.selectionModel().selectionChanged.connect(
             self._on_selection_changed_cache)
+        self.selectionModel().selectionChanged.connect(
+            self._on_selection_history_changed)
         self.selectionModel().currentChanged.connect(
             self._remember_selected_global_index)
         self.selectionModel().currentChanged.connect(
@@ -457,6 +469,7 @@ class ImageListView(
         source_model.modelAboutToBeReset.connect(self._clear_selection_cache)
         source_model.modelReset.connect(self._clear_selection_cache)
         self.update_context_menu_actions()
+        self._selection_history_current = self._capture_selection_snapshot()
 
     def _reaction_feedback_anchor_rect(self, target_global: int | None = None) -> QRect:
         viewport_rect = self.viewport().rect()

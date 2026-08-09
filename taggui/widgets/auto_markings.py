@@ -414,6 +414,36 @@ class MarkingSettingsForm(QWidget):
         self.merge_overlap_threshold_spin_box.setSingleStep(0.05)
         advanced_settings_form.addRow('Merge overlap threshold',
                                       self.merge_overlap_threshold_spin_box)
+        self.crop_padding_percent_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='auto_marking_crop_padding_percent',
+            default=DEFAULT_SETTINGS['auto_marking_crop_padding_percent'],
+            minimum=0.0,
+            maximum=20.0)
+        self.crop_padding_percent_spin_box.setSingleStep(0.5)
+        self.crop_padding_percent_spin_box.setSuffix('%')
+        self.crop_padding_percent_spin_box.setToolTip(
+            'Extra space removed around detections mapped to crop out.'
+        )
+        advanced_settings_form.addRow(
+            'Crop-out padding', self.crop_padding_percent_spin_box)
+        self.crop_minimum_retained_percent_spin_box = (
+            FocusedScrollSettingsDoubleSpinBox(
+                key='auto_marking_crop_minimum_retained_percent',
+                default=DEFAULT_SETTINGS[
+                    'auto_marking_crop_minimum_retained_percent'
+                ],
+                minimum=1.0,
+                maximum=100.0)
+        )
+        self.crop_minimum_retained_percent_spin_box.setSingleStep(1.0)
+        self.crop_minimum_retained_percent_spin_box.setSuffix('%')
+        self.crop_minimum_retained_percent_spin_box.setToolTip(
+            'Skip automatic crops that would preserve less than this '
+            'percentage of the image.'
+        )
+        advanced_settings_form.addRow(
+            'Minimum image retained',
+            self.crop_minimum_retained_percent_spin_box)
         self.advanced_settings_form_container.hide()
 
         root.addWidget(self.toggle_advanced_settings_form_button)
@@ -532,6 +562,10 @@ class MarkingSettingsForm(QWidget):
             'max_det': self.max_det_spin_box.value(),
             'merge_overlaps': self.merge_overlaps_check_box.isChecked(),
             'merge_overlap_threshold': self.merge_overlap_threshold_spin_box.value(),
+            'crop_padding_percent': self.crop_padding_percent_spin_box.value(),
+            'crop_minimum_retained_percent': (
+                self.crop_minimum_retained_percent_spin_box.value()
+            ),
             'classes': None
         }
 
@@ -1593,6 +1627,7 @@ class AutoMarkings(QDockWidget):
                 combo.addItem(create_add_box_icon(Qt.gray), 'hint')
                 combo.addItem(create_add_box_icon(Qt.red), 'exclude')
                 combo.addItem(create_add_box_icon(Qt.green), 'include')
+                combo.addItem(create_add_box_icon(Qt.blue), 'crop out')
                 combo.installEventFilter(self)
                 combo.currentTextChanged.connect(
                     lambda _text, self=self: self._persist_class_actions_for_current_model()

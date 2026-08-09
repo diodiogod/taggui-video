@@ -208,6 +208,12 @@ class PipelineRunner(QObject):
             "merge_overlap_threshold": float(
                 step.settings.get("merge_overlap_threshold", 0.6)
             ),
+            "crop_padding_percent": float(
+                step.settings.get("crop_padding_percent", 1.0)
+            ),
+            "crop_minimum_retained_percent": float(
+                step.settings.get("crop_minimum_retained_percent", 75.0)
+            ),
             "marking_type": str(step.settings.get("marking_type", "hint")),
             "class_names": list(class_names),
             "class_label_overrides": class_label_overrides,
@@ -377,6 +383,7 @@ class PipelineRunner(QObject):
                 "hint": "hint",
                 "include": "include in mask",
                 "exclude": "exclude from mask",
+                "crop out": "crop out",
             }.get(str(marking.get("type")), str(marking.get("type")))
             from math import ceil, floor
             rect_key = (

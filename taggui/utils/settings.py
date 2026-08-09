@@ -70,6 +70,8 @@ DEFAULT_SETTINGS = {
     'video_volume': 1.0,
     'auto_marking_merge_overlaps': False,
     'auto_marking_merge_overlap_threshold': 0.6,
+    'auto_marking_crop_padding_percent': 1.0,
+    'auto_marking_crop_minimum_retained_percent': 75.0,
     'auto_markings_ui_zoom': 100,
     'trusted_marking_models_json': '{}',
     'show_ideogram_caption_overlays': True,

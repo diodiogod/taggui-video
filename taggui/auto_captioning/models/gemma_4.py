@@ -94,7 +94,7 @@ class Gemma4(AutoCaptioningModel):
             ]
 
         messages = []
-        system_prompt = self.caption_settings.get('system_prompt', '').strip()
+        system_prompt = self.get_system_prompt(image)
         if system_prompt:
             messages.append({
                 'role': 'system',

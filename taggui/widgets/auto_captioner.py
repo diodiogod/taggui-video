@@ -158,6 +158,12 @@ IDEOGRAM_JSON_PROMPT = (
     'covered. Return complete JSON only.'
 )
 
+PROMPT_TEMPLATE_VARIABLES_TOOLTIP = (
+    'Per-image placeholders: {name} inserts the filename without its extension; '
+    '{folder} or {directory} inserts the immediate containing folder; and '
+    '{tags} inserts the current tags.'
+)
+
 
 class HorizontalLine(QFrame):
     def __init__(self):
@@ -495,6 +501,9 @@ class CaptionSettingsForm:
             key='system_prompt',
             default=PLAIN_CAPTION_SYSTEM_PROMPT,
         )
+        self.system_prompt_text_edit.setToolTip(
+            PROMPT_TEMPLATE_VARIABLES_TOOLTIP
+        )
         set_text_edit_height(self.system_prompt_text_edit, 3)
         self.system_prompt_history_button = self._make_history_menu_button(
             'View System Prompt History',
@@ -518,6 +527,7 @@ class CaptionSettingsForm:
 
         self.prompt_label = QLabel('Prompt')
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
+        self.prompt_text_edit.setToolTip(PROMPT_TEMPLATE_VARIABLES_TOOLTIP)
         set_text_edit_height(self.prompt_text_edit, 4)
         self.prompt_history_button = self._make_history_menu_button(
             'View Prompt History',
@@ -1756,12 +1766,13 @@ class CaptionSettingsForm:
             self.prompt_text_edit.setToolTip(
                 'Extra instruction appended to each per-image Ideogram prompt. '
                 'The actual generation prompt is built dynamically with aspect '
-                'ratio and existing sidecar/marking regions.'
+                'ratio and existing sidecar/marking regions.\n\n'
+                + PROMPT_TEMPLATE_VARIABLES_TOOLTIP
             )
         else:
             self.system_prompt_label.setText('System Prompt')
             self.prompt_label.setText('Prompt')
-            self.prompt_text_edit.setToolTip('')
+            self.prompt_text_edit.setToolTip(PROMPT_TEMPLATE_VARIABLES_TOOLTIP)
 
     @Slot()
     def reset_current_mode_system_prompt(self):

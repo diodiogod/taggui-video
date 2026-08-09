@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QGraphicsView, QGraphicsTextItem)
 
 from controllers.video_editing_controller import VideoEditingController
+from controllers.marking_effects_controller import MarkingEffectsController
 from controllers.toolbar_manager import ToolbarManager
 from controllers.menu_manager import MenuManager
 from controllers.signal_manager import SignalManager
@@ -633,6 +634,7 @@ class MainWindow(QMainWindow):
 
         # Initialize controllers and managers
         self.video_editing_controller = VideoEditingController(self)
+        self.marking_effects_controller = MarkingEffectsController(self)
         self.toolbar_manager = ToolbarManager(self)
         self.menu_manager = MenuManager(self)
         self.signal_manager = SignalManager(self)
@@ -874,6 +876,9 @@ class MainWindow(QMainWindow):
 
         # Connect all signals
         self.signal_manager.connect_all_signals()
+        self.image_list.list_view.selection_history_changed.connect(
+            self.menu_manager.update_undo_and_redo_actions
+        )
         self.sync_zoom_follow_mode_button(self.image_viewer)
         self.app.installEventFilter(self)
 
@@ -8054,11 +8059,17 @@ class MainWindow(QMainWindow):
         self._secondary_browser.image_list_model.update_undo_and_redo_actions_requested.connect(
             self.menu_manager.update_undo_and_redo_actions
         )
+        self._secondary_browser.dock.list_view.selection_history_changed.connect(
+            self.menu_manager.update_undo_and_redo_actions
+        )
         self._secondary_browser.image_list_model.ideogram_sidecars_restored.connect(
             self.signal_manager._refresh_current_ideogram_after_history_restore
         )
         self._secondary_browser.image_list_model.image_history_restored.connect(
-            self.signal_manager._refresh_current_image_after_history_restore
+            lambda paths, model=self._secondary_browser.image_list_model:
+                self.signal_manager._refresh_current_image_after_history_restore(
+                    paths, model
+                )
         )
         self._secondary_browser.dock.deletion_marking_changed.connect(
             self.signal_manager._update_delete_button_visibility

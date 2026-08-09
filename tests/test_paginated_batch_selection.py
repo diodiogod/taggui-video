@@ -6,8 +6,9 @@ import pytest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QItemSelectionModel, QStringListModel, Qt, Signal
+from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import QApplication, QListView
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'taggui'))
@@ -19,6 +20,7 @@ from utils.image_index_db import ImageIndexDB
 from widgets.image_list_view_paint_selection_mixin import (
     ImageListViewPaintSelectionMixin,
 )
+from widgets.image_list_view_interaction_mixin import ImageListViewInteractionMixin
 
 
 class _FakeSourceModel:
@@ -146,6 +148,88 @@ def test_virtual_ctrl_toggle_records_exclusions_and_inclusions(tmp_path):
     assert view._virtual_selection_paths == {}
     assert ImageListViewPaintSelectionMixin.get_selected_image_count(view) == 400_000
     assert view.selection_summary_changed.emissions == 2
+
+
+def test_ctrl_toggle_deselects_an_existing_thumbnail_without_clearing_others():
+    app = QApplication.instance() or QApplication([])
+    model = QStringListModel(['one', 'two', 'three'])
+    selection_model = QItemSelectionModel(model)
+
+    class _View:
+        def selectionModel(self):
+            return selection_model
+
+        def update_virtual_selection_for_toggle(self, index, *, was_selected):
+            self.last_toggle = (index.row(), was_selected)
+
+    view = _View()
+    first = model.index(0, 0)
+    second = model.index(1, 0)
+    selection_model.select(first, QItemSelectionModel.Select)
+    selection_model.select(second, QItemSelectionModel.Select)
+
+    assert ImageListViewInteractionMixin._toggle_thumbnail_selection(view, second)
+    assert [index.row() for index in selection_model.selectedIndexes()] == [0]
+    assert view.last_toggle == (1, True)
+
+    assert not ImageListViewInteractionMixin._toggle_thumbnail_selection(view, second)
+    assert [index.row() for index in selection_model.selectedIndexes()] == [0, 1]
+    assert view.last_toggle == (1, False)
+
+
+def test_selection_undo_restores_previous_thumbnail_selection(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    model = QStandardItemModel()
+    for name in ('one.png', 'two.png', 'three.png'):
+        item = QStandardItem()
+        item.setData(
+            Image(tmp_path / name, (1, 1), []),
+            Qt.ItemDataRole.UserRole,
+        )
+        model.appendRow(item)
+
+    class _SelectionView(ImageListViewPaintSelectionMixin, QListView):
+        selection_summary_changed = Signal()
+        selection_history_changed = Signal()
+
+    view = _SelectionView()
+    view.setModel(model)
+    view.setSelectionMode(QListView.SelectionMode.ExtendedSelection)
+    view._virtual_select_all_active = False
+    view._virtual_selection_mode = None
+    view._virtual_selection_paths = {}
+    view._applying_virtual_select_all = False
+    view._model_resetting = False
+    view._selection_history = []
+    view._selection_redo_history = []
+    view._selection_history_current = view._capture_selection_snapshot()
+    view._selection_history_pending_before = None
+    view._selection_history_pending_after = None
+    view._selection_history_flush_scheduled = False
+    view._selection_history_suspended = False
+    view.selectionModel().selectionChanged.connect(
+        view._on_selection_history_changed
+    )
+
+    for row in (0, 1):
+        view.selectionModel().select(
+            model.index(row, 0),
+            QItemSelectionModel.Select,
+        )
+    app.processEvents()
+
+    view.selectionModel().setCurrentIndex(
+        model.index(2, 0),
+        QItemSelectionModel.ClearAndSelect,
+    )
+    app.processEvents()
+    assert [index.row() for index in view.selectedIndexes()] == [2]
+
+    assert view.undo_selection()
+    assert [index.row() for index in view.selectedIndexes()] == [0, 1]
+
+    assert view.redo_selection()
+    assert [index.row() for index in view.selectedIndexes()] == [2]
 
 
 def test_explicit_paginated_selection_uses_stable_path_batch(tmp_path):

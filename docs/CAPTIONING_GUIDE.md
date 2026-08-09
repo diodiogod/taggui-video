@@ -99,7 +99,8 @@ The prompt gives instructions to the captioning model.
 
 Prompt formats are handled automatically based on the selected model.
 
-Template variables currently documented for the workflow:
+Template variables are expanded separately for each image in both the System
+Prompt and Prompt fields:
 
 - `{tags}`: current tags, separated by commas
 - `{name}`: file name without extension

@@ -1189,6 +1189,21 @@ class ImageListViewInteractionMixin:
 
         return bool(self.selectedIndexes())
 
+    def _toggle_thumbnail_selection(self, index) -> bool:
+        """Toggle one thumbnail without changing the rest of the selection."""
+        selection_model = self.selectionModel()
+        if selection_model is None or not index.isValid():
+            return False
+
+        was_selected = selection_model.isSelected(index)
+        selection_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+        self.update_virtual_selection_for_toggle(
+            index,
+            was_selected=was_selected,
+        )
+        selection_model.select(index, QItemSelectionModel.Toggle)
+        return was_selected
+
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
@@ -1325,16 +1340,7 @@ class ImageListViewInteractionMixin:
                     self._suppress_virtual_auto_scroll_once = True
                     self._suppress_masonry_auto_scroll_once = True
                     if modifiers & Qt.ControlModifier:
-                        was_selected = sel_model.isSelected(index)
-                        sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-                        sel_model.select(
-                            index,
-                            QItemSelectionModel.Deselect if was_selected else QItemSelectionModel.Select,
-                        )
-                        self.update_virtual_selection_for_toggle(
-                            index,
-                            was_selected=was_selected,
-                        )
+                        self._toggle_thumbnail_selection(index)
                     elif modifiers & Qt.ShiftModifier:
                         self.clear_virtual_all_selection()
                         current = self.currentIndex()
@@ -1595,24 +1601,8 @@ class ImageListViewInteractionMixin:
 
                 if modifiers & Qt.ControlModifier:
                     # Ctrl+Click: toggle selection WITHOUT clearing others
-                    was_selected = self.selectionModel().isSelected(index)
-
-                    # First, set as current index
                     self._suppress_masonry_auto_scroll_once = True
-                    self.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-
-                    # Then toggle its selection state
-                    if was_selected:
-                        # print(f"[DEBUG] Ctrl+Click: deselecting row={index.row()}")
-                        self.selectionModel().select(index, QItemSelectionModel.Deselect)
-                    else:
-                        # print(f"[DEBUG] Ctrl+Click: selecting row={index.row()}")
-                        self.selectionModel().select(index, QItemSelectionModel.Select)
-
-                    self.update_virtual_selection_for_toggle(
-                        index,
-                        was_selected=was_selected,
-                    )
+                    self._toggle_thumbnail_selection(index)
 
                     # Debug: show all selected indices
                     # all_selected = [idx.row() for idx in self.selectionModel().selectedIndexes()]

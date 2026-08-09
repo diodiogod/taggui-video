@@ -295,7 +295,8 @@ class SignalManager:
             self._refresh_current_ideogram_after_history_restore
         )
         image_list_model.image_history_restored.connect(
-            self._refresh_current_image_after_history_restore
+            lambda paths, model=image_list_model:
+                self._refresh_current_image_after_history_restore(paths, model)
         )
         image_list_model.total_count_changed.connect(
             lambda _count: image_list.update_image_index_label(
@@ -617,7 +618,11 @@ class SignalManager:
         self.main_window.ideogram_caption_editor.load_media(image)
         self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
 
-    def _refresh_current_image_after_history_restore(self, media_paths: list[str]):
+    def _refresh_current_image_after_history_restore(
+        self,
+        media_paths: list[str],
+        source_model=None,
+    ):
         """Refresh the active viewer after undo/redo restores image metadata."""
         restored_paths = {str(Path(path)) for path in media_paths if path}
         target_viewer = self.main_window.get_selection_target_viewer()
@@ -629,7 +634,25 @@ class SignalManager:
         image = proxy_index.data(Qt.ItemDataRole.UserRole)
         if image is None or str(getattr(image, 'path', '') or '') not in restored_paths:
             return
-        target_viewer.load_image(proxy_index, False)
+        # Paginated/proxy models can temporarily expose a different Image
+        # instance from the one restored by history. Synchronize from the
+        # source model before rebuilding the scene overlay.
+        if source_model is not None:
+            try:
+                row = source_model.get_loaded_row_for_path(image.path)
+                restored_index = source_model.index(row, 0) if row >= 0 else QModelIndex()
+                restored_image = (
+                    restored_index.data(Qt.ItemDataRole.UserRole)
+                    if restored_index.isValid()
+                    else None
+                )
+            except (AttributeError, RuntimeError, TypeError):
+                restored_image = None
+            if restored_image is not None and restored_image is not image:
+                image.crop = restored_image.crop
+                image.target_dimension = restored_image.target_dimension
+                image.markings = restored_image.markings.copy()
+        target_viewer.rebuild_marking_overlays(image)
         self.main_window.ideogram_caption_editor.load_media(image)
         self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
 

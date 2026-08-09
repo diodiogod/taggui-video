@@ -299,7 +299,7 @@ class ImageGraphicsView(QGraphicsView):
         )
         if isinstance(item, MarkingLabel):
             item = item.parentItem().parentItem()
-        if isinstance(item, MarkingItem) and MarkingItem.handle_selected != RectPosition.NONE:
+        if isinstance(item, MarkingItem):
             menu = QMenu()
             if item.rect_type != ImageMarking.NONE:
                 if item.rect_type == ImageMarking.CROP:
@@ -629,14 +629,26 @@ class ImageGraphicsView(QGraphicsView):
         if self._space_pan_active:
             event.accept()
             return
-        item = self.scene().itemAt(self.mapToScene(event.pos()), self.transform())
+        scene_pos = self.mapToScene(event.pos())
+        item = (
+            self._selected_marking_resize_region_at(scene_pos)
+            or self._preferred_marking_region_at(scene_pos)
+            or self.scene().itemAt(scene_pos, self.transform())
+        )
         if isinstance(item, MarkingLabel):
             super().mouseDoubleClickEvent(event)
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and isinstance(item, MarkingItem)
+            and item.rect_type not in {ImageMarking.CROP, ImageMarking.NONE}
+        ):
+            self.image_viewer.change_marking([item])
+            event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and not self.insertion_mode:
             zoom_handler = getattr(self.image_viewer, "apply_floating_double_click_zoom", None)
             if callable(zoom_handler):
-                scene_pos = self.mapToScene(event.pos())
                 view_pos = event.pos()
                 try:
                     handled = bool(zoom_handler(scene_anchor_pos=scene_pos, view_anchor_pos=view_pos))

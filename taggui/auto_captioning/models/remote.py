@@ -201,14 +201,24 @@ class RemoteGen(AutoCaptioningModel):
             frames_b64 = self._extract_video_frames(image, fps, max_frames, crop)
             print(f'Remote: extracted {len(frames_b64)} frames at {fps:.1f} fps '
                   f'from {image.path.name}')
-            return {'frames_b64': frames_b64, 'is_video': True, 'fps': fps}
+            model_inputs = {
+                'frames_b64': frames_b64,
+                'is_video': True,
+                'fps': fps,
+            }
         else:
             pil_image = self.load_image(image, crop)
             pil_image = self._scale_frame(pil_image)
             buf = io.BytesIO()
             pil_image.save(buf, format='JPEG')
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-            return {'frames_b64': [image_b64], 'is_video': False, 'fps': None}
+            model_inputs = {
+                'frames_b64': [image_b64],
+                'is_video': False,
+                'fps': None,
+            }
+        model_inputs['system_prompt'] = self.get_system_prompt(image)
+        return model_inputs
 
     @staticmethod
     def _extract_message_content(message: dict) -> str:
@@ -289,7 +299,7 @@ class RemoteGen(AutoCaptioningModel):
             {
                 'role': 'system',
                 'content': (
-                    self.caption_settings.get('system_prompt', '').strip()
+                    model_inputs.get('system_prompt', '')
                     or 'You are an image and video captioning expert.'
                 )
             },
