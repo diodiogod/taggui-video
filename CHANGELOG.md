@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.11] - 2026-08-09
+
+### Added
+
+- Expand marking, cropping, and undo tools
+- Crop marked images individually or across the loaded folder
+- Apply blur, fill, noise, or inpainting directly to Exclude markings
+- Use lazy-loaded MI-GAN as the default high-quality inpainting option
+- Undo marking movement, image effects, metadata edits, and selections consistently
+- Cycle marking types with matching colors and sensible generated labels
+- See automatic markings immediately without reloading the folder
+- Use per-image placeholders in caption system prompts and prompts
+
+### Changed
+
+- Improve startup responsiveness and paginated selection reliability
 ## [1.4.10] - 2026-08-03
 
 ### Added
