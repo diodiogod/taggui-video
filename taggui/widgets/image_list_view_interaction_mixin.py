@@ -2826,6 +2826,7 @@ class ImageListViewInteractionMixin:
         target_global = max(0, min(total_items - 1, target_global))
 
         jump_kind = str(reason or "").strip() or "global_jump"
+        async_restore = jump_kind == "async_refresh_restore"
         strict_paginated_masonry = bool(
             self.use_masonry
             and hasattr(source_model, "_paginated_mode")
@@ -2904,7 +2905,10 @@ class ImageListViewInteractionMixin:
             try:
                 prepared_state = source_model.prepare_target_window(
                     int(target_global),
-                    sync_target_page=True,
+                    # The initial page may already be loading in the page
+                    # executor. Never duplicate that work on the GUI thread
+                    # while applying the asynchronous startup rank lookup.
+                    sync_target_page=not async_restore,
                     include_buffer=True,
                     prefer_forward=prefer_forward_window,
                     emit_update=True,
@@ -2914,7 +2918,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 prepared_state = None
 
-        if prepared_state is None and not strict_paginated_masonry:
+        if prepared_state is None and not strict_paginated_masonry and not async_restore:
             try:
                 pages = getattr(source_model, "_pages", {})
                 if isinstance(pages, dict) and target_page not in pages and hasattr(source_model, "_load_page_sync"):
