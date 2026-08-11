@@ -955,7 +955,9 @@ class ImageTagsEditor(QDockWidget):
         # after one tag is moved.
         current_string_list = self.image_tag_list_model.stringList()
         if current_string_list == tags_from_source:
-            if self.descriptive_mode_checkbox.isChecked() and caption_text is not None:
+            if (self.descriptive_mode_checkbox.isChecked()
+                    and caption_text is not None
+                    and self.descriptive_text_edit.toPlainText() != caption_text):
                 self.descriptive_text_edit.blockSignals(True)
                 self.descriptive_text_edit.setPlainText(caption_text)
                 self.descriptive_text_edit.blockSignals(False)
