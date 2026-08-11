@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.12] - 2026-08-11
+
+### Added
+
+- Keep the text cursor in place while editing saved image descriptions
+- Create reviewable crops that avoid selected markings
+- Apply effects directly from individual markings or across chosen marking types
+- Avoid crop HUD crashes during image and scene refreshes
+- Fall back safely when native OpenGL initialization fails
+- Show MPV as the recommended video playback option
+
+### Changed
+
+- Improve caption editing, marking tools, and graphics reliability
 ## [1.4.11] - 2026-08-09
 
 ### Added
