@@ -29,12 +29,15 @@ from utils.settings import (
 )
 from utils.video.playback_backend import (
     PLAYBACK_BACKEND_CHOICES,
+    PLAYBACK_BACKEND_MPV,
     PLAYBACK_BACKEND_QT_HYBRID,
+    PLAYBACK_BACKEND_DISPLAY_NAMES,
     MPV_RUNTIME_SEARCHED_DIRS,
     VLC_RUNTIME_SEARCHED_DIRS,
     get_playback_backend_status,
     resolve_runtime_playback_backend,
     normalize_playback_backend_name,
+    playback_backend_display_name,
 )
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox,
@@ -2320,25 +2323,34 @@ class SettingsDialog(QDialog):
     def _add_gpu_video_settings(self, grid_layout: QGridLayout, start_row: int):
         """Add advanced GPU/video backend settings block."""
         row = start_row
-        mpv_available, mpv_error = get_playback_backend_status('mpv_experimental')
+        mpv_available, mpv_error = get_playback_backend_status(PLAYBACK_BACKEND_MPV)
         vlc_available, vlc_error = get_playback_backend_status('vlc_experimental')
 
-        # Playback backend selector (migration scaffold; runtime currently falls back to qt_hybrid)
+        # Playback backend selector. Keep stable storage IDs behind friendly labels.
         grid_layout.addWidget(QLabel('Video playback backend'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
-        self.video_playback_backend_combo = SettingsComboBox(
-            key='video_playback_backend',
-            default=PLAYBACK_BACKEND_QT_HYBRID,
-        )
-        self.video_playback_backend_combo.addItems(PLAYBACK_BACKEND_CHOICES)
+        self.video_playback_backend_combo = QComboBox()
+        configured_backend = normalize_playback_backend_name(settings.value(
+            'video_playback_backend',
+            DEFAULT_SETTINGS.get('video_playback_backend', PLAYBACK_BACKEND_QT_HYBRID),
+            type=str,
+        ))
+        for backend_id in PLAYBACK_BACKEND_CHOICES:
+            self.video_playback_backend_combo.addItem(
+                PLAYBACK_BACKEND_DISPLAY_NAMES[backend_id],
+                backend_id,
+            )
+        configured_index = self.video_playback_backend_combo.findData(configured_backend)
+        if configured_index >= 0:
+            self.video_playback_backend_combo.setCurrentIndex(configured_index)
         self.video_playback_backend_combo.setToolTip(
             'Select preferred playback engine.\n\n'
-            'qt_hybrid: Current stable backend (Qt + OpenCV hybrid).\n'
-            'mpv_experimental: Experimental MPV backend.\n'
-            'vlc_experimental: Experimental libVLC backend.\n\n'
-            f'mpv availability in current runtime: {"yes" if mpv_available else "no"}.\n'
-            f'vlc availability in current runtime: {"yes" if vlc_available else "no"}.\n'
-            'When unavailable, selected experimental backend falls back to qt_hybrid.\n'
+            'MPV: Recommended primary backend for video workflows.\n'
+            'Qt Hybrid: Compatibility fallback using Qt and OpenCV.\n'
+            'VLC: Alternative experimental libVLC backend.\n\n'
+            f'MPV availability in current runtime: {"yes" if mpv_available else "no"}.\n'
+            f'VLC availability in current runtime: {"yes" if vlc_available else "no"}.\n'
+            'When a selected backend is unavailable, TagGUI uses Qt Hybrid.\n'
             + (f'\nmpv load error: {mpv_error}' if (not mpv_available and mpv_error) else '')
             + (f'\nvlc load error: {vlc_error}' if (not vlc_available and vlc_error) else '')
             + (
@@ -2352,8 +2364,8 @@ class SettingsDialog(QDialog):
                 '\n\nSearched runtime dirs (vlc): none found with vlc runtime files.'
             )
         )
-        self.video_playback_backend_combo.currentTextChanged.connect(
-            self._on_playback_backend_changed
+        self.video_playback_backend_combo.currentIndexChanged.connect(
+            self._on_playback_backend_index_changed
         )
         grid_layout.addWidget(self.video_playback_backend_combo, row, 1,
                               Qt.AlignmentFlag.AlignLeft)
@@ -2630,14 +2642,14 @@ class SettingsDialog(QDialog):
         runtime_backend = resolve_runtime_playback_backend(configured)
         backend_available, backend_error = get_playback_backend_status(configured)
         show_mpv_download = (
-            configured == 'mpv_experimental'
+            configured == PLAYBACK_BACKEND_MPV
             and not backend_available
             and sys.platform.startswith('win')
         )
         self.mpv_download_btn.setVisible(show_mpv_download)
         if configured != runtime_backend:
             extra = ''
-            if configured == 'mpv_experimental' and backend_error:
+            if configured == PLAYBACK_BACKEND_MPV and backend_error:
                 extra = f' ({backend_error})'
                 if not MPV_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
                     extra += " Place libmpv-2.dll in 'third_party/mpv/windows-x86_64/'."
@@ -2646,13 +2658,23 @@ class SettingsDialog(QDialog):
                 if not VLC_RUNTIME_SEARCHED_DIRS and sys.platform.startswith('win'):
                     extra += " Place libvlc.dll/libvlccore.dll in 'third_party/vlc/windows-x86_64/'."
             self.warning_label.setText(
-                f'Playback backend "{configured}" is not active yet; runtime uses "{runtime_backend}"{extra}.'
+                f'{playback_backend_display_name(configured)} is unavailable; '
+                f'using {playback_backend_display_name(runtime_backend)}{extra}.'
             )
             self.warning_label.setStyleSheet('color: #d48806;')
         else:
-            self.warning_label.setText(f'Playback backend set to "{runtime_backend}".')
+            self.warning_label.setText(
+                f'Playback backend set to {playback_backend_display_name(runtime_backend)}.'
+            )
             self.warning_label.setStyleSheet('color: #0a7f2e;')
         self.warning_label.show()
+
+    @Slot(int)
+    def _on_playback_backend_index_changed(self, index: int):
+        backend_id = self.video_playback_backend_combo.itemData(index)
+        configured = normalize_playback_backend_name(backend_id)
+        settings.setValue('video_playback_backend', configured)
+        self._on_playback_backend_changed(configured)
 
     @Slot(str)
     def _on_playback_gpu_preference_changed(self, _value: str):

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu, Q
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from utils.image import ImageMarking
+from utils.marking_effects import MARKING_EFFECTS
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.rect import RectPosition, map_rect_position_to_cursor
 from widgets.ideogram_region_item import IdeogramRegionItem
@@ -310,6 +311,24 @@ class ImageGraphicsView(QGraphicsView):
                     menu.addAction(apply_crop_action)
                     menu.addSeparator()
                 else:
+                    effects_controller = getattr(
+                        self.image_viewer,
+                        'marking_effects_controller',
+                        None,
+                    )
+                    if effects_controller is not None:
+                        effects_menu = menu.addMenu('Apply to Source Image')
+                        for effect in MARKING_EFFECTS:
+                            effect_action = effects_menu.addAction(effect)
+                            effect_action.triggered.connect(
+                                lambda checked=False, selected_effect=effect:
+                                    effects_controller.apply_single_marking_effect(
+                                        self.image_viewer,
+                                        item,
+                                        selected_effect,
+                                    )
+                                )
+                        menu.addSeparator()
                     marking_group = QActionGroup(menu)
                     change_to_hint_action = QAction('Hint', marking_group)
                     change_to_hint_action.setCheckable(True)

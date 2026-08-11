@@ -148,7 +148,7 @@ class MarkingItem(QGraphicsRectItem):
     def move(self):
         if self.rect_type == ImageMarking.CROP:
             hud_pos = MarkingItem.handle_selected if self._crop_feedback_active else RectPosition.NONE
-            self.image_view.image_viewer.hud_item.setValues(self.rect(), hud_pos)
+            self.image_view.image_viewer._set_hud_values_if_alive(self.rect(), hud_pos)
         elif self.rect_type == ImageMarking.INCLUDE:
             area_rect = QRectF(
                 grid.snap(self.rect().toRect().topLeft(), ceil),

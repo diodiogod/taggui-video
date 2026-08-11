@@ -8,8 +8,34 @@ import io
 import threading
 import faulthandler
 import argparse
+import subprocess
 from pathlib import Path
 from datetime import datetime
+
+if len(sys.argv) > 1 and sys.argv[1] == '--taggui-opengl-probe':
+    # Exercise the same QOpenGLWidget/native-window initialization that can
+    # block indefinitely in a display driver's first show() call. This runs in
+    # an isolated child so the launcher can time it out and choose software GL.
+    os.environ['QT_OPENGL'] = 'desktop'
+    from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+    probe_app = QApplication([])
+    probe_window = QWidget()
+    probe_window.setWindowTitle('TagGUI OpenGL probe')
+    probe_window.resize(8, 8)
+    probe_window.move(-32000, -32000)
+    probe_layout = QVBoxLayout(probe_window)
+    probe_gl_widget = QOpenGLWidget(probe_window)
+    probe_layout.addWidget(probe_gl_widget)
+    probe_window.show()
+    probe_app.processEvents()
+    probe_gl_widget.makeCurrent()
+    probe_context = probe_gl_widget.context()
+    probe_ok = bool(probe_context is not None and probe_context.isValid())
+    probe_gl_widget.doneCurrent()
+    probe_window.close()
+    raise SystemExit(0 if probe_ok else 2)
 
 if (
     len(sys.argv) > 1
@@ -232,6 +258,80 @@ def _configure_qt_graphics_stack():
     """Apply low-risk Qt graphics hints before QApplication is created."""
     if not sys.platform.startswith('win'):
         return
+
+    explicit_backend = str(os.getenv('QT_OPENGL', '') or '').strip()
+    skip_probe = os.getenv('TAGGUI_SKIP_OPENGL_PROBE', '0') == '1'
+    if not explicit_backend and not skip_probe:
+        try:
+            timeout_seconds = max(
+                1.0,
+                float(os.getenv('TAGGUI_OPENGL_PROBE_TIMEOUT_SECONDS', '6') or 6),
+            )
+        except (TypeError, ValueError):
+            timeout_seconds = 6.0
+
+        probe_started = time.perf_counter()
+        probe_command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            '--taggui-opengl-probe',
+        ]
+        probe_env = os.environ.copy()
+        probe_env['QT_OPENGL'] = 'desktop'
+        probe_process = None
+        try:
+            probe_process = subprocess.Popen(
+                probe_command,
+                env=probe_env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            probe_returncode = probe_process.wait(timeout=timeout_seconds)
+            probe_ok = probe_returncode == 0
+            probe_reason = f'exit={probe_returncode}'
+        except subprocess.TimeoutExpired:
+            probe_ok = False
+            probe_reason = f'timeout>{timeout_seconds:.1f}s'
+            # A Windows venv python.exe can be a launcher with the real base
+            # interpreter as its child. Kill the whole probe tree so a wedged
+            # NVIDIA driver call cannot survive the fallback decision.
+            if probe_process is not None:
+                try:
+                    subprocess.run(
+                        [
+                            'taskkill.exe',
+                            '/PID',
+                            str(probe_process.pid),
+                            '/T',
+                            '/F',
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=3.0,
+                        check=False,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                    )
+                except Exception:
+                    try:
+                        probe_process.kill()
+                    except Exception:
+                        pass
+        except Exception as probe_error:
+            probe_ok = False
+            probe_reason = type(probe_error).__name__
+
+        probe_elapsed_ms = (time.perf_counter() - probe_started) * 1000.0
+        if probe_ok:
+            print(f'[STARTUP] Native OpenGL probe passed in {probe_elapsed_ms:.0f}ms')
+        else:
+            os.environ['QT_OPENGL'] = 'software'
+            print(
+                '[STARTUP] Native OpenGL probe failed '
+                f'({probe_reason}, {probe_elapsed_ms:.0f}ms); using software OpenGL'
+            )
 
     # Keep Qt on native desktop OpenGL for the shared QOpenGLWidget-based paths.
     os.environ.setdefault('QT_OPENGL', 'desktop')

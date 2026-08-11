@@ -10,14 +10,23 @@ from .mpv_runtime import bootstrap_mpv_runtime_search_paths
 from .vlc_runtime import bootstrap_vlc_runtime_search_paths
 
 PLAYBACK_BACKEND_QT_HYBRID = 'qt_hybrid'
+# The persisted value remains unchanged for backward compatibility. MPV is the
+# stable, recommended player; "experimental" is no longer user-facing.
+PLAYBACK_BACKEND_MPV = 'mpv_experimental'
 PLAYBACK_BACKEND_MPV_EXPERIMENTAL = 'mpv_experimental'
 PLAYBACK_BACKEND_VLC_EXPERIMENTAL = 'vlc_experimental'
 
 PLAYBACK_BACKEND_CHOICES = [
     PLAYBACK_BACKEND_QT_HYBRID,
-    PLAYBACK_BACKEND_MPV_EXPERIMENTAL,
+    PLAYBACK_BACKEND_MPV,
     PLAYBACK_BACKEND_VLC_EXPERIMENTAL,
 ]
+
+PLAYBACK_BACKEND_DISPLAY_NAMES = {
+    PLAYBACK_BACKEND_QT_HYBRID: 'Qt Hybrid (Fallback)',
+    PLAYBACK_BACKEND_MPV: 'MPV (Recommended)',
+    PLAYBACK_BACKEND_VLC_EXPERIMENTAL: 'VLC (Experimental)',
+}
 
 RUNTIME_SUPPORTED_PLAYBACK_BACKENDS = {
     PLAYBACK_BACKEND_QT_HYBRID,
@@ -97,6 +106,12 @@ def normalize_playback_backend_name(name: str | None) -> str:
     if value in PLAYBACK_BACKEND_CHOICES:
         return value
     return PLAYBACK_BACKEND_QT_HYBRID
+
+
+def playback_backend_display_name(name: str | None) -> str:
+    """Return a user-facing backend label without exposing storage IDs."""
+    selected = normalize_playback_backend_name(name)
+    return PLAYBACK_BACKEND_DISPLAY_NAMES.get(selected, selected)
 
 
 def get_configured_playback_backend() -> str:

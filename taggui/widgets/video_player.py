@@ -20,7 +20,7 @@ from utils.video import playback_backend
 from utils.video.playback_backend import (
     MPV_RUNTIME_SEARCHED_DIRS,
     VLC_RUNTIME_SEARCHED_DIRS,
-    PLAYBACK_BACKEND_MPV_EXPERIMENTAL,
+    PLAYBACK_BACKEND_MPV,
     PLAYBACK_BACKEND_QT_HYBRID,
     PLAYBACK_BACKEND_VLC_EXPERIMENTAL,
     get_configured_playback_backend,
@@ -321,7 +321,7 @@ class VideoPlayerWidget(QWidget):
             if not self._backend_fallback_warned:
                 reason = ''
                 if (
-                    self.configured_playback_backend == 'mpv_experimental'
+                    self.configured_playback_backend == PLAYBACK_BACKEND_MPV
                     and mpv is None
                     and playback_backend.MPV_BACKEND_ERROR
                 ):
@@ -356,14 +356,14 @@ class VideoPlayerWidget(QWidget):
         return
 
     def _is_using_mpv_backend(self) -> bool:
-        return self.runtime_playback_backend == PLAYBACK_BACKEND_MPV_EXPERIMENTAL
+        return self.runtime_playback_backend == PLAYBACK_BACKEND_MPV
 
     def _is_using_vlc_backend(self) -> bool:
         return self.runtime_playback_backend == PLAYBACK_BACKEND_VLC_EXPERIMENTAL
 
     def _is_mpv_forward_active(self) -> bool:
         return (
-            self._active_forward_backend == PLAYBACK_BACKEND_MPV_EXPERIMENTAL
+            self._active_forward_backend == PLAYBACK_BACKEND_MPV
             and self.mpv_player is not None
             and self.playback_speed >= 0
         )
@@ -2695,7 +2695,7 @@ class VideoPlayerWidget(QWidget):
             self.position_timer.timeout.connect(self._play_next_frame_opencv)
             self.position_timer.start()
         else:
-            # Use selected forward backend (mpv/vlc experimental, otherwise QMediaPlayer).
+            # Use selected forward backend (MPV/VLC, otherwise QMediaPlayer).
             use_mpv_forward = self._is_using_mpv_backend()
             use_vlc_forward = self._is_using_vlc_backend()
 
@@ -2737,7 +2737,7 @@ class VideoPlayerWidget(QWidget):
                     pass  # C++ object deleted
                 try:
                     self._cancel_vlc_reveal()
-                    self._active_forward_backend = PLAYBACK_BACKEND_MPV_EXPERIMENTAL
+                    self._active_forward_backend = PLAYBACK_BACKEND_MPV
                     speed = max(0.1, float(self.playback_speed))
                     if self._mpv_ready_for_seeks and self._mpv_vo_ready:
                         # File is already loaded and VO is stable — safe to play immediately.
@@ -3100,7 +3100,7 @@ class VideoPlayerWidget(QWidget):
         # Seek QMediaPlayer
         if self._qt_video_source_path is not None:
             self.media_player.setPosition(int(position_ms))
-        if self.mpv_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_MPV_EXPERIMENTAL:
+        if self.mpv_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_MPV:
             self._seek_mpv_position_ms(position_ms)
         if self.vlc_player is not None and self._active_forward_backend == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
             self._seek_vlc_position_ms(position_ms)

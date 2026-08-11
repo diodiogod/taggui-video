@@ -645,6 +645,7 @@ class MainWindow(QMainWindow):
         self.setPalette(self.app.style().standardPalette())
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=False)
+        self.image_viewer.marking_effects_controller = self.marking_effects_controller
         self.image_viewer.set_video_loop_persistence_scope('main')
         self._floating_viewers = []
         self._comparison_windows = []
@@ -6169,6 +6170,7 @@ class MainWindow(QMainWindow):
         target_proxy_index = self._normalize_spawn_proxy_index(target_proxy_index, proxy_model)
 
         viewer = ImageViewer(proxy_model, is_spawned_viewer=True)
+        viewer.marking_effects_controller = self.marking_effects_controller
         viewer.set_scene_padding(0)
         self._connect_floating_viewer(viewer)
 

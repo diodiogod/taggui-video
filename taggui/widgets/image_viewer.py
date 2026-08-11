@@ -3610,6 +3610,7 @@ class ImageViewer(QWidget):
 
     def _show_error_placeholder(self, message: str):
         """Display an error message on the scene."""
+        self.hud_item = None
         self.scene.clear()
         
         # Create standard background size
@@ -3674,15 +3675,47 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
-    def _clear_hud_crop_if_alive(self) -> None:
-        """Clear crop HUD state only when the Qt object is still alive."""
-        if not hasattr(self, 'hud_item'):
+    def _live_hud_item(self):
+        """Return the crop HUD only while its underlying Qt item is alive."""
+        hud_item = getattr(self, 'hud_item', None)
+        if hud_item is None:
+            return None
+        try:
+            if _shiboken_is_valid is not None and not _shiboken_is_valid(hud_item):
+                self.hud_item = None
+                return None
+        except RuntimeError:
+            self.hud_item = None
+            return None
+        return hud_item
+
+    def _set_hud_crop_rect_if_alive(self, rect) -> None:
+        """Update crop geometry without touching a scene-deleted HUD wrapper."""
+        hud_item = self._live_hud_item()
+        if hud_item is None:
             return
         try:
-            if self.hud_item is not None and (
-                _shiboken_is_valid is None or _shiboken_is_valid(self.hud_item)
-            ):
-                self.hud_item.clear_crop()
+            hud_item.set_crop_rect(rect)
+        except RuntimeError:
+            self.hud_item = None
+
+    def _set_hud_values_if_alive(self, rect, position) -> None:
+        """Update live crop feedback without touching a deleted Qt item."""
+        hud_item = self._live_hud_item()
+        if hud_item is None:
+            return
+        try:
+            hud_item.setValues(rect, position)
+        except RuntimeError:
+            self.hud_item = None
+
+    def _clear_hud_crop_if_alive(self) -> None:
+        """Clear crop HUD state only when the Qt object is still alive."""
+        hud_item = self._live_hud_item()
+        if hud_item is None:
+            return
+        try:
+            hud_item.clear_crop()
         except RuntimeError:
             self.hud_item = None
 
@@ -3797,6 +3830,10 @@ class ImageViewer(QWidget):
         if is_complete:
             self._clear_marking_items_from_scene()
             self.ideogram_overlay_items.clear()
+            # QGraphicsScene.clear() owns and deletes the HUD's C++ object.
+            # Drop its Python wrapper before clearing to prevent stale access
+            # during a re-entrant crop/metadata refresh.
+            self.hud_item = None
             self.view.clear_scene()
             auto_play_after_layout = False
             was_video_loaded = bool(self._is_video_loaded)
@@ -4913,8 +4950,7 @@ class ImageViewer(QWidget):
             self.crop_marking = marking_item
             marking_item.size_changed() # call after self.crop_marking was set!
             # Enable HUD text display when crop marking exists
-            if hasattr(self, 'hud_item'):
-                self.hud_item.set_crop_rect(marking_item.rect())
+            self._set_hud_crop_rect_if_alive(marking_item.rect())
         elif name == '' and rect_type != ImageMarking.NONE:
             name = {ImageMarking.HINT: 'hint',
                     ImageMarking.INCLUDE: 'include',
@@ -5078,8 +5114,7 @@ class ImageViewer(QWidget):
                 # Persist first so a later UI-only failure cannot lose the crop.
                 source_model.write_meta_to_disk(image)
                 # Update HUD rect for crop display
-                if hasattr(self, 'hud_item'):
-                    self.hud_item.set_crop_rect(marking.rect())
+                self._set_hud_crop_rect_if_alive(marking.rect())
                 if not self.proxy_image_list_model.does_image_match_filter(
                         image, self.proxy_image_list_model.filter):
                     # don't call .invalidate() as the displayed list shouldn't

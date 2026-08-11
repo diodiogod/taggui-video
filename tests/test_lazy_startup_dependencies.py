@@ -18,6 +18,9 @@ def test_qt_startup_keeps_desktop_opengl_without_forcing_global_attributes():
     source = (TAGGUI_ROOT / "run_gui.py").read_text(encoding="utf-8")
 
     assert "os.environ.setdefault('QT_OPENGL', 'desktop')" in source
+    assert "'--taggui-opengl-probe'" in source
+    assert "os.environ['QT_OPENGL'] = 'software'" in source
+    assert "TAGGUI_OPENGL_PROBE_TIMEOUT_SECONDS" in source
     assert "AA_UseDesktopOpenGL" not in source
     assert "AA_ShareOpenGLContexts" not in source
 
@@ -313,3 +316,17 @@ def test_playback_backend_import_does_not_probe_optional_runtimes():
     assert playback_backend.VLC_PYTHON_MODULE is None
     assert "mpv" not in sys.modules
     assert "vlc" not in sys.modules
+
+
+def test_playback_backend_uses_stable_user_facing_mpv_name():
+    from utils.video import playback_backend
+
+    assert playback_backend.playback_backend_display_name('mpv_experimental') == (
+        'MPV (Recommended)'
+    )
+    assert playback_backend.playback_backend_display_name('qt_hybrid') == (
+        'Qt Hybrid (Fallback)'
+    )
+    assert playback_backend.playback_backend_display_name('vlc_experimental') == (
+        'VLC (Experimental)'
+    )

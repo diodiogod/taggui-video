@@ -14,11 +14,13 @@ The practical recommendation is:
 
 The settings UI exposes these backend options:
 
-- `qt_hybrid`
-- `mpv_experimental`
-- `vlc_experimental`
+- **MPV (Recommended)** — the stable primary backend
+- **Qt Hybrid (Fallback)** — the compatibility fallback
+- **VLC (Experimental)** — an alternative backend
 
-If an experimental backend is selected but not available in the current runtime, TagGUI falls back to `qt_hybrid`.
+Existing installations may still contain the legacy internal value `mpv_experimental` in their settings. It now means the stable MPV backend and remains supported for compatibility.
+
+If the selected backend is unavailable in the current runtime, TagGUI falls back to Qt Hybrid.
 
 ## Recommended Backend
 
@@ -49,9 +51,9 @@ It can still be useful for:
 
 TagGUI resolves the configured backend at runtime.
 
-- if `mpv_experimental` is selected and MPV is available, it uses MPV
-- if `vlc_experimental` is selected and VLC is available, it uses VLC
-- otherwise it falls back to `qt_hybrid`
+- if MPV is selected and available, TagGUI uses MPV
+- if VLC is selected and available, TagGUI uses VLC
+- otherwise it falls back to Qt Hybrid
 
 This means the selected backend and the backend actually used at runtime may differ if required runtime files are missing.
 
@@ -73,7 +75,7 @@ Platform-specific subfolders are also checked automatically.
 
 At the moment, this repository bundles the Windows MPV runtime, but not a Linux MPV runtime.
 
-On Linux, `mpv_experimental` may still work if a compatible `libmpv` runtime is available on the system or provided in a repo-local Linux runtime folder.
+On Linux, MPV may work if a compatible `libmpv` runtime is available on the system or provided in a repo-local Linux runtime folder.
 
 If Linux users ask for it, bundling a Linux MPV runtime may be added later.
 

@@ -7646,6 +7646,8 @@ class ImageListModel(QAbstractListModel):
             'review_flags': int(getattr(image, 'review_flags', 0) or 0),
             'review_updated_at': getattr(image, 'review_updated_at', None),
             'crop': QRect(image.crop) if image.crop is not None else None,
+            'target_dimension': QSize(image.target_dimension)
+            if image.target_dimension is not None else None,
             'markings': image.markings.copy(),
             'loop_start_frame': image.loop_start_frame,
             'loop_end_frame': image.loop_end_frame,
@@ -7839,6 +7841,7 @@ class ImageListModel(QAbstractListModel):
         image.review_flags = int(state.get('review_flags', 0) or 0)
         image.review_updated_at = state.get('review_updated_at')
         image.crop = state['crop']
+        image.target_dimension = state.get('target_dimension')
         image.markings = state['markings']
         image.loop_start_frame = state.get('loop_start_frame')
         image.loop_end_frame = state.get('loop_end_frame')

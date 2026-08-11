@@ -8,23 +8,27 @@ import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, Qt
+from PySide6.QtCore import QRect, QStandardPaths, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressDialog,
     QVBoxLayout,
 )
 
 from utils.image import ImageMarking
+from utils.auto_crop import calculate_crop_avoiding_boxes
 from utils.marking_effects import MARKING_EFFECTS, apply_exclude_effect
 from utils.settings import DEFAULT_SETTINGS, settings
+import utils.target_dimension as target_dimension
 
 
 MIGAN_MODEL_URL = (
@@ -46,12 +50,12 @@ class MarkingEffectsController:
         self._undo_groups: list[dict] = []
         self._redo_groups: list[dict] = []
 
-    def _show_options(self) -> tuple[str, str, bool] | None:
+    def _show_options(self) -> tuple[str, str, str, bool] | None:
         dialog = QDialog(self.main_window)
-        dialog.setWindowTitle('Apply Exclude Markings to Source Images')
+        dialog.setWindowTitle('Apply Markings to Source Images')
         layout = QVBoxLayout(dialog)
         warning = QLabel(
-            'This modifies source image pixels. Exclude markings themselves '
+            'This modifies source image pixels. Markings themselves '
             'remain available after processing.'
         )
         warning.setWordWrap(True)
@@ -59,6 +63,8 @@ class MarkingEffectsController:
         form = QFormLayout()
         scope_combo = QComboBox()
         scope_combo.addItems(['Current image', 'Selected images', 'Loaded folder'])
+        type_combo = QComboBox()
+        type_combo.addItems(['All marking types', 'Exclude', 'Include', 'Hint'])
         effect_combo = QComboBox()
         effect_combo.addItems(list(MARKING_EFFECTS))
         effect_combo.setCurrentText('inpaint — AI (MI-GAN)')
@@ -68,6 +74,7 @@ class MarkingEffectsController:
             'Uses temporary disk space equal to the successfully modified images.'
         )
         form.addRow('Scope', scope_combo)
+        form.addRow('Marking type', type_combo)
         form.addRow('Effect', effect_combo)
         form.addRow('', undo_check)
         layout.addLayout(form)
@@ -82,6 +89,7 @@ class MarkingEffectsController:
             return None
         return (
             scope_combo.currentText(),
+            type_combo.currentText(),
             effect_combo.currentText(),
             undo_check.isChecked(),
         )
@@ -100,6 +108,202 @@ class MarkingEffectsController:
             if batch is not None:
                 return batch
         return list(getattr(model, 'images', []))
+
+    def _show_crop_options(self) -> dict | None:
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle('Create Crops Avoiding Markings')
+        layout = QVBoxLayout(dialog)
+        explanation = QLabel(
+            'Creates editable crop boxes without changing source pixels. '
+            'Apply them later with the scissors tool.'
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        form = QFormLayout()
+        scope_combo = QComboBox()
+        scope_combo.addItems(['Current image', 'Selected images', 'Loaded folder'])
+        type_combo = QComboBox()
+        type_combo.addItems(['All marking types', 'Exclude', 'Include', 'Hint'])
+        label_edit = QLineEdit()
+        label_edit.setPlaceholderText('Optional, e.g. watermark')
+        match_combo = QComboBox()
+        match_combo.addItems(['Contains', 'Exact'])
+        padding_spin = QDoubleSpinBox()
+        padding_spin.setRange(0.0, 25.0)
+        padding_spin.setDecimals(1)
+        padding_spin.setValue(1.0)
+        padding_spin.setSuffix('%')
+        retained_spin = QDoubleSpinBox()
+        retained_spin.setRange(1.0, 100.0)
+        retained_spin.setDecimals(1)
+        retained_spin.setValue(75.0)
+        retained_spin.setSuffix('%')
+        existing_combo = QComboBox()
+        existing_combo.addItems(['Skip images with a crop', 'Replace existing crops'])
+        form.addRow('Scope', scope_combo)
+        form.addRow('Marking type', type_combo)
+        form.addRow('Label filter', label_edit)
+        form.addRow('Label match', match_combo)
+        form.addRow('Padding', padding_spin)
+        form.addRow('Minimum retained area', retained_spin)
+        form.addRow('Existing crops', existing_combo)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return {
+            'scope': scope_combo.currentText(),
+            'marking_type': type_combo.currentText(),
+            'label_filter': label_edit.text().strip(),
+            'label_match': match_combo.currentText(),
+            'padding_percent': padding_spin.value(),
+            'minimum_retained_percent': retained_spin.value(),
+            'replace_existing': existing_combo.currentIndex() == 1,
+        }
+
+    @staticmethod
+    def _matching_marking_boxes(image, options: dict) -> list[list[float]]:
+        selected_type = {
+            'Exclude': ImageMarking.EXCLUDE,
+            'Include': ImageMarking.INCLUDE,
+            'Hint': ImageMarking.HINT,
+        }.get(options['marking_type'])
+        label_filter = str(options.get('label_filter') or '').casefold()
+        exact = options.get('label_match') == 'Exact'
+        boxes = []
+        for marking in getattr(image, 'markings', []):
+            if selected_type is not None and marking.type != selected_type:
+                continue
+            label = str(marking.label or '').casefold()
+            if label_filter and (
+                (exact and label != label_filter)
+                or (not exact and label_filter not in label)
+            ):
+                continue
+            rect = marking.rect.normalized()
+            boxes.append([
+                rect.left(), rect.top(),
+                rect.left() + rect.width(), rect.top() + rect.height(),
+            ])
+        return boxes
+
+    def create_crops_avoiding_markings(self):
+        options = self._show_crop_options()
+        if options is None:
+            return
+        model = self.main_window.image_list_model
+        references = list(self._scope_images(options['scope']))
+        progress = QProgressDialog(
+            'Creating crops from markings…', 'Cancel', 0, len(references),
+            self.main_window,
+        )
+        progress.setWindowTitle('Create Crops Avoiding Markings')
+        progress.setMinimumDuration(250)
+        generated = []
+        skipped_existing = 0
+        skipped_no_markings = 0
+        skipped_unsafe = 0
+        skipped_video = 0
+        seen_paths = set()
+        for position, reference in enumerate(references, start=1):
+            if progress.wasCanceled():
+                progress.close()
+                return
+            image = model.resolve_image_reference(reference)
+            if image is None or image.path in seen_paths:
+                progress.setValue(position)
+                continue
+            loaded_row = model.get_loaded_row_for_path(image.path)
+            if loaded_row >= 0:
+                loaded_image = model.index(loaded_row, 0).data(
+                    Qt.ItemDataRole.UserRole
+                )
+                if loaded_image is not None:
+                    image = loaded_image
+            seen_paths.add(image.path)
+            if image.is_video:
+                skipped_video += 1
+            elif image.crop is not None and not options['replace_existing']:
+                skipped_existing += 1
+            else:
+                boxes = self._matching_marking_boxes(image, options)
+                if not boxes:
+                    skipped_no_markings += 1
+                else:
+                    crop = calculate_crop_avoiding_boxes(
+                        image.valid_dimensions(),
+                        boxes,
+                        padding_percent=options['padding_percent'],
+                        minimum_retained_percent=options['minimum_retained_percent'],
+                    )
+                    if crop is None:
+                        skipped_unsafe += 1
+                    else:
+                        generated.append((image, crop))
+            progress.setValue(position)
+            if position % 25 == 0:
+                QApplication.processEvents()
+        progress.close()
+        if not generated:
+            QMessageBox.information(
+                self.main_window,
+                'No Crops Created',
+                'No matching markings produced a safe crop.\n\n'
+                f'No matching markings: {skipped_no_markings}\n'
+                f'Below retained-area limit: {skipped_unsafe}\n'
+                f'Existing crops preserved: {skipped_existing}\n'
+                f'Videos skipped: {skipped_video}',
+            )
+            return
+
+        model.add_images_to_undo_stack(
+            [image for image, _crop in generated],
+            action_name='Create crops avoiding markings',
+            should_ask_for_confirmation=False,
+        )
+        for image, crop in generated:
+            image.crop = crop
+            image.target_dimension = target_dimension.get(crop.size())
+            image.thumbnail = None
+            image.thumbnail_qimage = None
+            model.write_meta_to_disk(image)
+            row = model.get_loaded_row_for_path(image.path)
+            if row >= 0:
+                index = model.index(row, 0)
+                model.dataChanged.emit(index, index)
+
+        viewer = self.main_window.get_selection_target_viewer()
+        if viewer.proxy_image_index.isValid():
+            displayed = viewer.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+            matching = next(
+                (entry for entry, _crop in generated
+                 if displayed is not None and entry.path == displayed.path),
+                None,
+            )
+            if matching is not None:
+                if displayed is not matching:
+                    displayed.crop = matching.crop
+                    displayed.target_dimension = matching.target_dimension
+                viewer.rebuild_marking_overlays(displayed)
+        menu_manager = getattr(self.main_window, 'menu_manager', None)
+        if menu_manager is not None:
+            menu_manager.update_undo_and_redo_actions()
+        QMessageBox.information(
+            self.main_window,
+            'Crops Created',
+            f'Created {len(generated)} crop(s).\n\n'
+            f'No matching markings: {skipped_no_markings}\n'
+            f'Below retained-area limit: {skipped_unsafe}\n'
+            f'Existing crops preserved: {skipped_existing}\n'
+            f'Videos skipped: {skipped_video}\n\n'
+            'Review the crop boxes, then use the scissors menu to apply them.',
+        )
 
     @staticmethod
     def _file_sha256(path: Path) -> str:
@@ -236,15 +440,15 @@ class MarkingEffectsController:
         options = self._show_options()
         if options is None:
             return
-        scope, effect, keep_undo = options
+        scope, marking_type, effect, keep_undo = options
         model = self.main_window.image_list_model
         image_source = self._scope_images(scope)
         total = len(image_source)
         scan = QProgressDialog(
-            'Finding images with exclude markings…', 'Cancel', 0, total,
+            'Finding images with matching markings…', 'Cancel', 0, total,
             self.main_window,
         )
-        scan.setWindowTitle('Apply Exclude Markings')
+        scan.setWindowTitle('Apply Markings')
         scan.setMinimumDuration(250)
         targets = []
         seen_paths = set()
@@ -256,9 +460,15 @@ class MarkingEffectsController:
             image = model.resolve_image_reference(reference)
             if image is not None and image.path not in seen_paths:
                 rectangles = [
-                    marking.rect
-                    for marking in image.markings
-                    if marking.type == ImageMarking.EXCLUDE
+                    QRect(
+                        int(box[0]), int(box[1]),
+                        int(box[2] - box[0]), int(box[3] - box[1]),
+                    )
+                    for box in self._matching_marking_boxes(image, {
+                        'marking_type': marking_type,
+                        'label_filter': '',
+                        'label_match': 'Contains',
+                    })
                 ]
                 if rectangles:
                     if image.is_video:
@@ -279,8 +489,8 @@ class MarkingEffectsController:
             )
             QMessageBox.information(
                 self.main_window,
-                'No Exclude Markings',
-                f'No still images in this scope have exclude markings.{suffix}',
+                'No Matching Markings',
+                f'No still images in this scope have matching markings.{suffix}',
             )
             return
 
@@ -290,8 +500,8 @@ class MarkingEffectsController:
         )
         reply = QMessageBox.question(
             self.main_window,
-            'Apply Exclude Markings - Destructive Operation',
-            f'Apply “{effect}” inside exclude markings on '
+            'Apply Markings - Destructive Operation',
+            f'Apply “{effect}” inside {marking_type.lower()} on '
             f'{len(targets)} source image(s)?\n\n'
             'This changes the working files directly.'
             f'{undo_note}',
@@ -308,10 +518,10 @@ class MarkingEffectsController:
                 return
 
         progress = QProgressDialog(
-            'Applying exclude markings…', 'Cancel', 0, len(targets),
+            'Applying markings…', 'Cancel', 0, len(targets),
             self.main_window,
         )
-        progress.setWindowTitle('Apply Exclude Markings')
+        progress.setWindowTitle('Apply Markings')
         progress.setMinimumDuration(0)
         snapshots: list[tuple[Path, Path]] = []
         failures: list[str] = []
@@ -361,7 +571,7 @@ class MarkingEffectsController:
 
         if snapshots:
             self._undo_groups.append({
-                'operation': f'Apply {effect} to exclude markings',
+                'operation': f'Apply {effect} to markings',
                 'snapshots': snapshots,
                 'created_at_ns': time.monotonic_ns(),
             })
@@ -381,7 +591,59 @@ class MarkingEffectsController:
         if failures:
             summary += '\n\n' + '\n'.join(f'• {item}' for item in failures[:10])
         message_method = QMessageBox.warning if failures else QMessageBox.information
-        message_method(self.main_window, 'Exclude Marking Effect Complete', summary)
+        message_method(self.main_window, 'Marking Effect Complete', summary)
+
+    def apply_single_marking_effect(self, image_viewer, marking_item, effect: str):
+        """Apply an effect immediately to one context-clicked marking."""
+        proxy_index = getattr(image_viewer, 'proxy_image_index', None)
+        if proxy_index is None or not proxy_index.isValid():
+            return
+        image = proxy_index.data(Qt.ItemDataRole.UserRole)
+        if image is None:
+            return
+        if image.is_video:
+            QMessageBox.information(
+                self.main_window,
+                'Still Images Only',
+                'Marking effects currently apply only to still images.',
+            )
+            return
+        model_path = None
+        if effect.casefold() == 'inpaint — AI (MI-GAN)'.casefold():
+            model_path = self._ensure_migan_model()
+            if model_path is None:
+                return
+        snapshot_root = Path(tempfile.gettempdir()) / 'taggui_marking_effect_undo'
+        snapshot_root.mkdir(exist_ok=True)
+        snapshot = snapshot_root / f'{uuid.uuid4().hex}_{image.path.name}'
+        try:
+            shutil.copy2(image.path, snapshot)
+        except OSError as exc:
+            QMessageBox.warning(
+                self.main_window,
+                'Could Not Create Undo Snapshot',
+                str(exc),
+            )
+            return
+        success, message = apply_exclude_effect(
+            Path(image.path),
+            [marking_item.rect().toRect()],
+            effect,
+            model_path=model_path,
+        )
+        if not success:
+            snapshot.unlink(missing_ok=True)
+            QMessageBox.warning(self.main_window, 'Marking Effect Failed', message)
+            return
+        self._undo_groups.append({
+            'operation': f'Apply {effect} to marking',
+            'snapshots': [(Path(image.path), snapshot)],
+            'created_at_ns': time.monotonic_ns(),
+        })
+        self._clear_groups(self._redo_groups)
+        while len(self._undo_groups) > 5:
+            self._clear_groups([self._undo_groups.pop(0)])
+        self._refresh_modified_images([image.path])
 
     @staticmethod
     def _clear_groups(groups: list[dict]):

@@ -741,15 +741,6 @@ class MenuManager:
         export_action.triggered.connect(self.main_window.export_images_dialog)
         file_menu.addAction(export_action)
 
-        apply_marking_effects_action = QAction(
-            'Apply Exclude Markings to Source Images…',
-            parent=self.main_window,
-        )
-        apply_marking_effects_action.triggered.connect(
-            self.main_window.marking_effects_controller.apply_exclude_markings
-        )
-        file_menu.addAction(apply_marking_effects_action)
-
         settings_action = QAction('Settings...', parent=self.main_window)
         settings_action.setShortcut(QKeySequence('Ctrl+Alt+S'))
         settings_action.triggered.connect(self.main_window.show_settings_dialog)
@@ -812,6 +803,27 @@ class MenuManager:
         remove_empty_tags_action.triggered.connect(
             self.main_window.remove_empty_tags)
         edit_menu.addAction(remove_empty_tags_action)
+
+        edit_menu.addSeparator()
+
+        markings_menu = edit_menu.addMenu('Markings')
+        create_crops_action = QAction(
+            'Create Crops Avoiding Markings…',
+            parent=self.main_window,
+        )
+        create_crops_action.triggered.connect(
+            self.main_window.marking_effects_controller.create_crops_avoiding_markings
+        )
+        markings_menu.addAction(create_crops_action)
+
+        apply_effects_action = QAction(
+            'Apply Markings to Source Images…',
+            parent=self.main_window,
+        )
+        apply_effects_action.triggered.connect(
+            self.main_window.marking_effects_controller.apply_exclude_markings
+        )
+        markings_menu.addAction(apply_effects_action)
 
         edit_menu.addSeparator()
 

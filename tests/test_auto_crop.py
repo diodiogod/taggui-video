@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'taggui'))
 
 from utils.auto_crop import calculate_crop_avoiding_boxes
+from controllers.marking_effects_controller import MarkingEffectsController
+from PySide6.QtCore import QRect
+from utils.image import Image, ImageMarking, Marking
 
 
 def test_crop_out_prefers_least_destructive_edge_for_corner_watermark():
@@ -43,3 +46,35 @@ def test_crop_out_avoids_multiple_detections_with_one_crop():
 
     assert crop is not None
     assert crop.bottom() < 710
+
+
+def test_marking_crop_filter_supports_type_and_case_insensitive_label(tmp_path):
+    image = Image(tmp_path / 'image.png', (100, 100), markings=[
+        Marking('Corner Watermark', ImageMarking.EXCLUDE, QRect(80, 80, 20, 20)),
+        Marking('subject', ImageMarking.INCLUDE, QRect(10, 10, 50, 50)),
+    ])
+    options = {
+        'marking_type': 'Exclude',
+        'label_filter': 'watermark',
+        'label_match': 'Contains',
+    }
+
+    assert MarkingEffectsController._matching_marking_boxes(image, options) == [
+        [80, 80, 100, 100],
+    ]
+
+
+def test_marking_crop_filter_allows_all_types_with_exact_label(tmp_path):
+    image = Image(tmp_path / 'image.png', (100, 100), markings=[
+        Marking('logo', ImageMarking.HINT, QRect(0, 0, 10, 10)),
+        Marking('logo extra', ImageMarking.EXCLUDE, QRect(80, 80, 20, 20)),
+    ])
+    options = {
+        'marking_type': 'All marking types',
+        'label_filter': 'LOGO',
+        'label_match': 'Exact',
+    }
+
+    assert MarkingEffectsController._matching_marking_boxes(image, options) == [
+        [0, 0, 10, 10],
+    ]
