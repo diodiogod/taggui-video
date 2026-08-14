@@ -19,7 +19,7 @@ import json
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
                             QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG, QTimer)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
-from PySide6.QtWidgets import QMessageBox, QApplication
+from PySide6.QtWidgets import QMessageBox, QApplication, QProgressDialog
 from PIL import Image as pilimage  # Import Pillow's Image class
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -1575,6 +1575,7 @@ class HistoryItem:
     tags: list[dict[str, list[str] | QRect | None | list[Marking]]]
     should_ask_for_confirmation: bool
     paginated_snapshot: dict[str, list[str]] | None = None
+    paginated_review_snapshot: dict[str, dict[str, int | float | None]] | None = None
     image_snapshots: list[dict[str, Any]] | None = None
     ideogram_sidecar_snapshots: list[dict[str, Any]] | None = None
     created_at_ns: int = field(default_factory=time.monotonic_ns)
@@ -2345,6 +2346,7 @@ class ImageListModel(QAbstractListModel):
         self.undo_stack = deque(maxlen=UNDO_STACK_SIZE)
         self.redo_stack = []
         self._streaming_paginated_tag_history = None
+        self._streaming_paginated_review_history = None
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
 
@@ -7714,6 +7716,50 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    def begin_streaming_paginated_review_history(
+        self,
+        action_name: str,
+        should_ask_for_confirmation: bool,
+    ):
+        """Start a path-backed review-state undo snapshot."""
+        self._streaming_paginated_review_history = {
+            'action_name': str(action_name),
+            'should_ask_for_confirmation': bool(should_ask_for_confirmation),
+            'snapshot': {},
+        }
+
+    def record_streaming_paginated_review_history(self, image: Image):
+        history = self._streaming_paginated_review_history
+        if history is None or not self._paginated_mode or not self._directory_path:
+            return
+        try:
+            rel_path = str(image.path.relative_to(self._directory_path))
+        except (AttributeError, ValueError):
+            return
+        history['snapshot'].setdefault(rel_path, {
+            'rating': float(getattr(image, 'rating', 0.0) or 0.0),
+            'love': bool(getattr(image, 'love', False)),
+            'bomb': bool(getattr(image, 'bomb', False)),
+            'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
+            'review_rank': int(getattr(image, 'review_rank', 0) or 0),
+            'review_flags': int(getattr(image, 'review_flags', 0) or 0),
+            'review_updated_at': getattr(image, 'review_updated_at', None),
+        })
+
+    def commit_streaming_paginated_review_history(self):
+        history = self._streaming_paginated_review_history
+        self._streaming_paginated_review_history = None
+        if not history or not history['snapshot']:
+            return
+        self.undo_stack.append(HistoryItem(
+            history['action_name'],
+            [],
+            history['should_ask_for_confirmation'],
+            paginated_review_snapshot=dict(history['snapshot']),
+        ))
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+
     def _capture_history_image_state(self, image: Image) -> dict[str, Any]:
         return {
             'tags': image.tags.copy(),
@@ -8049,6 +8095,68 @@ class ImageListModel(QAbstractListModel):
             except OSError as e:
                 print(f"Error restoring tags for {rel_path}: {e}")
 
+        self._reload_loaded_pages_after_paginated_tag_change()
+
+    def _capture_paginated_review_snapshot(self, relative_paths) -> dict[str, dict]:
+        if not self._db:
+            return {}
+        return self._db.get_review_states_for_paths(relative_paths)
+
+    def _restore_paginated_review_snapshot(self, snapshot: dict[str, dict]):
+        """Restore review state without materializing every selected thumbnail."""
+        if not self._db or not self._directory_path:
+            return
+        for rel_path, state in snapshot.items():
+            media_path = self._directory_path / rel_path
+            rank, flags = normalize_review_state(
+                state.get('review_rank', 0),
+                state.get('review_flags', 0),
+            )
+            updated_at = state.get('review_updated_at')
+            image_id = self._db.get_image_id(rel_path)
+            if image_id:
+                self._db.set_rating(
+                    image_id,
+                    float(state.get('rating', 0.0) or 0.0),
+                    reaction_updated_at=state.get('reaction_updated_at'),
+                )
+                self._db.set_reactions(
+                    image_id,
+                    bool(state.get('love', False)),
+                    bool(state.get('bomb', False)),
+                    reaction_updated_at=state.get('reaction_updated_at'),
+                )
+                self._db.set_review_state(image_id, rank, flags, updated_at)
+            read_path = preferred_taggui_sidecar_read_path(media_path)
+            meta = {'version': 1}
+            if read_path is not None:
+                try:
+                    with read_path.open(encoding='UTF-8') as source:
+                        loaded = json.load(source)
+                    if is_taggui_metadata_dict(loaded):
+                        meta = loaded
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+            meta['review_rank'] = int(rank)
+            meta['review_flags'] = serialize_review_flags(flags)
+            meta['rating'] = float(state.get('rating', 0.0) or 0.0)
+            meta['love'] = bool(state.get('love', False))
+            meta['bomb'] = bool(state.get('bomb', False))
+            reaction_updated_at = state.get('reaction_updated_at')
+            if isinstance(reaction_updated_at, (int, float)):
+                meta['reaction_updated_at'] = float(reaction_updated_at)
+            else:
+                meta.pop('reaction_updated_at', None)
+            if isinstance(updated_at, (int, float)):
+                meta['review_updated_at'] = float(updated_at)
+            else:
+                meta.pop('review_updated_at', None)
+            try:
+                target = taggui_sidecar_path(media_path)
+                with target.open('w', encoding='UTF-8') as destination:
+                    json.dump(meta, destination)
+            except OSError as exc:
+                print(f'Error restoring review state for {rel_path}: {exc}')
         self._reload_loaded_pages_after_paginated_tag_change()
 
     def _normalize_tags(self, tags: list[str]) -> list[str]:
@@ -8449,6 +8557,21 @@ class ImageListModel(QAbstractListModel):
                 created_at_ns=history_item.created_at_ns,
             ))
             self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
+            self.update_undo_and_redo_actions_requested.emit()
+            return
+        if self._paginated_mode and history_item.paginated_review_snapshot is not None:
+            destination_stack.append(HistoryItem(
+                history_item.action_name,
+                [],
+                history_item.should_ask_for_confirmation,
+                paginated_review_snapshot=self._capture_paginated_review_snapshot(
+                    history_item.paginated_review_snapshot.keys()
+                ),
+                created_at_ns=history_item.created_at_ns,
+            ))
+            self._restore_paginated_review_snapshot(
+                history_item.paginated_review_snapshot
+            )
             self.update_undo_and_redo_actions_requested.emit()
             return
         if history_item.ideogram_sidecar_snapshots is not None:
@@ -9441,13 +9564,46 @@ class ImageListModel(QAbstractListModel):
         self.save_review_state_to_db(image)
         self.refresh_ideogram_caption_index_for_image(image)
 
-    @Slot(list, list)
-    def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
+    @Slot(list, object)
+    def add_tags(self, tags: list[str], image_indices):
         """Add one or more tags to one or more images."""
         if not image_indices:
             return
         action_name = f'Add {pluralize("Tag", len(tags))}'
         should_ask_for_confirmation = len(image_indices) > 1
+        if hasattr(image_indices, 'iter_images'):
+            total = len(image_indices)
+            progress = QProgressDialog(
+                action_name + '…',
+                'Cancel',
+                0,
+                max(1, total),
+                QApplication.activeWindow(),
+            )
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(400)
+            self.begin_streaming_paginated_tag_history(
+                action_name,
+                should_ask_for_confirmation,
+            )
+            changed = False
+            for position, image in enumerate(image_indices.iter_images(), start=1):
+                new_tags = [tag for tag in tags if tag not in image.tags]
+                if new_tags:
+                    self.record_streaming_paginated_tag_history(image)
+                    image.tags.extend(new_tags)
+                    self.write_image_tags_to_disk(image)
+                    changed = True
+                if position % 50 == 0 or position == total:
+                    progress.setValue(position)
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        break
+            self.commit_streaming_paginated_tag_history()
+            progress.close()
+            if changed:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            return
         self.add_to_undo_stack(action_name, should_ask_for_confirmation)
         for image_index in image_indices:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)

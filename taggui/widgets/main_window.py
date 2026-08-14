@@ -564,6 +564,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._startup_perf_origin = time.perf_counter()
         self.setAcceptDrops(True)
+        self.setDockNestingEnabled(True)
         self.app = app
         self._startup_directory = self._normalize_startup_directory(startup_directory)
         self._startup_select_path = str(startup_select_path) if startup_select_path else None
@@ -580,6 +581,10 @@ class MainWindow(QMainWindow):
         self._relay_server_name = str(relay_server_name or '').strip()
         self._session_settings_prefix = self._build_session_settings_prefix(self._startup_directory)
         self.directory_path = None
+        self._folder_panel_collapsed_from_handle = False
+        self._folder_panel_last_width = 240
+        self._folder_panel_resize_start_width = 0
+        self._folder_panel_resize_total_width = 0
         self.is_running = True
         self.post_deletion_index = None  # Track index to focus after deletion
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
@@ -771,6 +776,34 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.LeftDockWidgetArea,
             self.folder_tree_panel,
         )
+        self.splitDockWidget(
+            self.folder_tree_panel,
+            self.image_list,
+            Qt.Orientation.Horizontal,
+        )
+        self.image_list.left_companion_toggle_requested.connect(
+            self._toggle_left_folder_companion
+        )
+        self.image_list.left_companion_strip.resize_started.connect(
+            self._start_left_folder_companion_resize
+        )
+        self.image_list.left_companion_strip.resize_delta.connect(
+            self._resize_left_folder_companion
+        )
+        self.image_list.left_companion_strip.resize_finished.connect(
+            self._finish_left_folder_companion_resize
+        )
+        for dock_signal in (
+            self.folder_tree_panel.visibilityChanged,
+            self.folder_tree_panel.topLevelChanged,
+            self.folder_tree_panel.dockLocationChanged,
+            self.image_list.visibilityChanged,
+            self.image_list.topLevelChanged,
+            self.image_list.dockLocationChanged,
+        ):
+            dock_signal.connect(
+                lambda *_args: QTimer.singleShot(0, self._sync_left_folder_companion_handle)
+            )
         self.folder_tree_panel.hide()
 
         # Detect dock widget resize (splitter movement)
@@ -3787,6 +3820,130 @@ class MainWindow(QMainWindow):
         guard = getattr(list_view, 'ensure_materialized_selection', None)
         return not callable(guard) or bool(guard(action_name))
 
+    def _apply_virtual_review_selection(
+        self,
+        target_context: dict,
+        *,
+        action_name: str,
+        transform,
+    ) -> bool:
+        """Apply a review mutation to a complete paginated selection."""
+        list_view = target_context.get('list_view')
+        if list_view is None or not bool(list_view.has_virtual_dataset_selection()):
+            return False
+        source_model = target_context.get('source_model')
+        if source_model is None:
+            return True
+        batch = list_view.get_selected_image_batch()
+        if not hasattr(batch, 'iter_images'):
+            return True
+        total = len(batch)
+        progress = QProgressDialog(
+            action_name + '…',
+            'Cancel',
+            0,
+            max(1, total),
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)
+        source_model.begin_streaming_paginated_review_history(
+            action_name,
+            should_ask_for_confirmation=total > 1,
+        )
+        changed = 0
+        updated_at = time.time()
+        for position, image in enumerate(batch.iter_images(), start=1):
+            current_rank, current_flags = normalize_review_state(
+                getattr(image, 'review_rank', 0),
+                getattr(image, 'review_flags', 0),
+            )
+            next_rank, next_flags = transform(current_rank, current_flags)
+            next_rank, next_flags = normalize_review_state(next_rank, next_flags)
+            if (current_rank, current_flags) != (next_rank, next_flags):
+                source_model.record_streaming_paginated_review_history(image)
+                image.review_rank = int(next_rank)
+                image.review_flags = int(next_flags)
+                image.review_updated_at = updated_at
+                source_model.persist_review_state(image)
+                changed += 1
+            if position % 50 == 0 or position == total:
+                progress.setValue(position)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    break
+        source_model.commit_streaming_paginated_review_history()
+        progress.close()
+        if changed:
+            source_model._reload_loaded_pages_after_paginated_tag_change()
+            proxy_model = target_context.get('proxy_model')
+            active_filter = getattr(proxy_model, 'filter', None)
+            if self._filter_uses_review(active_filter):
+                proxy_model.set_filter(active_filter)
+            self._force_immediate_review_badge_repaint()
+        return True
+
+    def _apply_virtual_metadata_selection(
+        self,
+        target_context: dict,
+        *,
+        action_name: str,
+        updates_for_image,
+    ) -> bool:
+        """Apply rating/reaction updates to a complete paginated selection."""
+        list_view = target_context.get('list_view')
+        if list_view is None or not bool(list_view.has_virtual_dataset_selection()):
+            return False
+        source_model = target_context.get('source_model')
+        if source_model is None:
+            return True
+        batch = list_view.get_selected_image_batch()
+        if not hasattr(batch, 'iter_images'):
+            return True
+        total = len(batch)
+        progress = QProgressDialog(
+            action_name + '…', 'Cancel', 0, max(1, total), self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)
+        source_model.begin_streaming_paginated_review_history(
+            action_name,
+            should_ask_for_confirmation=total > 1,
+        )
+        changed = 0
+        for position, image in enumerate(batch.iter_images(), start=1):
+            updates = dict(updates_for_image(image) or {})
+            if updates:
+                source_model.record_streaming_paginated_review_history(image)
+                for name, value in updates.items():
+                    setattr(image, name, value)
+                source_model.write_meta_to_disk(image)
+                changed += 1
+            if position % 50 == 0 or position == total:
+                progress.setValue(position)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    break
+        source_model.commit_streaming_paginated_review_history()
+        progress.close()
+        if changed:
+            source_model._reload_loaded_pages_after_paginated_tag_change()
+            proxy_model = target_context.get('proxy_model')
+            active_filter = getattr(proxy_model, 'filter', None)
+            if (
+                self._filter_uses_star_rating(active_filter)
+                or self._filter_uses_reactions(active_filter)
+            ):
+                proxy_model.set_filter(active_filter)
+            self._refresh_reaction_sort_if_active(
+                source_model=source_model,
+                sync_rating=True,
+                sync_reactions=True,
+            )
+            self._force_immediate_review_badge_repaint()
+            self._sync_rating_controls_from_context()
+        return True
+
     def _apply_review_rank_from_viewer(self, viewer: ImageViewer | None, rank: int):
         if viewer is None:
             return
@@ -4014,6 +4171,12 @@ class MainWindow(QMainWindow):
             return
         else:
             target_context = self._review_target_context()
+            if self._apply_virtual_review_selection(
+                target_context,
+                action_name='Clear review marks',
+                transform=lambda _rank, _flags: (0, 0),
+            ):
+                return
             if not self._ensure_materialized_target_selection(
                 target_context,
                 'Clear Review Marks',
@@ -9644,6 +9807,22 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._rating_reaction_target_context()
+        rating_updated_at = time.time()
+
+        def _virtual_rating_updates(image):
+            if abs(float(getattr(image, 'rating', 0.0) or 0.0) - rating) <= 1e-6:
+                return {}
+            return {
+                'rating': rating,
+                'reaction_updated_at': rating_updated_at,
+            }
+
+        if self._apply_virtual_metadata_selection(
+            target_context,
+            action_name='Change rating',
+            updates_for_image=_virtual_rating_updates,
+        ):
+            return
         if not self._ensure_materialized_target_selection(
             target_context,
             'Change Ratings',
@@ -9749,6 +9928,27 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._rating_reaction_target_context()
+        reaction_updated_at = time.time()
+
+        def _virtual_reaction_updates(image):
+            current_love = bool(getattr(image, 'love', False))
+            current_bomb = bool(getattr(image, 'bomb', False))
+            next_love = current_love if love is None else bool(love)
+            next_bomb = current_bomb if bomb is None else bool(bomb)
+            if (current_love, current_bomb) == (next_love, next_bomb):
+                return {}
+            return {
+                'love': next_love,
+                'bomb': next_bomb,
+                'reaction_updated_at': reaction_updated_at,
+            }
+
+        if self._apply_virtual_metadata_selection(
+            target_context,
+            action_name='Change reactions',
+            updates_for_image=_virtual_reaction_updates,
+        ):
+            return
         if not self._ensure_materialized_target_selection(
             target_context,
             'Change Reactions',
@@ -9837,6 +10037,17 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._review_target_context()
+        if self._apply_virtual_review_selection(
+            target_context,
+            action_name='Change review rank',
+            transform=lambda _rank, flags: (
+                int(normalized_rank),
+                int(flags) & ~int(ReviewFlag.REJECT)
+                if normalized_rank > 0
+                else int(flags),
+            ),
+        ):
+            return
         if not self._ensure_materialized_target_selection(
             target_context,
             'Change Review Rank',
@@ -9878,6 +10089,23 @@ class MainWindow(QMainWindow):
             return
 
         target_context = self._review_target_context()
+        flag_value = int(flag)
+
+        def _virtual_flag_transform(rank, flags):
+            next_flags = (
+                int(flags) | flag_value
+                if enabled
+                else int(flags) & ~flag_value
+            )
+            next_rank = 0 if flag == ReviewFlag.REJECT and enabled else int(rank)
+            return next_rank, next_flags
+
+        if self._apply_virtual_review_selection(
+            target_context,
+            action_name='Change review mark',
+            transform=_virtual_flag_transform,
+        ):
+            return
         if not self._ensure_materialized_target_selection(
             target_context,
             'Change Review Mark',
@@ -9888,7 +10116,6 @@ class MainWindow(QMainWindow):
             return
 
         changed_states: list[tuple[Image, int, int]] = []
-        flag_value = int(flag)
         for image in targets:
             current_rank, current_flags = normalize_review_state(
                 getattr(image, 'review_rank', 0),
@@ -10127,10 +10354,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def add_tag_to_selected_images(self, tag: str):
-        if not self.image_list.ensure_materialized_selection('Add Tags'):
-            return
-        selected_image_indices = self.image_list.get_selected_image_indices()
-        self.image_list_model.add_tags([tag], selected_image_indices)
+        selected_images = self.image_list.list_view.get_selected_image_batch()
+        self.image_list_model.add_tags([tag], selected_images)
         self.image_tags_editor.select_last_tag()
 
 
@@ -10313,6 +10538,7 @@ class MainWindow(QMainWindow):
         """Restore the default dock, viewer, and toolbar layout."""
         self.cancel_compare_drag()
         self.close_all_floating_viewers()
+        self._folder_panel_collapsed_from_handle = False
 
         for dock in (
             getattr(self, 'image_list', None),
@@ -10365,6 +10591,107 @@ class MainWindow(QMainWindow):
                 for action in getattr(self.menu_manager, 'workspace_actions', {}).values():
                     action.setChecked(False)
                 workspace_group.setExclusive(True)
+
+    def _folder_panel_is_left_of_images(self) -> bool:
+        folder = getattr(self, 'folder_tree_panel', None)
+        images = getattr(self, 'image_list', None)
+        if folder is None or images is None:
+            return False
+        try:
+            if (
+                not folder.isVisible()
+                or folder.isFloating()
+                or images.isFloating()
+                or self.dockWidgetArea(folder) != self.dockWidgetArea(images)
+            ):
+                return False
+            folder_rect = folder.geometry()
+            image_rect = images.geometry()
+            vertical_overlap = min(folder_rect.bottom(), image_rect.bottom()) - max(
+                folder_rect.top(), image_rect.top()
+            )
+            return vertical_overlap > 20 and folder_rect.right() <= image_rect.left() + 16
+        except RuntimeError:
+            return False
+
+    def _sync_left_folder_companion_handle(self):
+        images = getattr(self, 'image_list', None)
+        folder = getattr(self, 'folder_tree_panel', None)
+        if images is None or folder is None:
+            return
+        adjacent = self._folder_panel_is_left_of_images()
+        if folder.isVisible():
+            self._folder_panel_collapsed_from_handle = False
+        collapsed = bool(self._folder_panel_collapsed_from_handle and not folder.isVisible())
+        images.set_left_companion_handle(adjacent or collapsed, collapsed=collapsed)
+
+    def _toggle_left_folder_companion(self):
+        folder = getattr(self, 'folder_tree_panel', None)
+        images = getattr(self, 'image_list', None)
+        if folder is None or images is None:
+            return
+        if self._folder_panel_is_left_of_images():
+            self._folder_panel_last_width = max(80, int(folder.width() or 240))
+            self._folder_panel_collapsed_from_handle = True
+            folder.hide()
+            QTimer.singleShot(0, self._sync_left_folder_companion_handle)
+            return
+        if not self._folder_panel_collapsed_from_handle:
+            return
+        folder.show()
+        if folder.isFloating():
+            folder.setFloating(False)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, folder)
+        self.splitDockWidget(folder, images, Qt.Orientation.Horizontal)
+        self.resizeDocks(
+            [folder, images],
+            [max(80, int(self._folder_panel_last_width)), max(120, int(images.width() or 320))],
+            Qt.Orientation.Horizontal,
+        )
+        self._folder_panel_collapsed_from_handle = False
+        folder.raise_()
+        QTimer.singleShot(0, self._sync_left_folder_companion_handle)
+
+    def _start_left_folder_companion_resize(self):
+        folder = getattr(self, 'folder_tree_panel', None)
+        images = getattr(self, 'image_list', None)
+        if folder is None or images is None:
+            return
+        if self._folder_panel_collapsed_from_handle and not folder.isVisible():
+            self._folder_panel_resize_start_width = 0
+            folder.show()
+            if folder.isFloating():
+                folder.setFloating(False)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, folder)
+            self.splitDockWidget(folder, images, Qt.Orientation.Horizontal)
+            self._folder_panel_collapsed_from_handle = False
+        else:
+            self._folder_panel_resize_start_width = max(0, int(folder.width() or 0))
+        self._folder_panel_resize_total_width = max(
+            121,
+            self._folder_panel_resize_start_width + int(images.width() or 320),
+        )
+
+    def _resize_left_folder_companion(self, delta: int):
+        folder = getattr(self, 'folder_tree_panel', None)
+        images = getattr(self, 'image_list', None)
+        if folder is None or images is None or not folder.isVisible():
+            return
+        target = max(1, self._folder_panel_resize_start_width + int(delta))
+        image_target = max(120, self._folder_panel_resize_total_width - target)
+        self.resizeDocks(
+            [folder, images],
+            [target, image_target],
+            Qt.Orientation.Horizontal,
+        )
+
+    def _finish_left_folder_companion_resize(self):
+        folder = getattr(self, 'folder_tree_panel', None)
+        if folder is not None and folder.isVisible():
+            self._folder_panel_last_width = max(1, int(folder.width() or 1))
+        self._folder_panel_resize_start_width = 0
+        self._folder_panel_resize_total_width = 0
+        QTimer.singleShot(0, self._sync_left_folder_companion_handle)
 
     def _add_to_recent_directories(self, dir_path: str):
         """Add directory to recent list and move it to the top."""
@@ -10720,6 +11047,12 @@ class MainWindow(QMainWindow):
             # Keep docking areas deterministic before visibility changes.
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, folder_dock)
+            if workspace_id == "folder_management":
+                self.splitDockWidget(
+                    folder_dock,
+                    left_dock,
+                    Qt.Orientation.Horizontal,
+                )
             for dock in right_docks:
                 self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 

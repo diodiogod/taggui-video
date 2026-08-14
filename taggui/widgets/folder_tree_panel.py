@@ -7,9 +7,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QItemSelectionModel, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -103,6 +105,93 @@ class FolderHistory:
             self.panel._history_changed()
 
 
+class FolderTreeWidget(QTreeWidget):
+    """Folder tree with hierarchy guides and filesystem-move drop routing."""
+
+    folder_move_requested = Signal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        color = self.palette().color(QPalette.ColorRole.Text)
+        color.setAlpha(210)
+        painter.setPen(QPen(color, 1))
+        indentation = max(12, self.indentation())
+
+        def depth(item: QTreeWidgetItem) -> int:
+            value = 0
+            parent = item.parent()
+            while parent is not None:
+                value += 1
+                parent = parent.parent()
+            return value
+
+        for parent in self._visible_items():
+            if not parent.isExpanded() or parent.childCount() == 0:
+                continue
+            visible_children = [
+                parent.child(index)
+                for index in range(parent.childCount())
+                if not parent.child(index).isHidden()
+                and self.visualItemRect(parent.child(index)).isValid()
+            ]
+            if not visible_children:
+                continue
+            parent_rect = self.visualItemRect(parent)
+            child_depth = depth(visible_children[0])
+            guide_x = child_depth * indentation - indentation // 2
+            first_rect = self.visualItemRect(visible_children[0])
+            last_rect = self.visualItemRect(visible_children[-1])
+            start_y = min(parent_rect.center().y(), first_rect.center().y())
+            painter.drawLine(guide_x, start_y, guide_x, last_rect.center().y())
+            for child in visible_children:
+                child_rect = self.visualItemRect(child)
+                painter.drawLine(
+                    guide_x,
+                    child_rect.center().y(),
+                    guide_x + indentation // 2 - 2,
+                    child_rect.center().y(),
+                )
+        painter.end()
+
+    def _visible_items(self):
+        item = self.topLevelItem(0)
+        while item is not None:
+            if self.visualItemRect(item).isValid():
+                yield item
+            item = self.itemBelow(item)
+
+    def dropEvent(self, event):
+        source_item = self.currentItem()
+        target_item = self.itemAt(event.position().toPoint())
+        if source_item is None or target_item is None or source_item is target_item:
+            event.ignore()
+            return
+        source_path = source_item.data(0, Qt.ItemDataRole.UserRole)
+        position = self.dropIndicatorPosition()
+        if position == QAbstractItemView.DropIndicatorPosition.OnItem:
+            parent_item = target_item
+        else:
+            parent_item = target_item.parent()
+        parent_path = (
+            parent_item.data(0, Qt.ItemDataRole.UserRole)
+            if parent_item is not None
+            else None
+        )
+        if not source_path or not parent_path:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.folder_move_requested.emit(str(source_path), str(parent_path))
+
 class FolderTreePanel(QDockWidget):
     """Snapshot folder tree; it never installs a filesystem watcher."""
 
@@ -118,12 +207,16 @@ class FolderTreePanel(QDockWidget):
             Qt.DockWidgetArea.LeftDockWidgetArea
             | Qt.DockWidgetArea.RightDockWidgetArea
         )
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         self.root_path: Path | None = None
         self.history = FolderHistory(self)
         self._build_ui()
 
     def _build_ui(self):
         root = QWidget(self)
+        root.setMinimumWidth(0)
+        root.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(5)
@@ -145,11 +238,15 @@ class FolderTreePanel(QDockWidget):
             self.move_button,
             self.delete_button,
         ):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             actions.addWidget(button)
         layout.addLayout(actions)
 
-        self.tree = QTreeWidget()
+        self.tree = FolderTreeWidget()
         self.tree.setHeaderLabels(["Folder", "Media"])
+        self.tree.setMinimumWidth(0)
+        self.tree.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         self.tree.setAlternatingRowColors(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -174,12 +271,28 @@ class FolderTreePanel(QDockWidget):
         self.tree.itemDoubleClicked.connect(lambda *_: self.open_selected_folder())
         self.tree.itemSelectionChanged.connect(self._update_actions)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.folder_move_requested.connect(self._move_folder_from_drop)
         refresh_action = QAction(self)
         refresh_action.setShortcut("F5")
         refresh_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         refresh_action.triggered.connect(lambda: self.refresh())
         self.addAction(refresh_action)
         self._update_actions()
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < 275
+        very_compact = self.width() < 185
+        self.refresh_button.setText("↻" if compact else "Refresh")
+        self.rename_button.setText("✎" if compact else "Rename")
+        self.move_button.setText("→" if compact else "Move")
+        self.rename_button.setVisible(not very_compact)
+        self.move_button.setVisible(not very_compact)
+        self.sort_button.setText("Quick Sort" if compact else "Use selected folder for Quick Sort")
 
     def set_root(self, path: Path | str | None, *, force: bool = False):
         if path is None:
@@ -231,6 +344,11 @@ class FolderTreePanel(QDockWidget):
         def add_directory(path: Path, parent: QTreeWidgetItem | None) -> tuple[QTreeWidgetItem, int]:
             item = QTreeWidgetItem([path.name or str(path), "0"])
             item.setData(0, self.PATH_ROLE, str(path))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
+            if parent is None:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+            else:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
             if parent is None:
                 self.tree.addTopLevelItem(item)
             else:
@@ -388,6 +506,23 @@ class FolderTreePanel(QDockWidget):
             self._warning(
                 "Cannot move folder",
                 "Choose a destination inside the hierarchy and outside the folder being moved.",
+            )
+            return
+        self._perform_move(source, parent / source.name, "Move folder")
+
+    def _move_folder_from_drop(self, source_text: str, parent_text: str):
+        if not self._changes_allowed() or self.root_path is None:
+            return
+        source = _absolute(source_text)
+        parent = _absolute(parent_text)
+        if not self._editable_source(source):
+            return
+        if source.parent == parent:
+            return
+        if not _within(parent, self.root_path) or _within(parent, source):
+            self._warning(
+                "Cannot move folder",
+                "Drop onto a folder inside the hierarchy and outside the folder being moved.",
             )
             return
         self._perform_move(source, parent / source.name, "Move folder")

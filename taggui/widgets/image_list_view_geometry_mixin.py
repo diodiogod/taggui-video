@@ -2597,6 +2597,21 @@ class ImageListViewGeometryMixin:
         """Return the visual rectangle for an index, using masonry positions."""
         if self.use_masonry and self._drag_preview_mode:
             return super().visualRect(index)
+        model = self.model()
+        source_model = model.sourceModel() if hasattr(model, 'sourceModel') else model
+        paginated_masonry = bool(
+            self.use_masonry
+            and source_model is not None
+            and getattr(source_model, '_paginated_mode', False)
+        )
+        # Buffered pagination can briefly have model rows before a matching
+        # masonry snapshot is committed. Falling through to QListView's normal
+        # visualRect during that window lets Qt traverse geometry from the
+        # changing proxy model and has produced native access violations in
+        # updateGeometries. An empty rect is the correct transient answer; the
+        # next committed masonry layout will update the viewport.
+        if paginated_masonry and not self._masonry_items:
+            return QRect()
         if self._virtual_list_is_active() and index.isValid():
             global_idx = self._proxy_index_to_global_index(index)
             if global_idx < 0:
@@ -2612,8 +2627,7 @@ class ImageListViewGeometryMixin:
         if self.use_masonry and self._masonry_items and index.isValid():
             # In masonry mode, we map rows to global indices
             global_idx = index.row()
-            if hasattr(self.model(), 'sourceModel'):
-                source_model = self.model().sourceModel()
+            if hasattr(model, 'sourceModel'):
                 if hasattr(source_model, 'get_global_index_for_row'):
                     global_idx = source_model.get_global_index_for_row(index.row())
                 elif getattr(source_model, '_paginated_mode', False):

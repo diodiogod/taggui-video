@@ -65,7 +65,7 @@ class ImageListView(
     ImageListViewFileOpsMixin,
     QListView,
 ):
-    tags_paste_requested = Signal(list, list)
+    tags_paste_requested = Signal(list, object)
     directory_reload_requested = Signal()
     layout_ready = Signal()  # Emitted when masonry layout is fully calculated and applied
     selection_summary_changed = Signal()

@@ -4,6 +4,7 @@ import time
 from widgets.image_list_shared import *  # noqa: F401,F403
 from widgets.image_list_view import ImageListView
 from PySide6.QtWidgets import (
+    QApplication,
     QInputDialog,
     QSizePolicy,
     QStyle,
@@ -28,6 +29,62 @@ class ClickableLabel(QLabel):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class SidePanelToggleStrip(QFrame):
+    """Narrow, optional handle for a dock positioned left of Images."""
+
+    clicked = Signal()
+    resize_started = Signal()
+    resize_delta = Signal(int)
+    resize_finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(7)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setToolTip('Click to hide the left panel; drag to resize it')
+        self._press_global_x = None
+        self._dragging = False
+        self.setStyleSheet(
+            "QFrame { border: none; border-left: 1px solid palette(mid); "
+            "border-right: 1px solid palette(mid); background: transparent; }"
+            "QFrame:hover { background: palette(alternate-base); }"
+        )
+        self.hide()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_global_x = int(event.globalPosition().x())
+            self._dragging = False
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_global_x is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        delta = int(event.globalPosition().x()) - self._press_global_x
+        if not self._dragging and abs(delta) >= QApplication.startDragDistance():
+            self._dragging = True
+            self.resize_started.emit()
+        if self._dragging:
+            self.resize_delta.emit(delta)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._press_global_x is not None:
+            was_dragging = self._dragging
+            self._press_global_x = None
+            self._dragging = False
+            if was_dragging:
+                self.resize_finished.emit()
+            else:
+                self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class ControlsToggleStrip(QFrame):
@@ -444,6 +501,7 @@ class ImageList(QDockWidget):
     deletion_marking_changed = Signal()
     directory_reload_requested = Signal()
     sort_state_changed = Signal(str, str)
+    left_companion_toggle_requested = Signal()
 
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
@@ -666,9 +724,20 @@ class ImageList(QDockWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
-        layout.setSpacing(0)  # Remove spacing between widgets
+        outer_layout = QHBoxLayout(container)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        self.left_companion_strip = SidePanelToggleStrip(container)
+        self.left_companion_strip.clicked.connect(
+            self.left_companion_toggle_requested
+        )
+        outer_layout.addWidget(self.left_companion_strip)
+        content = QWidget(container)
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self.controls_container)
         self.list_view.setMinimumWidth(0)
         self.list_view.setSizePolicy(
@@ -677,6 +746,7 @@ class ImageList(QDockWidget):
         )
         layout.addWidget(self.list_view)
         layout.addWidget(self.footer_container)
+        outer_layout.addWidget(content, 1)
         self.setWidget(container)
         self.restore_controls_collapsed_state()
         self.restore_footer_collapsed_state()
@@ -865,6 +935,16 @@ class ImageList(QDockWidget):
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()
         return QSize(0, hint.height())
+
+    def set_left_companion_handle(self, visible: bool, *, collapsed: bool = False):
+        visible = bool(visible)
+        if self.left_companion_strip.isVisible() != visible:
+            self.left_companion_strip.setVisible(visible)
+        self.left_companion_strip.setToolTip(
+            'Click to show the panel to the left of Images; drag to restore and resize it'
+            if collapsed
+            else 'Click to hide the panel to the left of Images; drag to resize it'
+        )
 
     @Slot()
     def update_image_index_label(self, proxy_image_index: QModelIndex):

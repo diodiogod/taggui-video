@@ -1103,8 +1103,6 @@ class ImageListViewPaintSelectionMixin:
 
     @Slot()
     def paste_tags(self):
-        if not self.ensure_materialized_selection('Paste Tags'):
-            return
         selected_image_count = self.get_selected_image_count()
         if selected_image_count > 1:
             reply = get_confirmation_dialog_reply(
@@ -1114,8 +1112,8 @@ class ImageListViewPaintSelectionMixin:
             if reply != QMessageBox.StandardButton.Yes:
                 return
         tags = QApplication.clipboard().text().split(self.tag_separator)
-        selected_image_indices = self.get_selected_image_indices()
-        self.tags_paste_requested.emit(tags, selected_image_indices)
+        selected_images = self.get_selected_image_batch()
+        self.tags_paste_requested.emit(tags, selected_images)
 
 
     @Slot()

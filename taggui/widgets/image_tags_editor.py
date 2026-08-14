@@ -33,7 +33,7 @@ INTERNAL_HIDDEN_TAGS = {"__no_tags__"}
 
 
 class TagInputBox(QLineEdit):
-    tags_addition_requested = Signal(list, list)
+    tags_addition_requested = Signal(list, object)
     ideogram_tags_addition_requested = Signal(list)
 
     def __init__(self, image_tag_list_model: QStringListModel,
@@ -95,15 +95,8 @@ class TagInputBox(QLineEdit):
             if normalized_tags:
                 self.ideogram_tags_addition_requested.emit(normalized_tags)
             return
-        selection_guard = getattr(
-            self.image_list,
-            'ensure_materialized_selection',
-            None,
-        )
-        if callable(selection_guard) and not selection_guard('Add Tags'):
-            return
-        selected_image_indices = self.image_list.get_selected_image_indices()
-        selected_image_count = len(selected_image_indices)
+        selected_images = self.image_list.list_view.get_selected_image_batch()
+        selected_image_count = len(selected_images)
         if len(tags) == 1 and selected_image_count == 1:
             # Add an empty tag and set it to the new tag.
             self.image_tag_list_model.insertRow(
@@ -123,7 +116,7 @@ class TagInputBox(QLineEdit):
                                                   question=question)
             if reply != QMessageBox.StandardButton.Yes:
                 return
-        self.tags_addition_requested.emit(tags, selected_image_indices)
+        self.tags_addition_requested.emit(tags, selected_images)
 
 
 class IdeogramCaptionItemDelegate(TextEditItemDelegate):

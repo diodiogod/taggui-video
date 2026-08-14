@@ -14,12 +14,24 @@ count for each folder.
 
 The panel intentionally does not monitor the filesystem continuously.
 
+When **Folders** is docked immediately to the left of **Images**, a narrow
+handle appears on the left edge of Images. Click it to collapse the Folders
+panel and click it again to restore the previous width. The folder toolbar also
+compacts automatically at narrow widths; all commands remain available from the
+tree's context menu.
+
 ## Folder operations
 
 Use the buttons or the folder context menu to create, rename, move, or delete
 folders. Rename and move are restricted to the loaded hierarchy and update the
 TagGUI index without replacing image IDs. The first implementation deletes only
 empty folders so deletion can be safely undone.
+
+You can also drag a folder onto another folder to move it there. Folders remain
+alphabetically ordered after refresh; dragging changes their parent rather than
+creating a separate cosmetic order. The **Move** button remains available when
+choosing a distant destination is more convenient than dragging through the
+tree.
 
 Folder operations participate in TagGUI's standard **Edit > Undo** and
 **Edit > Redo** history. Undo can refuse an operation if later filesystem

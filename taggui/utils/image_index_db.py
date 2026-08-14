@@ -4245,6 +4245,39 @@ class ImageIndexDB:
                 print(f'Database review clear error: {e}')
                 return 0
 
+    def get_review_states_for_paths(self, rel_paths) -> dict[str, dict]:
+        """Return structured review state keyed by relative media path."""
+        paths = [str(path) for path in rel_paths if str(path)]
+        if not self.enabled or not self.conn or not paths:
+            return {}
+        result = {}
+        try:
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                for offset in range(0, len(paths), 400):
+                    batch = paths[offset:offset + 400]
+                    placeholders = ','.join('?' for _ in batch)
+                    cursor.execute(
+                        f'''SELECT file_name, rating, love, bomb, reaction_updated_at,
+                                   review_rank, review_flags, review_updated_at
+                            FROM images WHERE file_name IN ({placeholders})''',
+                        tuple(batch),
+                    )
+                    for (file_name, rating, love, bomb, reaction_updated_at,
+                         rank, flags, updated_at) in cursor.fetchall():
+                        result[str(file_name)] = {
+                            'rating': float(rating or 0.0),
+                            'love': bool(love),
+                            'bomb': bool(bomb),
+                            'reaction_updated_at': reaction_updated_at,
+                            'review_rank': int(rank or 0),
+                            'review_flags': int(flags or 0),
+                            'review_updated_at': updated_at,
+                        }
+        except sqlite3.Error as exc:
+            print(f'Database review snapshot error: {exc}')
+        return result
+
     def mark_thumbnail_cached(self, file_name: str, cached: bool = True):
         """Mark thumbnail as cached/uncached for an image (thread-safe)."""
         if not self.enabled or not self.conn:
