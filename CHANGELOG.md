@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-08-14
+
+### Added
+
+- Keep keyboard deletion marking working in both image browsers
+
+### Fixed
+
+- Fix Delete no longer marking selected images after the Image List panel layout update
+
+### Removed
+
+- Restore Delete-key deletion marking
 ## [1.5.1] - 2026-08-14
 
 ### Added
