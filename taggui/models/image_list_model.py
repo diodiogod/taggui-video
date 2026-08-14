@@ -92,6 +92,20 @@ _mismatched_repair_lock = threading.Lock()
 _mismatched_repair_blocked_cache: dict[str, dict[str, float | int | str]] = {}
 MARKING_CONFIDENCE_PATTERN = re.compile(r'^(<=|>=|==|<|>|=)\s*(0?[.,][0-9]+)')
 
+# Formats that can be identified from a still-image header.  This is kept
+# separate from the user's configured image list because extension repair must
+# also be able to recognize a file whose current suffix is garbage (for
+# example, ``photo.jpg.v1699743618``).
+_REPAIRABLE_IMAGE_SUFFIXES = frozenset({
+    '.avif', '.bmp', '.gif', '.heic', '.heif', '.jpg', '.jpeg', '.jxl',
+    '.png', '.tif', '.tiff', '.webp',
+})
+_EMBEDDED_IMAGE_SUFFIX_RE = re.compile(
+    r'^(?P<base>.*?)(?P<suffix>\.(?:avif|bmp|gif|heic|heif|jpe?g|jxl|png|tiff?|webp))'
+    r'(?:\((?P<copy>\d+)\))?$',
+    re.IGNORECASE,
+)
+
 # Custom event for background load completion
 class BackgroundLoadCompleteEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
@@ -766,10 +780,15 @@ def _detect_image_suffix_from_header(path: Path) -> str | None:
 
 
 def _detect_extensionless_image_suffix(path: Path) -> str | None:
-    """Detect common image formats for files that have no suffix."""
-    if path.suffix:
+    """Detect an image format when the current suffix is missing or invalid."""
+    if str(path.suffix).lower() in _REPAIRABLE_IMAGE_SUFFIXES:
         return None
     return _detect_image_suffix_from_header(path)
+
+
+def _needs_image_extension_repair(path: Path) -> bool:
+    """Return whether ``path`` has no usable still-image suffix."""
+    return str(path.suffix).lower() not in _REPAIRABLE_IMAGE_SUFFIXES
 
 
 def _extensionless_repair_cache_path(directory_path: Path) -> Path:
@@ -845,21 +864,50 @@ def _extensionless_cache_entry_matches(
 
 
 def _unique_detected_image_path(path: Path, suffix: str) -> Path:
-    candidate = path.with_name(f"{path.name}{suffix}")
+    candidate = _preferred_repaired_image_path(path, suffix)
     if not candidate.exists():
         return candidate
 
     counter = 2
     while True:
-        candidate = path.with_name(f"{path.name}_{counter}{suffix}")
+        # Parenthesized copy markers are not mistaken for TagGUI's legacy
+        # numbered repair artifacts and keep the repaired extension singular.
+        candidate = candidate.with_name(f"{candidate.stem}({counter}){suffix}")
         if not candidate.exists():
             return candidate
         counter += 1
 
 
+def _preferred_repaired_image_path(path: Path, suffix: str) -> Path:
+    """Build a clean target name for a file with a missing/bogus suffix.
+
+    Download/cache-buster names commonly look like ``name.jpg.v123``.  The
+    actual format is in the header, so remove the trailing cache-buster and
+    replace an embedded claimed image extension when it disagrees with that
+    header.  Copy markers such as ``name.jpg(1).v123`` are moved before the
+    repaired extension to keep the result usable by normal path handling.
+    """
+    suffix = str(suffix).lower()
+    stem = path.stem
+    if stem.lower().endswith(suffix):
+        # The bad suffix was appended after the correct extension.
+        candidate_name = stem
+    else:
+        embedded_match = _EMBEDDED_IMAGE_SUFFIX_RE.match(stem)
+        if embedded_match:
+            base = embedded_match.group('base')
+            copy_marker = embedded_match.group('copy')
+            if copy_marker:
+                base = f"{base}({copy_marker})"
+            candidate_name = f"{base}{suffix}"
+        else:
+            candidate_name = f"{stem}{suffix}"
+    return path.with_name(candidate_name)
+
+
 def _unique_repaired_image_path(path: Path, suffix: str) -> Path:
     """Return a unique renamed path that uses the detected suffix."""
-    candidate = path.with_suffix(str(suffix))
+    candidate = _preferred_repaired_image_path(path, suffix)
     if candidate == path:
         return path
     if not candidate.exists():
@@ -867,7 +915,7 @@ def _unique_repaired_image_path(path: Path, suffix: str) -> Path:
 
     counter = 2
     while True:
-        candidate = path.with_name(f"{path.stem}_{counter}{suffix}")
+        candidate = candidate.with_name(f"{candidate.stem}({counter}){suffix}")
         if not candidate.exists():
             return candidate
         counter += 1
@@ -892,7 +940,7 @@ def _pop_extensionless_image_repair_count(directory_path: Path) -> int:
 def _print_extensionless_image_repair_summary(directory_path: Path):
     repaired_count = _pop_extensionless_image_repair_count(directory_path)
     if repaired_count > 0:
-        print(f"[SCAN] Repaired {repaired_count:,} extensionless image file(s)")
+        print(f"[SCAN] Repaired {repaired_count:,} image file extension(s)")
 
 
 def repair_extensionless_image_path(
@@ -902,7 +950,7 @@ def repair_extensionless_image_path(
     stat_result=None,
     repair_cache: dict[str, dict[str, dict[str, float | int | str]]] | None = None,
 ) -> Path:
-    """Rename an extensionless image to its detected image suffix when possible."""
+    """Rename an image with a missing/bogus suffix to its detected suffix."""
     cache_key = _normalize_relative_path(rel_path) if rel_path else None
     non_image_cache = repair_cache.get('non_images', {}) if repair_cache is not None else None
     rename_failed_cache = (
@@ -958,7 +1006,7 @@ def repair_extensionless_image_path(
                 }
             except (TypeError, ValueError):
                 pass
-        print(f"[SCAN] Failed to repair extensionless image {path}: {e}")
+        print(f"[SCAN] Failed to repair image extension {path}: {e}")
         return path
 
 
@@ -1119,7 +1167,7 @@ def scan_directory_snapshot(
 
                     if stat_module.S_ISREG(mode) or entry.is_symlink():
                         file_path = Path(entry.path)
-                        if repair_extensionless_images and not file_path.suffix:
+                        if repair_extensionless_images and _needs_image_extension_repair(file_path):
                             file_path = repair_extensionless_image_path(
                                 file_path,
                                 scan_root=directory_path,
@@ -1272,7 +1320,7 @@ def scan_image_paths_in_subtrees(
                         continue
 
                     file_path = Path(entry.path)
-                    if repair_extensionless_images and not file_path.suffix:
+                    if repair_extensionless_images and _needs_image_extension_repair(file_path):
                         file_path = repair_extensionless_image_path(
                             file_path,
                             scan_root=directory_path,
@@ -1323,7 +1371,7 @@ def repair_extensionless_images_in_directory(
     directory_path: Path,
     progress_callback=None,
 ) -> dict[str, Any]:
-    """Explicitly scan a directory tree for extensionless images and repair them."""
+    """Scan a directory tree for missing/bogus image extensions and repair them."""
     import os
     import stat as stat_module
 
@@ -1373,7 +1421,7 @@ def repair_extensionless_images_in_directory(
                             pass
 
                     file_path = Path(entry.path)
-                    if file_path.suffix:
+                    if not _needs_image_extension_repair(file_path):
                         continue
 
                     extensionless_count += 1

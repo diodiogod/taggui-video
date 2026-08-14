@@ -886,7 +886,7 @@ class SettingsDialog(QDialog):
             QMessageBox.information(
                 self,
                 'Scan Still Running',
-                'Cancel the extensionless image scan before closing Settings.'
+                'Cancel the image-extension scan before closing Settings.'
             )
             event.ignore()
             return
@@ -2111,23 +2111,24 @@ class SettingsDialog(QDialog):
         workflow_grid.addWidget(image_list_double_click_combo, 1, 1,
                                 Qt.AlignmentFlag.AlignLeft)
 
-        maintenance_grid.addWidget(QLabel('Repair extensionless images on folder scan'), 0, 0,
+        maintenance_grid.addWidget(QLabel('Repair malformed image extensions on folder scan'), 0, 0,
                                    Qt.AlignmentFlag.AlignRight)
         repair_extensionless_images_check_box = SettingsBigCheckBox(
             key='repair_extensionless_images')
         repair_extensionless_images_check_box.setToolTip(
-            'Off by default. When enabled, folder scans inspect files with no extension. '
-            'If a JPEG, PNG, GIF, WebP, BMP, TIFF, or JPEG XL header is found, TagGUI '
-            'renames the file to add the detected extension before adding it to the image list.')
+            'Off by default. When enabled, folder scans inspect files with no usable image '
+            'extension. If a JPEG, PNG, GIF, WebP, BMP, TIFF, or JPEG XL header is found, '
+            'TagGUI renames the file to use the detected extension before adding it to the image list. '
+            'This also handles download names such as photo.jpg.v1699743618.')
         repair_extensionless_images_check_box.stateChanged.connect(self.show_restart_warning)
         maintenance_grid.addWidget(repair_extensionless_images_check_box, 0, 1,
                                    Qt.AlignmentFlag.AlignLeft)
 
-        maintenance_grid.addWidget(QLabel('Current folder extensionless repair'), 1, 0,
+        maintenance_grid.addWidget(QLabel('Repair image extensions in current folder'), 1, 0,
                                    Qt.AlignmentFlag.AlignRight)
         repair_current_folder_btn = QPushButton('Scan Current Folder...')
         repair_current_folder_btn.setToolTip(
-            'Manually scan the currently loaded folder for files with no extension. '
+            'Manually scan the currently loaded folder for files with no usable image extension. '
             'Detected images are renamed and added to the image list without clearing caches.')
         repair_current_folder_btn.clicked.connect(self.repair_current_folder_extensionless_images)
         maintenance_grid.addWidget(repair_current_folder_btn, 1, 1,
@@ -2172,13 +2173,13 @@ class SettingsDialog(QDialog):
 
     @Slot()
     def repair_current_folder_extensionless_images(self):
-        """Manually repair extensionless images in the currently loaded folder."""
+        """Manually repair missing or malformed image extensions in the currently loaded folder."""
         existing_thread = getattr(self, '_extensionless_repair_thread', None)
         if existing_thread is not None and existing_thread.isRunning():
             QMessageBox.information(
                 self,
                 'Scan Already Running',
-                'The current folder extensionless image scan is already running.'
+                'The current folder image-extension scan is already running.'
             )
             return
 
@@ -2202,7 +2203,7 @@ class SettingsDialog(QDialog):
         reply = QMessageBox.question(
             self,
             'Scan Current Folder',
-            f'This scans the current folder for files with no extension and renames '
+            f'This scans the current folder for files with no usable image extension and renames '
             f'detected images to their real image extension.\n\n'
             f'{current_dir}\n\n'
             f'Existing cache data is not cleared.\n\n'
@@ -2214,13 +2215,13 @@ class SettingsDialog(QDialog):
             return
 
         progress = QProgressDialog(
-            'Scanning extensionless files...',
+            'Scanning malformed image extensions...',
             'Cancel',
             0,
             0,
             self,
         )
-        progress.setWindowTitle('Repair Extensionless Images')
+        progress.setWindowTitle('Repair Image Extensions')
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
@@ -2236,9 +2237,9 @@ class SettingsDialog(QDialog):
             if progress.wasCanceled():
                 return
             progress.setLabelText(
-                f'Scanning extensionless files...\n'
+                f'Scanning malformed image extensions...\n'
                 f'Files checked: {int(file_count):,}\n'
-                f'Extensionless files found: {int(extensionless_count):,}'
+                f'Files needing repair: {int(extensionless_count):,}'
             )
 
         def cleanup_progress():
@@ -2253,7 +2254,7 @@ class SettingsDialog(QDialog):
             cleanup_progress()
             QMessageBox.critical(
                 self,
-                'Extensionless Image Scan Failed',
+                'Image Extension Scan Failed',
                 f'Failed to scan current folder:\n\n{message}'
             )
 
@@ -2270,15 +2271,15 @@ class SettingsDialog(QDialog):
                     print(f"[SCAN] Warning: couldn't add repaired images to current model: {e}")
 
             title = (
-                'Extensionless Image Scan Cancelled'
+                'Image Extension Scan Cancelled'
                 if result.get('cancelled', False)
-                else 'Extensionless Image Scan Complete'
+                else 'Image Extension Scan Complete'
             )
             QMessageBox.information(
                 self,
                 title,
                 f'Files checked: {int(result.get("file_count", 0) or 0):,}\n'
-                f'Extensionless files found: {int(result.get("extensionless_count", 0) or 0):,}\n'
+                f'Files needing repair: {int(result.get("extensionless_count", 0) or 0):,}\n'
                 f'Repaired images: {int(result.get("repaired_count", 0) or 0):,}\n'
                 f'Added to image list: {int(added_count):,}\n'
                 f'Skipped from repair cache: {int(result.get("skipped_cached_count", 0) or 0):,}\n'
