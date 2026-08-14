@@ -45,6 +45,20 @@ Typing letters in the image list no longer jumps selection. Use the filter box w
 
 Fullscreen applies to the main viewer only and works for both images and videos.
 
+## Quick Sort
+
+- Open or start the configured Quick Sort workflow: `Ctrl` + `Shift` + `Q`
+- Sort to a matching folder with no setup: `A` to `Z` or `0` to `9`
+- Skip the current item without moving or copying it: `Space`
+- Undo or redo the last Quick Sort decision: `Ctrl` + `Z` / `Ctrl` + `Y`
+- Alternate redo shortcut: `Ctrl` + `Shift` + `Z`
+- Browse the immutable session queue: arrow keys, `Page Up`, `Page Down`, `Home`, or `End`
+- Toggle the dedicated viewer fullscreen window: `F11`
+- Clear a pending qualifier: `Backspace` or `Esc`
+- Exit Quick Sort when no qualifier is pending: `Esc`
+
+Quick Sort owns these keys only while its focused session is active. Named overrides and optional qualifier keys are configured in the Quick Sort panel.
+
 ## Image Tags Pane
 
 - Add a tag: type in `Add Tag` and press `Enter`

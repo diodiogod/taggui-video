@@ -2302,18 +2302,29 @@ class ImageIndexDB:
 
     def _bulk_insert_chunk(self, data_chunk):
         """Helper to insert a chunk of data."""
-        try:
-            cursor = self.conn.cursor()
-            cursor.executemany('''
-                INSERT OR IGNORE INTO images
-                (file_name, width, height, aspect_ratio, is_video, video_fps,
-                 video_duration, video_frame_count, mtime, rating, indexed_at,
-                 file_size, file_type, ctime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', data_chunk)
-            self.conn.commit()
-        except sqlite3.Error as e:
-            print(f'Database bulk insert error: {e}')
+        with self._db_lock:
+            try:
+                before_changes = self.conn.total_changes
+                cursor = self.conn.cursor()
+                cursor.executemany('''
+                    INSERT OR IGNORE INTO images
+                    (file_name, width, height, aspect_ratio, is_video, video_fps,
+                     video_duration, video_frame_count, mtime, rating, indexed_at,
+                     file_size, file_type, ctime)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', data_chunk)
+                inserted = self.conn.total_changes > before_changes
+                if inserted:
+                    cursor.execute('DELETE FROM ordered_image_cache')
+                self.conn.commit()
+                if inserted:
+                    self._order_cache_signature = None
+            except sqlite3.Error as e:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                print(f'Database bulk insert error: {e}')
 
     def _create_ideogram_caption_schema(self, cursor):
         cursor.execute('''
@@ -3884,32 +3895,40 @@ class ImageIndexDB:
         """Remove images (and their tags) from the DB by relative path."""
         if not self.enabled or not self.conn or not rel_paths:
             return 0
-        try:
-            cursor = self.conn.cursor()
-            placeholders = ','.join('?' for _ in rel_paths)
-            # Get IDs first for tag cleanup
-            cursor.execute(
-                f'SELECT id FROM images WHERE file_name IN ({placeholders})',
-                rel_paths
-            )
-            ids = [row[0] for row in cursor.fetchall()]
-            if ids:
-                id_ph = ','.join('?' for _ in ids)
-                cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
-                cursor.execute(f'DELETE FROM image_markings WHERE image_id IN ({id_ph})', ids)
-                cursor.execute(f'DELETE FROM image_ideogram_captions WHERE image_id IN ({id_ph})', ids)
-                cursor.execute(f'DELETE FROM image_ideogram_terms WHERE image_id IN ({id_ph})', ids)
-            cursor.execute(
-                f'DELETE FROM images WHERE file_name IN ({placeholders})',
-                rel_paths
-            )
-            self.commit()
-            if ids:
-                print(f'[DB] Removed {len(ids)} deleted images from index.')
-            return len(ids)
-        except Exception as e:
-            print(f'[DB] Error removing deleted images: {e}')
-            return 0
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                placeholders = ','.join('?' for _ in rel_paths)
+                # Get IDs first for tag cleanup
+                cursor.execute(
+                    f'SELECT id FROM images WHERE file_name IN ({placeholders})',
+                    rel_paths
+                )
+                ids = [row[0] for row in cursor.fetchall()]
+                if ids:
+                    id_ph = ','.join('?' for _ in ids)
+                    cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
+                    cursor.execute(f'DELETE FROM image_markings WHERE image_id IN ({id_ph})', ids)
+                    cursor.execute(f'DELETE FROM image_ideogram_captions WHERE image_id IN ({id_ph})', ids)
+                    cursor.execute(f'DELETE FROM image_ideogram_terms WHERE image_id IN ({id_ph})', ids)
+                cursor.execute(
+                    f'DELETE FROM images WHERE file_name IN ({placeholders})',
+                    rel_paths
+                )
+                if ids:
+                    cursor.execute('DELETE FROM ordered_image_cache')
+                self.conn.commit()
+                if ids:
+                    self._order_cache_signature = None
+                    print(f'[DB] Removed {len(ids)} deleted images from index.')
+                return len(ids)
+            except Exception as e:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                print(f'[DB] Error removing deleted images: {e}')
+                return 0
 
     def remove_tag_from_image(self, image_id: int, tag: str):
         """Remove a single tag from an image."""
@@ -4297,8 +4316,15 @@ class ImageIndexDB:
             except sqlite3.Error as e:
                 print(f'Database image dimension write error: {e}')
 
-    def rename_image_path(self, old_file_name: str, new_file_name: str, *, directory_path: Path | None = None) -> bool:
-        """Rename one indexed image path in-place after an on-disk file rename."""
+    def rename_image_path(
+        self,
+        old_file_name: str,
+        new_file_name: str,
+        *,
+        directory_path: Path | None = None,
+        replace_stale_destination: bool = False,
+    ) -> bool:
+        """Rename one indexed path, optionally replacing a stale target atomically."""
         if not self.enabled or not self.conn:
             return False
         if not old_file_name or not new_file_name or old_file_name == new_file_name:
@@ -4349,6 +4375,30 @@ class ImageIndexDB:
                 row = cursor.fetchone()
                 if not row:
                     return False
+                source_id = int(row[0])
+
+                if replace_stale_destination:
+                    cursor.execute(
+                        'SELECT id FROM images WHERE file_name = ?',
+                        (normalized_new,),
+                    )
+                    destination_row = cursor.fetchone()
+                    if destination_row and int(destination_row[0]) != source_id:
+                        destination_id = int(destination_row[0])
+                        for table in (
+                            'image_tags',
+                            'image_markings',
+                            'image_ideogram_captions',
+                            'image_ideogram_terms',
+                        ):
+                            cursor.execute(
+                                f'DELETE FROM {table} WHERE image_id = ?',
+                                (destination_id,),
+                            )
+                        cursor.execute(
+                            'DELETE FROM images WHERE id = ?',
+                            (destination_id,),
+                        )
 
                 cursor.execute(
                     '''
@@ -4369,19 +4419,149 @@ class ImageIndexDB:
                         normalized_old,
                     ),
                 )
+                changed = bool(cursor.rowcount)
+                if changed:
+                    cursor.execute('DELETE FROM ordered_image_cache')
                 self.conn.commit()
-                return bool(cursor.rowcount)
+                if changed:
+                    self._order_cache_signature = None
+                return changed
             except sqlite3.IntegrityError:
                 try:
-                    cursor = self.conn.cursor()
-                    cursor.execute('DELETE FROM images WHERE file_name = ?', (normalized_old,))
-                    self.conn.commit()
+                    self.conn.rollback()
                 except Exception:
                     pass
                 return False
             except sqlite3.Error as e:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
                 print(f'Database image rename error: {e}')
                 return False
+
+    def clone_curator_metadata(self, source_file_name: str, destination_file_name: str) -> bool:
+        """Clone user-authored index metadata between two already indexed files."""
+        if not self.enabled or not self.conn:
+            return False
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT id FROM images WHERE file_name = ?',
+                    (str(source_file_name),),
+                )
+                source_row = cursor.fetchone()
+                cursor.execute(
+                    'SELECT id FROM images WHERE file_name = ?',
+                    (str(destination_file_name),),
+                )
+                destination_row = cursor.fetchone()
+                if not source_row or not destination_row:
+                    return False
+                source_id = int(source_row[0])
+                destination_id = int(destination_row[0])
+
+                cursor.execute(
+                    '''
+                    UPDATE images
+                    SET rating = (SELECT rating FROM images WHERE id = ?),
+                        love = (SELECT love FROM images WHERE id = ?),
+                        bomb = (SELECT bomb FROM images WHERE id = ?),
+                        reaction_updated_at = (
+                            SELECT reaction_updated_at FROM images WHERE id = ?
+                        ),
+                        review_rank = (SELECT review_rank FROM images WHERE id = ?),
+                        review_flags = (SELECT review_flags FROM images WHERE id = ?),
+                        review_updated_at = (
+                            SELECT review_updated_at FROM images WHERE id = ?
+                        )
+                    WHERE id = ?
+                    ''',
+                    (
+                        source_id,
+                        source_id,
+                        source_id,
+                        source_id,
+                        source_id,
+                        source_id,
+                        source_id,
+                        destination_id,
+                    ),
+                )
+
+                for table in (
+                    'image_tags',
+                    'image_markings',
+                    'image_ideogram_captions',
+                    'image_ideogram_terms',
+                ):
+                    cursor.execute(
+                        f'DELETE FROM {table} WHERE image_id = ?',
+                        (destination_id,),
+                    )
+                cursor.execute(
+                    '''
+                    INSERT OR IGNORE INTO image_tags(image_id, tag)
+                    SELECT ?, tag FROM image_tags
+                    WHERE image_id = ?
+                    ORDER BY rowid ASC
+                    ''',
+                    (destination_id, source_id),
+                )
+                cursor.execute(
+                    '''
+                    INSERT INTO image_markings(
+                        image_id, label, type, confidence, x, y, width, height
+                    )
+                    SELECT ?, label, type, confidence, x, y, width, height
+                    FROM image_markings WHERE image_id = ?
+                    ''',
+                    (destination_id, source_id),
+                )
+                cursor.execute(
+                    '''
+                    INSERT INTO image_ideogram_captions(
+                        image_id, search_text, sidecar_mtime
+                    )
+                    SELECT ?, search_text, sidecar_mtime
+                    FROM image_ideogram_captions WHERE image_id = ?
+                    ''',
+                    (destination_id, source_id),
+                )
+                cursor.execute(
+                    '''
+                    INSERT INTO image_ideogram_terms(
+                        image_id, kind, label, value, element_index
+                    )
+                    SELECT ?, kind, label, value, element_index
+                    FROM image_ideogram_terms WHERE image_id = ?
+                    ''',
+                    (destination_id, source_id),
+                )
+                cursor.execute('DELETE FROM ordered_image_cache')
+                self.conn.commit()
+                self._order_cache_signature = None
+                return True
+            except sqlite3.Error as e:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                print(f'Database metadata clone error: {e}')
+                return False
+
+    def invalidate_order_cache(self) -> None:
+        """Invalidate materialized ranks after paths are added, removed, or renamed."""
+        self._order_cache_signature = None
+        if not self.enabled or not self.conn:
+            return
+        with self._db_lock:
+            try:
+                self.conn.execute('DELETE FROM ordered_image_cache')
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f'Database order cache invalidation error: {e}')
 
     # ========== Image ID Lookup ==========
 

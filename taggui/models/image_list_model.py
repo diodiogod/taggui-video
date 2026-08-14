@@ -62,6 +62,11 @@ ensure_pillow_plugins_registered()
 UNDO_STACK_SIZE = 32
 
 
+def _absolute_path_no_follow(path: Path | str) -> Path:
+    """Return an absolute path while preserving a filesystem symlink itself."""
+    return Path(os.path.abspath(os.fspath(Path(path).expanduser())))
+
+
 @lru_cache(maxsize=1)
 def _get_exifread_module():
     """Load EXIF parsing only when uncached image metadata needs it."""
@@ -5970,6 +5975,13 @@ class ImageListModel(QAbstractListModel):
             Qt.ConnectionType.QueuedConnection,
         )
 
+    def cancel_background_path_validation(self):
+        """Invalidate scheduled/in-flight folder validation before a file workflow."""
+        self._path_validation_generation += 1
+        with self._path_validation_lock:
+            self._pending_path_validation_result = None
+        self._close_background_validation_progress()
+
     def _compute_paginated_refresh_preload(
         self,
         db: ImageIndexDB,
@@ -6286,6 +6298,12 @@ class ImageListModel(QAbstractListModel):
                 repair_extensionless_images=repair_extensionless_images,
             )
 
+            # A foreground file workflow may invalidate this generation while
+            # the filesystem scan is running. Never let a stale scan mutate the
+            # index after that point.
+            if generation != self._path_validation_generation:
+                return
+
             merged_rel_paths = {
                 rel_path for rel_path in current_rel_paths
                 if not any(
@@ -6319,6 +6337,9 @@ class ImageListModel(QAbstractListModel):
                 current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
                 for rel_path in merged_rel_paths
             }
+
+            if generation != self._path_validation_generation:
+                return
 
             if removed_db_paths:
                 db.remove_images_by_paths(removed_db_paths)
@@ -7101,6 +7122,9 @@ class ImageListModel(QAbstractListModel):
 
     def _schedule_paginated_maintenance(self, directory_path: Path):
         """Run paginated DB maintenance in the background after the UI is visible."""
+        executor = getattr(self, '_load_executor', None)
+        if self._shutdown_requested or executor is None:
+            return
         with self._paginated_maintenance_lock:
             if self._paginated_maintenance_running:
                 return
@@ -7268,7 +7292,11 @@ class ImageListModel(QAbstractListModel):
                 with self._paginated_maintenance_lock:
                     self._paginated_maintenance_running = False
 
-        self._load_executor.submit(maintenance_worker)
+        try:
+            executor.submit(maintenance_worker)
+        except RuntimeError:
+            with self._paginated_maintenance_lock:
+                self._paginated_maintenance_running = False
 
     def _resolve_page_memory_limits(self) -> tuple[int, int, int]:
         """Resolve raw + effective paginated page-memory limits from settings."""
@@ -9717,13 +9745,59 @@ class ImageListModel(QAbstractListModel):
         """Register a known app-created media file without scanning the folder."""
         return self.add_generated_media_batch([image_path]) > 0
 
+    def _hydrate_generated_media_sidecar_index(self, rel_paths: list[str]):
+        """Restore searchable curator state for newly registered media sidecars."""
+        if not self._db or not self._directory_path or not rel_paths:
+            return
+        reaction_updates = []
+        review_updates = []
+        for rel_path in rel_paths:
+            image_id = self._db.get_image_id(rel_path)
+            if image_id is None:
+                continue
+            media_path = Path(self._directory_path) / rel_path
+            sidecar_path = self._preferred_sidecar_meta_path(media_path)
+            if sidecar_path is None:
+                continue
+            meta = self._read_cached_sidecar_meta(sidecar_path)
+            if not isinstance(meta, dict) or meta.get('version') != 1:
+                continue
+
+            reaction_state = extract_sidecar_reaction_state(meta)
+            if reaction_state is not None:
+                reaction_updates.append((
+                    float(reaction_state.get('rating') or 0.0),
+                    bool(reaction_state.get('love') or False),
+                    bool(reaction_state.get('bomb') or False),
+                    reaction_state.get('reaction_updated_at'),
+                    int(image_id),
+                ))
+
+            review_state = extract_sidecar_review_state(meta)
+            if review_state is not None:
+                review_updates.append((
+                    int(review_state.get('review_rank') or 0),
+                    int(review_state.get('review_flags') or 0),
+                    review_state.get('review_updated_at'),
+                    int(image_id),
+                ))
+
+            markings = meta.get('markings')
+            if isinstance(markings, list):
+                self._db.set_markings_for_image(int(image_id), markings)
+
+        if reaction_updates:
+            self._db.import_sidecar_reactions(reaction_updates)
+        if review_updates:
+            self._db.import_sidecar_review_state(review_updates)
+
     def add_generated_media_batch(self, image_paths: list[Path]) -> int:
         """Register multiple known app-created media files without scanning the folder."""
         resolved_paths: list[Path] = []
         seen_paths: set[Path] = set()
         for raw_path in image_paths or []:
             try:
-                image_path = Path(raw_path).resolve()
+                image_path = _absolute_path_no_follow(raw_path)
             except Exception:
                 continue
             if not image_path.exists() or image_path in seen_paths:
@@ -9738,7 +9812,11 @@ class ImageListModel(QAbstractListModel):
             existing_paths: set[Path] = set()
             for img in self.images:
                 try:
-                    existing_paths.add(Path(getattr(img, 'path', resolved_paths[0])).resolve())
+                    existing_paths.add(
+                        _absolute_path_no_follow(
+                            getattr(img, 'path', resolved_paths[0])
+                        )
+                    )
                 except Exception:
                     continue
 
@@ -9774,6 +9852,7 @@ class ImageListModel(QAbstractListModel):
                         db=self._db,
                         directory_path=self._directory_path,
                     )
+                    self._hydrate_generated_media_sidecar_index(rel_paths)
                     self._db.commit()
             return len(inserted_paths)
 
@@ -9808,6 +9887,7 @@ class ImageListModel(QAbstractListModel):
             db=self._db,
             directory_path=self._directory_path,
         )
+        self._hydrate_generated_media_sidecar_index(rel_paths)
         self._db.commit()
 
         new_total = int(self._db.count(
@@ -9826,7 +9906,7 @@ class ImageListModel(QAbstractListModel):
         seen_paths: set[Path] = set()
         for raw_path in image_paths or []:
             try:
-                image_path = Path(raw_path).resolve()
+                image_path = _absolute_path_no_follow(raw_path)
             except Exception:
                 continue
             if image_path in seen_paths:
@@ -9843,7 +9923,9 @@ class ImageListModel(QAbstractListModel):
             removed_count = 0
             for image in self.images:
                 try:
-                    image_path = Path(getattr(image, 'path', '')).resolve()
+                    image_path = _absolute_path_no_follow(
+                        getattr(image, 'path', '')
+                    )
                 except Exception:
                     image_path = None
                 if image_path in target_paths:

@@ -26,6 +26,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/VIDEO_SURFACE_CONTROLS_GUIDE.md`: Contextual hover controls for video seek, scrub, and temporary speed actions.
 - `docs/PIPELINES_GUIDE.md`: Pipeline creation, step configuration, linking, execution, and import/export guide.
 - `docs/MARKINGS_GUIDE.md`: Manual and automatic marking workflows, class actions, and model safety notes.
+- `docs/QUICK_SORT_GUIDE.md`: Zero-setup keyboard sorting, named destination overrides, qualifier routing, file handling, and session controls.
 
 ## Archived Docs (`docs/archive/`)
 
@@ -80,6 +81,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `auto_captioner.py`: Auto-caption UI integration.
 - `auto_markings.py`: Responsive auto-marking panel with persistent Ctrl+wheel UI zoom, model picker, class-to-label/action mapping, advanced inference controls, and run status/log UI.
 - `pipeline_editor.py`: Named pipeline editor with reorderable step cards, linked marking steps, scope selection, profiles, and execution status.
+- `quick_sort_panel.py`: Compact Quick Sort profile/setup dock with automatic keyboard destinations, named overrides, optional qualifiers, and launch state.
 - `marking_view.py`: Marking canvas integration.
 - `masonry_layout.py`: Masonry layout computation logic.
 - `masonry_worker.py`: Background masonry worker/executor integration.
@@ -107,11 +109,14 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `signal_manager.py`: Signal/slot wiring.
 - `video_editing_controller.py`: Video editing workflow control, screenshot export, and copy-output media registration.
 - `pipeline_runner.py`: Sequential pipeline execution, scope resolution, progress/log signals, and step dispatch.
+- `quick_sort_controller.py`: Immutable Quick Sort sessions, focused viewer HUD, keyboard routing, undo/redo, and browser/DB reconciliation.
 
 ### Utilities (`taggui/utils/`)
 
 - `settings.py`: Persistent settings access.
 - `pipeline.py`: Pipeline definitions, serialization, validation, and persistent profile storage.
+- `quick_sort.py`: Versioned Quick Sort profiles, automatic key routes, nested qualifier routing, validation, and persistence.
+- `quick_sort_file_service.py`: Collision-safe media/sidecar move and copy bundles with rollback, undo, redo, and symlink safety.
 - `auto_marking_preferences.py`: Persistent per-model class action and custom output-label preferences.
 - `marking_model_security.py`: Marking-model discovery, PT trust/import prompts, task inference, VirusTotal lookup, and safer ONNX runtime setup.
 - `marking_model_importer.py`: Isolated PT-to-ONNX import helper with source timestamp preservation.

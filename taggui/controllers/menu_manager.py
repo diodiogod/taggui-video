@@ -560,6 +560,9 @@ class MenuManager:
         self.toggle_auto_markings_action = None
         self.toggle_ideogram_caption_editor_action = None
         self.toggle_pipeline_editor_action = None
+        self.toggle_quick_sort_panel_action = None
+        self.start_quick_sort_action = None
+        self.exit_quick_sort_action = None
         self.toggle_perf_hud_action = None
         self.toggle_reaction_controls_action = None
         self.recent_folders_menu = None
@@ -614,6 +617,9 @@ class MenuManager:
         # View menu
         self._create_view_menu(menu_bar)
 
+        # Quick Sort workflow menu
+        self._create_quick_sort_menu(menu_bar)
+
         # Browsers menu
         self._create_browsers_menu(menu_bar)
 
@@ -656,6 +662,20 @@ class MenuManager:
             'Pipelines',
             parent=self.main_window,
         )
+        self.toggle_quick_sort_panel_action = QAction(
+            'Quick Sort',
+            parent=self.main_window,
+        )
+        self.start_quick_sort_action = QAction(
+            'Start Quick Sort',
+            parent=self.main_window,
+        )
+        self.start_quick_sort_action.setShortcut(QKeySequence('Ctrl+Shift+Q'))
+        self.exit_quick_sort_action = QAction(
+            'Exit Quick Sort',
+            parent=self.main_window,
+        )
+        self.exit_quick_sort_action.setEnabled(False)
         self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
         self.auto_captioner_layout_action_group = QActionGroup(self.main_window)
         self.auto_captioner_layout_action_group.setExclusive(True)
@@ -845,6 +865,7 @@ class MenuManager:
         self.toggle_auto_markings_action.setCheckable(True)
         self.toggle_ideogram_caption_editor_action.setCheckable(True)
         self.toggle_pipeline_editor_action.setCheckable(True)
+        self.toggle_quick_sort_panel_action.setCheckable(True)
         self.toggle_perf_hud_action.setCheckable(True)
 
         # Connect toggle actions
@@ -877,6 +898,15 @@ class MenuManager:
         self.toggle_pipeline_editor_action.triggered.connect(
             lambda is_checked: self.main_window.pipeline_editor.setVisible(is_checked)
         )
+        self.toggle_quick_sort_panel_action.triggered.connect(
+            self._set_quick_sort_panel_visible
+        )
+        self.main_window.quick_sort_panel.visibilityChanged.connect(
+            self.toggle_quick_sort_panel_action.setChecked
+        )
+        self.toggle_quick_sort_panel_action.setChecked(
+            self.main_window.quick_sort_panel.isVisible()
+        )
         self.toggle_perf_hud_action.triggered.connect(
             lambda checked: self.main_window.set_perf_hud_visible(checked)
         )
@@ -901,6 +931,7 @@ class MenuManager:
         view_menu.addAction(self.toggle_auto_markings_action)
         view_menu.addAction(self.toggle_ideogram_caption_editor_action)
         view_menu.addAction(self.toggle_pipeline_editor_action)
+        view_menu.addAction(self.toggle_quick_sort_panel_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_perf_hud_action)
 
@@ -940,6 +971,46 @@ class MenuManager:
         self._sync_auto_captioner_layout_actions(
             getattr(self.main_window.auto_captioner, 'layout_mode', load_auto_captioner_layout_mode())
         )
+
+    def _set_quick_sort_panel_visible(self, visible: bool):
+        panel = getattr(self.main_window, 'quick_sort_panel', None)
+        if panel is None:
+            return
+        panel.setVisible(bool(visible))
+        if visible:
+            panel.raise_()
+
+    def _create_quick_sort_menu(self, menu_bar):
+        quick_sort_menu = menu_bar.addMenu('Quick Sort')
+        open_panel_action = quick_sort_menu.addAction('Open Setup Panel')
+        open_panel_action.triggered.connect(
+            lambda: self._set_quick_sort_panel_visible(True)
+        )
+        quick_sort_menu.addSeparator()
+        quick_sort_menu.addAction(self.start_quick_sort_action)
+        quick_sort_menu.addAction(self.exit_quick_sort_action)
+
+        panel = self.main_window.quick_sort_panel
+        controller = self.main_window.quick_sort_controller
+        self.start_quick_sort_action.triggered.connect(panel.start_quick_sort)
+        self.exit_quick_sort_action.triggered.connect(
+            lambda: controller.finish_session()
+        )
+
+        def _sync_active(active: bool):
+            self.start_quick_sort_action.setEnabled(
+                not active and bool(panel.is_ready)
+            )
+            self.exit_quick_sort_action.setEnabled(active)
+
+        def _sync_ready(ready: bool):
+            self.start_quick_sort_action.setEnabled(
+                bool(ready) and not controller.active
+            )
+
+        controller.active_changed.connect(_sync_active)
+        panel.readiness_changed.connect(_sync_ready)
+        _sync_active(controller.active)
 
     def _create_browsers_menu(self, menu_bar):
         """Create Browsers menu."""

@@ -736,6 +736,7 @@ class ImageViewer(QWidget):
             getattr(self, "_video_scrub_overlay", None),
             getattr(self, "_video_playback_feedback_overlay", None),
             getattr(self, "_reaction_feedback_overlay", None),
+            getattr(self, "_quick_sort_hud", None),
         ):
             if overlay is None:
                 continue
@@ -3068,6 +3069,9 @@ class ImageViewer(QWidget):
         self._position_main_controls_overlay()
         self._position_reaction_controls_overlay()
         self._position_reaction_feedback_overlay()
+        quick_sort_hud = getattr(self, "_quick_sort_hud", None)
+        if quick_sort_hud is not None:
+            quick_sort_hud.reposition()
         # Restore visibility after resize (force controls to update)
         if was_visible and self.video_controls is not None:
             self.video_controls.setVisible(True)

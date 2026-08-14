@@ -12,6 +12,7 @@ High-level capabilities of TagGUI Video 1M.
 - Main viewer hover controls for zoom, previous/next media, and fullscreen, with toolbar fallback when detached or when the main viewer is hidden
 - Floating/spawned viewers for multi-view workflows
 - Selection masonry review wall with persistent review badges
+- Zero-setup keyboard sorting into folders with optional two-stage classification
 - Custom skin system for player controls
 
 ## Viewer Experience
@@ -26,6 +27,7 @@ High-level capabilities of TagGUI Video 1M.
 - Half-star ratings plus local love/bomb reactions
 - Auto-captioning integrations, including native temporal video captioning and Ideogram 4 structured JSON captions with editable bounding boxes
 - Named visual automation pipelines for chaining detection, structured-region conversion, captioning, and persistence
+- Quick Sort profiles with automatic A-Z/0-9 destinations, named folder overrides, qualifier subfolders, and reversible move/copy operations
 - Crop/masking workflow
 - Video frame tools including screenshot, extract, remove, repeat, and repair actions
 - Dataset export pipeline
@@ -37,6 +39,7 @@ High-level capabilities of TagGUI Video 1M.
 - [Captioning Guide](CAPTIONING_GUIDE.md)
 - [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)
 - [Pipelines Guide](PIPELINES_GUIDE.md)
+- [Quick Sort Guide](QUICK_SORT_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)
 - [Compare Guide](COMPARE_GUIDE.md)

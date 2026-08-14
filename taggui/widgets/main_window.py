@@ -22,6 +22,7 @@ from controllers.video_editing_controller import VideoEditingController
 from controllers.marking_effects_controller import MarkingEffectsController
 from controllers.toolbar_manager import ToolbarManager
 from controllers.menu_manager import MenuManager
+from controllers.quick_sort_controller import QuickSortController
 from controllers.signal_manager import SignalManager
 from models.image_list_model import ImageListModel
 from models.image_tag_list_model import ImageTagListModel
@@ -65,6 +66,7 @@ from widgets.image_list import ImageList
 from widgets.image_tags_editor import ImageTagsEditor
 from widgets.ideogram_caption_editor import IdeogramCaptionEditor
 from widgets.pipeline_editor import PipelineEditor
+from widgets.quick_sort_panel import QuickSortPanel
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
 from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
@@ -599,6 +601,7 @@ class MainWindow(QMainWindow):
         self._default_window_state = None
         self._background_workers_shutdown = False
         self._shutdown_failsafe_armed = False
+        self._quick_sort_close_pending = False
         self._main_viewer_visible = True
         self._main_viewer_controls_attached = True
         self._reaction_controls_attached = True
@@ -795,6 +798,13 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.RightDockWidgetArea,
             self.pipeline_editor,
         )
+        self.quick_sort_panel = QuickSortPanel(self)
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.quick_sort_panel,
+        )
+        self.quick_sort_controller = QuickSortController(self)
+        self.quick_sort_panel.bind_controller(self.quick_sort_controller)
         self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
         self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
         self.tabifyDockWidget(
@@ -805,8 +815,13 @@ class MainWindow(QMainWindow):
             self.ideogram_caption_editor,
             self.pipeline_editor,
         )
+        self.tabifyDockWidget(
+            self.pipeline_editor,
+            self.quick_sort_panel,
+        )
         self.ideogram_caption_editor.hide()
         self.pipeline_editor.hide()
+        self.quick_sort_panel.hide()
         self.all_tags_editor.raise_()
         self._install_external_drop_targets()
         # Set default widths for the dock widgets.
@@ -1115,6 +1130,17 @@ class MainWindow(QMainWindow):
                 pass
 
         if event_type in (event.Type.ShortcutOverride, event.Type.KeyPress):
+            # A mapping button temporarily owns all raw keyboard input while it
+            # captures a destination/qualifier key. Bypass app-wide shortcuts
+            # until the button releases its keyboard grab.
+            if bool(self.app.property("quick_sort_key_capture")):
+                return False
+            quick_sort_controller = getattr(self, "quick_sort_controller", None)
+            if (
+                quick_sort_controller is not None
+                and quick_sort_controller.handle_key_event(event, event_type)
+            ):
+                return True
             try:
                 if (
                     not event.isAutoRepeat()
@@ -1513,6 +1539,17 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
+        quick_sort_controller = getattr(self, "quick_sort_controller", None)
+        if quick_sort_controller is not None and quick_sort_controller.active:
+            quick_sort_controller.ensure_finished_before_close()
+            if quick_sort_controller.active:
+                # A file operation cannot be interrupted safely. Keep the app
+                # alive until it completes instead of persisting the temporary
+                # focused layout, then retry this close request automatically.
+                self._quick_sort_close_pending = True
+                quick_sort_controller.finish_session()
+                event.ignore()
+                return
         self._main_window_closing = True
         self._arm_shutdown_failsafe()
         self.cancel_compare_drag()
@@ -2503,6 +2540,7 @@ class MainWindow(QMainWindow):
             'auto_markings',
             'ideogram_caption_editor',
             'pipeline_editor',
+            'quick_sort_panel',
         ):
             dock = getattr(self, dock_name, None)
             if dock is None:
@@ -10179,6 +10217,7 @@ class MainWindow(QMainWindow):
             getattr(self, 'auto_markings', None),
             getattr(self, 'ideogram_caption_editor', None),
             getattr(self, 'pipeline_editor', None),
+            getattr(self, 'quick_sort_panel', None),
         ):
             if dock is None:
                 continue
@@ -10206,6 +10245,9 @@ class MainWindow(QMainWindow):
             )
             self.menu_manager.toggle_pipeline_editor_action.setChecked(
                 self.pipeline_editor.isVisible()
+            )
+            self.menu_manager.toggle_quick_sort_panel_action.setChecked(
+                self.quick_sort_panel.isVisible()
             )
             self.menu_manager.toggle_main_viewer_action.setChecked(bool(self._main_viewer_visible))
             workspace_group = getattr(self.menu_manager, 'workspace_action_group', None)
@@ -10442,6 +10484,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": self.auto_markings,
                 "ideogram_caption_editor": self.ideogram_caption_editor,
                 "pipeline_editor": self.pipeline_editor,
+                "quick_sort_panel": self.quick_sort_panel,
             }
             right_docks = [
                 right_dock_map["image_tags_editor"],
@@ -10450,6 +10493,7 @@ class MainWindow(QMainWindow):
                 right_dock_map["auto_markings"],
                 right_dock_map["ideogram_caption_editor"],
                 right_dock_map["pipeline_editor"],
+                right_dock_map["quick_sort_panel"],
             ]
 
             visibility = {
@@ -10462,6 +10506,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
+                "quick_sort_panel": False,
             },
             "tagging": {
                 "toolbar": True,
@@ -10472,6 +10517,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
+                "quick_sort_panel": False,
             },
             "marking": {
                 "toolbar": True,
@@ -10482,6 +10528,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": True,
                 "ideogram_caption_editor": False,
                 "pipeline_editor": True,
+                "quick_sort_panel": False,
             },
             "ideogram_tagging": {
                 "toolbar": True,
@@ -10492,6 +10539,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": False,
                 "ideogram_caption_editor": True,
                 "pipeline_editor": False,
+                "quick_sort_panel": False,
             },
             "video_prep": {
                 "toolbar": True,
@@ -10502,6 +10550,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
+                "quick_sort_panel": False,
             },
             "auto_captioning": {
                 "toolbar": True,
@@ -10512,6 +10561,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
+                "quick_sort_panel": False,
             },
             "full_masonry": {
                 "toolbar": False,
@@ -10522,6 +10572,7 @@ class MainWindow(QMainWindow):
                 "auto_markings": False,
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
+                "quick_sort_panel": False,
             },
             }[workspace_id]
 
@@ -10543,6 +10594,7 @@ class MainWindow(QMainWindow):
                 visibility["ideogram_caption_editor"]
             )
             self.pipeline_editor.setVisible(visibility["pipeline_editor"])
+            self.quick_sort_panel.setVisible(visibility["quick_sort_panel"])
 
             visible_right_docks = [
                 dock
