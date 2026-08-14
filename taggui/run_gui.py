@@ -23,16 +23,23 @@ if len(sys.argv) > 1 and sys.argv[1] == '--taggui-opengl-probe':
     probe_app = QApplication([])
     probe_window = QWidget()
     probe_window.setWindowTitle('TagGUI OpenGL probe')
-    probe_window.resize(8, 8)
+    # Keep a real drawable area after layout margins are applied. An 8x8 host
+    # collapsed the child to zero height and falsely rejected working drivers.
+    probe_window.resize(64, 64)
     probe_window.move(-32000, -32000)
     probe_layout = QVBoxLayout(probe_window)
+    probe_layout.setContentsMargins(0, 0, 0, 0)
     probe_gl_widget = QOpenGLWidget(probe_window)
     probe_layout.addWidget(probe_gl_widget)
     probe_window.show()
     probe_app.processEvents()
     probe_gl_widget.makeCurrent()
     probe_context = probe_gl_widget.context()
-    probe_ok = bool(probe_context is not None and probe_context.isValid())
+    probe_ok = bool(
+        probe_gl_widget.isValid()
+        and probe_context is not None
+        and probe_context.isValid()
+    )
     probe_gl_widget.doneCurrent()
     probe_window.close()
     raise SystemExit(0 if probe_ok else 2)

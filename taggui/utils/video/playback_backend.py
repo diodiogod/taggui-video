@@ -5,6 +5,8 @@ This module defines stable backend identifiers and runtime resolution rules.
 
 from __future__ import annotations
 
+import os
+
 from utils.settings import DEFAULT_SETTINGS, settings
 from .mpv_runtime import bootstrap_mpv_runtime_search_paths
 from .vlc_runtime import bootstrap_vlc_runtime_search_paths
@@ -129,6 +131,14 @@ def resolve_runtime_playback_backend(configured_backend: str | None = None) -> s
     selected = normalize_playback_backend_name(
         configured_backend if configured_backend is not None else get_configured_playback_backend()
     )
+    # MPV renders into a QOpenGLWidget through libmpv's GL API. Qt's software
+    # OpenGL fallback can produce corrupted/black frames even while audio keeps
+    # playing, so use Qt Multimedia when native OpenGL is unavailable.
+    if (
+        selected == PLAYBACK_BACKEND_MPV_EXPERIMENTAL
+        and str(os.getenv('QT_OPENGL', '') or '').strip().lower() == 'software'
+    ):
+        return PLAYBACK_BACKEND_QT_HYBRID
     if (
         selected == PLAYBACK_BACKEND_MPV_EXPERIMENTAL
         and load_playback_backend(selected) is not None

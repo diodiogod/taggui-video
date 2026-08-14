@@ -21,6 +21,9 @@ def test_qt_startup_keeps_desktop_opengl_without_forcing_global_attributes():
     assert "'--taggui-opengl-probe'" in source
     assert "os.environ['QT_OPENGL'] = 'software'" in source
     assert "TAGGUI_OPENGL_PROBE_TIMEOUT_SECONDS" in source
+    assert "probe_window.resize(64, 64)" in source
+    assert "probe_layout.setContentsMargins(0, 0, 0, 0)" in source
+    assert "probe_gl_widget.isValid()" in source
     assert "AA_UseDesktopOpenGL" not in source
     assert "AA_ShareOpenGLContexts" not in source
 
@@ -330,3 +333,35 @@ def test_playback_backend_uses_stable_user_facing_mpv_name():
     assert playback_backend.playback_backend_display_name('vlc_experimental') == (
         'VLC (Experimental)'
     )
+
+
+def test_mpv_falls_back_to_qt_when_software_opengl_is_forced(monkeypatch):
+    from utils.video import playback_backend
+
+    backend_loads = []
+    monkeypatch.setenv('QT_OPENGL', 'software')
+    monkeypatch.setattr(
+        playback_backend,
+        'load_playback_backend',
+        lambda backend: backend_loads.append(backend),
+    )
+
+    assert playback_backend.resolve_runtime_playback_backend(
+        playback_backend.PLAYBACK_BACKEND_MPV
+    ) == playback_backend.PLAYBACK_BACKEND_QT_HYBRID
+    assert backend_loads == []
+
+
+def test_mpv_remains_available_with_desktop_opengl(monkeypatch):
+    from utils.video import playback_backend
+
+    monkeypatch.setenv('QT_OPENGL', 'desktop')
+    monkeypatch.setattr(
+        playback_backend,
+        'load_playback_backend',
+        lambda _backend: object(),
+    )
+
+    assert playback_backend.resolve_runtime_playback_backend(
+        playback_backend.PLAYBACK_BACKEND_MPV
+    ) == playback_backend.PLAYBACK_BACKEND_MPV

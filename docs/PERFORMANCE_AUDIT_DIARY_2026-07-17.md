@@ -96,3 +96,4 @@
 - Restored the saved model entry and valid cached categories automatically after Auto-Markings construction, without scanning the model directory, loading ONNX, or waiting for panel interaction.
 - Prevented asynchronous startup selection restoration from synchronously reloading its target page on the GUI thread, including the legacy fallback path.
 - Replaced the GUI token counter's multi-second Transformers startup with the compatible lightweight `tokenizers` backend, retaining Transformers as a fallback.
+- Fixed the OpenGL probe's zero-height surface and made MPV fall back safely when Qt genuinely requires software OpenGL, preventing intermittent black/corrupted video frames.
