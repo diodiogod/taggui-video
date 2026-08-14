@@ -5,6 +5,23 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-08-14
+
+### Added
+
+- Add folder hierarchy management and complete-selection editing
+- Browse and manage loaded folder hierarchies from a dedicated panel and workspace
+- Collapse or resize Folders beside Images using the new companion handle
+- Apply tags, ratings, reactions, and review changes to complete Ctrl+A selections, including unloaded media
+- Undo and redo folder and dataset-wide metadata changes
+
+### Changed
+
+- Improve stability during paginated Masonry selection restoration
+
+### Removed
+
+- Move folders by drag and drop, navigate into folders, and send a selected folder to Quick Sort
 ## [1.5.0] - 2026-08-14
 
 ### Added
