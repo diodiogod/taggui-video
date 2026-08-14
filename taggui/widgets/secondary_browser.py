@@ -369,6 +369,14 @@ class SecondaryBrowser(QObject):
         self.image_list_model.load_directory(resolved, load_options=load_options)
         self._folder_name = resolved.name
         self._update_title()
+        folder_panel = getattr(self.parent(), 'folder_tree_panel', None)
+        active_browser = getattr(self.parent(), '_active_directory_browser_name', None)
+        if (
+            folder_panel is not None
+            and callable(active_browser)
+            and active_browser() == 'secondary'
+        ):
+            folder_panel.set_root(resolved)
         self.dock.filter_line_edit.clear()
         first = self.proxy_image_list_model.index(0, 0)
         if first.isValid():

@@ -67,6 +67,7 @@ from widgets.image_tags_editor import ImageTagsEditor
 from widgets.ideogram_caption_editor import IdeogramCaptionEditor
 from widgets.pipeline_editor import PipelineEditor
 from widgets.quick_sort_panel import QuickSortPanel
+from widgets.folder_tree_panel import FolderTreePanel
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
 from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
@@ -765,6 +766,12 @@ class MainWindow(QMainWindow):
             self._on_folder_media_pref_changed)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self.image_list)
+        self.folder_tree_panel = FolderTreePanel(self)
+        self.addDockWidget(
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            self.folder_tree_panel,
+        )
+        self.folder_tree_panel.hide()
 
         # Detect dock widget resize (splitter movement)
         self.image_list.list_view.installEventFilter(self)
@@ -807,6 +814,9 @@ class MainWindow(QMainWindow):
         )
         self.quick_sort_controller = QuickSortController(self)
         self.quick_sort_panel.bind_controller(self.quick_sort_controller)
+        self.quick_sort_controller.session_finished.connect(
+            lambda _summary: self.folder_tree_panel.refresh()
+        )
         self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
         self.tabifyDockWidget(self.auto_captioner, self.auto_markings)
         self.tabifyDockWidget(
@@ -7616,6 +7626,9 @@ class MainWindow(QMainWindow):
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
         _log_ui_load_stage('ui-setup-returned')
+        folder_panel = getattr(self, 'folder_tree_panel', None)
+        if folder_panel is not None:
+            folder_panel.set_root(self.directory_path)
 
     def _capture_reload_restore_state(self) -> tuple[str, int, str | None]:
         """Capture filter and selection state before a directory refresh."""
@@ -8917,6 +8930,9 @@ class MainWindow(QMainWindow):
             select_index=select_index,
             select_path=select_path,
         )
+        folder_panel = getattr(self, 'folder_tree_panel', None)
+        if folder_panel is not None:
+            folder_panel.refresh()
 
     @Slot()
     def refresh_new_media_only(self, target_browser: str | None = None):
@@ -10300,6 +10316,7 @@ class MainWindow(QMainWindow):
 
         for dock in (
             getattr(self, 'image_list', None),
+            getattr(self, 'folder_tree_panel', None),
             getattr(self, 'image_tags_editor', None),
             getattr(self, 'all_tags_editor', None),
             getattr(self, 'auto_captioner', None),
@@ -10325,6 +10342,9 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, 'menu_manager') and self.menu_manager is not None:
             self.menu_manager.toggle_image_list_action.setChecked(self.image_list.isVisible())
+            self.menu_manager.toggle_folder_tree_action.setChecked(
+                self.folder_tree_panel.isVisible()
+            )
             self.menu_manager.toggle_image_tags_editor_action.setChecked(self.image_tags_editor.isVisible())
             self.menu_manager.toggle_all_tags_editor_action.setChecked(self.all_tags_editor.isVisible())
             self.menu_manager.toggle_auto_captioner_action.setChecked(self.auto_captioner.isVisible())
@@ -10484,6 +10504,7 @@ class MainWindow(QMainWindow):
             {"id": "ideogram_tagging", "label": "Ideogram Tagging"},
             {"id": "video_prep", "label": "Video Prep"},
             {"id": "auto_captioning", "label": "Auto Captioning"},
+            {"id": "folder_management", "label": "Folder Management"},
             {"id": "full_masonry", "label": "Full Masonry"},
         ]
 
@@ -10566,6 +10587,7 @@ class MainWindow(QMainWindow):
         try:
             self._workspace_active_id = workspace_id
             left_dock = self.image_list
+            folder_dock = self.folder_tree_panel
             secondary_dock = getattr(getattr(self, '_secondary_browser', None), 'dock', None)
             secondary_was_visible = False
             secondary_placement = self._saved_secondary_browser_placement()
@@ -10600,6 +10622,7 @@ class MainWindow(QMainWindow):
             "media_viewer": {
                 "toolbar": False,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": False,
                 "all_tags_editor": False,
                 "auto_captioner": False,
@@ -10611,6 +10634,7 @@ class MainWindow(QMainWindow):
             "tagging": {
                 "toolbar": True,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": True,
                 "all_tags_editor": True,
                 "auto_captioner": False,
@@ -10622,6 +10646,7 @@ class MainWindow(QMainWindow):
             "marking": {
                 "toolbar": True,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": False,
                 "all_tags_editor": False,
                 "auto_captioner": False,
@@ -10633,6 +10658,7 @@ class MainWindow(QMainWindow):
             "ideogram_tagging": {
                 "toolbar": True,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": True,
                 "all_tags_editor": True,
                 "auto_captioner": False,
@@ -10644,6 +10670,7 @@ class MainWindow(QMainWindow):
             "video_prep": {
                 "toolbar": True,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": False,
                 "all_tags_editor": False,
                 "auto_captioner": True,
@@ -10655,6 +10682,7 @@ class MainWindow(QMainWindow):
             "auto_captioning": {
                 "toolbar": True,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": True,
                 "all_tags_editor": False,
                 "auto_captioner": True,
@@ -10663,9 +10691,22 @@ class MainWindow(QMainWindow):
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
             },
+            "folder_management": {
+                "toolbar": False,
+                "image_list": True,
+                "folders": True,
+                "image_tags_editor": False,
+                "all_tags_editor": False,
+                "auto_captioner": False,
+                "auto_markings": False,
+                "ideogram_caption_editor": False,
+                "pipeline_editor": False,
+                "quick_sort_panel": False,
+            },
             "full_masonry": {
                 "toolbar": False,
                 "image_list": True,
+                "folders": False,
                 "image_tags_editor": False,
                 "all_tags_editor": False,
                 "auto_captioner": False,
@@ -10678,6 +10719,7 @@ class MainWindow(QMainWindow):
 
             # Keep docking areas deterministic before visibility changes.
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, folder_dock)
             for dock in right_docks:
                 self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
@@ -10686,6 +10728,7 @@ class MainWindow(QMainWindow):
                 toolbar_manager.set_toolbars_visible(visibility["toolbar"])
 
             self.image_list.setVisible(visibility["image_list"])
+            self.folder_tree_panel.setVisible(visibility["folders"])
             self.image_tags_editor.setVisible(visibility["image_tags_editor"])
             self.all_tags_editor.setVisible(visibility["all_tags_editor"])
             self.auto_captioner.setVisible(visibility["auto_captioner"])
@@ -10792,6 +10835,13 @@ class MainWindow(QMainWindow):
                 self.image_list.raise_()
                 fitted_size = self._compute_full_masonry_initial_size()
                 self._set_image_list_thumbnail_size(fitted_size, persist=False)
+            elif workspace_id == "folder_management":
+                self.folder_tree_panel.raise_()
+                self.resizeDocks(
+                    [self.folder_tree_panel, self.image_list],
+                    [max(220, int(self.width() * 0.18)), max(320, int(self.width() * 0.28))],
+                    Qt.Orientation.Horizontal,
+                )
 
             if secondary_was_visible and secondary_dock is not None:
                 self._place_secondary_browser(secondary_placement)

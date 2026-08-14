@@ -551,6 +551,7 @@ class MenuManager:
         self.reset_layout_action = None
         self.toggle_main_viewer_action = None
         self.toggle_image_list_action = None
+        self.toggle_folder_tree_action = None
         self.toggle_image_tags_editor_action = None
         self.toggle_all_tags_editor_action = None
         self.toggle_auto_captioner_action = None
@@ -650,6 +651,7 @@ class MenuManager:
         self.reset_layout_action = QAction('Reset Layout', parent=self.main_window)
         self.toggle_main_viewer_action = QAction('Main Viewer', parent=self.main_window)
         self.toggle_image_list_action = QAction('Images', parent=self.main_window)
+        self.toggle_folder_tree_action = QAction('Folders', parent=self.main_window)
         self.toggle_image_tags_editor_action = QAction('Image Tags', parent=self.main_window)
         self.toggle_all_tags_editor_action = QAction('All Tags', parent=self.main_window)
         self.toggle_auto_captioner_action = QAction('Auto-Captioner', parent=self.main_window)
@@ -859,6 +861,7 @@ class MenuManager:
         self.toggle_toolbar_action.setCheckable(True)
         self.toggle_main_viewer_action.setCheckable(True)
         self.toggle_image_list_action.setCheckable(True)
+        self.toggle_folder_tree_action.setCheckable(True)
         self.toggle_image_tags_editor_action.setCheckable(True)
         self.toggle_all_tags_editor_action.setCheckable(True)
         self.toggle_auto_captioner_action.setCheckable(True)
@@ -883,6 +886,12 @@ class MenuManager:
         )
         self.toggle_image_list_action.triggered.connect(
             lambda is_checked: self.main_window.image_list.setVisible(is_checked))
+        self.toggle_folder_tree_action.triggered.connect(
+            lambda checked: self.main_window.folder_tree_panel.setVisible(checked)
+        )
+        self.main_window.folder_tree_panel.visibilityChanged.connect(
+            self.toggle_folder_tree_action.setChecked
+        )
         self.toggle_image_tags_editor_action.triggered.connect(
             lambda is_checked: self.main_window.image_tags_editor.setVisible(is_checked))
         self.toggle_all_tags_editor_action.triggered.connect(
@@ -921,6 +930,7 @@ class MenuManager:
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_main_viewer_action)
         view_menu.addAction(self.toggle_image_list_action)
+        view_menu.addAction(self.toggle_folder_tree_action)
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)
         auto_captioner_menu = view_menu.addMenu('Auto-Captioner')
@@ -1279,6 +1289,19 @@ class MenuManager:
                 effects.undo_action_name() if is_undo else effects.redo_action_name(),
                 ('effect', effects),
             ))
+        folder_history = getattr(
+            getattr(self.main_window, 'folder_tree_panel', None),
+            'history',
+            None,
+        )
+        if folder_history is not None:
+            can_apply = folder_history.can_undo() if is_undo else folder_history.can_redo()
+            if can_apply:
+                candidates.append((
+                    folder_history.undo_timestamp() if is_undo else folder_history.redo_timestamp(),
+                    folder_history.undo_action_name() if is_undo else folder_history.redo_action_name(),
+                    ('folder', folder_history),
+                ))
         return candidates
 
     def _clear_unified_redo_histories(self):
@@ -1297,6 +1320,13 @@ class MenuManager:
             view._selection_redo_history.clear()
             getattr(view, '_selection_redo_timestamps', []).clear()
         self.main_window.marking_effects_controller.clear_redo()
+        folder_history = getattr(
+            getattr(self.main_window, 'folder_tree_panel', None),
+            'history',
+            None,
+        )
+        if folder_history is not None:
+            folder_history.clear_redo()
 
     def _focused_image_list_view(self):
         """Return the thumbnail list that currently owns keyboard focus."""
@@ -1335,6 +1365,8 @@ class MenuManager:
             provider.undo_selection()
         elif provider_type == 'effect':
             provider.undo_last_effect(confirm=False)
+        elif provider_type == 'folder':
+            provider.undo()
         else:
             provider.undo()
         self.update_undo_and_redo_actions()
@@ -1352,6 +1384,8 @@ class MenuManager:
             provider.redo_selection()
         elif provider_type == 'effect':
             provider.redo_last_effect()
+        elif provider_type == 'folder':
+            provider.redo()
         else:
             provider.redo()
         self.update_undo_and_redo_actions()

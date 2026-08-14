@@ -4440,6 +4440,61 @@ class ImageIndexDB:
                 print(f'Database image rename error: {e}')
                 return False
 
+    def rename_path_prefix(
+        self,
+        old_path: Path | str,
+        new_path: Path | str,
+        *,
+        directory_path: Path | None = None,
+    ) -> bool:
+        """Atomically rewrite indexed media paths below a moved directory."""
+        if not self.enabled or not self.conn:
+            return False
+        base_dir = Path(directory_path or self._directory_path)
+        try:
+            old_rel = Path(old_path).relative_to(base_dir)
+            new_rel = Path(new_path).relative_to(base_dir)
+        except (TypeError, ValueError):
+            return False
+        old_parts = tuple(part.casefold() for part in old_rel.parts)
+        with self._db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT id, file_name FROM images")
+                rows = cursor.fetchall()
+                changes = []
+                for image_id, file_name in rows:
+                    candidate = Path(str(file_name))
+                    parts = tuple(part.casefold() for part in candidate.parts)
+                    if parts[:len(old_parts)] != old_parts:
+                        continue
+                    suffix = Path(*candidate.parts[len(old_rel.parts):])
+                    changes.append((int(image_id), str(new_rel / suffix)))
+                if not changes:
+                    return True
+                changed_ids = {image_id for image_id, _ in changes}
+                destinations = {new_name.casefold() for _, new_name in changes}
+                for image_id, file_name in rows:
+                    if int(image_id) not in changed_ids and str(file_name).casefold() in destinations:
+                        return False
+                cursor.execute("BEGIN IMMEDIATE")
+                for image_id, new_name in changes:
+                    cursor.execute(
+                        "UPDATE images SET file_name = ? WHERE id = ?",
+                        (new_name, image_id),
+                    )
+                cursor.execute("DELETE FROM ordered_image_cache")
+                self.conn.commit()
+                self._order_cache_signature = None
+                return True
+            except sqlite3.Error as exc:
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error:
+                    pass
+                print(f"Database folder-path rename error: {exc}")
+                return False
+
     def clone_curator_metadata(self, source_file_name: str, destination_file_name: str) -> bool:
         """Clone user-authored index metadata between two already indexed files."""
         if not self.enabled or not self.conn:

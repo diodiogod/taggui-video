@@ -13,6 +13,7 @@ This is the main documentation map for TagGUI Video 1M.
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
 - [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Quick Sort Guide](QUICK_SORT_GUIDE.md)
+- [Folder Hierarchy Guide](FOLDER_HIERARCHY_GUIDE.md)
 - [Skin Designer Guide](SKIN_DESIGNER_GUIDE.md)
 
 ## Workflow Guides
@@ -25,6 +26,7 @@ This is the main documentation map for TagGUI Video 1M.
 - [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)
 - [Pipelines Guide](PIPELINES_GUIDE.md)
 - [Quick Sort Guide](QUICK_SORT_GUIDE.md)
+- [Folder Hierarchy Guide](FOLDER_HIERARCHY_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Video Backends](VIDEO_BACKENDS.md)
 - [Export Guide](EXPORT_GUIDE.md)
