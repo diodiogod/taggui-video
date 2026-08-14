@@ -14,14 +14,13 @@ No destination setup is required. By default, pressing `R` routes the current fi
 
 ## Named Destination Overrides
 
-Use `Add named override` only when a key should be more descriptive or use another relative folder. Each compact row contains:
+Use `Add destination override` only when a key should use a descriptive destination instead of its automatic letter or number folder. Each compact row contains:
 
 - **Key:** the keyboard key used during sorting.
-- **Name:** the label shown as visual feedback.
-- **Folder:** the relative destination, including optional nested paths.
+- **Destination:** both the visual-feedback label and relative folder, including optional nested paths.
 - **Color:** the small feedback accent.
 
-For example, an override can map `R` to the visible name `Right Arm` and folder `Body/Right Arm`. That override replaces the automatic `R` folder while the remaining standard keys continue to work normally. Disable `Automatically map A-Z and 0-9` when a profile should accept only explicitly configured destinations.
+For example, an override can map `R` to `Body/Right Arm`. The same value appears in feedback and becomes the destination path. That override replaces the automatic `R` folder while the remaining standard keys continue to work normally. Disable `Automatically map A-Z and 0-9` when a profile should accept only explicitly configured destinations.
 
 ## Images Included in a Session
 
@@ -31,6 +30,8 @@ The compact `Sort` control describes the queue source; it does not add another f
 - **Selected media:** only the current browser selection.
 - **Filtered results:** the current filtered result set.
 - **All loaded media:** everything in the active browser scope.
+
+The launch area always states the eligible media count and scope. When **Current folder** omits media available in nested folders, it shows that additional count and an **Include all** button so the broader scope is not hidden in the dropdown.
 
 The queue is immutable. Destination folders created during sorting are not scanned back into the same session.
 

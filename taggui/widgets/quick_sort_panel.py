@@ -164,7 +164,6 @@ class QuickSortMappingCard(QFrame):
         self.mapping_id = mapping.id
         self.kind = kind
         self.color = mapping.color
-        self._last_name = str(mapping.name or "").strip()
         self.setObjectName("quickSortMappingCard")
         self.setProperty("accent", self.color)
         self.setMinimumWidth(0)
@@ -184,11 +183,20 @@ class QuickSortMappingCard(QFrame):
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
-        self.name_edit = QLineEdit(mapping.name)
-        self.name_edit.setPlaceholderText(f"{kind.title()} name")
-        self.name_edit.setToolTip(f"Display name for this {kind}")
-        self.name_edit.setMinimumWidth(0)
-        self.name_edit.setSizePolicy(
+        # Folder is canonical for legacy profiles because changing it during
+        # migration would silently redirect files. The one practical value is
+        # now used both as the on-screen label and actual relative folder.
+        destination = str(mapping.folder or mapping.name or "").strip()
+        self.destination_edit = QLineEdit(destination)
+        self.destination_edit.setPlaceholderText(
+            "Destination" if kind == "destination" else kind.title()
+        )
+        self.destination_edit.setToolTip(
+            "Used both for feedback and as the relative destination folder. "
+            "Nested folders such as People/Heads are allowed."
+        )
+        self.destination_edit.setMinimumWidth(0)
+        self.destination_edit.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Fixed,
         )
@@ -200,41 +208,20 @@ class QuickSortMappingCard(QFrame):
         self.remove_button.setObjectName("quickSortRemoveButton")
         self.remove_button.setFixedSize(22, 22)
         self.remove_button.setToolTip(f"Remove this {kind}")
-        self.folder_edit = QLineEdit(mapping.folder or mapping.name)
-        self.folder_edit.setPlaceholderText("Folder")
-        self.folder_edit.setMinimumWidth(0)
-        self.folder_edit.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.folder_edit.setToolTip(
-            "Relative to the profile's base destination. Nested folders are allowed."
-        )
         root.addWidget(self.enabled_check)
         root.addWidget(self.key_button)
-        root.addWidget(self.name_edit, 1)
-        root.addWidget(self.folder_edit, 1)
+        root.addWidget(self.destination_edit, 1)
         root.addWidget(self.color_button)
         root.addWidget(self.remove_button)
 
         self.enabled_check.toggled.connect(self.changed)
         self.key_button.key_changed.connect(lambda _key: self.changed.emit())
-        self.name_edit.textChanged.connect(self._name_changed)
-        self.folder_edit.textChanged.connect(self.changed)
+        self.destination_edit.textChanged.connect(self.changed)
         self.color_button.clicked.connect(self._choose_color)
         self.remove_button.clicked.connect(
             lambda: self.remove_requested.emit(self.mapping_id)
         )
         self._refresh_accent()
-
-    def _name_changed(self, text: str):
-        next_name = text.strip()
-        if self.folder_edit.text().strip() == self._last_name:
-            self.folder_edit.setText(next_name)
-        if not self.folder_edit.text().strip():
-            self.folder_edit.setPlaceholderText(next_name or "Relative folder")
-        self._last_name = next_name
-        self.changed.emit()
 
     def _choose_color(self):
         chosen = QColorDialog.getColor(QColor(self.color), self, "Mapping color")
@@ -254,11 +241,12 @@ class QuickSortMappingCard(QFrame):
         )
 
     def mapping(self) -> QuickSortMapping:
+        destination = self.destination_edit.text().strip()
         return QuickSortMapping(
             id=self.mapping_id,
-            name=self.name_edit.text().strip(),
+            name=destination,
             key=self.key_button.key,
-            folder=self.folder_edit.text().strip(),
+            folder=destination,
             color=self.color,
             enabled=self.enabled_check.isChecked(),
         )
@@ -306,6 +294,7 @@ class QuickSortPanel(QDockWidget):
         self._launch_ready = False
         self._eligible_count_key: tuple | None = None
         self._eligible_count_value: int | None = None
+        self._all_loaded_count_value: int | None = None
         self._pending_count_key: tuple | None = None
         self._observed_context_key: tuple[int, int, int] | None = None
         self._context_signal_connections: list[tuple[object, object]] = []
@@ -448,20 +437,18 @@ class QuickSortPanel(QDockWidget):
         destination_columns.setSpacing(5)
         key_column = QLabel("KEY")
         key_column.setFixedWidth(52)
-        name_column = QLabel("NAME")
-        folder_column = QLabel("FOLDER")
-        for label in (key_column, name_column, folder_column):
+        destination_column = QLabel("DESTINATION")
+        for label in (key_column, destination_column):
             label.setObjectName("quickSortColumnLabel")
         destination_columns.addWidget(key_column)
-        destination_columns.addWidget(name_column, 1)
-        destination_columns.addWidget(folder_column, 1)
+        destination_columns.addWidget(destination_column, 1)
         content_layout.addLayout(destination_columns)
         self.destination_host = QWidget()
         self.destination_layout = QVBoxLayout(self.destination_host)
         self.destination_layout.setContentsMargins(0, 0, 0, 0)
         self.destination_layout.setSpacing(8)
         content_layout.addWidget(self.destination_host)
-        self.add_destination_button = QPushButton("＋  Add named override")
+        self.add_destination_button = QPushButton("＋  Add destination override")
         self.add_destination_button.setObjectName("quickSortAddButton")
         destination_add_row = QHBoxLayout()
         destination_add_row.addStretch(1)
@@ -647,6 +634,24 @@ class QuickSortPanel(QDockWidget):
         status_row.addWidget(self.summary_label, 1)
         status_row.addWidget(self.reset_progress_button)
         run_layout.addLayout(status_row)
+        self.scope_notice = QFrame()
+        self.scope_notice.setObjectName("quickSortScopeNotice")
+        scope_notice_layout = QHBoxLayout(self.scope_notice)
+        scope_notice_layout.setContentsMargins(8, 6, 7, 6)
+        scope_notice_layout.setSpacing(7)
+        self.scope_notice_label = QLabel()
+        self.scope_notice_label.setObjectName("quickSortScopeNoticeText")
+        self.scope_notice_label.setWordWrap(True)
+        self.scope_notice_label.setMinimumWidth(0)
+        self.include_all_loaded_button = QPushButton("Include all")
+        self.include_all_loaded_button.setObjectName("quickSortScopeAction")
+        self.include_all_loaded_button.setToolTip(
+            "Switch the queue from this folder only to all media loaded by the browser."
+        )
+        scope_notice_layout.addWidget(self.scope_notice_label, 1)
+        scope_notice_layout.addWidget(self.include_all_loaded_button)
+        self.scope_notice.hide()
+        run_layout.addWidget(self.scope_notice)
         self.start_button = QPushButton("Start Quick Sort")
         self.start_button.setObjectName("quickSortRunButton")
         run_layout.addWidget(self.start_button)
@@ -676,6 +681,7 @@ class QuickSortPanel(QDockWidget):
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         self.start_button.clicked.connect(self._start)
         self.reset_progress_button.clicked.connect(self._clear_saved_progress)
+        self.include_all_loaded_button.clicked.connect(self._include_all_loaded)
         for widget_signal in (
             self.source_combo.currentIndexChanged,
             self.include_subfolders_check.toggled,
@@ -1061,6 +1067,11 @@ class QuickSortPanel(QDockWidget):
         if not self._loading_ui:
             self._invalidate_eligible_count()
 
+    def _include_all_loaded(self):
+        index = self.source_combo.findData("all_loaded")
+        if index >= 0:
+            self.source_combo.setCurrentIndex(index)
+
     def _update_unclassified_visibility(self, *_args):
         visible = self.missing_qualifier_combo.currentData() == "unclassified"
         self.unclassified_label.setVisible(visible)
@@ -1237,6 +1248,7 @@ class QuickSortPanel(QDockWidget):
     def _clear_eligible_count_cache(self):
         self._eligible_count_key = None
         self._eligible_count_value = None
+        self._all_loaded_count_value = None
         self._pending_count_key = None
 
     def _browser_context_changed(self, *_args):
@@ -1293,8 +1305,20 @@ class QuickSortPanel(QDockWidget):
             count = max(0, int(self.controller.estimate_queue_count(profile, context)))
         except Exception:
             count = 0
+        all_loaded_count = None
+        if profile.source_scope == "current_folder" and not profile.include_subfolders:
+            all_loaded_profile = deepcopy(profile)
+            all_loaded_profile.source_scope = "all_loaded"
+            try:
+                all_loaded_count = max(
+                    count,
+                    int(self.controller.estimate_queue_count(all_loaded_profile, context)),
+                )
+            except Exception:
+                all_loaded_count = count
         self._eligible_count_key = key
         self._eligible_count_value = count
+        self._all_loaded_count_value = all_loaded_count
         self._pending_count_key = None
         self._refresh_summary()
 
@@ -1350,6 +1374,36 @@ class QuickSortPanel(QDockWidget):
             f"{count_text} · {destination_text}"
             f"{qualifier_text} · {profile.operation_mode.title()} mode"
         )
+        self.scope_notice.hide()
+        if count is None:
+            self.start_button.setText("Start Quick Sort")
+        else:
+            scope_labels = {
+                "current_folder": "from this folder",
+                "selected": "selected",
+                "filtered": "matching the current filter",
+                "all_loaded": "across all loaded folders",
+            }
+            self.summary_label.setText(
+                f"{count:,} media {scope_labels.get(profile.source_scope, '')} · "
+                f"{destination_text}{qualifier_text} · "
+                f"{profile.operation_mode.title()} mode"
+            )
+            self.start_button.setText(f"Start with {count:,} media")
+            if (
+                profile.source_scope == "current_folder"
+                and not profile.include_subfolders
+                and self._all_loaded_count_value is not None
+                and self._all_loaded_count_value > count
+            ):
+                additional = self._all_loaded_count_value - count
+                self.scope_notice_label.setText(
+                    f"{additional:,} more media available in subfolders."
+                )
+                self.include_all_loaded_button.setText(
+                    f"Include all {self._all_loaded_count_value:,}"
+                )
+                self.scope_notice.show()
         if count is None:
             self._set_validation_state("warning", "COUNTING")
             self._set_configuration_ready(False)
@@ -1554,6 +1608,13 @@ class QuickSortPanel(QDockWidget):
             }}
             QFrame#quickSortRunPanel {{ background: #383838; border: 1px solid #4A4A4A; border-radius: 6px; }}
             QLabel#quickSortRunSummary {{ color: #BDBDBD; }}
+            QFrame#quickSortScopeNotice {{ background: #303842; border: 1px solid #506071; border-radius: 5px; }}
+            QLabel#quickSortScopeNoticeText {{ color: #D8E4EF; }}
+            QPushButton#quickSortScopeAction {{
+                color: #DDEBFF; background: #3C526B; border: 1px solid #617A94;
+                border-radius: 5px; padding: 4px 8px; font-weight: 700;
+            }}
+            QPushButton#quickSortScopeAction:hover {{ background: #48627E; }}
             QLabel#quickSortValidationChip {{ border-radius: 6px; padding: 3px 7px; font-weight: 900; }}
             QLabel#quickSortValidationChip[state="ready"] {{ color: #8ED9B0; background: #203A2D; }}
             QLabel#quickSortValidationChip[state="warning"] {{ color: #F3CF79; background: #40351F; }}

@@ -2817,6 +2817,11 @@ class ImageListViewInteractionMixin:
 
         jump_kind = str(reason or "").strip() or "global_jump"
         async_restore = jump_kind == "async_refresh_restore"
+        if async_restore:
+            # Disabled after repeated native Qt crashes during folder-load
+            # page/proxy/layout convergence. Callers must wait for a model-owned
+            # loaded index or accept the stable initial selection.
+            return False
         strict_paginated_masonry = bool(
             self.use_masonry
             and hasattr(source_model, "_paginated_mode")

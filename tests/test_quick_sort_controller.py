@@ -669,6 +669,41 @@ def test_hud_geometry_stays_inside_narrow_viewport():
         viewport.close()
 
 
+def test_paginated_setup_count_does_not_materialize_queue_ids(tmp_path):
+    _application()
+    window = _ControllerWindow()
+    controller = QuickSortController(window)
+
+    class _CountOnlyBatch:
+        count = 250_000
+
+        def snapshot_ids(self):
+            raise AssertionError("setup count must not materialize the queue")
+
+    model = SimpleNamespace(
+        _directory_path=tmp_path,
+        _paginated_mode=True,
+        _scope_sql="",
+        _scope_bindings=(),
+        create_paginated_image_batch=lambda **_kwargs: _CountOnlyBatch(),
+    )
+    context = {
+        "name": "primary",
+        "model": model,
+        "proxy": object(),
+        "image_list": object(),
+        "owner": window,
+    }
+    try:
+        assert controller.estimate_queue_count(
+            QuickSortProfile(name="Large folder", source_scope="all_loaded"),
+            context,
+        ) == 250_000
+    finally:
+        controller.hud.hide()
+        window.close()
+
+
 def test_completion_feedback_offers_persistent_start_fresh_action():
     app = _application()
     viewport = QWidget()

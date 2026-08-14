@@ -103,11 +103,12 @@ class _Controller(QObject):
     active_changed = Signal(bool)
     session_finished = Signal(dict)
 
-    def __init__(self, window: _Window, count: int = 6):
+    def __init__(self, window: _Window, count: int = 6, all_loaded_count: int | None = None):
         super().__init__(window)
         self.window = window
         self.active = False
         self.count = count
+        self.all_loaded_count = count if all_loaded_count is None else all_loaded_count
         self.estimate_calls = 0
 
     def resolve_browser_context(self):
@@ -119,9 +120,9 @@ class _Controller(QObject):
             "owner": self.window,
         }
 
-    def estimate_queue_count(self, _profile, _context):
+    def estimate_queue_count(self, profile, _context):
         self.estimate_calls += 1
-        return self.count
+        return self.all_loaded_count if profile.source_scope == "all_loaded" else self.count
 
     def start_session(self, _profile):
         return True
@@ -180,7 +181,7 @@ def test_mapping_cards_fit_a_narrow_dock_and_keep_dynamic_zoom(monkeypatch, tmp_
             Qt.ScrollPhase.NoScrollPhase,
             False,
         )
-        QApplication.sendEvent(card.name_edit, wheel)
+        QApplication.sendEvent(card.destination_edit, wheel)
         assert panel._ui_zoom == initial_zoom + 10
     finally:
         _dispose(window, panel)
@@ -207,6 +208,31 @@ def test_qualifier_setup_is_visible_and_expands_from_its_switch(monkeypatch, tmp
         assert panel.qualifier_options.isVisible()
         assert panel.qualifier_name_edit.isVisible()
         assert panel.add_qualifier_button.isVisible()
+    finally:
+        _dispose(window, panel)
+
+
+def test_destination_field_drives_both_label_and_folder(monkeypatch, tmp_path):
+    legacy = QuickSortProfile(
+        name="Legacy",
+        destinations=[
+            QuickSortMapping(
+                name="Friendly label",
+                key="R",
+                folder="Right_Arm",
+            )
+        ],
+    )
+    window, panel, _store = _make_panel(monkeypatch, tmp_path, [legacy])
+    try:
+        card = panel.destination_cards[0]
+        # Preserve the actual route when collapsing a legacy two-field row.
+        assert card.destination_edit.text() == "Right_Arm"
+
+        card.destination_edit.setText("People/Right Arm")
+        mapping = card.mapping()
+        assert mapping.name == "People/Right Arm"
+        assert mapping.folder == "People/Right Arm"
     finally:
         _dispose(window, panel)
 
@@ -246,7 +272,7 @@ def test_profile_switch_persists_valid_draft_and_rejects_invalid_draft(
     second = _profile("Second", "B", "Folder B")
     window, panel, store = _make_panel(monkeypatch, tmp_path, [first, second])
     try:
-        panel.destination_cards[0].name_edit.setText("Edited A")
+        panel.destination_cards[0].destination_edit.setText("Edited A")
         second_index = panel.profile_combo.findData(second.id)
         panel.profile_combo.setCurrentIndex(second_index)
 
@@ -256,12 +282,12 @@ def test_profile_switch_persists_valid_draft_and_rejects_invalid_draft(
         first_index = panel.profile_combo.findData(first.id)
         panel.profile_combo.setCurrentIndex(first_index)
         saves_before_invalid_switch = len(store.saved)
-        panel.destination_cards[0].name_edit.clear()
+        panel.destination_cards[0].destination_edit.clear()
         panel.profile_combo.setCurrentIndex(second_index)
 
         assert panel.current_profile_id == first.id
         assert panel.profile_combo.currentData() == first.id
-        assert panel.destination_cards[0].name_edit.text() == ""
+        assert panel.destination_cards[0].destination_edit.text() == ""
         assert len(store.saved) == saves_before_invalid_switch
         assert panel.validation_chip.text() == "CHECK"
     finally:
@@ -285,12 +311,12 @@ def test_mapping_edits_reuse_count_cache_and_readiness_tracks_recounts(
         panel._count_refresh_timer.stop()
         panel._refresh_eligible_count()
 
-        assert controller.estimate_calls == 1
+        assert controller.estimate_calls == 2
         assert panel.is_ready
         assert readiness == [True]
 
-        panel.destination_cards[0].name_edit.setText("Renamed route")
-        assert controller.estimate_calls == 1
+        panel.destination_cards[0].destination_edit.setText("Renamed route")
+        assert controller.estimate_calls == 2
         assert not panel._count_refresh_timer.isActive()
         assert panel.is_ready
 
@@ -298,17 +324,50 @@ def test_mapping_edits_reuse_count_cache_and_readiness_tracks_recounts(
         assert not panel.is_ready
         panel._count_refresh_timer.stop()
         panel._refresh_eligible_count()
-        assert controller.estimate_calls == 2
+        assert controller.estimate_calls == 4
         assert panel.is_ready
 
         controller.count = 0
+        controller.all_loaded_count = 0
         panel.source_combo.setCurrentIndex(
             panel.source_combo.findData("all_loaded")
         )
         panel._count_refresh_timer.stop()
         panel._refresh_eligible_count()
-        assert controller.estimate_calls == 3
+        assert controller.estimate_calls == 5
         assert not panel.is_ready
         assert readiness == [True, False, True, False]
+    finally:
+        _dispose(window, panel)
+
+
+def test_current_folder_scope_reveals_hidden_subfolder_media(monkeypatch, tmp_path):
+    window, panel, _store = _make_panel(
+        monkeypatch,
+        tmp_path,
+        [_profile("Body parts", "R", "Right Arm")],
+    )
+    controller = _Controller(window, count=5, all_loaded_count=148)
+    try:
+        panel.bind_controller(controller)
+        panel._count_refresh_timer.stop()
+        panel._refresh_eligible_count()
+        panel.show()
+        APP.processEvents()
+
+        assert not panel.scope_notice.isHidden()
+        assert panel.scope_notice_label.text() == (
+            "143 more media available in subfolders."
+        )
+        assert panel.include_all_loaded_button.text() == "Include all 148"
+        assert panel.start_button.text() == "Start with 5 media"
+
+        panel.include_all_loaded_button.click()
+        panel._count_refresh_timer.stop()
+        panel._refresh_eligible_count()
+
+        assert panel.source_combo.currentData() == "all_loaded"
+        assert panel.scope_notice.isHidden()
+        assert panel.start_button.text() == "Start with 148 media"
     finally:
         _dispose(window, panel)

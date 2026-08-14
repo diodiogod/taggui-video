@@ -595,9 +595,11 @@ class MainWindow(QMainWindow):
         self._workspace_apply_retry_count = 0
         self._workspace_applying = False
         self._workspace_active_id = None
+        self._last_non_masonry_image_list_width = 0
         self._pending_new_media_refresh_state = None
         self._pending_auto_new_media_refresh_load_id = -1
         self._async_recenter_request_id = 0
+        self._pending_safe_recenter = None
         self._default_window_state = None
         self._background_workers_shutdown = False
         self._shutdown_failsafe_armed = False
@@ -7662,6 +7664,7 @@ class MainWindow(QMainWindow):
         return current_sort_field == expected_sort_field and current_sort_dir == expected_sort_dir
 
     def _request_async_recenter(self, *, select_path: str, sort_text: str):
+        """Resolve a saved selection without touching Qt objects off-thread."""
         if not select_path:
             return
         if not bool(getattr(self.image_list_model, '_paginated_mode', False)):
@@ -7689,11 +7692,15 @@ class MainWindow(QMainWindow):
                 'target_global': -1,
                 'sort_field': sort_field,
                 'sort_dir': sort_dir,
+                'filter_sql': filter_sql,
+                'filter_bindings': filter_bindings,
             }
             db = None
             try:
                 db = ImageIndexDB(directory_path_obj)
-                rel_candidates = self.image_list_model._restore_rel_path_candidates(Path(select_path_text))
+                rel_candidates = self.image_list_model._restore_rel_path_candidates(
+                    Path(select_path_text)
+                )
                 rank = -1
                 for rel_path in rel_candidates:
                     rank = db.get_rank_of_image(
@@ -7724,6 +7731,7 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def _apply_async_recenter_result(self, result: dict):
+        """Load the target page, then restore by a freshly resolved path index."""
         if not isinstance(result, dict):
             return
         if int(result.get('request_id', -1) or -1) != int(self._async_recenter_request_id):
@@ -7732,7 +7740,10 @@ class MainWindow(QMainWindow):
             return
         if str(result.get('directory_path') or '') != str(self.directory_path or ''):
             return
-        target_global = int(result.get('target_global', -1) or -1)
+        try:
+            target_global = int(result.get('target_global', -1))
+        except (TypeError, ValueError):
+            target_global = -1
         if target_global < 0:
             return
 
@@ -7741,24 +7752,102 @@ class MainWindow(QMainWindow):
         if (
             str(result.get('sort_field') or '') != current_sort_field
             or str(result.get('sort_dir') or '').upper() != current_sort_dir
+            or str(result.get('filter_sql') or '')
+            != str(getattr(self.image_list_model, '_filter_sql', '') or '')
+            or tuple(result.get('filter_bindings') or ())
+            != tuple(getattr(self.image_list_model, '_filter_bindings', ()) or ())
         ):
             return
 
         restore_path = str(result.get('select_path') or '')
-        if restore_path and restore_path != str(getattr(self, '_directory_restore_selection_path', '') or ''):
+        if restore_path != str(getattr(self, '_directory_restore_selection_path', '') or ''):
+            return
+        source_model = self.image_list_model
+        page_size = max(1, int(getattr(source_model, 'PAGE_SIZE', 1000) or 1000))
+        page_generation = int(getattr(source_model, '_page_load_generation', 0) or 0)
+        self._pending_safe_recenter = {
+            'request_id': int(result['request_id']),
+            'load_session_id': int(result['load_session_id']),
+            'directory_path': str(result['directory_path']),
+            'select_path': restore_path,
+            'target_global': target_global,
+            'page_generation': page_generation,
+            'deadline': time.monotonic() + 8.0,
+        }
+        target_page = target_global // page_size
+        try:
+            if source_model.get_loaded_row_for_global_index(target_global) < 0:
+                source_model._request_page_load(target_page)
+        except Exception:
+            self._pending_safe_recenter = None
+            return
+        QTimer.singleShot(0, self._try_apply_safe_recenter)
+
+    @Slot()
+    def _try_apply_safe_recenter(self):
+        """Apply a pending restore only after pages and masonry have settled."""
+        pending = self._pending_safe_recenter
+        if not isinstance(pending, dict):
+            return
+        if (
+            int(pending.get('request_id', -1)) != int(self._async_recenter_request_id)
+            or int(pending.get('load_session_id', -1)) != int(self._load_session_id)
+            or str(pending.get('directory_path') or '') != str(self.directory_path or '')
+            or time.monotonic() >= float(pending.get('deadline', 0.0) or 0.0)
+        ):
+            self._pending_safe_recenter = None
             return
 
-        view = self.image_list.list_view
         source_model = self.image_list_model
+        view = self.image_list.list_view
+        if int(getattr(source_model, '_page_load_generation', 0) or 0) != int(
+            pending.get('page_generation', -1)
+        ):
+            self._pending_safe_recenter = None
+            return
+        layout_busy = any(
+            bool(getattr(view, name, False))
+            for name in (
+                '_masonry_calculation_in_progress',
+                '_masonry_recalc_running',
+                '_layout_update_in_progress',
+            )
+        )
+        target_global = int(pending['target_global'])
         try:
-            if hasattr(view, 'start_targeted_relocation'):
-                view.start_targeted_relocation(
-                    int(target_global),
-                    reason='async_refresh_restore',
-                    source_model=source_model,
-                )
+            loaded_row = int(source_model.get_loaded_row_for_global_index(target_global))
         except Exception:
-            pass
+            loaded_row = -1
+        if layout_busy or loaded_row < 0:
+            QTimer.singleShot(80, self._try_apply_safe_recenter)
+            return
+
+        try:
+            source_index = source_model.index(loaded_row, 0)
+            proxy_index = self.proxy_image_list_model.mapFromSource(source_index)
+            if not proxy_index.isValid():
+                QTimer.singleShot(80, self._try_apply_safe_recenter)
+                return
+            image = proxy_index.data(Qt.ItemDataRole.UserRole)
+            image_path = str(getattr(image, 'path', '') or '')
+            if image_path and os.path.normcase(os.path.abspath(image_path)) != os.path.normcase(
+                os.path.abspath(str(pending['select_path']))
+            ):
+                QTimer.singleShot(80, self._try_apply_safe_recenter)
+                return
+            selection_model = view.selectionModel()
+            if selection_model is None:
+                return
+            selection_model.setCurrentIndex(
+                proxy_index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+            view.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            view._selected_global_index = target_global
+            self._pending_safe_recenter = None
+            print(f"[RESTORE] Safely restored selection at rank {target_global}")
+        except (AttributeError, RuntimeError, TypeError):
+            QTimer.singleShot(80, self._try_apply_safe_recenter)
 
     def _restore_directory_selection(
         self,
@@ -10461,6 +10550,17 @@ class MainWindow(QMainWindow):
             self._workspace_apply_pending_id = workspace_id
             self._schedule_workspace_apply(450)
             return
+
+        previous_workspace_id = self._current_workspace_id()
+        previous_image_list_width = 0
+        try:
+            if not self.image_list.isFloating() and self.image_list.isVisible():
+                previous_image_list_width = int(self.image_list.width() or 0)
+        except Exception:
+            previous_image_list_width = 0
+        if previous_workspace_id != "full_masonry" and previous_image_list_width >= 120:
+            self._last_non_masonry_image_list_width = previous_image_list_width
+
         self._workspace_applying = True
 
         try:
@@ -10660,20 +10760,11 @@ class MainWindow(QMainWindow):
                 # All standard workspaces are built around the anchored main viewer.
                 self.set_main_viewer_visible(True, save=True)
 
-            base_w = max(180, int(getattr(self.image_list_model, 'image_list_image_width', 200)))
-
             # Set focus/active tab for the primary tool of each workspace.
             if workspace_id == "media_viewer":
                 self.image_list.raise_()
-                list_target = max(300, int(self.width() * 0.60))
-                self.resizeDocks([self.image_list], [list_target], Qt.Orientation.Horizontal)
             elif workspace_id == "tagging":
                 self.image_tags_editor.raise_()
-                self.resizeDocks(
-                    [self.image_list, self.image_tags_editor],
-                    [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
-                    Qt.Orientation.Horizontal,
-                )
                 self.resizeDocks(
                     [self.image_tags_editor, self.all_tags_editor],
                     [max(280, int(self.height() * 0.58)), max(180, int(self.height() * 0.42))],
@@ -10681,18 +10772,8 @@ class MainWindow(QMainWindow):
                 )
             elif workspace_id == "marking":
                 self.auto_markings.raise_()
-                self.resizeDocks(
-                    [self.image_list, self.auto_markings],
-                    [max(320, int(base_w * 2.0)), max(360, int(base_w * 2.1))],
-                    Qt.Orientation.Horizontal,
-                )
             elif workspace_id == "ideogram_tagging":
                 self.ideogram_caption_editor.raise_()
-                self.resizeDocks(
-                    [self.image_list, self.image_tags_editor],
-                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
-                    Qt.Orientation.Horizontal,
-                )
                 self.resizeDocks(
                     [self.image_tags_editor, self.ideogram_caption_editor],
                     [max(190, int(self.height() * 0.40)), max(240, int(self.height() * 0.60))],
@@ -10700,18 +10781,8 @@ class MainWindow(QMainWindow):
                 )
             elif workspace_id == "video_prep":
                 self.auto_captioner.raise_()
-                self.resizeDocks(
-                    [self.image_list, self.auto_captioner],
-                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
-                    Qt.Orientation.Horizontal,
-                )
             elif workspace_id == "auto_captioning":
                 self.auto_captioner.raise_()
-                self.resizeDocks(
-                    [self.image_list, self.auto_captioner],
-                    [max(300, int(base_w * 1.9)), max(420, int(base_w * 2.4))],
-                    Qt.Orientation.Horizontal,
-                )
                 self.resizeDocks(
                     [self.image_tags_editor, self.auto_captioner],
                     [max(240, int(self.height() * 0.52)), max(220, int(self.height() * 0.48))],
@@ -10730,6 +10801,19 @@ class MainWindow(QMainWindow):
 
             if self.directory_path is not None:
                 self._set_central_content_page()
+
+            if workspace_id != "full_masonry":
+                preserved_width = previous_image_list_width
+                if previous_workspace_id == "full_masonry":
+                    preserved_width = int(
+                        getattr(self, '_last_non_masonry_image_list_width', 0) or 0
+                    )
+                if preserved_width >= 120:
+                    self.resizeDocks(
+                        [self.image_list],
+                        [preserved_width],
+                        Qt.Orientation.Horizontal,
+                    )
 
             if save_to_settings:
                 self._session_settings_set_value('workspace_preset', workspace_id)

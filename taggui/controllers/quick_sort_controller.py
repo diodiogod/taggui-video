@@ -777,7 +777,10 @@ class QuickSortController(QObject):
                 model=model,
                 image_list=context["image_list"],
             )
-            return len(batch) if batch is not None else 0
+            # Counting must stay O(1) for million-item datasets. Materializing
+            # snapshot_ids here made a setup-panel label perform the full
+            # queue query before the user even pressed Start.
+            return int(getattr(batch, "count", 0) or 0) if batch is not None else 0
         return len(self.build_queue(profile, context))
 
     def start_session(self, profile: QuickSortProfile) -> bool:
