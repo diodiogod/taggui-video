@@ -74,6 +74,9 @@ class ImageListView(
     def __init__(self, parent, proxy_image_list_model: ProxyImageListModel,
                  tag_separator: str, image_width: int):
         super().__init__(parent)
+        # Keep a stable reference to the owning ImageList dock. Layout wrappers
+        # may reparent the view, so walking parentWidget() is not reliable.
+        self._image_list_dock = parent
         self.proxy_image_list_model = proxy_image_list_model
         self.tag_separator = tag_separator
         self.setModel(proxy_image_list_model)

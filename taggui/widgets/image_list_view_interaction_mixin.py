@@ -2096,17 +2096,16 @@ class ImageListViewInteractionMixin:
             # Toggle deletion marking for selected images
             selected_indices = self.selectedIndexes()
             if selected_indices:
-                # Walk up the parent chain to find ImageList
-                parent = self.parent()
-                if parent:
-                    parent = parent.parent()
                 try:
                     if not self.ensure_materialized_selection(
                         'Deletion marking'
                     ):
                         event.accept()
                         return
-                    parent.toggle_deletion_marking()
+                    image_list_dock = getattr(self, '_image_list_dock', None)
+                    if image_list_dock is None:
+                        raise RuntimeError('Image List owner is unavailable')
+                    image_list_dock.toggle_deletion_marking()
                     event.accept()
                     return
                 except Exception as e:
