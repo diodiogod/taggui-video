@@ -2241,6 +2241,7 @@ class ImageListModel(QAbstractListModel):
     sidecar_reaction_migration_applied = Signal(int)  # imported curator-state count
     sidecar_review_migration_applied = Signal(int)  # imported review-state count
     sidecar_tag_migration_applied = Signal(int)  # reconciled txt-sidecar tag count
+    paginated_maintenance_applied = Signal(dict)  # generation-scoped maintenance result
     # NEW: Signal for buffered mode page updates (avoids layoutChanged which crashes Qt)
     pages_updated = Signal(list)  # Emits list of currently loaded page numbers
     thumbnail_updates_ready = Signal()  # Batched visual refresh for paginated thumbnails
@@ -2498,6 +2499,7 @@ class ImageListModel(QAbstractListModel):
         self.background_validation_progress.connect(self._on_background_validation_progress)
         self.sidecar_tag_migration_applied.connect(self._on_sidecar_tag_migration_applied)
         self.sidecar_review_migration_applied.connect(self._on_sidecar_review_migration_applied)
+        self.paginated_maintenance_applied.connect(self._on_paginated_maintenance_applied)
         self._flow_log_last: dict[str, float] = {}
         self._dimensions_update_timer = QTimer(self)
         self._dimensions_update_timer.setSingleShot(True)
@@ -3395,19 +3397,22 @@ class ImageListModel(QAbstractListModel):
 
         # Update total count based on combined filter
         self._advance_page_load_generation()
-        self._total_count = self._db.count(
+        new_total_count = self._db.count(
             filter_sql=self._filter_sql, bindings=self._filter_bindings)
 
-        # Clear cache and reset
-        self._pages.clear()
-
-        # Bootstrap load first pages
-        print(f"[FILTER] Applied SQL filter (Count: {self._total_count})")
-        for page_num in range(min(3, (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
-            self._load_page_sync(page_num)
-
-        # Emit reset AFTER pages are loaded so rowCount() returns valid data
-        self.modelReset.emit()
+        # Use Qt's reset protocol so persistent indices held by the view and
+        # proxy are invalidated before page ownership changes. Emitting
+        # modelReset directly leaves Qt's internal index bookkeeping stale and
+        # can crash inside QListView paint/geometry during a folder switch.
+        self.beginResetModel()
+        try:
+            self._total_count = int(new_total_count)
+            self._pages.clear()
+            print(f"[FILTER] Applied SQL filter (Count: {self._total_count})")
+            for page_num in range(min(3, (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
+                self._load_page_sync(page_num)
+        finally:
+            self.endResetModel()
         self.total_count_changed.emit(self._total_count)
 
     def _build_filter_sql(self, filter_node) -> tuple[str, tuple]:
@@ -3940,19 +3945,22 @@ class ImageListModel(QAbstractListModel):
             return
 
         self._advance_page_load_generation()
-        with self._page_load_lock:
-            current_pages = sorted(self._pages.keys())
-            self._pages.clear()
-            self._page_load_order.clear()
+        self.beginResetModel()
+        try:
+            with self._page_load_lock:
+                current_pages = sorted(self._pages.keys())
+                self._pages.clear()
+                self._page_load_order.clear()
 
-        if not current_pages:
-            current_pages = [max(0, int(page_num))]
+            if not current_pages:
+                current_pages = [max(0, int(page_num))]
 
-        for loaded_page in current_pages:
-            self._load_page_sync(int(loaded_page))
+            for loaded_page in current_pages:
+                self._load_page_sync(int(loaded_page))
+        finally:
+            self.endResetModel()
 
         self.total_count_changed.emit(int(new_total))
-        self.modelReset.emit()
         self._emit_pages_updated()
 
     def _compute_new_media_refresh_result(
@@ -7177,6 +7185,7 @@ class ImageListModel(QAbstractListModel):
             if self._paginated_maintenance_running:
                 return
             self._paginated_maintenance_running = True
+        maintenance_generation = int(self._path_validation_generation)
         loaded_rel_paths_snapshot: list[str] = []
         seen_rel_paths: set[str] = set()
         if directory_path == self._directory_path:
@@ -7319,20 +7328,14 @@ class ImageListModel(QAbstractListModel):
                     + loaded_ideogram_updates
                     + incremental_ideogram_updates
                 )
-                if total_tag_updates > 0 and directory_path == self._directory_path:
-                    self.sidecar_tag_migration_applied.emit(total_tag_updates)
-                if total_ideogram_updates > 0 and directory_path == self._directory_path:
-                    self.background_validation_applied.emit({
-                        'directory_path': str(directory_path),
-                        'added_count': 0,
-                        'removed_count': 0,
-                        'tag_updates_count': 0,
-                        'ideogram_updates_count': total_ideogram_updates,
-                    })
-                if migrated_total > 0:
-                    self.sidecar_reaction_migration_applied.emit(int(migrated_total))
-                if review_migrated_total > 0:
-                    self.sidecar_review_migration_applied.emit(int(review_migrated_total))
+                self.paginated_maintenance_applied.emit({
+                    'directory_path': str(directory_path),
+                    'generation': maintenance_generation,
+                    'tag_updates_count': total_tag_updates,
+                    'ideogram_updates_count': total_ideogram_updates,
+                    'reaction_updates_count': int(migrated_total),
+                    'review_updates_count': int(review_migrated_total),
+                })
                 db_bg.close()
             except Exception as e:
                 print(f"[DB] Background maintenance error: {e}")
@@ -8743,13 +8746,47 @@ class ImageListModel(QAbstractListModel):
     def _reload_loaded_pages_after_paginated_tag_change(self):
         """Reload currently loaded pages after a paginated bulk tag update."""
         self._advance_page_load_generation()
-        current_pages = list(self._pages.keys())
-        self._pages.clear()
-        self._page_load_order.clear()
-        for page in current_pages:
-            self._load_page_sync(page)
-        self.modelReset.emit()
+        self.beginResetModel()
+        try:
+            current_pages = list(self._pages.keys())
+            self._pages.clear()
+            self._page_load_order.clear()
+            for page in current_pages:
+                self._load_page_sync(page)
+        finally:
+            self.endResetModel()
         self._emit_pages_updated()
+
+    @Slot(dict)
+    def _on_paginated_maintenance_applied(self, result: dict):
+        """Apply maintenance only to the folder generation that produced it."""
+        if not isinstance(result, dict):
+            return
+        if int(result.get('generation', -1)) != int(self._path_validation_generation):
+            return
+        if str(result.get('directory_path') or '') != str(self._directory_path or ''):
+            return
+        if not self._paginated_mode:
+            return
+
+        tag_updates = int(result.get('tag_updates_count', 0) or 0)
+        ideogram_updates = int(result.get('ideogram_updates_count', 0) or 0)
+        reaction_updates = int(result.get('reaction_updates_count', 0) or 0)
+        review_updates = int(result.get('review_updates_count', 0) or 0)
+        if tag_updates > 0:
+            self.sidecar_tag_migration_applied.emit(tag_updates)
+        if ideogram_updates > 0:
+            self.background_validation_applied.emit({
+                'directory_path': str(self._directory_path),
+                'added_count': 0,
+                'removed_count': 0,
+                'tag_updates_count': 0,
+                'ideogram_updates_count': ideogram_updates,
+            })
+        if reaction_updates > 0:
+            self.sidecar_reaction_migration_applied.emit(reaction_updates)
+        if review_updates > 0:
+            self.sidecar_review_migration_applied.emit(review_updates)
 
     @Slot(int)
     def _on_sidecar_tag_migration_applied(self, _count: int):

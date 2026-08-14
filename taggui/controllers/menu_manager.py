@@ -980,11 +980,59 @@ class MenuManager:
         if visible:
             panel.raise_()
 
+    def _open_quick_sort_setup_panel(self):
+        """Present Quick Sort as a movable, fully visible setup window."""
+        panel = getattr(self.main_window, 'quick_sort_panel', None)
+        if panel is None:
+            return
+
+        # This command means "bring setup to me", unlike View > Quick Sort,
+        # which merely toggles the dock wherever the user last placed it.
+        # Hiding before detaching avoids a transient tab remnant in its old
+        # dock group on Windows.
+        if not panel.isFloating():
+            panel.hide()
+            panel.setFloating(True)
+
+        def _place_and_activate():
+            if panel is None:
+                return
+            main_frame = self.main_window.frameGeometry()
+            screen = QApplication.screenAt(main_frame.center())
+            if screen is None:
+                screen = QApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                width = min(max(360, panel.width()), available.width())
+                height = min(max(520, panel.height()), available.height())
+                x = min(
+                    max(available.left(), main_frame.left() + 40),
+                    available.right() - width + 1,
+                )
+                y = min(
+                    max(available.top(), main_frame.top() + 40),
+                    available.bottom() - height + 1,
+                )
+                panel.setGeometry(x, y, width, height)
+            panel.show()
+            panel.raise_()
+            panel.activateWindow()
+            handle = panel.windowHandle()
+            if handle is not None:
+                handle.requestActivate()
+
+        # A floating QDockWidget receives its native title-bar frame only
+        # after the top-level transition has reached the event loop. Applying
+        # geometry afterward prevents the initial frameless-looking window in
+        # the screen's top-left corner.
+        panel.show()
+        QTimer.singleShot(0, _place_and_activate)
+
     def _create_quick_sort_menu(self, menu_bar):
         quick_sort_menu = menu_bar.addMenu('Quick Sort')
         open_panel_action = quick_sort_menu.addAction('Open Setup Panel')
         open_panel_action.triggered.connect(
-            lambda: self._set_quick_sort_panel_visible(True)
+            self._open_quick_sort_setup_panel
         )
         quick_sort_menu.addSeparator()
         quick_sort_menu.addAction(self.start_quick_sort_action)
