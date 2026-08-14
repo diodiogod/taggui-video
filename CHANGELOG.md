@@ -5,6 +5,24 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-14
+
+### Added
+
+- Add keyboard-driven Quick Sort
+- Sort images rapidly into folders with configurable keyboard destinations and optional quality qualifiers
+- Resume unfinished sessions without reprocessing previously sorted or skipped images
+- Undo and redo sorting actions, handle filename collisions, and choose move or copy behavior
+- Use a focused image-first sorting view with clearer progress, feedback, and completion controls
+
+### Changed
+
+- Improve Quick Sort setup, destination editing, panel visibility, and folder-source guidance
+- Improve stability when changing folders and restoring the previously selected image
+
+### Fixed
+
+- Fix malformed image-extension repair and unnecessary OpenGL video fallback
 ## [1.4.12] - 2026-08-11
 
 ### Added
