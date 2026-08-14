@@ -109,6 +109,7 @@ class FolderTreeWidget(QTreeWidget):
     """Folder tree with hierarchy guides and filesystem-move drop routing."""
 
     folder_move_requested = Signal(str, str)
+    external_open_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,6 +118,16 @@ class FolderTreeWidget(QTreeWidget):
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            item = self.itemAt(event.position().toPoint())
+            path = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+            if path:
+                event.accept()
+                self.external_open_requested.emit(str(path))
+                return
+        super().mouseDoubleClickEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -273,6 +284,9 @@ class FolderTreePanel(QDockWidget):
         self.delete_button.clicked.connect(self.delete_folder)
         self.sort_button.clicked.connect(self.use_for_quick_sort)
         self.tree.itemDoubleClicked.connect(lambda *_: self.open_selected_folder())
+        self.tree.external_open_requested.connect(
+            lambda path: self._open_in_file_explorer(_absolute(path))
+        )
         self.tree.itemSelectionChanged.connect(self._update_actions)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         self.tree.folder_move_requested.connect(self._move_folder_from_drop)
@@ -452,6 +466,13 @@ class FolderTreePanel(QDockWidget):
         if path is None:
             return
         self.main_window.load_directory_in_active_browser(path, save_path_to_settings=True)
+
+    def _open_in_file_explorer(self, path: Path):
+        """Open a hierarchy folder externally without changing the loaded dataset."""
+        try:
+            os.startfile(str(path))
+        except OSError as exc:
+            self._warning("Cannot open folder", str(exc))
 
     def go_up(self):
         root = self.root_path

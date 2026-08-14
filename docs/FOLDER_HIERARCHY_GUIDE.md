@@ -7,6 +7,8 @@ count for each folder.
 ## Navigation and Quick Sort
 
 - Double-click a folder to open it in the active browser.
+- Hold `Alt` and double-click a folder to open it in Windows Explorer without
+  changing the dataset loaded in TagGUI.
 - Click **↑** to reveal the current root's parent while keeping the loaded
   folder selected. This navigates the tree without loading another dataset.
 - Select a folder and choose **Use selected folder for Quick Sort** to open it
