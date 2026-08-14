@@ -4,6 +4,39 @@ from utils.sidecar import is_taggui_metadata_dict, legacy_json_sidecar_path
 from utils.settings import DEFAULT_SETTINGS, settings
 
 class ImageListViewInteractionMixin:
+    def _queue_safe_current_selection(self, row: int, *, clear: bool) -> None:
+        """Commit a selection after the current native Qt callback unwinds.
+
+        Selection changes synchronously load the viewer. Running that chain from
+        inside mouse or layout-completion callbacks can re-enter Qt while
+        pagination state is transitioning, which is unsafe on Qt 6.9/Windows.
+        """
+        expected_model = self.model()
+        expected_epoch = int(getattr(self, '_selection_model_epoch', 0))
+
+        def commit_selection():
+            if bool(getattr(self, '_model_resetting', False)):
+                return
+            model = self.model()
+            if model is None or model is not expected_model:
+                return
+            if int(getattr(self, '_selection_model_epoch', 0)) != expected_epoch:
+                return
+            if row < 0 or row >= model.rowCount():
+                return
+            fresh_index = model.index(row, 0)
+            if not fresh_index.isValid():
+                return
+            self._pending_click_commit_index = QPersistentModelIndex(fresh_index)
+            if clear:
+                # Let QAbstractItemView coordinate its private selection state.
+                # Direct QItemSelectionModel.setCurrentIndex calls have crashed
+                # in Qt6Core after paginated proxy layout transitions.
+                self.setCurrentIndex(fresh_index)
+            self.viewport().update()
+
+        QTimer.singleShot(0, commit_selection)
+
     def _main_window_host(self):
         """Resolve the owning main window even when the dock is floating."""
         for origin in (self, self.window()):
@@ -1596,7 +1629,7 @@ class ImageListViewInteractionMixin:
                 self._strict_jump_target_global = None
                 self._strict_jump_until = 0.0
                 self._mark_selection_log_source("user_click", hold_s=2.5)
-                self._pending_click_commit_index = QPersistentModelIndex(index)
+                self._pending_click_commit_index = QPersistentModelIndex()
                 self._pending_click_commit_global = int(clicked_global) if clicked_global >= 0 else None
 
                 if modifiers & Qt.ControlModifier:
@@ -1658,25 +1691,18 @@ class ImageListViewInteractionMixin:
                             self.clear_virtual_all_selection()
                         self._preserve_multi_selection_on_drag_candidate = bool(preserve_multi_drag)
                         self._suppress_masonry_auto_scroll_once = True
-                        if preserve_multi_drag:
-                            sel_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
-                        else:
-                            sel_model.setCurrentIndex(
-                                index, QItemSelectionModel.SelectionFlag.ClearAndSelect
-                            )
-                        self.viewport().update()
+                        self._queue_safe_current_selection(
+                            index.row(),
+                            clear=not preserve_multi_drag,
+                        )
 
                 QTimer.singleShot(
                     0,
                     lambda: setattr(self, "_suppress_masonry_auto_scroll_once", False),
                 )
 
-                # Freeze selection against recalc-driven mutations.
-                # The click's own setCurrentIndex already fired synchronously above,
-                # so all handlers (save_image_index, load_image, etc.) already ran
-                # with the CORRECT index.  Any subsequent currentChanged triggered
-                # by updateGeometries / layout churn in the completion path must NOT
-                # overwrite the user's deliberate click.
+                # Freeze selection against recalc-driven mutations while the
+                # queued click commit and its currentChanged handlers complete.
                 import time as _time_mod
                 if (
                     not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))

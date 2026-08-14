@@ -2356,6 +2356,7 @@ class ImageListModel(QAbstractListModel):
         self._pages: dict = {}  # page_num -> list[Image]
         self._page_load_order: list = []  # LRU tracking
         self._loading_pages: set = set()  # Pages currently being loaded
+        self._pending_page_results: dict[tuple[int, int], tuple[list[Image], list[str]]] = {}
         self._page_load_lock = threading.RLock()
         self._page_load_generation = 0
         self._protected_page_window: tuple[int, int] | None = None
@@ -2991,6 +2992,7 @@ class ImageListModel(QAbstractListModel):
         with self._page_load_lock:
             self._page_load_generation += 1
             self._loading_pages.clear()
+            self._pending_page_results.clear()
             return int(self._page_load_generation)
 
     def set_page_protection_window(self, start_page: int, end_page: int):
@@ -3081,15 +3083,15 @@ class ImageListModel(QAbstractListModel):
                 filter_bindings=load_snapshot.get('filter_bindings'),
                 random_seed=load_snapshot.get('random_seed'),
             )
-            if not self._store_page(page_num, images, generation=generation):
-                return
-            if missing_rel_paths:
-                self.stale_index_paths_detected.emit(
-                    missing_rel_paths,
-                    int(page_num),
-                    int(generation),
+            # Never mutate Qt model-visible page state from a worker thread.
+            # Transfer the result to the model's UI-thread signal handler.
+            with self._page_load_lock:
+                if generation != self._page_load_generation:
+                    return
+                self._pending_page_results[(int(generation), int(page_num))] = (
+                    images,
+                    list(missing_rel_paths or []),
                 )
-            # print(f"[ASYNC_LOAD] Stored Page {page_num}, now emitting signal...")
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
             self.page_loaded.emit(int(page_num), int(generation))
@@ -3837,6 +3839,23 @@ class ImageListModel(QAbstractListModel):
             and int(generation) != int(self._page_load_generation)
         ):
             return
+
+        with self._page_load_lock:
+            page_result = self._pending_page_results.pop(
+                (int(generation), int(page_num)),
+                None,
+            )
+        if page_result is None:
+            return
+        images, missing_rel_paths = page_result
+        if not self._store_page(page_num, images, generation=generation):
+            return
+        if missing_rel_paths:
+            self.stale_index_paths_detected.emit(
+                missing_rel_paths,
+                int(page_num),
+                int(generation),
+            )
 
         initial_page_finished = bool(
             int(page_num) == 0
@@ -5144,6 +5163,76 @@ class ImageListModel(QAbstractListModel):
             except Exception as e:
                 print(f"[SHUTDOWN] Executor shutdown warning ({executor_name}): {e}")
             setattr(self, executor_name, None)
+
+    def quiesce_for_directory_relocation(self):
+        """Release live filesystem/DB handles before renaming a loaded root."""
+        self.cancel_background_path_validation()
+        self._advance_page_load_generation()
+        try:
+            self._enrichment_cancelled.set()
+        except Exception:
+            pass
+
+        for timer_name in (
+            '_page_debouncer',
+            '_thumbnail_batch_timer',
+            '_db_flush_timer',
+            '_dimensions_update_timer',
+            '_page_load_debounce_timer',
+            '_post_bootstrap_debounce_timer',
+            '_final_recalc_timer',
+            '_enrichment_timer',
+            '_qimage_timer',
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        # Windows directory rename requires every child handle to be released.
+        # Cancel queued work and wait only for already-running short file reads.
+        for executor_name in (
+            '_page_executor',
+            '_load_executor',
+            '_enrichment_executor',
+            '_refresh_executor',
+            '_save_executor',
+            '_scan_process_executor',
+        ):
+            executor = getattr(self, executor_name, None)
+            if executor is None:
+                continue
+            try:
+                executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=True)
+            setattr(self, executor_name, None)
+
+        database = self._db
+        if database is not None:
+            database.close()
+            self._db = None
+
+        # The model remains reusable; a subsequent load repopulates its state.
+        self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
+        self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        self._enrichment_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="page_enrich",
+            initializer=self._set_low_priority_thread,
+        )
+        self._refresh_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="folder_refresh",
+            initializer=self._set_low_priority_thread,
+        )
+        self._save_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="thumb_save",
+            initializer=self._set_low_priority_thread,
+        )
 
     @Slot(int, int, int)
     def _notify_thumbnail_ready(self, idx: int, width: int = -1, height: int = -1):

@@ -41,6 +41,22 @@ from utils.quick_sort import (
 from utils.settings import settings
 
 
+_MAPPING_COLOR_PALETTE = (
+    "#4C9AFF",
+    "#FF8A65",
+    "#AB47BC",
+    "#66BB6A",
+    "#FFD54F",
+    "#26C6DA",
+    "#EC407A",
+    "#7E57C2",
+    "#9CCC65",
+    "#FFA726",
+    "#42A5F5",
+    "#D4E157",
+)
+
+
 class _CompressibleQuickSortRoot(QWidget):
     def minimumSizeHint(self):
         return QSize(0, 0)
@@ -1006,13 +1022,29 @@ class QuickSortPanel(QDockWidget):
                 return candidate
         return "F1"
 
+    def _next_mapping_color(self, cards: list[QuickSortMappingCard]) -> str:
+        """Return a contrasting color not already used by this mapping group."""
+        used = {str(card.color).casefold() for card in cards}
+        for color in _MAPPING_COLOR_PALETTE:
+            if color.casefold() not in used:
+                return color
+
+        # Keep producing distinct colors when a profile outgrows the palette.
+        offset = len(cards) - len(_MAPPING_COLOR_PALETTE)
+        for attempt in range(360):
+            hue = (offset * 137 + attempt * 29) % 360
+            color = QColor.fromHsv(hue, 170, 240).name()
+            if color.casefold() not in used:
+                return color
+        return "#62E7D8"
+
     def _add_destination(self):
         number = len(self.destination_cards) + 1
         mapping = QuickSortMapping(
             name=f"Destination {number}",
             key=self._next_default_key(self.destination_cards),
             folder=f"Destination {number}",
-            color="#62E7D8",
+            color=self._next_mapping_color(self.destination_cards),
         )
         card = QuickSortMappingCard(mapping, kind="destination")
         self._install_zoom_filter_tree(card)
@@ -1030,7 +1062,7 @@ class QuickSortPanel(QDockWidget):
             name=f"Qualifier {number}",
             key=str(number) if number <= 9 else self._next_default_key(self.qualifier_cards),
             folder=f"Qualifier {number}",
-            color="#F2C96D",
+            color=self._next_mapping_color(self.qualifier_cards),
         )
         card = QuickSortMappingCard(mapping, kind="qualifier")
         self._install_zoom_filter_tree(card)

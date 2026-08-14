@@ -228,6 +228,7 @@ class QuickSortHud(QObject):
         self.feedback_animation.finished.connect(self.feedback.hide)
 
         self._apply_style("#62E7D8")
+        self._legend_mapping_count = 0
         self.hide()
 
     def _apply_style(self, accent: str):
@@ -314,7 +315,13 @@ class QuickSortHud(QObject):
             status_height,
         )
 
-        legend_width = min(available_width, 430)
+        # Use extra horizontal space for larger mapping sets so every named
+        # override remains visible without turning the legend into a tall list.
+        preferred_legend_width = min(
+            720,
+            max(300, 120 * min(6, max(1, self._legend_mapping_count))),
+        )
+        legend_width = min(available_width, preferred_legend_width)
         legend_content_width = max(1, legend_width - 24)
         self.legend_label.setMaximumWidth(legend_content_width)
         self.legend.setMinimumWidth(0)
@@ -377,30 +384,19 @@ class QuickSortHud(QObject):
         self.stage_label.setText(stage)
         self.progress_label.setText(progress)
         viewport_width = max(1, self.viewport.width())
-        visible_limit = (
-            8
-            if viewport_width >= 900
-            else 6
-            if viewport_width >= 600
-            else 4
-            if viewport_width >= 360
-            else 2
-        )
-        visible = mappings[:visible_limit]
+        self._legend_mapping_count = len(mappings)
         items = [
             f'<span style="color:{mapping.color};font-weight:900">'
             f'[{html.escape(mapping.key)}]</span> {html.escape(mapping.name)}'
-            for mapping in visible
+            for mapping in mappings
         ]
-        per_row = max(1, min(len(items) or 1, (viewport_width - 28) // 150))
+        legend_target_width = min(viewport_width - 28, 696)
+        per_row = max(1, min(6, legend_target_width // 115))
         rows = [
-            " &nbsp;&nbsp; ".join(items[index:index + per_row])
+            " &nbsp;·&nbsp; ".join(items[index:index + per_row])
             for index in range(0, len(items), per_row)
         ]
         legend = "<br>".join(rows)
-        if len(mappings) > len(visible):
-            more = f"+{len(mappings) - len(visible)} more"
-            legend = f"{legend}<br>{more}" if legend else more
         if standard_keys:
             automatic = (
                 '<span style="color:#7AA2FF;font-weight:700">'

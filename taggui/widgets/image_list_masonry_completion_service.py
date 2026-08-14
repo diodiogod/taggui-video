@@ -648,29 +648,10 @@ class MasonryCompletionService:
                                     domain_max=sb_local.maximum(),
                                 )
 
-                            # IMPORTANT: avoid selection rebinding during resize/zoom anchoring.
-                            # It can remap through transient buffered rows and cause jumpy
-                            # "wrong image selected" behavior. Keep rebind only for restore.
-                            if (restore_anchor_live or stabilize_anchor_live) and (not resize_anchor_live):
-                                if hasattr(source_model_local, 'get_loaded_row_for_global_index'):
-                                    loaded_row = source_model_local.get_loaded_row_for_global_index(target_global)
-                                    if loaded_row >= 0:
-                                        src_idx = source_model_local.index(loaded_row, 0)
-                                        proxy_model_local = v.model()
-                                        proxy_idx = (
-                                            proxy_model_local.mapFromSource(src_idx)
-                                            if proxy_model_local and hasattr(proxy_model_local, 'mapFromSource')
-                                            else src_idx
-                                        )
-                                        if proxy_idx.isValid() and v.currentIndex() != proxy_idx:
-                                            sel_model = v.selectionModel()
-                                            if sel_model is not None:
-                                                sel_model.setCurrentIndex(
-                                                    proxy_idx,
-                                                    QItemSelectionModel.SelectionFlag.ClearAndSelect,
-                                                )
-                                            else:
-                                                v.setCurrentIndex(proxy_idx)
+                            # Do not mutate selection from layout completion.
+                            # MainWindow's restoration coordinator owns selection
+                            # rebinding and waits until the model/layout is stable.
+                            # This service only restores the viewport anchor.
 
                             if strict_restore_target_y is not None and not prefer_exact_item_anchor:
                                 target_y = max(0, min(int(strict_restore_target_y), int(sb_local.maximum())))

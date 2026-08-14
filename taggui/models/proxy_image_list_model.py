@@ -63,7 +63,8 @@ class ProxyImageListModel(QSortFilterProxyModel):
         is_scrolling = bool(getattr(source_model, '_is_scrolling', False))
         now = time.monotonic()
         min_interval = 0.25 if is_scrolling else 0.08
-        if (now - self._last_proxy_invalidate_ts) >= min_interval:
+        paginated = bool(getattr(source_model, '_paginated_mode', False))
+        if not paginated and (now - self._last_proxy_invalidate_ts) >= min_interval:
             # Keep proxy/source row mapping in sync to avoid boundary voids.
             self.invalidate()
             self._last_proxy_invalidate_ts = now

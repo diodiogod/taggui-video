@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-08-14
+
+### Added
+
+- Navigate to a parent hierarchy without automatically loading another dataset
+- Rename loaded folders with F2 while preserving the active media selection
+- Show accurate recursive media counts for every displayed sibling folder after Up or Refresh
+- Make Quick Sort overrides easier to review with compact entries and distinct automatic colors
+- Reduce crashes while loading folders, restoring selections, and closing TagGUI
+
+### Changed
+
+- Improve folder management and browsing stability
 ## [1.5.2] - 2026-08-14
 
 ### Added

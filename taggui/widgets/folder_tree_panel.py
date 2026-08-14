@@ -223,6 +223,8 @@ class FolderTreePanel(QDockWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(4)
+        self.up_button = QPushButton("↑")
+        self.up_button.setToolTip("Show the parent folder without loading it")
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setToolTip("Refresh the folder hierarchy (F5 while this panel is focused)")
         self.add_button = QPushButton("+")
@@ -232,6 +234,7 @@ class FolderTreePanel(QDockWidget):
         self.delete_button = QPushButton("×")
         self.delete_button.setToolTip("Delete the selected folder if it is empty")
         for button in (
+            self.up_button,
             self.refresh_button,
             self.add_button,
             self.rename_button,
@@ -262,6 +265,7 @@ class FolderTreePanel(QDockWidget):
         layout.addWidget(self.sort_button)
         self.setWidget(root)
 
+        self.up_button.clicked.connect(self.go_up)
         self.refresh_button.clicked.connect(lambda: self.refresh())
         self.add_button.clicked.connect(self.create_folder)
         self.rename_button.clicked.connect(self.rename_folder)
@@ -277,6 +281,11 @@ class FolderTreePanel(QDockWidget):
         refresh_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         refresh_action.triggered.connect(lambda: self.refresh())
         self.addAction(refresh_action)
+        rename_action = QAction(self)
+        rename_action.setShortcut("F2")
+        rename_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        rename_action.triggered.connect(self.rename_folder)
+        self.addAction(rename_action)
         self._update_actions()
 
     def minimumSizeHint(self):
@@ -320,24 +329,14 @@ class FolderTreePanel(QDockWidget):
             for item in self._walk_items()
             if item.isExpanded() and self._item_path(item) is not None
         }
-        counts: dict[str, int] = {}
-        database = ImageIndexDB(root)
-        try:
-            indexed_paths = database.get_all_paths()
-        finally:
-            database.close()
-        for indexed_path in indexed_paths:
-            relative_parent = Path(str(indexed_path)).parent
-            current = root
-            counts[os.path.normcase(str(current))] = counts.get(
-                os.path.normcase(str(current)), 0
-            ) + 1
-            for part in relative_parent.parts:
-                if part in ("", "."):
-                    continue
-                current = current / part
-                key = os.path.normcase(str(current))
-                counts[key] = counts.get(key, 0) + 1
+        suffix_provider = getattr(
+            self.main_window, "_supported_external_drop_suffixes", None
+        )
+        media_suffixes = (
+            suffix_provider()
+            if callable(suffix_provider)
+            else {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".mkv"}
+        )
         self.tree.setUpdatesEnabled(False)
         self.tree.clear()
 
@@ -354,17 +353,23 @@ class FolderTreePanel(QDockWidget):
             else:
                 parent.addChild(item)
             children: list[Path] = []
+            total = 0
             try:
                 for entry in os.scandir(path):
                     if entry.name in ImageIndexDB.INTERNAL_DIR_NAMES:
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         children.append(Path(entry.path))
+                    elif (
+                        Path(entry.name).suffix.lower() in media_suffixes
+                        and (entry.is_file(follow_symlinks=False) or entry.is_symlink())
+                    ):
+                        total += 1
             except OSError:
                 item.setDisabled(True)
-            total = counts.get(os.path.normcase(str(path)), 0)
             for child in sorted(children, key=lambda value: value.name.casefold()):
-                add_directory(child, item)
+                _child_item, child_total = add_directory(child, item)
+                total += child_total
             item.setText(1, str(total))
             item.setToolTip(0, str(path))
             item.setExpanded(str(path) in expanded or parent is None)
@@ -409,8 +414,18 @@ class FolderTreePanel(QDockWidget):
     def _update_actions(self):
         selected = self.selected_path()
         editable = selected is not None and self.root_path is not None and selected != self.root_path
+        loaded_root = self._active_loaded_root()
+        renaming_loaded_root = selected is not None and selected == loaded_root
+        can_go_up = bool(
+            self.root_path is not None
+            and self.root_path.parent != self.root_path
+        )
+        self.up_button.setEnabled(can_go_up)
         self.add_button.setEnabled(selected is not None)
-        self.rename_button.setEnabled(editable)
+        self.rename_button.setEnabled(
+            selected is not None
+            and (editable or renaming_loaded_root)
+        )
         self.move_button.setEnabled(editable)
         self.delete_button.setEnabled(editable)
         self.sort_button.setEnabled(selected is not None)
@@ -421,6 +436,7 @@ class FolderTreePanel(QDockWidget):
             self.tree.setCurrentItem(item)
         menu = QMenu(self.tree)
         menu.addAction("Open folder", self.open_selected_folder)
+        menu.addAction("Load parent folder", self.go_up)
         menu.addAction("Use for Quick Sort", self.use_for_quick_sort)
         menu.addSeparator()
         menu.addAction("New subfolder…", self.create_folder)
@@ -436,6 +452,15 @@ class FolderTreePanel(QDockWidget):
         if path is None:
             return
         self.main_window.load_directory_in_active_browser(path, save_path_to_settings=True)
+
+    def go_up(self):
+        root = self.root_path
+        if root is None or root.parent == root:
+            return
+        previous_root = root
+        self.root_path = root.parent
+        self.refresh(select_path=previous_root)
+        self.root_changed.emit(str(self.root_path))
 
     def use_for_quick_sort(self):
         path = self.selected_path()
@@ -477,7 +502,13 @@ class FolderTreePanel(QDockWidget):
         if not self._changes_allowed():
             return
         source = self.selected_path()
-        if not self._editable_source(source):
+        if source is None or self.root_path is None:
+            return
+        renaming_root = source == self._active_loaded_root()
+        if renaming_root and source.parent == source:
+            self._warning("Cannot rename folder", "The filesystem root cannot be renamed here.")
+            return
+        if not renaming_root and not self._editable_source(source):
             return
         name, accepted = QInputDialog.getText(
             self, "Rename folder", "New name:", text=source.name
@@ -488,7 +519,22 @@ class FolderTreePanel(QDockWidget):
         if Path(name).name != name:
             self._warning("Cannot rename folder", "Enter a folder name, not a path.")
             return
-        self._perform_move(source, source.with_name(name), "Rename folder")
+        destination = source.with_name(name)
+        if renaming_root:
+            if destination.exists():
+                self._warning("Destination exists", str(destination))
+                return
+            if self._relocate_loaded_root(source, destination):
+                self.history.record(
+                    FolderHistoryEntry(
+                        "Rename loaded root",
+                        source,
+                        destination,
+                        time.time_ns(),
+                    )
+                )
+            return
+        self._perform_move(source, destination, "Rename folder")
 
     def move_folder(self):
         if not self._changes_allowed():
@@ -618,10 +664,99 @@ class FolderTreePanel(QDockWidget):
         source, destination = (
             (entry.destination, entry.source) if reverse else (entry.source, entry.destination)
         )
+        if entry.action == "Rename loaded root":
+            return self._relocate_loaded_root(source, destination)
         if not self._relocate(source, destination):
             return False
         self.refresh(select_path=destination)
         return True
+
+    def _relocate_loaded_root(self, source: Path, destination: Path) -> bool:
+        """Rename a loaded dataset root, releasing and reopening live DB handles."""
+        source = _absolute(source)
+        destination = _absolute(destination)
+        if not source.is_dir() or destination.exists() or source.parent != destination.parent:
+            self._warning(
+                "Cannot rename folder",
+                "The source is missing or the destination already exists.",
+            )
+            return False
+
+        main = self.main_window
+        secondary = getattr(main, "_secondary_browser", None)
+        contexts = []
+        primary_dir = getattr(main, "directory_path", None)
+        if primary_dir is not None and _within(_absolute(primary_dir), source):
+            contexts.append(("primary", getattr(main, "image_list_model", None), _absolute(primary_dir)))
+        secondary_model = getattr(secondary, "image_list_model", None)
+        secondary_dir = getattr(secondary_model, "_directory_path", None)
+        if secondary_dir is not None and _within(_absolute(secondary_dir), source):
+            contexts.append(("secondary", secondary_model, _absolute(secondary_dir)))
+
+        selected_path = getattr(
+            getattr(getattr(main, "image_viewer", None), "current_media", None),
+            "path",
+            None,
+        )
+        selected_path = _absolute(selected_path) if selected_path else None
+
+        for _name, model, _directory in contexts:
+            if model is None:
+                continue
+            quiesce = getattr(model, "quiesce_for_directory_relocation", None)
+            if callable(quiesce):
+                quiesce()
+                continue
+            cancel = getattr(model, "cancel_background_path_validation", None)
+            if callable(cancel):
+                cancel()
+            advance = getattr(model, "_advance_page_load_generation", None)
+            if callable(advance):
+                advance()
+            database = getattr(model, "_db", None)
+            if database is not None:
+                try:
+                    database.close()
+                except Exception:
+                    pass
+                model._db = None
+
+        try:
+            source.rename(destination)
+        except OSError as exc:
+            self._warning("Cannot rename folder", str(exc))
+            for name, _model, directory in contexts:
+                if name == "primary":
+                    main.load_directory(directory, save_path_to_settings=True)
+                elif secondary is not None:
+                    secondary.load_directory(directory)
+            return False
+
+        for name, _model, directory in contexts:
+            mapped_directory = destination / directory.relative_to(source)
+            if name == "primary":
+                mapped_selection = None
+                if selected_path is not None and _within(selected_path, source):
+                    mapped_selection = destination / selected_path.relative_to(source)
+                main.load_directory(
+                    mapped_directory,
+                    save_path_to_settings=True,
+                    select_path=str(mapped_selection) if mapped_selection else None,
+                )
+            elif secondary is not None:
+                secondary.load_directory(mapped_directory)
+
+        self.set_root(destination)
+        return True
+
+    def _active_loaded_root(self) -> Path | None:
+        browser_name = self.main_window._active_directory_browser_name()
+        if browser_name == "secondary":
+            secondary = getattr(self.main_window, "_secondary_browser", None)
+            value = getattr(getattr(secondary, "image_list_model", None), "_directory_path", None)
+        else:
+            value = getattr(self.main_window, "directory_path", None)
+        return _absolute(value) if value else None
 
     def _relocate(self, source: Path, destination: Path) -> bool:
         if self.root_path is None or not _within(source, self.root_path) or not _within(destination, self.root_path):

@@ -172,6 +172,7 @@ class ImageListView(
         self._selection_log_source = "program"
         self._selection_log_source_until = 0.0
         self._pending_click_commit_index = QPersistentModelIndex()
+        self._selection_model_epoch = 0
         self._pending_click_commit_global = None
         self._pending_targeted_relocation_target_global = None
         self._pending_targeted_relocation_target_page = None
@@ -711,6 +712,7 @@ class ImageListView(
     def _on_model_about_to_reset(self):
         import time as _t
 
+        self._selection_model_epoch += 1
         try:
             self._get_masonry_incremental_service().invalidate("model_reset")
         except Exception:

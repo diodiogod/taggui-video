@@ -484,6 +484,10 @@ class ImageViewer(QWidget):
         self.setLayout(layout)
 
         self.proxy_image_index: QPersistentModelIndex = QPersistentModelIndex()
+        # Stable Python-side media reference for toolbar/state synchronization.
+        # Qt persistent indexes can be transiently unsafe during model resets or
+        # modal focus changes even when isValid() still returns true.
+        self.current_media = None
         self._viewer_model_resetting = False
         self.marking_items: list[MarkingItem] = []
         self.ideogram_overlay_items: list[QGraphicsItem] = []
@@ -2242,6 +2246,7 @@ class ImageViewer(QWidget):
     def _on_proxy_model_about_to_reset(self):
         self._viewer_model_resetting = True
         self.proxy_image_index = QPersistentModelIndex()
+        self.current_media = None
 
     @Slot()
     def _on_proxy_model_reset(self):
@@ -3822,6 +3827,7 @@ class ImageViewer(QWidget):
             # Page not loaded yet in pagination mode - wait
             return
         self.proxy_image_index = QPersistentModelIndex(proxy_index)
+        self.current_media = image
         if self.is_spawned_viewer or bool(getattr(image, "is_video", False)):
             self._floating_double_click_return_scale = None
         self._floating_last_auto_double_click_zoom_scale = None

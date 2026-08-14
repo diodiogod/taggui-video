@@ -212,6 +212,25 @@ def test_qualifier_setup_is_visible_and_expands_from_its_switch(monkeypatch, tmp
         _dispose(window, panel)
 
 
+def test_new_overrides_receive_distinct_automatic_colors(monkeypatch, tmp_path):
+    window, panel, _store = _make_panel(
+        monkeypatch,
+        tmp_path,
+        [_profile("Body parts", "R", "Right Arm")],
+    )
+    try:
+        existing_colors = {card.color.casefold() for card in panel.destination_cards}
+        panel._add_destination()
+        first_color = panel.destination_cards[-1].color.casefold()
+        panel._add_destination()
+        second_color = panel.destination_cards[-1].color.casefold()
+
+        assert first_color not in existing_colors
+        assert second_color not in existing_colors | {first_color}
+    finally:
+        _dispose(window, panel)
+
+
 def test_destination_field_drives_both_label_and_folder(monkeypatch, tmp_path):
     legacy = QuickSortProfile(
         name="Legacy",

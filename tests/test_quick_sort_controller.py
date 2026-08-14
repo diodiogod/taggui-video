@@ -669,6 +669,29 @@ def test_hud_geometry_stays_inside_narrow_viewport():
         viewport.close()
 
 
+def test_hud_legend_includes_every_named_mapping():
+    _application()
+    viewport = QWidget()
+    viewport.resize(1200, 700)
+    hud = QuickSortHud(viewport)
+    mappings = [
+        QuickSortMapping(f"Category {index}", str(index), f"Category {index}")
+        for index in range(14)
+    ]
+    try:
+        hud.set_state(
+            stage="Choose a destination",
+            progress="1 / 20",
+            mappings=mappings,
+        )
+        legend = hud.legend_label.text()
+        assert all(mapping.name in legend for mapping in mappings)
+        assert "more" not in legend
+    finally:
+        hud.hide()
+        viewport.close()
+
+
 def test_paginated_setup_count_does_not_materialize_queue_ids(tmp_path):
     _application()
     window = _ControllerWindow()

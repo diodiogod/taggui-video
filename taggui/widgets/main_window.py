@@ -1606,12 +1606,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'toolbar_manager'):
             settings.setValue('fixed_marker_size', self.toolbar_manager.fixed_marker_size_spinbox.value())
 
-        # Manually save current selection to ensure it persists
-        if hasattr(self, 'image_list') and hasattr(self.image_list, 'list_view'):
-             idx = self.image_list.list_view.currentIndex()
-             if idx.isValid():
-                 # Use the slot directly to save
-                 self.save_image_index(idx)
+        # Persist the already tracked selection without entering Qt's proxy or
+        # selection model while native widgets are beginning teardown.
+        self._save_cached_image_selection_on_close()
 
         settings.sync()
         print("[SHUTDOWN] Settings synced")
@@ -3408,12 +3405,16 @@ class MainWindow(QMainWindow):
         target = viewer or self.get_active_viewer()
         if target is None:
             return None
-        try:
-            index = target.proxy_image_index
-            if index is not None and index.isValid():
-                return index.data(Qt.ItemDataRole.UserRole)
-        except Exception:
-            return None
+        # Prefer the stable Python object captured when the media was loaded.
+        # Dereferencing QPersistentModelIndex.data() during a modal focus event
+        # can enter Qt with an index whose model is being reset and crash before
+        # Python can catch an exception.
+        current_media = getattr(target, 'current_media', None)
+        if current_media is not None:
+            return current_media
+        # An empty cache means no safely loaded media is available. Do not fall
+        # back to the persistent index here: this method is called from native
+        # focus events precisely while that index may be transitioning.
         return None
 
     def _current_list_image(self):
@@ -9583,6 +9584,34 @@ class MainWindow(QMainWindow):
                     self._update_main_window_title()
             else:
                 self._update_main_window_title()
+
+    def _save_cached_image_selection_on_close(self):
+        """Persist selection state without dereferencing Qt model indexes."""
+        view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+        if view is None:
+            return
+
+        rank = getattr(view, '_selected_global_index', None)
+        if not (isinstance(rank, int) and rank >= 0):
+            rank = getattr(view, '_current_global_row_cache', None)
+        if isinstance(rank, int) and rank >= 0:
+            filter_value = getattr(
+                getattr(self, 'proxy_image_list_model', None),
+                'filter',
+                None,
+            )
+            settings_key = 'image_index' if filter_value is None else 'filtered_image_index'
+            self._session_settings_set_value(settings_key, int(rank))
+
+        image = getattr(getattr(self, 'image_viewer', None), 'current_media', None)
+        path_value = getattr(image, 'path', None)
+        if path_value is None:
+            path_value = getattr(self, '_directory_restore_selection_path', None)
+        if path_value:
+            path = Path(path_value)
+            self._directory_restore_selection_path = str(path)
+            self._save_folder_last_selected_path(path)
+            self._session_settings_set_value('last_selected_path', str(path))
 
     def _should_suppress_transient_restore_index(self, proxy_image_index: QModelIndex) -> bool:
         """Ignore intermediate selection/current changes while startup restore is settling."""
