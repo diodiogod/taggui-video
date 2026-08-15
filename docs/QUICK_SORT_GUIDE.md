@@ -7,7 +7,7 @@ Quick Sort is a focused, keyboard-driven workflow for rapidly organizing images 
 ## Start Immediately
 
 1. Load a folder in Browser 1 or Browser 2.
-2. Open `Quick Sort` from the menu, or press `Ctrl + Shift + Q` when the saved setup is ready.
+2. Open `Quick Review > Quick Sort` from the menu, or press `Ctrl + Shift + Q` when the saved setup is ready.
 3. Press any letter `A-Z` or number `0-9`.
 
 No destination setup is required. By default, pressing `R` routes the current file into folder `R`, pressing `1` routes it into folder `1`, and so on. Destination folders are created below the active folder unless a different parent is selected.
@@ -21,6 +21,11 @@ Use `Add destination override` only when a key should use a descriptive destinat
 - **Color:** the small feedback accent.
 
 For example, an override can map `R` to `Body/Right Arm`. The same value appears in feedback and becomes the destination path. That override replaces the automatic `R` folder while the remaining standard keys continue to work normally. Disable `Automatically map A-Z and 0-9` when a profile should accept only explicitly configured destinations.
+
+Drag the grip at the start of a destination or qualifier row to reorder the
+mapping list. The order is saved with the profile and used in the setup legend.
+Profile names can be edited directly in the profile field and saved with Enter;
+built-in presets are copied into editable profiles.
 
 ## Images Included in a Session
 

@@ -46,6 +46,12 @@ class FullscreenViewerWindow(QWidget):
                 player.sync_external_surface_geometry()
         except Exception:
             pass
+        try:
+            raise_overlays = getattr(self.viewer, "raise_viewport_overlays", None)
+            if callable(raise_overlays):
+                raise_overlays()
+        except Exception:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)

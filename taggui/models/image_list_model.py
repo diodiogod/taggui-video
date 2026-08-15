@@ -16,8 +16,9 @@ from math import floor, ceil
 from pathlib import Path
 import json
 
-from PySide6.QtCore import (QAbstractListModel, QModelIndex, QMimeData, QPoint,
-                            QRect, QSize, Qt, QUrl, Signal, Slot, QEvent, QMetaObject, Q_ARG, QTimer)
+from PySide6.QtCore import (QAbstractListModel, QItemSelectionModel, QModelIndex,
+                            QMimeData, QPoint, QRect, QSize, Qt, QUrl, Signal,
+                            Slot, QEvent, QMetaObject, Q_ARG, QTimer)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication, QProgressDialog
 from PIL import Image as pilimage  # Import Pillow's Image class
@@ -3049,6 +3050,7 @@ class ImageListModel(QAbstractListModel):
             return 0, int(getattr(self, "_total_count", 0) or 0)
 
         db = ImageIndexDB(self._directory_path)
+        self._configure_filter_db(db)
         try:
             removed_count = int(db.remove_images_by_paths(normalized_paths) or 0)
             new_total = int(db.count(
@@ -3455,13 +3457,28 @@ class ImageListModel(QAbstractListModel):
         """Convert filter structure to SQL WHERE clause and bindings."""
         if filter_node is None:
             return "", ()
+
+        # The token predicate is evaluated by a SQLite function so it uses the
+        # same shared tokenizer as the non-paginated proxy.  Configure the
+        # active connection before SQLite starts evaluating the expression.
+        active_db = getattr(self, '_db', None)
+        proxy_model = getattr(self, 'proxy_image_list_model', None)
+        if active_db is not None and hasattr(active_db, 'configure_filter_tokenizer'):
+            active_db.configure_filter_tokenizer(
+                getattr(proxy_model, 'tokenizer', None),
+            )
+
+        real_tag_sql = (
+            "tag IS NOT NULL AND tag != '' AND tag != '__no_tags__'"
+        )
         
         if isinstance(filter_node, str):
             # Simple string search: tag OR filename
             pattern = f"%{filter_node}%"
             return (
                 "(file_name LIKE ? "
-                "OR EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?) "
+                "OR EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
+                + real_tag_sql + " AND tag LIKE ?) "
                 "OR EXISTS(SELECT 1 FROM image_ideogram_captions WHERE image_id=images.id AND search_text LIKE ?))",
                 (pattern, pattern, pattern)
             )
@@ -3489,35 +3506,69 @@ class ImageListModel(QAbstractListModel):
                         try:
                             stars_value = float(value_raw)
                         except Exception:
-                            return "", ()
-                        # UI supports 0..5 star semantics.
-                        stars_value = max(0, min(5, stars_value))
+                            return "0", ()
                         # Ratings are stored as 0.0..1.0 floats.
                         return "(COALESCE(rating, 0) * 5.0) " + cmp_sql + " ?", (stars_value,)
+                    if key == 'tags':
+                        try:
+                            tags_value = float(value_raw)
+                        except Exception:
+                            return "0", ()
+                        return (
+                            "(SELECT COUNT(*) FROM image_tags "
+                            "WHERE image_id=images.id AND " + real_tag_sql + ") "
+                            + cmp_sql + " ?",
+                            (tags_value,),
+                        )
+                    if key == 'chars':
+                        try:
+                            chars_value = float(value_raw)
+                        except Exception:
+                            return "0", ()
+                        # GROUP_CONCAT reproduces the caption string formed
+                        # by joining real tags with the configured separator.
+                        return (
+                            "LENGTH(COALESCE((SELECT GROUP_CONCAT(tag, ?) "
+                            "FROM image_tags WHERE image_id=images.id AND "
+                            + real_tag_sql + "), '')) "
+                            + cmp_sql + " ?",
+                            (self.tag_separator, chars_value),
+                        )
+                    if key == 'tokens':
+                        try:
+                            tokens_value = float(value_raw)
+                        except Exception:
+                            return "0", ()
+                        return (
+                            "TAGGUI_TOKEN_COUNT(COALESCE((SELECT GROUP_CONCAT(tag, ?) "
+                            "FROM image_tags WHERE image_id=images.id AND "
+                            + real_tag_sql + "), '')) "
+                            + cmp_sql + " ?",
+                            (self.tag_separator, tokens_value),
+                        )
                     if key == 'width':
                         try:
                             width_value = int(value_raw)
                         except Exception:
-                            return "", ()
+                            return "0", ()
                         return "COALESCE(width, 0) " + cmp_sql + " ?", (width_value,)
                     if key == 'height':
                         try:
                             height_value = int(value_raw)
                         except Exception:
-                            return "", ()
+                            return "0", ()
                         return "COALESCE(height, 0) " + cmp_sql + " ?", (height_value,)
                     if key == 'area':
                         try:
                             area_value = int(value_raw)
                         except Exception:
-                            return "", ()
+                            return "0", ()
                         return "(COALESCE(width, 0) * COALESCE(height, 0)) " + cmp_sql + " ?", (area_value,)
                     if key == 'review_rank':
                         try:
-                            review_rank_value = int(float(value_raw))
+                            review_rank_value = float(value_raw)
                         except Exception:
-                            return "", ()
-                        review_rank_value = max(0, min(5, review_rank_value))
+                            return "0", ()
                         return "COALESCE(review_rank, 0) " + cmp_sql + " ?", (review_rank_value,)
                 
             # Handle infix notation [A, 'AND', B] or prefix ['tag', 'val']
@@ -3526,18 +3577,33 @@ class ImageListModel(QAbstractListModel):
                 # Binary operator like ['tag', 'val']
                 op = str(filter_node[0]).strip().lower()
                 val = filter_node[1]
+
+                if op == 'not':
+                    child_sql, child_bindings = self._build_filter_sql(val)
+                    if not child_sql:
+                        return "", ()
+                    return f"NOT ({child_sql})", child_bindings
                 
                 if op == 'tag':
                     if '*' in val or '?' in val:
                         val = val.replace('*', '%').replace('?', '_')
-                        return "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?)", (val,)
+                        return (
+                            "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
+                            + real_tag_sql + " AND tag LIKE ?)",
+                            (val,),
+                        )
                     else:
-                        return "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag = ?)", (val,)
+                        return (
+                            "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
+                            + real_tag_sql + " AND tag = ?)",
+                            (val,),
+                        )
 
                 if op == 'caption':
                     pattern = f"%{val}%"
                     return (
-                        "(EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND tag LIKE ?) "
+                        "(EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
+                        + real_tag_sql + " AND tag LIKE ?) "
                         "OR EXISTS(SELECT 1 FROM image_ideogram_captions WHERE image_id=images.id AND search_text LIKE ?))",
                         (pattern, pattern),
                     )
@@ -3565,8 +3631,7 @@ class ImageListModel(QAbstractListModel):
                     )
                 
                 if op == 'name':
-                     # Contains match by default
-                     return "file_name LIKE ?", (f"%{val}%",)
+                     return "TAGGUI_NAME_MATCH(file_name, ?) = 1", (str(val),)
 
                 if op == 'marking':
                     label_value = str(val)
@@ -3588,38 +3653,69 @@ class ImageListModel(QAbstractListModel):
                                 '>=': '>=',
                             }.get(match.group(1))
                             if confidence_operator is None:
-                                return "", ()
+                                return "0", ()
                             label_value = candidate_label
                             confidence_value = float(match.group(2).replace(',', '.'))
                             confidence_sql = f" AND confidence {confidence_operator} ?"
                             confidence_bindings = (confidence_value,)
 
-                    if '*' in label_value or '?' in label_value:
-                        label_value = label_value.replace('*', '%').replace('?', '_')
-                        return (
-                            "EXISTS(SELECT 1 FROM image_markings "
-                            "WHERE image_id=images.id AND label LIKE ?" + confidence_sql + ")",
-                            (label_value,) + confidence_bindings
-                        )
                     return (
                         "EXISTS(SELECT 1 FROM image_markings "
-                        "WHERE image_id=images.id AND label = ?" + confidence_sql + ")",
+                        "WHERE image_id=images.id AND "
+                        "TAGGUI_LABEL_MATCH(label, ?) = 1" + confidence_sql + ")",
                         (label_value,) + confidence_bindings
                     )
 
                 if op == 'marking_type':
                     val = str(val).strip().lower()
-                    if '*' in val or '?' in val:
-                        val = val.replace('*', '%').replace('?', '_')
-                        return (
-                            "EXISTS(SELECT 1 FROM image_markings "
-                            "WHERE image_id=images.id AND type LIKE ?)",
-                            (val,)
-                        )
                     return (
                         "EXISTS(SELECT 1 FROM image_markings "
-                        "WHERE image_id=images.id AND type = ?)",
+                        "WHERE image_id=images.id AND "
+                        "TAGGUI_LABEL_MATCH(LOWER(type), ?) = 1)",
                         (val,)
+                    )
+                if op in ('crops', 'visible'):
+                    return (
+                        "EXISTS(SELECT 1 FROM image_markings AS marking "
+                        "WHERE marking.image_id = images.id AND "
+                        "TAGGUI_MARKING_VIEW_MATCH("
+                        "images.file_name, marking.x, marking.y, marking.width, "
+                        "marking.height, images.width, images.height, marking.label, ?, ?) = 1)",
+                        (str(val), op),
+                    )
+                if op == 'path':
+                    directory_prefix = str(getattr(self, '_directory_path', '') or '')
+                    return (
+                        "TAGGUI_PATH_MATCH(file_name, ?, ?) = 1",
+                        (directory_prefix, str(val)),
+                    )
+                if op == 'size':
+                    dimensions = str(val).replace(':', 'x').split('x')
+                    if len(dimensions) != 2:
+                        return "0", ()
+                    try:
+                        width_value, height_value = (int(value) for value in dimensions)
+                    except (TypeError, ValueError):
+                        return "0", ()
+                    if width_value <= 0 or height_value <= 0:
+                        return "0", ()
+                    return (
+                        "(COALESCE(width, 0) = ? AND COALESCE(height, 0) = ?)",
+                        (width_value, height_value),
+                    )
+                if op == 'target':
+                    dimensions = str(val).replace(':', 'x').split('x')
+                    if len(dimensions) != 2:
+                        return "0", ()
+                    try:
+                        if any(int(value) <= 0 for value in dimensions):
+                            return "0", ()
+                    except (TypeError, ValueError):
+                        return "0", ()
+                    return (
+                        "TAGGUI_TARGET_MATCH(file_name, COALESCE(width, 0), "
+                        "COALESCE(height, 0), ?) = 1",
+                        (str(val),),
                     )
                 if op == 'review':
                     normalized = str(val).strip().lower()
@@ -3664,6 +3760,13 @@ class ImageListModel(QAbstractListModel):
             return "", ()
 
         return "", ()
+
+    def _configure_filter_db(self, db):
+        """Give any auxiliary DB connection the shared filter tokenizer."""
+        if db is None or not hasattr(db, 'configure_filter_tokenizer'):
+            return
+        proxy_model = getattr(self, 'proxy_image_list_model', None)
+        db.configure_filter_tokenizer(getattr(proxy_model, 'tokenizer', None))
 
     def _store_page(
         self,
@@ -4050,6 +4153,7 @@ class ImageListModel(QAbstractListModel):
         result['supported'] = True
         try:
             db = ImageIndexDB(directory_path)
+            self._configure_filter_db(db)
             cached_paths = db.get_all_paths()
             norm_to_cached_paths: dict[str, list[str]] = {}
             for rel_path in cached_paths:
@@ -4284,6 +4388,7 @@ class ImageListModel(QAbstractListModel):
         # with closing and replacing its SQLite connection.
         if self._db is None:
             self._db = ImageIndexDB(self._directory_path)
+            self._configure_filter_db(self._db)
 
         if self._active_load_options is not None:
             refreshed_scope_rel_paths = self._db.get_limited_paths(self._active_load_options)
@@ -6353,6 +6458,7 @@ class ImageListModel(QAbstractListModel):
             # closed underneath page and thumbnail workers.
             if self._db is None:
                 self._db = ImageIndexDB(self._directory_path)
+                self._configure_filter_db(self._db)
             snapshot_matches = (
                 str(result.get('filter_sql') or '') == str(self._filter_sql or '')
                 and tuple(result.get('filter_bindings') or ()) == tuple(self._filter_bindings or ())
@@ -7643,6 +7749,7 @@ class ImageListModel(QAbstractListModel):
             print(f"[PAGINATION] Max pages in memory: {self.MAX_PAGES_IN_MEMORY}")
 
         self._db = ImageIndexDB(directory_path)
+        self._configure_filter_db(self._db)
         self._paginated_mode = True
         self._active_load_options = _normalize_limited_load_options(load_options)
 
@@ -8691,6 +8798,8 @@ class ImageListModel(QAbstractListModel):
                 error_message_box.setIcon(QMessageBox.Icon.Critical)
                 error_message_box.setText(f'Failed to save JSON for {image.path}.')
                 error_message_box.exec()
+        if self._db and hasattr(self._db, 'invalidate_filter_crop_cache'):
+            self._db.invalidate_filter_crop_cache(image.path)
         self._save_markings_to_db(image)
         if notify:
             self._notify_image_metadata_changed(image)
@@ -8805,10 +8914,23 @@ class ImageListModel(QAbstractListModel):
             reverse_snapshots: list[dict[str, Any]] = []
             changed_image_indices: list[int] = []
             restored_paths: list[str] = []
+            filter_membership_changed = False
+            proxy_model = getattr(self, 'proxy_image_list_model', None)
+            filter_is_active = bool(
+                getattr(proxy_model, 'filter', None)
+            ) or bool(getattr(self, '_filter_sql', ''))
             for snapshot in history_item.image_snapshots:
                 image, image_index = self._resolve_history_snapshot_image(snapshot)
                 if image is None:
                     continue
+                was_in_filtered_images = None
+                if filter_is_active and proxy_model is not None:
+                    try:
+                        was_in_filtered_images = bool(
+                            proxy_model.is_image_in_filtered_images(image)
+                        )
+                    except (AttributeError, RuntimeError, TypeError):
+                        was_in_filtered_images = None
                 reverse_snapshots.append({
                     'image': image,
                     'path': self._history_image_key(image),
@@ -8816,11 +8938,28 @@ class ImageListModel(QAbstractListModel):
                 })
                 self._restore_history_image_state(image, snapshot['state'])
                 self.write_image_tags_to_disk(image)
-                self.write_meta_to_disk(image)
+                # The final dataChanged emission below is enough for ordinary
+                # metadata/view updates. Avoid scheduling a paginated filter
+                # reset for geometry-only undo operations; that reset clears
+                # the viewer overlays after the history rebuild has run.
+                self.write_meta_to_disk(image, notify=False)
                 self.save_reactions_to_db(image)
                 restored_paths.append(self._history_image_key(image))
                 if isinstance(image_index, int):
                     changed_image_indices.append(image_index)
+                if (
+                    was_in_filtered_images is not None
+                    and proxy_model is not None
+                ):
+                    try:
+                        is_in_filtered_images = bool(
+                            proxy_model.is_image_in_filtered_images(image)
+                        )
+                    except (AttributeError, RuntimeError, TypeError):
+                        is_in_filtered_images = was_in_filtered_images
+                    filter_membership_changed |= (
+                        was_in_filtered_images != is_in_filtered_images
+                    )
             if reverse_snapshots:
                 destination_stack.append(HistoryItem(
                     history_item.action_name,
@@ -8834,6 +8973,18 @@ class ImageListModel(QAbstractListModel):
                 self.dataChanged.emit(
                     self.index(changed_image_indices[0]),
                     self.index(changed_image_indices[-1]),
+                )
+            if (
+                filter_membership_changed
+                and self._paginated_mode
+                and self._db
+                and self._filter_sql
+                and not getattr(self, '_metadata_filter_refresh_pending', False)
+            ):
+                self._metadata_filter_refresh_pending = True
+                QTimer.singleShot(
+                    0,
+                    self._refresh_paginated_filter_after_metadata_change,
                 )
             if restored_paths:
                 self.image_history_restored.emit(restored_paths)
@@ -9061,8 +9212,49 @@ class ImageListModel(QAbstractListModel):
 
         return affected_count
 
+    def _apply_paginated_tag_batch_updates(self, changed_images: list[Image]):
+        """Update loaded rows without rebuilding the masonry page set."""
+        loaded_indexes: list[QModelIndex] = []
+        for image in changed_images:
+            loaded_index = self.get_loaded_index_for_reference(image)
+            if not loaded_index.isValid():
+                continue
+            try:
+                loaded_image = self.data(loaded_index, Qt.ItemDataRole.UserRole)
+                if loaded_image is not None:
+                    loaded_image.tags = list(image.tags)
+                loaded_indexes.append(loaded_index)
+            except (RuntimeError, TypeError):
+                continue
+
+        roles = [
+            Qt.ItemDataRole.DecorationRole,
+            Qt.ItemDataRole.ToolTipRole,
+            Qt.ItemDataRole.UserRole,
+        ]
+        if loaded_indexes:
+            first_row = min(index.row() for index in loaded_indexes)
+            last_row = max(index.row() for index in loaded_indexes)
+            self.dataChanged.emit(
+                self.index(first_row, 0),
+                self.index(last_row, 0),
+                roles,
+            )
+
+        # A tag-dependent filter must be re-queried, but ordinary folder/all-
+        # media views do not need a model reset just because a sidecar changed.
+        if (
+            self._filter_sql
+            and "image_tags" in str(self._filter_sql)
+            and self._db is not None
+            and not getattr(self, "_metadata_filter_refresh_pending", False)
+        ):
+            self._metadata_filter_refresh_pending = True
+            QTimer.singleShot(0, self._refresh_paginated_filter_after_metadata_change)
+
     def _reload_loaded_pages_after_paginated_tag_change(self):
         """Reload currently loaded pages after a paginated bulk tag update."""
+        selected_paths = self._capture_selected_image_paths()
         self._advance_page_load_generation()
         self.beginResetModel()
         try:
@@ -9074,6 +9266,91 @@ class ImageListModel(QAbstractListModel):
         finally:
             self.endResetModel()
         self._emit_pages_updated()
+        self._restore_selected_image_paths(selected_paths)
+
+    def _capture_selected_image_paths(self) -> tuple[Path | None, tuple[Path, ...]]:
+        """Capture current and selected proxy paths before a model reset."""
+        selection_model = getattr(self, "image_list_selection_model", None)
+        if selection_model is None:
+            return None, ()
+        try:
+            current = selection_model.currentIndex()
+            current_image = (
+                current.data(Qt.ItemDataRole.UserRole)
+                if current.isValid()
+                else None
+            )
+            current_path = (
+                Path(current_image.path)
+                if getattr(current_image, "path", None) is not None
+                else None
+            )
+            selected_paths = tuple(
+                Path(image.path)
+                for image in (
+                    index.data(Qt.ItemDataRole.UserRole)
+                    for index in selection_model.selectedIndexes()
+                )
+                if getattr(image, "path", None) is not None
+            )
+            return current_path, selected_paths
+        except (RuntimeError, TypeError, ValueError):
+            return None, ()
+
+    def _restore_selected_image_paths(
+        self,
+        selection: tuple[Path | None, tuple[Path, ...]],
+    ):
+        """Restore live proxy selection after reloading paginated pages."""
+        current_path, selected_paths = selection
+        paths = tuple(dict.fromkeys(selected_paths or (())))
+        if current_path is not None and current_path not in paths:
+            paths = (current_path, *paths)
+        if not paths:
+            return
+        selection_model = getattr(self, "image_list_selection_model", None)
+        proxy_model = getattr(self, "proxy_image_list_model", None)
+        if selection_model is None or proxy_model is None:
+            return
+
+        def restore():
+            try:
+                proxy_indexes = []
+                for path in paths:
+                    source_row = self.get_loaded_row_for_path(path)
+                    if source_row < 0:
+                        continue
+                    proxy_index = proxy_model.mapFromSource(self.index(source_row, 0))
+                    if proxy_index.isValid():
+                        proxy_indexes.append((path, proxy_index))
+                if not proxy_indexes:
+                    return
+                selection_model.clearSelection()
+                for _path, proxy_index in proxy_indexes:
+                    selection_model.select(
+                        proxy_index,
+                        QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+                current_index = next(
+                    (
+                        proxy_index
+                        for path, proxy_index in proxy_indexes
+                        if current_path is not None and path == current_path
+                    ),
+                    proxy_indexes[0][1],
+                )
+                selection_model.setCurrentIndex(
+                    current_index,
+                    QItemSelectionModel.SelectionFlag.NoUpdate,
+                )
+            except (RuntimeError, TypeError, ValueError):
+                return
+
+        # Restore immediately for the normal path and once more after proxy
+        # model-reset handlers have settled, without forcing a reload.
+        restore()
+        QTimer.singleShot(0, restore)
 
     @Slot(dict)
     def _on_paginated_maintenance_applied(self, result: dict):
@@ -9827,9 +10104,10 @@ class ImageListModel(QAbstractListModel):
             return
         image.tags = tags
         self.write_image_tags_to_disk(image)
-        loaded_index = self.get_loaded_index_for_reference(image_index)
-        if loaded_index.isValid():
-            self.dataChanged.emit(loaded_index, loaded_index)
+        # Captioning changes searchable metadata. Refresh the active paginated
+        # filter so an image that no longer matches cannot remain selectable
+        # while its next batch silently resolves to zero images.
+        self._notify_image_metadata_changed(image)
 
     def refresh_ideogram_caption_index_for_image(self, image: Image | None):
         """Refresh DB-searchable Ideogram text for a saved structured caption."""
@@ -9895,6 +10173,8 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode or not self._db or not self._filter_sql:
             return
 
+        selected_paths = self._capture_selected_image_paths()
+
         try:
             new_total_count = int(self._db.count(
                 filter_sql=self._filter_sql,
@@ -9934,6 +10214,7 @@ class ImageListModel(QAbstractListModel):
             )
 
         self._emit_pages_updated()
+        self._restore_selected_image_paths(selected_paths)
         if old_total_count != new_total_count:
             self.total_count_changed.emit(new_total_count)
 
@@ -9960,6 +10241,7 @@ class ImageListModel(QAbstractListModel):
                 should_ask_for_confirmation,
             )
             changed = False
+            changed_images: list[Image] = []
             for position, image in enumerate(image_indices.iter_images(), start=1):
                 new_tags = [tag for tag in tags if tag not in image.tags]
                 if new_tags:
@@ -9967,6 +10249,7 @@ class ImageListModel(QAbstractListModel):
                     image.tags.extend(new_tags)
                     self.write_image_tags_to_disk(image)
                     changed = True
+                    changed_images.append(image)
                 if position % 50 == 0 or position == total:
                     progress.setValue(position)
                     QApplication.processEvents()
@@ -9975,7 +10258,7 @@ class ImageListModel(QAbstractListModel):
             self.commit_streaming_paginated_tag_history()
             progress.close()
             if changed:
-                self._reload_loaded_pages_after_paginated_tag_change()
+                self._apply_paginated_tag_batch_updates(changed_images)
             return
         self.add_to_undo_stack(action_name, should_ask_for_confirmation)
         for image_index in image_indices:

@@ -66,6 +66,7 @@ def replace_filter_wildcards(filter_: str | list) -> str | list:
 
 FILTER_TEMPLATE_SPECS = [
     ('Tag', 'Filter by tag', 'tag:"{cursor}"', True),
+    ('Untagged', 'Images with no tags', 'tags:=0', False),
     ('Caption', 'Filter by caption text', 'caption:"{cursor}"', True),
     ('Ideogram', 'Filter by Ideogram JSON caption text', 'ideogram:"{cursor}"', True),
     ('Ideogram Color', 'Filter by selected Ideogram color', 'ideogram_color:"#RRGGBB"', True),

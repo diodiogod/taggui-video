@@ -380,6 +380,7 @@ class QuickSortHud(QObject):
         progress: str,
         mappings: list[QuickSortMapping],
         standard_keys: bool = False,
+        control_text: str | None = None,
     ):
         self.stage_label.setText(stage)
         self.progress_label.setText(progress)
@@ -403,7 +404,7 @@ class QuickSortHud(QObject):
                 'A-Z / 0-9 → matching folders</span>'
             )
             legend = f"{automatic}<br>{legend}" if legend else automatic
-        controls = (
+        controls = control_text or (
             '<span style="color:#A0A0A0;font-size:10px">'
             'Space skip &nbsp;·&nbsp; Ctrl+Z undo &nbsp;·&nbsp; '
             'F11 fullscreen &nbsp;·&nbsp; Esc exit</span>'

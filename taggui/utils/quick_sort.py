@@ -204,6 +204,7 @@ class QuickSortProfile:
     collision_policy: str = "append"
     include_sidecars: bool = True
     start_fullscreen: bool = True
+    template_key: str = ""
     id: str = field(default_factory=lambda: new_quick_sort_id("profile"))
     schema_version: int = QUICK_SORT_SCHEMA_VERSION
 
@@ -266,6 +267,7 @@ class QuickSortProfile:
             )
         if not self.id:
             raise QuickSortValidationError("Quick Sort profiles require a stable ID.")
+        self.template_key = str(self.template_key or "").strip()
         if not self.name:
             raise QuickSortValidationError("Profile name cannot be empty.")
         if self.source_scope not in QUICK_SORT_SOURCE_SCOPES:
@@ -436,6 +438,7 @@ class QuickSortProfile:
             "collision_policy": self.collision_policy,
             "include_sidecars": bool(self.include_sidecars),
             "start_fullscreen": bool(self.start_fullscreen),
+            "template_key": self.template_key,
         }
 
     @classmethod
@@ -484,6 +487,7 @@ class QuickSortProfile:
             collision_policy=str(payload.get("collision_policy") or "append"),
             include_sidecars=bool(payload.get("include_sidecars", True)),
             start_fullscreen=bool(payload.get("start_fullscreen", True)),
+            template_key=str(payload.get("template_key") or ""),
         )
         profile.validate()
         return profile
@@ -500,6 +504,71 @@ def default_quick_sort_profile(name: str = "My Quick Sort") -> QuickSortProfile:
             QuickSortMapping("Low Quality", "3", "Low Quality", "#E87979"),
         ],
     )
+
+
+def builtin_quick_sort_profiles() -> tuple[QuickSortProfile, ...]:
+    """Return built-in Quick Sort templates as fresh profiles."""
+    composition = QuickSortProfile(
+        name="Composition / Shot sizes",
+        destinations=[
+            QuickSortMapping("Extreme close-up", "E", "extreme close-up", "#E87979"),
+            QuickSortMapping("Close-up", "C", "close-up", "#F2C96D"),
+            QuickSortMapping("Bust shot", "B", "bust shot", "#62E7D8"),
+            QuickSortMapping("Medium shot", "M", "medium shot", "#7AA2FF"),
+            QuickSortMapping("Cowboy shot", "K", "cowboy shot", "#B98CFF"),
+            QuickSortMapping("Full body", "F", "full body", "#72D49A"),
+            QuickSortMapping("Wide shot", "W", "wide shot", "#62B6CB"),
+            QuickSortMapping("Extreme wide shot", "X", "extreme wide shot", "#C5D86D"),
+            QuickSortMapping("Over-the-shoulder", "O", "over-the-shoulder", "#D49AEE"),
+        ],
+        standard_key_destinations=False,
+    )
+    composition.validate()
+    return (composition,)
+
+
+def clone_quick_sort_profile(profile: QuickSortProfile, *, name: str | None = None) -> QuickSortProfile:
+    """Clone a profile with fresh IDs for a new saved profile."""
+    clone = QuickSortProfile(
+        name=name or profile.name,
+        destinations=[
+            QuickSortMapping(
+                name=mapping.name,
+                key=mapping.key,
+                folder=mapping.folder,
+                color=mapping.color,
+                enabled=mapping.enabled,
+            )
+            for mapping in profile.destinations
+        ],
+        standard_key_destinations=profile.standard_key_destinations,
+        qualifiers=[
+            QuickSortMapping(
+                name=mapping.name,
+                key=mapping.key,
+                folder=mapping.folder,
+                color=mapping.color,
+                enabled=mapping.enabled,
+            )
+            for mapping in profile.qualifiers
+        ],
+        qualifier_enabled=profile.qualifier_enabled,
+        qualifier_name=profile.qualifier_name,
+        hierarchy_order=profile.hierarchy_order,
+        missing_qualifier=profile.missing_qualifier,
+        unclassified_folder=profile.unclassified_folder,
+        base_destination=profile.base_destination,
+        source_scope=profile.source_scope,
+        include_subfolders=profile.include_subfolders,
+        include_videos=profile.include_videos,
+        operation_mode=profile.operation_mode,
+        collision_policy=profile.collision_policy,
+        include_sidecars=profile.include_sidecars,
+        start_fullscreen=profile.start_fullscreen,
+        template_key=profile.template_key,
+    )
+    clone.validate()
+    return clone
 
 
 class QuickSortProfileStore:

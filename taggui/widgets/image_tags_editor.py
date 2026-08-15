@@ -43,6 +43,7 @@ class TagInputBox(QLineEdit):
         self.image_tag_list_model = image_tag_list_model
         self.image_list = image_list
         self.tag_separator = tag_separator
+        self.current_image_reference_getter = None
         self.caption_mode = 'tags'
 
         self.setPlaceholderText('Add Tag')
@@ -97,6 +98,24 @@ class TagInputBox(QLineEdit):
             return
         selected_images = self.image_list.list_view.get_selected_image_batch()
         selected_image_count = len(selected_images)
+        if selected_image_count == 0:
+            # The displayed image may have just left an active filter (for
+            # example tags:=0) after the previous tag was saved. Continue
+            # editing the panel's stable image instead of dropping the tag
+            # because the filtered list no longer reports a selection.
+            getter = self.current_image_reference_getter
+            current_image = getter() if callable(getter) else None
+            if current_image is not None:
+                current_tags = self.image_tag_list_model.stringList()
+                additions = [
+                    value for value in tags
+                    if value and value not in current_tags
+                ]
+                if additions:
+                    self.image_tag_list_model.setStringList(
+                        current_tags + additions
+                    )
+                return
         if len(tags) == 1 and selected_image_count == 1:
             # Add an empty tag and set it to the new tag.
             self.image_tag_list_model.insertRow(
@@ -309,6 +328,9 @@ class ImageTagsEditor(QDockWidget):
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.image_index = None
+        # Stable reference for the displayed image when a filter reset
+        # invalidates its source model index.
+        self.image_reference: Image | None = None
         self._pending_descriptive_tags: list[str] | None = None
         self._descriptive_dirty = False
         self._descriptive_sync_delay_ms = 450
@@ -418,6 +440,9 @@ class ImageTagsEditor(QDockWidget):
         self.tag_input_box = TagInputBox(self.image_tag_list_model,
                                          tag_counter_model, image_list,
                                          tag_separator)
+        self.tag_input_box.current_image_reference_getter = (
+            lambda: self.image_reference
+        )
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
         self.ideogram_tag_list_model = QStringListModel()
         self.ideogram_caption_list = IdeogramCaptionList(
@@ -900,15 +925,29 @@ class ImageTagsEditor(QDockWidget):
         self.image_tags_list.select_tag(tag_count - 1)
 
     @Slot()
-    def load_image_tags(self, proxy_image_index: QModelIndex):
+    def load_image_tags(
+        self,
+        proxy_image_index: QModelIndex,
+        *,
+        image_override: Image | None = None,
+        source_index_override: QModelIndex | None = None,
+    ):
         # Persist pending edits for the previous image before switching index.
         self._flush_descriptive_sync()
         self._flush_ideogram_json_sync()
-        self.image_index = self.proxy_image_list_model.mapToSource(
-            proxy_image_index)
+        self.image_index = (
+            source_index_override
+            if source_index_override is not None
+            else self.proxy_image_list_model.mapToSource(proxy_image_index)
+        )
         source_model = self.proxy_image_list_model.sourceModel()
-        image: Image = self.proxy_image_list_model.data(
-            proxy_image_index, Qt.ItemDataRole.UserRole)
+        image: Image = (
+            image_override
+            if image_override is not None
+            else self.proxy_image_list_model.data(
+                proxy_image_index, Qt.ItemDataRole.UserRole)
+        )
+        self.image_reference = image
         # Safety check: if no image is selected or available, clear the tags
         if image is None:
             self.image_tag_list_model.setStringList([])
@@ -975,6 +1014,38 @@ class ImageTagsEditor(QDockWidget):
             self.select_first_tag()
         if should_refresh_source_row:
             self._emit_source_row_data_changed(source_model)
+
+    @Slot(object)
+    def load_image_tags_for_reference(self, image_reference):
+        """Load tags from a stable image reference after a filter reset."""
+        source_model = self.proxy_image_list_model.sourceModel()
+        resolver = getattr(source_model, 'resolve_image_reference', None)
+        image = (
+            resolver(image_reference)
+            if callable(resolver) else image_reference
+        )
+        if image is None:
+            self.load_image_tags(QModelIndex())
+            return
+
+        source_index = QModelIndex()
+        loaded_index_getter = getattr(
+            source_model,
+            'get_loaded_index_for_reference',
+            None,
+        )
+        if callable(loaded_index_getter):
+            try:
+                loaded_index = loaded_index_getter(image)
+                if loaded_index.isValid():
+                    source_index = loaded_index
+            except (RuntimeError, AttributeError, TypeError):
+                pass
+        self.load_image_tags(
+            QModelIndex(),
+            image_override=image,
+            source_index_override=source_index,
+        )
 
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,

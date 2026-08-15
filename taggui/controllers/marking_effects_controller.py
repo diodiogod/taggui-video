@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QStandardPaths, Qt
+from PySide6.QtCore import QRect, QStandardPaths, QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -45,10 +45,36 @@ MIGAN_MODEL_SIZE = 28_079_181
 class MarkingEffectsController:
     """Orchestrate destructive marking effects and session undo groups."""
 
+    _LAST_EFFECT_SETTING = 'last_marking_source_effect'
+
     def __init__(self, main_window):
         self.main_window = main_window
         self._undo_groups: list[dict] = []
         self._redo_groups: list[dict] = []
+
+    @staticmethod
+    def _canonical_effect(effect: str | None) -> str:
+        candidate = str(effect or '').strip()
+        for available in MARKING_EFFECTS:
+            if available.casefold() == candidate.casefold():
+                return available
+        return MARKING_EFFECTS[0]
+
+    def last_effect(self) -> str:
+        """Return the remembered direct-action effect."""
+        return self._canonical_effect(
+            settings.value(
+                self._LAST_EFFECT_SETTING,
+                defaultValue=MARKING_EFFECTS[0],
+                type=str,
+            )
+        )
+
+    def remember_effect(self, effect: str | None) -> str:
+        """Remember and return a valid effect name for future direct actions."""
+        canonical = self._canonical_effect(effect)
+        settings.setValue(self._LAST_EFFECT_SETTING, canonical)
+        return canonical
 
     def _show_options(self) -> tuple[str, str, str, bool] | None:
         dialog = QDialog(self.main_window)
@@ -67,7 +93,7 @@ class MarkingEffectsController:
         type_combo.addItems(['All marking types', 'Exclude', 'Include', 'Hint'])
         effect_combo = QComboBox()
         effect_combo.addItems(list(MARKING_EFFECTS))
-        effect_combo.setCurrentText('inpaint — AI (MI-GAN)')
+        effect_combo.setCurrentText(self.last_effect())
         undo_check = QCheckBox('Keep a session undo snapshot')
         undo_check.setChecked(True)
         undo_check.setToolTip(
@@ -87,6 +113,7 @@ class MarkingEffectsController:
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
+        self.remember_effect(effect_combo.currentText())
         return (
             scope_combo.currentText(),
             type_combo.currentText(),
@@ -193,6 +220,14 @@ class MarkingEffectsController:
             ])
         return boxes
 
+    @staticmethod
+    def _path_key(path) -> str:
+        """Return a stable key for the same file across path representations."""
+        try:
+            return str(Path(path).resolve()).casefold()
+        except OSError:
+            return str(Path(path)).casefold()
+
     def create_crops_avoiding_markings(self):
         options = self._show_crop_options()
         if options is None:
@@ -210,13 +245,13 @@ class MarkingEffectsController:
         skipped_no_markings = 0
         skipped_unsafe = 0
         skipped_video = 0
-        seen_paths = set()
+        seen_paths: set[str] = set()
         for position, reference in enumerate(references, start=1):
             if progress.wasCanceled():
                 progress.close()
                 return
             image = model.resolve_image_reference(reference)
-            if image is None or image.path in seen_paths:
+            if image is None:
                 progress.setValue(position)
                 continue
             loaded_row = model.get_loaded_row_for_path(image.path)
@@ -226,7 +261,11 @@ class MarkingEffectsController:
                 )
                 if loaded_image is not None:
                     image = loaded_image
-            seen_paths.add(image.path)
+            path_key = self._path_key(image.path)
+            if path_key in seen_paths:
+                progress.setValue(position)
+                continue
+            seen_paths.add(path_key)
             if image.is_video:
                 skipped_video += 1
             elif image.crop is not None and not options['replace_existing']:
@@ -272,18 +311,28 @@ class MarkingEffectsController:
             image.target_dimension = target_dimension.get(crop.size())
             image.thumbnail = None
             image.thumbnail_qimage = None
-            model.write_meta_to_disk(image)
+            # Notify exactly once. write_meta_to_disk() already emits
+            # dataChanged by default; emitting it again here can re-enter the
+            # viewer refresh path while the batch is still being written.
+            model.write_meta_to_disk(image, notify=False)
             row = model.get_loaded_row_for_path(image.path)
             if row >= 0:
-                index = model.index(row, 0)
-                model.dataChanged.emit(index, index)
+                model._notify_image_metadata_changed(
+                    image,
+                    refresh_filter=False,
+                )
 
         viewer = self.main_window.get_selection_target_viewer()
         if viewer.proxy_image_index.isValid():
             displayed = viewer.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+            displayed_path_key = (
+                self._path_key(displayed.path)
+                if displayed is not None else None
+            )
             matching = next(
                 (entry for entry, _crop in generated
-                 if displayed is not None and entry.path == displayed.path),
+                 if displayed_path_key is not None
+                 and self._path_key(entry.path) == displayed_path_key),
                 None,
             )
             if matching is not None:
@@ -409,29 +458,67 @@ class MarkingEffectsController:
 
     def _refresh_modified_images(self, paths):
         model = self.main_window.image_list_model
-        changed_indexes = []
-        normalized_paths = {str(Path(path)) for path in paths}
-        for path in normalized_paths:
-            row = model.get_loaded_row_for_path(Path(path))
+
+        def normalize(path) -> str:
+            try:
+                return str(Path(path).resolve()).casefold()
+            except OSError:
+                return str(Path(path)).casefold()
+
+        source_paths = [Path(path) for path in paths if path]
+        normalized_paths = {normalize(path) for path in source_paths}
+        for source_path in source_paths:
+            row = model.get_loaded_row_for_path(source_path)
             if row < 0:
                 continue
             index = model.index(row, 0)
             image = index.data(Qt.ItemDataRole.UserRole)
             if image is not None:
-                image.thumbnail = None
-                image.thumbnail_qimage = None
-            changed_indexes.append(index)
-        for index in changed_indexes:
-            model.dataChanged.emit(
-                index,
-                index,
-                [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.UserRole],
-            )
+                refreshed = model.refresh_image_after_file_change(
+                    image,
+                    refresh_filter=False,
+                )
+                if not refreshed:
+                    image.thumbnail = None
+                    image.thumbnail_qimage = None
+                    model.dataChanged.emit(
+                        index,
+                        index,
+                        [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.UserRole],
+                    )
         viewer = self.main_window.get_selection_target_viewer()
-        if viewer.proxy_image_index.isValid():
-            current = viewer.proxy_image_index.data(Qt.ItemDataRole.UserRole)
-            if current is not None and str(current.path) in normalized_paths:
-                viewer.load_image(viewer.proxy_image_index)
+
+        def reload_current_viewer():
+            try:
+                context_getter = getattr(viewer, 'get_live_image_context', None)
+                if callable(context_getter):
+                    proxy_index, _source_model, current = context_getter()
+                else:
+                    proxy_index = viewer.proxy_image_index
+                    current = (
+                        proxy_index.data(Qt.ItemDataRole.UserRole)
+                        if proxy_index.isValid() else None
+                    )
+                if not proxy_index.isValid() or current is None:
+                    return
+                if normalize(current.path) not in normalized_paths:
+                    return
+                clear_cache = getattr(viewer, '_clear_static_image_render_cache', None)
+                if callable(clear_cache):
+                    clear_cache()
+                viewer.load_image(proxy_index, True)
+                viewer.view.viewport().update()
+            except (RuntimeError, AttributeError):
+                pass
+
+        # Let dataChanged handlers finish first; then perform a complete image
+        # reload so source-file undo/redo is visible without changing images.
+        if normalized_paths:
+            QTimer.singleShot(0, reload_current_viewer)
+            image_list = getattr(self.main_window, 'image_list', None)
+            list_view = getattr(image_list, 'list_view', None)
+            if list_view is not None:
+                list_view.viewport().update()
         menu_manager = getattr(self.main_window, 'menu_manager', None)
         if menu_manager is not None:
             menu_manager.update_undo_and_redo_actions()
@@ -441,6 +528,7 @@ class MarkingEffectsController:
         if options is None:
             return
         scope, marking_type, effect, keep_undo = options
+        effect = self.remember_effect(effect)
         model = self.main_window.image_list_model
         image_source = self._scope_images(scope)
         total = len(image_source)
@@ -595,11 +683,49 @@ class MarkingEffectsController:
 
     def apply_single_marking_effect(self, image_viewer, marking_item, effect: str):
         """Apply an effect immediately to one context-clicked marking."""
-        proxy_index = getattr(image_viewer, 'proxy_image_index', None)
-        if proxy_index is None or not proxy_index.isValid():
+        effect = self.remember_effect(effect)
+        context_getter = getattr(image_viewer, 'get_live_image_context', None)
+        if callable(context_getter):
+            proxy_index, _source_model, image = context_getter()
+        else:
+            proxy_index = getattr(image_viewer, 'proxy_image_index', None)
+            image = (
+                proxy_index.data(Qt.ItemDataRole.UserRole)
+                if proxy_index is not None and proxy_index.isValid()
+                else None
+            )
+        if proxy_index is None or not proxy_index.isValid() or image is None:
             return
-        image = proxy_index.data(Qt.ItemDataRole.UserRole)
-        if image is None:
+
+        try:
+            item_is_live = marking_item.scene() is image_viewer.scene
+        except RuntimeError:
+            item_is_live = False
+        if not item_is_live:
+            item_rect = None
+            item_type = getattr(marking_item, 'rect_type', None)
+            try:
+                item_rect = marking_item.rect().toRect().normalized()
+            except RuntimeError:
+                pass
+            replacement = None
+            for candidate in list(image_viewer.marking_items):
+                try:
+                    if candidate.scene() is not image_viewer.scene:
+                        continue
+                    if candidate.rect_type != item_type:
+                        continue
+                    if (
+                        item_rect is not None
+                        and candidate.rect().toRect().normalized() != item_rect
+                    ):
+                        continue
+                except RuntimeError:
+                    continue
+                replacement = candidate
+                break
+            marking_item = replacement
+        if marking_item is None:
             return
         if image.is_video:
             QMessageBox.information(

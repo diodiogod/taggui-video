@@ -21,6 +21,8 @@ from utils.quick_sort import (
     QuickSortProfileStore,
     QuickSortSessionStore,
     QuickSortValidationError,
+    builtin_quick_sort_profiles,
+    clone_quick_sort_profile,
     default_quick_sort_profile,
     normalize_key_sequence,
 )
@@ -35,6 +37,20 @@ def test_default_profile_is_zero_setup_full_keyboard_sort():
     assert profile.standard_key_destinations is True
     assert profile.mapping_for_key("a", qualifier=False).folder == "A"
     assert profile.mapping_for_key("9", qualifier=False).folder == "9"
+
+
+def test_composition_preset_uses_memorable_folder_keys_and_fresh_ids():
+    preset = builtin_quick_sort_profiles()[0]
+    mapping_keys = {mapping.key: mapping.folder for mapping in preset.destinations}
+    assert mapping_keys["C"] == "close-up"
+    assert mapping_keys["K"] == "cowboy shot"
+    assert mapping_keys["F"] == "full body"
+    assert mapping_keys["W"] == "wide shot"
+    clone = clone_quick_sort_profile(preset)
+    assert clone.id != preset.id
+    assert {mapping.id for mapping in clone.destinations}.isdisjoint(
+        {mapping.id for mapping in preset.destinations}
+    )
 
 
 def test_named_override_replaces_automatic_folder_and_can_disable_a_key():

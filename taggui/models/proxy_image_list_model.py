@@ -153,12 +153,21 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self.invalidateFilter()
         self.filter_changed.emit()
 
+    @staticmethod
+    def _real_tags(image: Image) -> list[str]:
+        """Return user-visible tags, excluding the empty-image DB sentinel."""
+        return [
+            str(tag)
+            for tag in (getattr(image, 'tags', None) or [])
+            if tag and str(tag) != '__no_tags__'
+        ]
+
     def does_image_match_filter(self, image: Image,
                                 filter_: list | str | None) -> bool:
         if filter_ is None:
             return True
         if isinstance(filter_, str):
-            caption = self.tag_separator.join(image.tags)
+            caption = self.tag_separator.join(self._real_tags(image))
             ideogram_text = discover_ideogram_search_text(image.path)
             return (fnmatchcase(caption,
                                 f'*{filter_}*')
@@ -167,26 +176,28 @@ class ProxyImageListModel(QSortFilterProxyModel):
         if len(filter_) == 1:
             return self.does_image_match_filter(image, filter_[0])
         if len(filter_) == 2:
-            if filter_[0] == 'NOT':
+            op = str(filter_[0]).strip().lower()
+            if op == 'not':
                 return not self.does_image_match_filter(image, filter_[1])
-            if filter_[0] == 'tag':
-                return any(fnmatchcase(tag, filter_[1]) for tag in image.tags)
-            if filter_[0] == 'caption':
+            if op == 'tag':
+                return any(fnmatchcase(tag, filter_[1])
+                           for tag in self._real_tags(image))
+            if op == 'caption':
                 ideogram_text = discover_ideogram_search_text(image.path)
-                caption = f"{self.tag_separator.join(image.tags)} {ideogram_text}"
+                caption = f"{self.tag_separator.join(self._real_tags(image))} {ideogram_text}"
                 return fnmatchcase(caption, f'*{filter_[1]}*')
-            if filter_[0] == 'ideogram':
+            if op == 'ideogram':
                 return fnmatchcase(
                     discover_ideogram_search_text(image.path),
                     f'*{filter_[1]}*',
                 )
-            if filter_[0] == 'ideogram_color':
+            if op == 'ideogram_color':
                 needle = str(filter_[1]).strip().upper()
                 return fnmatchcase(
                     discover_ideogram_search_text(image.path).upper(),
                     f'*{needle}*',
                 )
-            if filter_[0] == 'marking':
+            if op == 'marking':
                 last_colon_index = filter_[1].rfind(':')
                 if last_colon_index < 0:
                     return any(fnmatchcase(marking.label, filter_[1])
@@ -203,25 +214,25 @@ class ProxyImageListModel(QSortFilterProxyModel):
                                comparison_operator(marking.confidence,
                                                    confidence_target))
                                for marking in image.markings)
-            if filter_[0] == 'marking_type':
+            if op == 'marking_type':
                 target_type = str(filter_[1]).strip().lower()
                 return any(fnmatchcase(marking.type.name.lower(), target_type)
                            for marking in image.markings)
-            if filter_[0] == 'crops':
+            if op == 'crops':
                 crop = image.crop if image.crop is not None else image.dimensions_qrect()
                 return any(fnmatchcase(marking.label, filter_[1]) and
                            marking.rect.intersects(crop) and not crop.contains(marking.rect)
                            for marking in image.markings)
-            if filter_[0] == 'visible':
+            if op == 'visible':
                 crop = image.crop if image.crop is not None else image.dimensions_qrect()
                 return any(fnmatchcase(marking.label, filter_[1]) and
                            marking.rect.intersects(crop)
                            for marking in image.markings)
-            if filter_[0] == 'name':
+            if op == 'name':
                 return fnmatchcase(image.path.name, f'*{filter_[1]}*')
-            if filter_[0] == 'path':
+            if op == 'path':
                 return fnmatchcase(str(image.path), f'*{filter_[1]}*')
-            if filter_[0] == 'size':
+            if op == 'size':
                 # accept any dimension separator of [x:]
                 dimension = (filter_[1]).replace(':', 'x').split('x')
                 valid_dimensions = image.valid_dimensions()
@@ -229,7 +240,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
                         and valid_dimensions is not None
                         and dimension[0] == str(valid_dimensions[0])
                         and dimension[1] == str(valid_dimensions[1]))
-            if filter_[0] == 'target':
+            if op == 'target':
                 # accept any dimension separator of [x:]
                 dimension = (filter_[1]).replace(':', 'x').split('x')
                 if image.target_dimension is None:
@@ -240,21 +251,21 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 return (len(dimension) == 2
                         and dimension[0] == str(image.target_dimension.width())
                         and dimension[1] == str(image.target_dimension.height()))
-            if filter_[0] == 'love':
+            if op == 'love':
                 normalized = str(filter_[1]).strip().lower()
                 if normalized in {'1', 'true', 'yes', 'on'}:
                     return bool(getattr(image, 'love', False))
                 if normalized in {'0', 'false', 'no', 'off'}:
                     return not bool(getattr(image, 'love', False))
                 return False
-            if filter_[0] == 'bomb':
+            if op == 'bomb':
                 normalized = str(filter_[1]).strip().lower()
                 if normalized in {'1', 'true', 'yes', 'on'}:
                     return bool(getattr(image, 'bomb', False))
                 if normalized in {'0', 'false', 'no', 'off'}:
                     return not bool(getattr(image, 'bomb', False))
                 return False
-            if filter_[0] == 'review':
+            if op == 'review':
                 normalized = str(filter_[1]).strip().lower()
                 review_rank = int(getattr(image, 'review_rank', 0) or 0)
                 review_flags = int(getattr(image, 'review_flags', 0) or 0)
@@ -272,38 +283,48 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 if review_flag is not None:
                     return (review_flags & int(review_flag)) != 0
                 return False
-        if filter_[1] == 'AND':
+        if str(filter_[1]).strip().upper() == 'AND':
             if len(filter_) < 3:
                 return self.does_image_match_filter(image, filter_[0])
             return (self.does_image_match_filter(image, filter_[0])
                     and self.does_image_match_filter(image, filter_[2:]))
-        if filter_[1] == 'OR':
+        if str(filter_[1]).strip().upper() == 'OR':
             if len(filter_) < 3:
                 return self.does_image_match_filter(image, filter_[0])
             return (self.does_image_match_filter(image, filter_[0])
                     or self.does_image_match_filter(image, filter_[2:]))
-        comparison_operator = comparison_operators[filter_[1]]
+        comparison_operator = comparison_operators.get(str(filter_[1]).strip())
+        if comparison_operator is None or len(filter_) < 3:
+            return False
         number_to_compare = None
-        if filter_[0] == 'tags':
-            number_to_compare = len(image.tags)
-        elif filter_[0] == 'chars':
-            caption = self.tag_separator.join(image.tags)
+        number_key = str(filter_[0]).strip().lower()
+        if number_key == 'tags':
+            number_to_compare = len(self._real_tags(image))
+        elif number_key == 'chars':
+            caption = self.tag_separator.join(self._real_tags(image))
             number_to_compare = len(caption)
-        elif filter_[0] == 'tokens':
-            caption = self.tag_separator.join(image.tags)
+        elif number_key == 'tokens':
+            caption = self.tag_separator.join(self._real_tags(image))
             # Subtract 2 for the `<|startoftext|>` and `<|endoftext|>` tokens.
+            if self.tokenizer is None:
+                return False
             number_to_compare = len(self.tokenizer(caption).input_ids) - 2
-        elif filter_[0] == 'stars':
+        elif number_key == 'stars':
             number_to_compare = image.rating * 5.0
-        elif filter_[0] == 'review_rank':
+        elif number_key == 'review_rank':
             number_to_compare = int(getattr(image, 'review_rank', 0) or 0)
-        elif filter_[0] == 'width':
+        elif number_key == 'width':
             number_to_compare = image.dimensions[0]
-        elif filter_[0] == 'height':
+        elif number_key == 'height':
             number_to_compare = image.dimensions[1]
-        elif filter_[0] == 'area':
+        elif number_key == 'area':
             number_to_compare =  image.dimensions[0] * image.dimensions[1]
-        return comparison_operator(number_to_compare, float(filter_[2]))
+        if number_to_compare is None:
+            return False
+        try:
+            return comparison_operator(number_to_compare, float(filter_[2]))
+        except (TypeError, ValueError):
+            return False
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:

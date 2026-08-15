@@ -323,9 +323,32 @@ class ImageGraphicsView(QGraphicsView):
                         None,
                     )
                     if effects_controller is not None:
-                        effects_menu = menu.addMenu('Apply to Source Image')
+                        last_effect = effects_controller.last_effect()
+                        apply_last_action = QAction(
+                            f'Apply to Source Image ({last_effect})',
+                            self,
+                        )
+                        apply_last_action.setToolTip(
+                            f'Uses the remembered effect: {last_effect}'
+                        )
+                        apply_last_action.triggered.connect(
+                            lambda checked=False: effects_controller.apply_single_marking_effect(
+                                self.image_viewer,
+                                item,
+                                effects_controller.last_effect(),
+                            )
+                        )
+                        menu.addAction(apply_last_action)
+
+                        effects_menu = menu.addMenu('Apply to Source Image…')
+                        effect_group = QActionGroup(effects_menu)
+                        effect_group.setExclusive(True)
                         for effect in MARKING_EFFECTS:
-                            effect_action = effects_menu.addAction(effect)
+                            effect_action = QAction(effect, effects_menu)
+                            effect_group.addAction(effect_action)
+                            effect_action.setCheckable(True)
+                            effect_action.setChecked(effect == last_effect)
+                            effects_menu.addAction(effect_action)
                             effect_action.triggered.connect(
                                 lambda checked=False, selected_effect=effect:
                                     effects_controller.apply_single_marking_effect(

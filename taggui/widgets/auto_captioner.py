@@ -34,6 +34,7 @@ from auto_captioning.models_list import (
     get_model_kind,
     is_tagger_model,
 )
+from models.image_batch import ImageBatchItem
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
 from utils.prompt_history import get_prompt_history
@@ -161,7 +162,9 @@ IDEOGRAM_JSON_PROMPT = (
 PROMPT_TEMPLATE_VARIABLES_TOOLTIP = (
     'Per-image placeholders: {name} inserts the filename without its extension; '
     '{folder} or {directory} inserts the immediate containing folder; and '
-    '{tags} inserts the current tags.'
+    '{tags} inserts the current tags. Conditional blocks are supported with '
+    '##IF{tags} THEN## ... ##ENDIF##; use ##ELSE## for an alternative. '
+    'A trailing IF block may omit ##ENDIF##.'
 )
 
 
@@ -1874,8 +1877,56 @@ class AutoCaptioner(QDockWidget):
             None,
         )
         if callable(batch_getter):
-            return batch_getter()
-        return self.image_list.get_selected_image_indices()
+            selected = batch_getter()
+        else:
+            selected = self.image_list.get_selected_image_indices()
+        if selected:
+            return selected
+
+        # A filtered image can remain displayed in the viewer after its tags
+        # change and it leaves the list. Keep that current image usable for a
+        # one-image captioning run even though it no longer has a list index.
+        viewer = self.image_viewer
+        current_image = (
+            getattr(viewer, 'current_media', None)
+            or getattr(viewer, '_last_displayed_media', None)
+        ) if viewer is not None else None
+        if current_image is None or not getattr(current_image, 'path', None):
+            return selected
+        image_path = Path(current_image.path)
+        if not image_path.exists():
+            return selected
+        directory_path = getattr(self.image_list_model, '_directory_path', None)
+        if directory_path is not None:
+            try:
+                image_path.relative_to(Path(directory_path))
+            except ValueError:
+                return selected
+        return [ImageBatchItem(current_image)]
+
+    def _sync_viewer_caption_tags(self, image_reference, _caption, tags):
+        """Keep the displayed image metadata current after a caption update."""
+        viewer = self.image_viewer
+        current_image = (
+            getattr(viewer, 'current_media', None)
+            or getattr(viewer, '_last_displayed_media', None)
+        ) if viewer is not None else None
+        resolve_reference = getattr(
+            self.image_list_model,
+            'resolve_image_reference',
+            None,
+        )
+        source_image = (
+            resolve_reference(image_reference)
+            if callable(resolve_reference) else None
+        )
+        if (
+            current_image is None
+            or source_image is None
+            or Path(current_image.path) != Path(source_image.path)
+        ):
+            return
+        current_image.tags = list(tags or [])
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList,
@@ -2823,6 +2874,17 @@ class AutoCaptioner(QDockWidget):
 
     @Slot()
     def generate_captions(self):
+        selected_image_indices = self._selected_image_batch()
+        if not selected_image_indices:
+            message = (
+                'No image is selected. If the previous caption changed the '
+                'active filter, clear or change the filter before trying again.'
+            )
+            self.status_label.setText(message)
+            self.status_label.show()
+            self.update_console_text_edit(message)
+            return
+
         # Save current prompt to history before generating captions
         current_prompt = self.caption_settings_form.prompt_text_edit.toPlainText()
         if current_prompt and current_prompt.strip():
@@ -2852,7 +2914,6 @@ class AutoCaptioner(QDockWidget):
         if forced_words and forced_words.strip():
             field_history.add_value('forced_words', forced_words.strip())
 
-        selected_image_indices = self._selected_image_batch()
         selected_image_count = len(selected_image_indices)
         show_alert_when_finished = False
         if selected_image_count > 1:
@@ -2907,6 +2968,8 @@ class AutoCaptioner(QDockWidget):
             self.console_text_edit.clear)
         self.captioning_thread.caption_generated.connect(
             self.caption_generated)
+        self.captioning_thread.caption_generated.connect(
+            self._sync_viewer_caption_tags)
         self.captioning_thread.structured_caption_generated.connect(
             self.structured_caption_generated
         )

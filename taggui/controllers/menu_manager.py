@@ -564,6 +564,9 @@ class MenuManager:
         self.toggle_quick_sort_panel_action = None
         self.start_quick_sort_action = None
         self.exit_quick_sort_action = None
+        self.toggle_quick_tag_panel_action = None
+        self.start_quick_tag_action = None
+        self.exit_quick_tag_action = None
         self.toggle_perf_hud_action = None
         self.toggle_reaction_controls_action = None
         self.recent_folders_menu = None
@@ -618,8 +621,10 @@ class MenuManager:
         # View menu
         self._create_view_menu(menu_bar)
 
-        # Quick Sort workflow menu
-        self._create_quick_sort_menu(menu_bar)
+        # One top-level menu keeps the two focused review workflows together.
+        quick_review_menu = menu_bar.addMenu('Quick Review')
+        self._create_quick_sort_menu(quick_review_menu)
+        self._create_quick_tag_menu(quick_review_menu)
 
         # Browsers menu
         self._create_browsers_menu(menu_bar)
@@ -678,6 +683,10 @@ class MenuManager:
             parent=self.main_window,
         )
         self.exit_quick_sort_action.setEnabled(False)
+        self.toggle_quick_tag_panel_action = QAction('Quick Tags', parent=self.main_window)
+        self.start_quick_tag_action = QAction('Start Quick Tag Review', parent=self.main_window)
+        self.exit_quick_tag_action = QAction('Exit Quick Tag Review', parent=self.main_window)
+        self.exit_quick_tag_action.setEnabled(False)
         self.toggle_perf_hud_action = QAction('Performance HUD', parent=self.main_window)
         self.auto_captioner_layout_action_group = QActionGroup(self.main_window)
         self.auto_captioner_layout_action_group.setExclusive(True)
@@ -869,6 +878,7 @@ class MenuManager:
         self.toggle_ideogram_caption_editor_action.setCheckable(True)
         self.toggle_pipeline_editor_action.setCheckable(True)
         self.toggle_quick_sort_panel_action.setCheckable(True)
+        self.toggle_quick_tag_panel_action.setCheckable(True)
         self.toggle_perf_hud_action.setCheckable(True)
 
         # Connect toggle actions
@@ -916,6 +926,15 @@ class MenuManager:
         self.toggle_quick_sort_panel_action.setChecked(
             self.main_window.quick_sort_panel.isVisible()
         )
+        self.toggle_quick_tag_panel_action.triggered.connect(
+            self._set_quick_tag_panel_visible
+        )
+        self.main_window.quick_tag_panel.visibilityChanged.connect(
+            self.toggle_quick_tag_panel_action.setChecked
+        )
+        self.toggle_quick_tag_panel_action.setChecked(
+            self.main_window.quick_tag_panel.isVisible()
+        )
         self.toggle_perf_hud_action.triggered.connect(
             lambda checked: self.main_window.set_perf_hud_visible(checked)
         )
@@ -942,6 +961,7 @@ class MenuManager:
         view_menu.addAction(self.toggle_ideogram_caption_editor_action)
         view_menu.addAction(self.toggle_pipeline_editor_action)
         view_menu.addAction(self.toggle_quick_sort_panel_action)
+        view_menu.addAction(self.toggle_quick_tag_panel_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_perf_hud_action)
 
@@ -984,6 +1004,14 @@ class MenuManager:
 
     def _set_quick_sort_panel_visible(self, visible: bool):
         panel = getattr(self.main_window, 'quick_sort_panel', None)
+        if panel is None:
+            return
+        panel.setVisible(bool(visible))
+        if visible:
+            panel.raise_()
+
+    def _set_quick_tag_panel_visible(self, visible: bool):
+        panel = getattr(self.main_window, 'quick_tag_panel', None)
         if panel is None:
             return
         panel.setVisible(bool(visible))
@@ -1065,6 +1093,32 @@ class MenuManager:
             self.start_quick_sort_action.setEnabled(
                 bool(ready) and not controller.active
             )
+
+        controller.active_changed.connect(_sync_active)
+        panel.readiness_changed.connect(_sync_ready)
+        _sync_active(controller.active)
+
+    def _create_quick_tag_menu(self, menu_bar):
+        quick_tag_menu = menu_bar.addMenu('Quick Tag Review')
+        open_panel_action = quick_tag_menu.addAction('Open Setup Panel')
+        open_panel_action.triggered.connect(
+            lambda: self._set_quick_tag_panel_visible(True)
+        )
+        quick_tag_menu.addSeparator()
+        quick_tag_menu.addAction(self.start_quick_tag_action)
+        quick_tag_menu.addAction(self.exit_quick_tag_action)
+
+        panel = self.main_window.quick_tag_panel
+        controller = self.main_window.quick_tag_controller
+        self.start_quick_tag_action.triggered.connect(panel.start_quick_tag)
+        self.exit_quick_tag_action.triggered.connect(controller.finish_session)
+
+        def _sync_active(active: bool):
+            self.start_quick_tag_action.setEnabled(not active and bool(panel.is_ready))
+            self.exit_quick_tag_action.setEnabled(active)
+
+        def _sync_ready(ready: bool):
+            self.start_quick_tag_action.setEnabled(bool(ready) and not controller.active)
 
         controller.active_changed.connect(_sync_active)
         panel.readiness_changed.connect(_sync_ready)

@@ -7,6 +7,7 @@ import sqlite3
 import shutil
 import time
 import threading
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from utils.review_marks import (
@@ -353,6 +354,8 @@ class ImageIndexDB:
         self.legacy_db_path = self.legacy_db_base_path(self._directory_path)
         self.conn = None
         self._order_cache_signature = None
+        self._filter_tokenizer = None
+        self._filter_crop_cache: dict[str, tuple[float, int, tuple[int, int, int, int] | None]] = {}
 
         # Re-entrant so write helpers can safely call commit() while locked.
         self._db_lock = threading.RLock()
@@ -378,6 +381,196 @@ class ImageIndexDB:
             except Exception as e:
                 print(f"[DB] Reconnect failed: {e}")
                 return False
+
+    def configure_filter_tokenizer(self, tokenizer):
+        """Set the tokenizer used by the paginated ``tokens`` SQL filter."""
+        with self._db_lock:
+            self._filter_tokenizer = tokenizer
+
+    def invalidate_filter_crop_cache(self, media_path=None):
+        """Drop cached crop metadata after a sidecar edit."""
+        with self._db_lock:
+            if media_path is None:
+                self._filter_crop_cache.clear()
+                return
+            try:
+                sidecar_path = preferred_taggui_sidecar_read_path(Path(media_path))
+                if sidecar_path is not None:
+                    self._filter_crop_cache.pop(str(sidecar_path), None)
+            except (OSError, TypeError, ValueError):
+                self._filter_crop_cache.clear()
+
+    def _register_filter_functions(self):
+        """Register Python-backed predicates needed by paginated filters."""
+        if not self.conn:
+            return
+        self.conn.create_function(
+            'TAGGUI_TOKEN_COUNT',
+            1,
+            self._sql_token_count,
+        )
+        self.conn.create_function(
+            'TAGGUI_TARGET_MATCH',
+            4,
+            self._sql_target_match,
+        )
+        self.conn.create_function(
+            'TAGGUI_MARKING_VIEW_MATCH',
+            10,
+            self._sql_marking_view_match,
+        )
+        self.conn.create_function('TAGGUI_NAME_MATCH', 2, self._sql_name_match)
+        self.conn.create_function('TAGGUI_PATH_MATCH', 3, self._sql_path_match)
+        self.conn.create_function('TAGGUI_LABEL_MATCH', 2, self._sql_label_match)
+
+    def _sql_token_count(self, caption) -> int:
+        """Return the same token count used by the in-memory proxy filter."""
+        try:
+            tokenizer = self._filter_tokenizer
+            if tokenizer is None:
+                return 0
+            return len(tokenizer(str(caption or '')).input_ids) - 2
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _sql_label_match(label, pattern) -> int:
+        return int(fnmatchcase(str(label or ''), str(pattern or '')))
+
+    @staticmethod
+    def _sql_name_match(file_name, pattern) -> int:
+        normalized = str(file_name or '').replace('\\', '/')
+        name = normalized.rsplit('/', 1)[-1]
+        return int(fnmatchcase(name, f'*{str(pattern or '')}*'))
+
+    @staticmethod
+    def _sql_path_match(file_name, directory_path, pattern) -> int:
+        relative = str(file_name or '').replace('\\', '/')
+        base = str(directory_path or '').replace('\\', '/').rstrip('/')
+        absolute = f'{base}/{relative}' if base else relative
+        needle = str(pattern or '').replace('\\', '/')
+        wrapped = f'*{needle}*'
+        return int(
+            fnmatchcase(relative, wrapped)
+            or fnmatchcase(absolute, wrapped)
+        )
+
+    def _sql_target_match(self, file_name, width, height, target) -> int:
+        """Check a target bucket using the application's target resolver."""
+        try:
+            from PySide6.QtCore import QSize
+            from utils.target_dimension import get as get_target_dimension
+
+            dimensions = str(target or '').replace(':', 'x').split('x')
+            if len(dimensions) != 2:
+                return 0
+            target_width, target_height = (int(value) for value in dimensions)
+            crop = self._read_filter_crop(file_name)
+            source_width, source_height = (
+                (crop[2], crop[3])
+                if crop is not None
+                else (int(width or 0), int(height or 0))
+            )
+            resolved = get_target_dimension(QSize(source_width, source_height))
+            return int(
+                resolved.width() == target_width
+                and resolved.height() == target_height
+            )
+        except Exception:
+            return 0
+
+    def _read_filter_crop(self, file_name) -> tuple[int, int, int, int] | None:
+        """Read and cache the current crop rectangle for a relative media path."""
+        try:
+            media_path = self._directory_path / str(file_name or '').replace('\\', '/')
+            sidecar_path = preferred_taggui_sidecar_read_path(media_path)
+            if sidecar_path is None:
+                return None
+            stat = sidecar_path.stat()
+            cache_key = str(sidecar_path)
+            cached = self._filter_crop_cache.get(cache_key)
+            signature = (float(stat.st_mtime), int(stat.st_size))
+            if cached and cached[:2] == signature:
+                return cached[2]
+
+            crop = None
+            if stat.st_size > 0:
+                with sidecar_path.open(encoding='UTF-8') as source:
+                    meta = json.load(source)
+                raw_crop = meta.get('crop') if isinstance(meta, dict) and meta.get('version') == 1 else None
+                if isinstance(raw_crop, (list, tuple)) and len(raw_crop) == 4:
+                    x, y, width, height = (int(round(float(value))) for value in raw_crop)
+                    if width < 0:
+                        x += width
+                        width = -width
+                    if height < 0:
+                        y += height
+                        height = -height
+                    if width > 0 and height > 0:
+                        crop = (x, y, width, height)
+
+            self._filter_crop_cache[cache_key] = (signature[0], signature[1], crop)
+            return crop
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _sql_marking_view_match(
+        self,
+        file_name,
+        x,
+        y,
+        width,
+        height,
+        image_width,
+        image_height,
+        label,
+        pattern,
+        mode,
+    ) -> int:
+        """Match a marking against the current crop viewport for SQL filters."""
+        try:
+            if not fnmatchcase(str(label or ''), str(pattern or '')):
+                return 0
+            marking_x, marking_y = int(x), int(y)
+            marking_width, marking_height = int(width), int(height)
+            if marking_width < 0:
+                marking_x += marking_width
+                marking_width = -marking_width
+            if marking_height < 0:
+                marking_y += marking_height
+                marking_height = -marking_height
+            if marking_width <= 0 or marking_height <= 0:
+                return 0
+
+            crop = self._read_filter_crop(file_name)
+            if crop is None:
+                crop = (0, 0, max(0, int(image_width or 0)), max(0, int(image_height or 0)))
+            crop_x, crop_y, crop_width, crop_height = crop
+
+            marking_right = marking_x + marking_width
+            marking_bottom = marking_y + marking_height
+            crop_right = crop_x + crop_width
+            crop_bottom = crop_y + crop_height
+            intersects = (
+                marking_x < crop_right
+                and marking_right > crop_x
+                and marking_y < crop_bottom
+                and marking_bottom > crop_y
+            )
+            if not intersects:
+                return 0
+            if str(mode or '').lower() == 'visible':
+                return 1
+
+            contained = (
+                crop_x <= marking_x
+                and crop_y <= marking_y
+                and marking_right <= crop_right
+                and marking_bottom <= crop_bottom
+            )
+            return int(not contained)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _normalize_bindings(bindings) -> tuple:
@@ -419,6 +612,7 @@ class ImageIndexDB:
                 self._prepare_db_location()
                 self.conn = sqlite3.connect(str(self.db_path), timeout=60.0, check_same_thread=False)  # Increased timeout for migrations
                 self.conn.row_factory = sqlite3.Row  # Access columns by name
+                self._register_filter_functions()
 
                 # Enable WAL mode for better concurrency (allows simultaneous reads/writes)
                 self.conn.execute('PRAGMA journal_mode=WAL')

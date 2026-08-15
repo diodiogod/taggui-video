@@ -23,6 +23,7 @@ from controllers.marking_effects_controller import MarkingEffectsController
 from controllers.toolbar_manager import ToolbarManager
 from controllers.menu_manager import MenuManager
 from controllers.quick_sort_controller import QuickSortController
+from controllers.quick_tag_controller import QuickTagController
 from controllers.signal_manager import SignalManager
 from models.image_list_model import ImageListModel
 from models.image_tag_list_model import ImageTagListModel
@@ -67,6 +68,7 @@ from widgets.image_tags_editor import ImageTagsEditor
 from widgets.ideogram_caption_editor import IdeogramCaptionEditor
 from widgets.pipeline_editor import PipelineEditor
 from widgets.quick_sort_panel import QuickSortPanel
+from widgets.quick_tag_panel import QuickTagPanel
 from widgets.folder_tree_panel import FolderTreePanel
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
@@ -864,9 +866,18 @@ class MainWindow(QMainWindow):
             self.pipeline_editor,
             self.quick_sort_panel,
         )
+        self.quick_tag_panel = QuickTagPanel(self)
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.quick_tag_panel,
+        )
+        self.quick_tag_controller = QuickTagController(self)
+        self.quick_tag_panel.bind_controller(self.quick_tag_controller)
+        self.tabifyDockWidget(self.quick_sort_panel, self.quick_tag_panel)
         self.ideogram_caption_editor.hide()
         self.pipeline_editor.hide()
         self.quick_sort_panel.hide()
+        self.quick_tag_panel.hide()
         self.all_tags_editor.raise_()
         self._install_external_drop_targets()
         # Set default widths for the dock widgets.
@@ -1180,6 +1191,12 @@ class MainWindow(QMainWindow):
             # until the button releases its keyboard grab.
             if bool(self.app.property("quick_sort_key_capture")):
                 return False
+            quick_tag_controller = getattr(self, "quick_tag_controller", None)
+            if (
+                quick_tag_controller is not None
+                and quick_tag_controller.handle_key_event(event, event_type)
+            ):
+                return True
             quick_sort_controller = getattr(self, "quick_sort_controller", None)
             if (
                 quick_sort_controller is not None
@@ -1585,6 +1602,9 @@ class MainWindow(QMainWindow):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
         quick_sort_controller = getattr(self, "quick_sort_controller", None)
+        quick_tag_controller = getattr(self, "quick_tag_controller", None)
+        if quick_tag_controller is not None and quick_tag_controller.active:
+            quick_tag_controller.finish_session()
         if quick_sort_controller is not None and quick_sort_controller.active:
             quick_sort_controller.ensure_finished_before_close()
             if quick_sort_controller.active:
@@ -2583,6 +2603,7 @@ class MainWindow(QMainWindow):
             'ideogram_caption_editor',
             'pipeline_editor',
             'quick_sort_panel',
+            'quick_tag_panel',
         ):
             dock = getattr(self, dock_name, None)
             if dock is None:
@@ -10331,8 +10352,14 @@ class MainWindow(QMainWindow):
     @Slot()
     def update_image_tags(self):
         image_index = self.image_tags_editor.image_index
-        image: Image = self.image_list_model.data(image_index,
-                                                  Qt.ItemDataRole.UserRole)
+        image: Image | None = None
+        if image_index is not None and image_index.isValid():
+            image = self.image_list_model.data(
+                image_index,
+                Qt.ItemDataRole.UserRole,
+            )
+        if image is None:
+            image = getattr(self.image_tags_editor, 'image_reference', None)
         if image is None:
             return
         old_tags = image.tags
@@ -10359,7 +10386,12 @@ class MainWindow(QMainWindow):
         else:
             self.image_list_model.add_to_undo_stack(
                 action_name='Delete Tags', should_ask_for_confirmation=False)
-        self.image_list_model.update_image_tags(image_index, new_tags)
+        image_reference = (
+            image
+            if image_index is None or not image_index.isValid()
+            else image_index
+        )
+        self.image_list_model.update_image_tags(image_reference, new_tags)
 
 
     @Slot(str, str)
@@ -10583,6 +10615,7 @@ class MainWindow(QMainWindow):
             getattr(self, 'ideogram_caption_editor', None),
             getattr(self, 'pipeline_editor', None),
             getattr(self, 'quick_sort_panel', None),
+            getattr(self, 'quick_tag_panel', None),
         ):
             if dock is None:
                 continue
@@ -10616,6 +10649,9 @@ class MainWindow(QMainWindow):
             )
             self.menu_manager.toggle_quick_sort_panel_action.setChecked(
                 self.quick_sort_panel.isVisible()
+            )
+            self.menu_manager.toggle_quick_tag_panel_action.setChecked(
+                self.quick_tag_panel.isVisible()
             )
             self.menu_manager.toggle_main_viewer_action.setChecked(bool(self._main_viewer_visible))
             workspace_group = getattr(self.menu_manager, 'workspace_action_group', None)
@@ -10967,6 +11003,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": self.ideogram_caption_editor,
                 "pipeline_editor": self.pipeline_editor,
                 "quick_sort_panel": self.quick_sort_panel,
+                "quick_tag_panel": self.quick_tag_panel,
             }
             right_docks = [
                 right_dock_map["image_tags_editor"],
@@ -10976,6 +11013,7 @@ class MainWindow(QMainWindow):
                 right_dock_map["ideogram_caption_editor"],
                 right_dock_map["pipeline_editor"],
                 right_dock_map["quick_sort_panel"],
+                right_dock_map["quick_tag_panel"],
             ]
 
             visibility = {
@@ -10990,6 +11028,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "tagging": {
                 "toolbar": True,
@@ -11002,6 +11041,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "marking": {
                 "toolbar": True,
@@ -11014,6 +11054,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": True,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "ideogram_tagging": {
                 "toolbar": True,
@@ -11026,6 +11067,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": True,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "video_prep": {
                 "toolbar": True,
@@ -11038,6 +11080,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "auto_captioning": {
                 "toolbar": True,
@@ -11050,6 +11093,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "folder_management": {
                 "toolbar": False,
@@ -11062,6 +11106,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             "full_masonry": {
                 "toolbar": False,
@@ -11074,6 +11119,7 @@ class MainWindow(QMainWindow):
                 "ideogram_caption_editor": False,
                 "pipeline_editor": False,
                 "quick_sort_panel": False,
+                "quick_tag_panel": False,
             },
             }[workspace_id]
 
@@ -11104,6 +11150,7 @@ class MainWindow(QMainWindow):
             )
             self.pipeline_editor.setVisible(visibility["pipeline_editor"])
             self.quick_sort_panel.setVisible(visibility["quick_sort_panel"])
+            self.quick_tag_panel.setVisible(visibility.get("quick_tag_panel", False))
 
             visible_right_docks = [
                 dock

@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -34,6 +37,8 @@ from utils.quick_sort import (
     QuickSortProfile,
     QuickSortProfileStore,
     QuickSortValidationError,
+    builtin_quick_sort_profiles,
+    clone_quick_sort_profile,
     default_quick_sort_profile,
     new_quick_sort_id,
     normalize_key_sequence,
@@ -71,6 +76,101 @@ class _CompressibleQuickSortCombo(QComboBox):
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()
         return QSize(0, hint.height())
+
+
+class _QuickSortMappingList(QListWidget):
+    """Compact internal-move list used for destination and qualifier cards."""
+
+    order_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("quickSortMappingList")
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setSpacing(8)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.model().rowsMoved.connect(lambda *_args: self.order_changed.emit())
+
+    def _content_height(self) -> int:
+        total = max(0, self.frameWidth() * 2 + 4)
+        for row in range(self.count()):
+            height = self.sizeHintForRow(row)
+            if height <= 0:
+                widget = self.itemWidget(self.item(row))
+                height = widget.sizeHint().height() if widget is not None else 0
+            total += max(0, height)
+        if self.count() > 1:
+            total += (self.count() - 1) * self.spacing()
+        return total
+
+    def sizeHint(self):
+        return QSize(0, self._content_height())
+
+    def minimumSizeHint(self):
+        return QSize(0, self._content_height())
+
+    def refresh_height(self):
+        self._sync_item_width()
+        self.setFixedHeight(self._content_height())
+        self.updateGeometry()
+
+    def _sync_item_width(self):
+        width = self.viewport().width()
+        if width <= 0:
+            return
+        for row in range(self.count()):
+            item = self.item(row)
+            height = item.sizeHint().height()
+            item.setSizeHint(QSize(width, height))
+            widget = self.itemWidget(item)
+            if widget is not None:
+                widget.setMinimumWidth(0)
+                widget.setMaximumWidth(16777215)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_item_width()
+
+
+class QuickSortDragHandle(QLabel):
+    drag_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__("::::", parent)
+        self._press_pos = None
+        self.setObjectName("quickSortDragHandle")
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Drag to reorder")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._press_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and (event.position().toPoint() - self._press_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self.drag_requested.emit()
+            self._press_pos = None
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
 
 
 class QuickSortKeyButton(QPushButton):
@@ -190,6 +290,9 @@ class QuickSortMappingCard(QFrame):
         root = QHBoxLayout(self)
         root.setContentsMargins(4, 3, 4, 3)
         root.setSpacing(5)
+        self.drag_handle = QuickSortDragHandle()
+        self.drag_handle.setObjectName("quickSortDragHandle")
+        self.drag_handle.drag_requested.connect(self._start_drag)
         self.enabled_check = QCheckBox()
         self.enabled_check.setChecked(mapping.enabled)
         self.enabled_check.setToolTip(f"Enable this {kind}")
@@ -224,6 +327,7 @@ class QuickSortMappingCard(QFrame):
         self.remove_button.setObjectName("quickSortRemoveButton")
         self.remove_button.setFixedSize(22, 22)
         self.remove_button.setToolTip(f"Remove this {kind}")
+        root.addWidget(self.drag_handle)
         root.addWidget(self.enabled_check)
         root.addWidget(self.key_button)
         root.addWidget(self.destination_edit, 1)
@@ -238,6 +342,19 @@ class QuickSortMappingCard(QFrame):
             lambda: self.remove_requested.emit(self.mapping_id)
         )
         self._refresh_accent()
+
+    def _start_drag(self):
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, _QuickSortMappingList):
+            parent = parent.parentWidget()
+        if not isinstance(parent, _QuickSortMappingList):
+            return
+        for row in range(parent.count()):
+            item = parent.item(row)
+            if parent.itemWidget(item) is self:
+                parent.setCurrentItem(item)
+                parent.startDrag(Qt.DropAction.MoveAction)
+                return
 
     def _choose_color(self):
         chosen = QColorDialog.getColor(QColor(self.color), self, "Mapping color")
@@ -302,6 +419,7 @@ class QuickSortPanel(QDockWidget):
         self.setMinimumWidth(0)
         self.store = QuickSortProfileStore()
         self.profiles: list[QuickSortProfile] = []
+        self._builtin_profiles = builtin_quick_sort_profiles()
         self.current_profile_id: str | None = None
         self.destination_cards: list[QuickSortMappingCard] = []
         self.qualifier_cards: list[QuickSortMappingCard] = []
@@ -347,6 +465,9 @@ class QuickSortPanel(QDockWidget):
         self.profile_combo = QComboBox()
         self.profile_combo.setEditable(True)
         self.profile_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.profile_combo.setToolTip(
+            "Choose a profile, or edit its name here and press Enter."
+        )
         self.profile_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
@@ -459,10 +580,10 @@ class QuickSortPanel(QDockWidget):
         destination_columns.addWidget(key_column)
         destination_columns.addWidget(destination_column, 1)
         content_layout.addLayout(destination_columns)
-        self.destination_host = QWidget()
-        self.destination_layout = QVBoxLayout(self.destination_host)
-        self.destination_layout.setContentsMargins(0, 0, 0, 0)
-        self.destination_layout.setSpacing(8)
+        self.destination_host = _QuickSortMappingList()
+        self.destination_host.order_changed.connect(
+            lambda: self._cards_reordered("destination")
+        )
         content_layout.addWidget(self.destination_host)
         self.add_destination_button = QPushButton("＋  Add destination override")
         self.add_destination_button.setObjectName("quickSortAddButton")
@@ -530,10 +651,10 @@ class QuickSortPanel(QDockWidget):
             self.unclassified_folder_edit,
         )
         qualifier_options_layout.addLayout(qualifier_form)
-        self.qualifier_host = QWidget()
-        self.qualifier_cards_layout = QVBoxLayout(self.qualifier_host)
-        self.qualifier_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.qualifier_cards_layout.setSpacing(8)
+        self.qualifier_host = _QuickSortMappingList()
+        self.qualifier_host.order_changed.connect(
+            lambda: self._cards_reordered("qualifier")
+        )
         qualifier_options_layout.addWidget(self.qualifier_host)
         self.add_qualifier_button = QPushButton("＋  Add qualifier")
         self.add_qualifier_button.setObjectName("quickSortAddButton")
@@ -719,12 +840,23 @@ class QuickSortPanel(QDockWidget):
         index = combo.findData(value)
         combo.setCurrentIndex(max(0, index))
 
-    def _clear_card_layout(self, layout: QVBoxLayout):
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+    @staticmethod
+    def _cards_in_list(list_widget: _QuickSortMappingList):
+        return [
+            list_widget.itemWidget(list_widget.item(row))
+            for row in range(list_widget.count())
+            if list_widget.itemWidget(list_widget.item(row)) is not None
+        ]
+
+    def _cards_reordered(self, kind: str):
+        cards = self._cards_in_list(
+            self.destination_host if kind == "destination" else self.qualifier_host
+        )
+        if kind == "destination":
+            self.destination_cards = cards
+        else:
+            self.qualifier_cards = cards
+        self._schedule_save()
 
     def _populate_cards(
         self,
@@ -733,14 +865,14 @@ class QuickSortPanel(QDockWidget):
         kind: str,
     ):
         if kind == "destination":
-            layout = self.destination_layout
+            list_widget = self.destination_host
             self.destination_cards = []
             target = self.destination_cards
         else:
-            layout = self.qualifier_cards_layout
+            list_widget = self.qualifier_host
             self.qualifier_cards = []
             target = self.qualifier_cards
-        self._clear_card_layout(layout)
+        list_widget.clear()
         for mapping in mappings:
             card = QuickSortMappingCard(mapping, kind=kind)
             self._install_zoom_filter_tree(card)
@@ -751,8 +883,12 @@ class QuickSortPanel(QDockWidget):
                     mapping_id,
                 )
             )
-            layout.addWidget(card)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, card.sizeHint().height()))
+            list_widget.addItem(item)
+            list_widget.setItemWidget(item, card)
             target.append(card)
+        list_widget.refresh_height()
 
     def _current_profile(self) -> QuickSortProfile | None:
         return next(
@@ -772,9 +908,13 @@ class QuickSortPanel(QDockWidget):
             # point, so using currentText() here would silently rename the old
             # profile to the newly selected profile's name.
             name=current.name,
-            destinations=[card.mapping() for card in self.destination_cards],
+            destinations=[
+                card.mapping() for card in self._cards_in_list(self.destination_host)
+            ],
             standard_key_destinations=self.standard_keys_check.isChecked(),
-            qualifiers=[card.mapping() for card in self.qualifier_cards],
+            qualifiers=[
+                card.mapping() for card in self._cards_in_list(self.qualifier_host)
+            ],
             qualifier_enabled=self.qualifier_enabled_check.isChecked(),
             qualifier_name=self.qualifier_name_edit.text().strip() or "Quality",
             hierarchy_order=str(self.hierarchy_combo.currentData() or "destination_first"),
@@ -790,6 +930,7 @@ class QuickSortPanel(QDockWidget):
             collision_policy=str(self.collision_combo.currentData() or "append"),
             include_sidecars=self.sidecars_check.isChecked(),
             start_fullscreen=self.fullscreen_check.isChecked(),
+            template_key=current.template_key if current is not None else "",
         )
 
     def _load_profile_into_ui(self, profile: QuickSortProfile):
@@ -843,6 +984,26 @@ class QuickSortPanel(QDockWidget):
     def _rebuild_profile_combo(self, selected_id: str | None = None):
         self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
+        for preset in self._builtin_profiles:
+            index = self.profile_combo.count()
+            self.profile_combo.addItem(f"Preset: {preset.name}", f"__builtin__:{preset.id}")
+            self.profile_combo.setItemData(
+                index,
+                "Built-in template — selecting it creates an editable profile.",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+            self.profile_combo.setItemData(
+                index, QColor("#62E7D8"), Qt.ItemDataRole.ForegroundRole
+            )
+            self.profile_combo.setItemData(
+                index, QColor("#26383B"), Qt.ItemDataRole.BackgroundRole
+            )
+        if self._builtin_profiles and self.profiles:
+            separator_index = self.profile_combo.count()
+            self.profile_combo.insertSeparator(separator_index)
+            separator_item = self.profile_combo.model().item(separator_index)
+            if separator_item is not None:
+                separator_item.setFlags(separator_item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
         for profile in self.profiles:
             self.profile_combo.addItem(profile.name, profile.id)
         index = self.profile_combo.findData(selected_id)
@@ -930,6 +1091,12 @@ class QuickSortPanel(QDockWidget):
         if self._prepare_profile_transition() is None:
             self._restore_current_profile_selection()
             return
+        if profile_id.startswith("__builtin__:"):
+            preset_id = profile_id.split(":", 1)[1]
+            preset = next((item for item in self._builtin_profiles if item.id == preset_id), None)
+            if preset is not None:
+                self._add_preset(preset, committed=True)
+            return
         profile = next(
             (item for item in self.profiles if item.id == profile_id),
             None,
@@ -939,6 +1106,23 @@ class QuickSortPanel(QDockWidget):
             return
         self._load_profile_into_ui(profile)
         settings.setValue("quick_sort_profile_id", profile.id)
+
+    def _add_preset(self, template: QuickSortProfile, *, committed: bool = False):
+        if not committed and self._prepare_profile_transition() is None:
+            return
+        existing = next(
+            (item for item in self.profiles if item.template_key == template.template_key),
+            None,
+        )
+        if existing is not None:
+            self._rebuild_profile_combo(existing.id)
+            self._load_profile_into_ui(existing)
+            return
+        profile = clone_quick_sort_profile(template, name=f"{template.name} (custom)")
+        self.profiles.append(profile)
+        self._rebuild_profile_combo(profile.id)
+        self._load_profile_into_ui(profile)
+        self._persist_profiles(profile)
 
     def _rename_current_profile(self):
         if self._loading_ui:
@@ -1039,12 +1223,13 @@ class QuickSortPanel(QDockWidget):
         return "#62E7D8"
 
     def _add_destination(self):
-        number = len(self.destination_cards) + 1
+        cards = self._cards_in_list(self.destination_host)
+        number = len(cards) + 1
         mapping = QuickSortMapping(
             name=f"Destination {number}",
-            key=self._next_default_key(self.destination_cards),
+            key=self._next_default_key(cards),
             folder=f"Destination {number}",
-            color=self._next_mapping_color(self.destination_cards),
+            color=self._next_mapping_color(cards),
         )
         card = QuickSortMappingCard(mapping, kind="destination")
         self._install_zoom_filter_tree(card)
@@ -1052,17 +1237,22 @@ class QuickSortPanel(QDockWidget):
         card.remove_requested.connect(
             lambda mapping_id: self._remove_mapping("destination", mapping_id)
         )
-        self.destination_layout.addWidget(card)
-        self.destination_cards.append(card)
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, card.sizeHint().height()))
+        self.destination_host.addItem(item)
+        self.destination_host.setItemWidget(item, card)
+        self.destination_cards = self._cards_in_list(self.destination_host)
+        self.destination_host.refresh_height()
         self._schedule_save()
 
     def _add_qualifier(self):
-        number = len(self.qualifier_cards) + 1
+        cards = self._cards_in_list(self.qualifier_host)
+        number = len(cards) + 1
         mapping = QuickSortMapping(
             name=f"Qualifier {number}",
-            key=str(number) if number <= 9 else self._next_default_key(self.qualifier_cards),
+            key=str(number) if number <= 9 else self._next_default_key(cards),
             folder=f"Qualifier {number}",
-            color=self._next_mapping_color(self.qualifier_cards),
+            color=self._next_mapping_color(cards),
         )
         card = QuickSortMappingCard(mapping, kind="qualifier")
         self._install_zoom_filter_tree(card)
@@ -1070,18 +1260,28 @@ class QuickSortPanel(QDockWidget):
         card.remove_requested.connect(
             lambda mapping_id: self._remove_mapping("qualifier", mapping_id)
         )
-        self.qualifier_cards_layout.addWidget(card)
-        self.qualifier_cards.append(card)
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, card.sizeHint().height()))
+        self.qualifier_host.addItem(item)
+        self.qualifier_host.setItemWidget(item, card)
+        self.qualifier_cards = self._cards_in_list(self.qualifier_host)
+        self.qualifier_host.refresh_height()
         self._schedule_save()
 
     def _remove_mapping(self, kind: str, mapping_id: str):
-        cards = self.destination_cards if kind == "destination" else self.qualifier_cards
-        card = next((item for item in cards if item.mapping_id == mapping_id), None)
-        if card is None:
-            return
-        cards.remove(card)
-        card.setParent(None)
-        card.deleteLater()
+        list_widget = self.destination_host if kind == "destination" else self.qualifier_host
+        for row in range(list_widget.count()):
+            item = list_widget.item(row)
+            card = list_widget.itemWidget(item)
+            if card is not None and card.mapping_id == mapping_id:
+                list_widget.takeItem(row)
+                card.deleteLater()
+                list_widget.refresh_height()
+                if kind == "destination":
+                    self.destination_cards = self._cards_in_list(list_widget)
+                else:
+                    self.qualifier_cards = self._cards_in_list(list_widget)
+                break
         self._schedule_save()
 
     def _qualifier_toggled(self, checked: bool):
@@ -1612,6 +1812,10 @@ class QuickSortPanel(QDockWidget):
                 background: #303030;
             }}
             QScrollArea#quickSortScroll {{ border: 0; }}
+            QListWidget#quickSortMappingList {{ background: transparent; border: 0; padding: 0; }}
+            QListWidget#quickSortMappingList::item {{ background: transparent; border: 0; }}
+            QLabel#quickSortDragHandle {{ color: #8E8E8E; font-weight: 900; padding: 0 2px; }}
+            QLabel#quickSortDragHandle:hover {{ color: #7AA2FF; }}
             QFrame#quickSortSection {{ background: #383838; border: 1px solid #4A4A4A; border-radius: 6px; }}
             QLabel#quickSortSectionTitle {{ color: #E0E0E0; font-weight: 700; }}
             QLabel#quickSortMutedLabel {{ color: #9E9E9E; }}

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Slot, QModelIndex
+from PySide6.QtCore import Qt, Slot, QModelIndex, QTimer
 from widgets.image_viewer import ImageMarking
 from utils.settings import settings
 
@@ -421,6 +421,14 @@ class SignalManager:
 
         auto_captioner.caption_generated.connect(apply_generated_caption)
         def reload_generated_tags_if_loaded(image_reference, *_):
+            stable_loader = getattr(
+                image_tags_editor,
+                'load_image_tags_for_reference',
+                None,
+            )
+            if callable(stable_loader):
+                stable_loader(image_reference)
+                return
             image_index = image_list_model.get_loaded_index_for_reference(
                 image_reference
             )
@@ -626,7 +634,13 @@ class SignalManager:
         source_model=None,
     ):
         """Refresh the active viewer after undo/redo restores image metadata."""
-        restored_paths = {str(Path(path)) for path in media_paths if path}
+        def path_key(path) -> str:
+            try:
+                return str(Path(path).resolve()).casefold()
+            except OSError:
+                return str(Path(path)).casefold()
+
+        restored_paths = {path_key(path) for path in media_paths if path}
         target_viewer = self.main_window.get_selection_target_viewer()
         if target_viewer is None:
             target_viewer = self.main_window.image_viewer
@@ -634,7 +648,7 @@ class SignalManager:
         if proxy_index is None or not proxy_index.isValid():
             return
         image = proxy_index.data(Qt.ItemDataRole.UserRole)
-        if image is None or str(getattr(image, 'path', '') or '') not in restored_paths:
+        if image is None or path_key(getattr(image, 'path', '') or '') not in restored_paths:
             return
         # Paginated/proxy models can temporarily expose a different Image
         # instance from the one restored by history. Synchronize from the
@@ -655,6 +669,13 @@ class SignalManager:
                 image.target_dimension = restored_image.target_dimension
                 image.markings = restored_image.markings.copy()
         target_viewer.rebuild_marking_overlays(image)
+        # A dataChanged handler may have rebuilt the scene once before the
+        # history signal arrives. Run one deferred pass after proxy/index
+        # bookkeeping settles so the restored geometry is visible immediately.
+        QTimer.singleShot(
+            0,
+            lambda viewer=target_viewer: viewer.rebuild_marking_overlays(),
+        )
         self.main_window.ideogram_caption_editor.load_media(image)
         self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
 

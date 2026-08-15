@@ -34,6 +34,7 @@ from auto_captioning.model_availability import (
 from auto_captioning.model_download_worker import (
     MODEL_DOWNLOAD_WORKER_FLAG,
 )
+from auto_captioning.prompt_template import replace_template_variables
 from models.image_list_model import _video_lock
 from utils.enums import CaptionDevice
 from utils.image import Image
@@ -46,29 +47,6 @@ class CaptionGenerationError(RuntimeError):
     def __init__(self, message: str, console_output: str | None = None):
         super().__init__(message)
         self.console_output = console_output
-
-
-def replace_template_variable(match: re.Match, image: Image, skip_hash: bool) -> str:
-    template_variable = match.group(0)[1:-1].lower()
-    if template_variable == 'tags':
-        if skip_hash:
-            return ', '.join([t for t in image.tags if not t.startswith('#')])
-        else:
-            return ', '.join(image.tags)
-    if template_variable == 'name':
-        return image.path.stem
-    if template_variable in ('directory', 'folder'):
-        return image.path.parent.name
-    return match.group(0)
-
-
-def replace_template_variables(text: str, image: Image, skip_hash: bool) -> str:
-    # Replace template variables inside curly braces that are not escaped.
-    text = re.sub(r'(?<!\\){[^{}]+(?<!\\)}',
-                  lambda match: replace_template_variable(match, image, skip_hash), text)
-    # Unescape escaped curly braces.
-    text = re.sub(r'\\([{}])', r'\1', text)
-    return text
 
 
 def _build_hf_download_command(
