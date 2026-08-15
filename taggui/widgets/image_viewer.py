@@ -4833,7 +4833,9 @@ class ImageViewer(QWidget):
                 target_type = new_marking
             self._rename_default_marking_label(item, target_type)
             item.set_rect_type(target_type)
-            self.marking_changed(item)
+            # Changing the marking type can change membership in a marking
+            # filter, so request the targeted SQL refresh for this path.
+            self.marking_changed(item, refresh_filter=True)
 
     @staticmethod
     def _rename_default_marking_label(item: MarkingItem, target_type: ImageMarking):
@@ -5149,7 +5151,12 @@ class ImageViewer(QWidget):
         self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
 
     @Slot(QGraphicsRectItem)
-    def marking_changed(self, marking: QGraphicsRectItem):
+    def marking_changed(
+        self,
+        marking: QGraphicsRectItem,
+        *,
+        refresh_filter: bool = False,
+    ):
         """Slot to call when a marking was changed to sync the information
         in the image."""
         from widgets.marking import grid
@@ -5176,7 +5183,11 @@ class ImageViewer(QWidget):
                 )
                 image.target_dimension = grid.target
                 # Persist first so a later UI-only failure cannot lose the crop.
-                source_model.write_meta_to_disk(image)
+                source_model.write_meta_to_disk(image, notify=False)
+                source_model._notify_image_metadata_changed(
+                    image,
+                    refresh_filter=False,
+                )
                 # Update HUD rect for crop display
                 self._set_hud_crop_rect_if_alive(marking.rect())
                 if not self.proxy_image_list_model.does_image_match_filter(
@@ -5190,28 +5201,21 @@ class ImageViewer(QWidget):
                     self.crop_changed.emit(None)
                 except RuntimeError:
                     pass
-                try:
-                    source_index = source_model.get_loaded_index_for_reference(image)
-                    if source_index.isValid():
-                        source_model.dataChanged.emit(
-                            source_index,
-                            source_index,
-                            [
-                                Qt.ItemDataRole.DecorationRole,
-                                Qt.ItemDataRole.SizeHintRole,
-                                Qt.ToolTipRole,
-                                Qt.ItemDataRole.UserRole,
-                            ],
-                        )
-                except (RuntimeError, AttributeError):
-                    pass
             finally:
                 self.inhibit_reload_image = False
         else:
             self.inhibit_reload_image = True
             try:
                 image.markings = self._live_marking_model_entries()
-                source_model.write_meta_to_disk(image)
+                # Moving/resizing a marking changes geometry only. It does not
+                # change membership in a label/type filter, so do not trigger
+                # a viewer reload or paginated model reset for this path.
+                source_model.write_meta_to_disk(image, notify=False)
+                if refresh_filter:
+                    source_model._notify_image_metadata_changed(
+                        image,
+                        refresh_filter=True,
+                    )
             finally:
                 self.inhibit_reload_image = False
         self._apply_marking_ideogram_overlay_priority()
@@ -5464,34 +5468,49 @@ class ImageViewer(QWidget):
             action_name='Delete marking',
             should_ask_for_confirmation=False,
         )
-        for item in items:
-            if item.rect_type == ImageMarking.CROP:
-                if item in self.marking_items:
-                    self.marking_items.remove(item)
-                if self.crop_marking is item:
-                    self.crop_marking = None
-                previous_crop = image.crop
-                image.thumbnail = None
-                image.thumbnail_qimage = None
-                image.crop = None
-                self._invalidate_thumbnail_cache_for_image(
-                    image,
-                    crops=(previous_crop,),
-                )
-                image.target_dimension = None
-                # Reset HUD when crop is deleted
-                self._clear_hud_crop_if_alive()
-                self.accept_crop_addition.emit(True)
-                calculate_grid(MarkingItem.image_size)
-                source_model.write_meta_to_disk(image)
-            else:
-                if item in self.marking_items:
-                    self.marking_items.remove(item)
-                self.label_changed(add_undo=False)
-                source_model.write_meta_to_disk(image)
-            if getattr(self.view, '_last_interacted_marking', None) is item:
-                self.view._last_interacted_marking = None
-            self.scene.removeItem(item)
+        deleted_searchable_marking = False
+        previous_inhibit = self.inhibit_reload_image
+        self.inhibit_reload_image = True
+        try:
+            for item in items:
+                if item.rect_type == ImageMarking.CROP:
+                    if item in self.marking_items:
+                        self.marking_items.remove(item)
+                    if self.crop_marking is item:
+                        self.crop_marking = None
+                    previous_crop = image.crop
+                    image.thumbnail = None
+                    image.thumbnail_qimage = None
+                    image.crop = None
+                    self._invalidate_thumbnail_cache_for_image(
+                        image,
+                        crops=(previous_crop,),
+                    )
+                    image.target_dimension = None
+                    # Reset HUD when crop is deleted
+                    self._clear_hud_crop_if_alive()
+                    self.accept_crop_addition.emit(True)
+                    calculate_grid(MarkingItem.image_size)
+                else:
+                    deleted_searchable_marking = True
+                    if item in self.marking_items:
+                        self.marking_items.remove(item)
+                if getattr(self.view, '_last_interacted_marking', None) is item:
+                    self.view._last_interacted_marking = None
+                self.scene.removeItem(item)
+
+            # Persist the final scene state once. Multiple per-item writes used
+            # to emit repeated dataChanged/reset cycles while the scene still
+            # contained the items being deleted.
+            if deleted_searchable_marking:
+                image.markings = self._live_marking_model_entries()
+            source_model.write_meta_to_disk(image, notify=False)
+            source_model._notify_image_metadata_changed(
+                image,
+                refresh_filter=deleted_searchable_marking,
+            )
+        finally:
+            self.inhibit_reload_image = previous_inhibit
 
     @Slot()
     def apply_all_crops_to_folder(self):

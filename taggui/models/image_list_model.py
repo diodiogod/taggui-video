@@ -2457,6 +2457,7 @@ class ImageListModel(QAbstractListModel):
         self._page_load_priority_page = None
         self._page_load_priority_until = 0.0
         self._metadata_filter_refresh_pending = False
+        self._metadata_filter_refresh_in_progress = False
         # DISABLED: Cache warming causes UI blocking
         # Cache warming executor: 2 workers for proactive cache building when idle (low priority)
         # Reduced to 1 worker to minimize resource usage during idle warming
@@ -9911,6 +9912,9 @@ class ImageListModel(QAbstractListModel):
         old_total_count = int(self._total_count)
 
         self._advance_page_load_generation()
+        self._metadata_filter_refresh_in_progress = bool(
+            new_total_count > 0 and current_pages
+        )
         self.beginResetModel()
         try:
             self._total_count = new_total_count
@@ -9921,6 +9925,13 @@ class ImageListModel(QAbstractListModel):
                     self._load_page_sync(page_num)
         finally:
             self.endResetModel()
+            # Keep the flag set through the synchronous modelReset handlers so
+            # the masonry view can distinguish this targeted refresh from a
+            # folder switch. Clear it on the next event-loop turn.
+            QTimer.singleShot(
+                0,
+                lambda: setattr(self, '_metadata_filter_refresh_in_progress', False),
+            )
 
         self._emit_pages_updated()
         if old_total_count != new_total_count:

@@ -306,6 +306,7 @@ class ImageListView(
         self._current_proxy_row_cache = -1
         self._current_global_row_cache = -1
         self._model_resetting = False
+        self._preserve_masonry_during_reset = False
         self._strict_drag_live_fraction = 0.0
         self._strict_range_guard = False
         self._jump_dialog_open = False
@@ -712,6 +713,15 @@ class ImageListView(
     def _on_model_about_to_reset(self):
         import time as _t
 
+        source_model = (
+            self.model().sourceModel()
+            if self.model() and hasattr(self.model(), 'sourceModel')
+            else self.model()
+        )
+        self._preserve_masonry_during_reset = bool(
+            getattr(source_model, '_metadata_filter_refresh_in_progress', False)
+        )
+
         self._selection_model_epoch += 1
         try:
             self._get_masonry_incremental_service().invalidate("model_reset")
@@ -809,14 +819,15 @@ class ImageListView(
             self._selected_global_lock_until = 0.0
             self._selected_global_lock_value = None
             self._last_stable_scroll_value = 0
-        self._masonry_items = []
+        if not self._preserve_masonry_during_reset:
+            self._masonry_items = []
+            self._masonry_total_height = 0
         self._masonry_index_map = None
         self._painted_hit_regions = {}
         self._painted_hit_regions_time = 0.0
         self._painted_hit_regions_scroll_offset = 0
-        self._masonry_total_height = 0
         self._last_masonry_window_signature = None
-        if not pending_restore_live:
+        if not pending_restore_live and not self._preserve_masonry_during_reset:
             sb = self.verticalScrollBar()
             prev_block = sb.blockSignals(True)
             try:
@@ -830,6 +841,13 @@ class ImageListView(
     def _on_model_reset_complete(self):
         self._model_resetting = False
         self._clear_selection_cache()
+        if self._preserve_masonry_during_reset:
+            self._last_masonry_window_signature = None
+            self.viewport().update()
+            QTimer.singleShot(
+                0,
+                lambda: self._recalculate_masonry_if_needed("layoutChanged"),
+            )
 
     @Slot()
     def _on_filter_changed(self):

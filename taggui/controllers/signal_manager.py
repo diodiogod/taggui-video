@@ -264,6 +264,8 @@ class SignalManager:
                 target_viewer = self.main_window.get_selection_target_viewer()
                 if target_viewer is None:
                     return
+                if getattr(target_viewer, "inhibit_reload_image", False):
+                    return
                 if getattr(target_viewer, "_viewer_model_resetting", False):
                     return
                 current = image_list_selection_model.currentIndex()

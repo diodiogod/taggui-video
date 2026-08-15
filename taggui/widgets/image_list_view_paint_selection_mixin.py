@@ -5,6 +5,12 @@ from utils.sidecar import existing_json_sidecar_paths_for_media
 class ImageListViewPaintSelectionMixin:
     def paintEvent(self, event):
         """Override paint to handle masonry layout rendering."""
+        # Qt can deliver one queued paint event after modelAboutToBeReset and
+        # before the view's internal indexes have been rebuilt. Do not let the
+        # base item-view painter dereference that stale state.
+        if getattr(self, "_model_resetting", False):
+            event.accept()
+            return
         if self.use_masonry and self._drag_preview_mode:
             super().paintEvent(event)
             return
@@ -599,12 +605,26 @@ class ImageListViewPaintSelectionMixin:
 
     def _do_enable_updates(self):
         """Actually re-enable updates (called after event loop processes)."""
+        # A deferred enable from an earlier reset must not reopen painting
+        # during a newer reset. The current modelReset handler will queue a
+        # fresh enable when that reset completes.
+        if getattr(self, "_model_resetting", False):
+            return
         self.setUpdatesEnabled(True)
         self.viewport().setUpdatesEnabled(True)
 
-        # CRITICAL: Clear stale masonry data so new folder doesn't show old images
-        self._masonry_items = []
-        self._masonry_total_height = 0
+        preserve_masonry = bool(
+            getattr(self, "_preserve_masonry_during_reset", False)
+        )
+        # Clear stale masonry data for a folder switch. A targeted metadata
+        # filter refresh keeps the old geometry visible until the replacement
+        # page has been recalculated, preventing a blank viewport.
+        if not preserve_masonry:
+            self._masonry_items = []
+            self._masonry_total_height = 0
+        else:
+            self._masonry_index_map = None
+            self._last_masonry_window_signature = None
         self._current_page = 0
         self._last_stable_scroll_value = 0
         self._strict_virtual_avg_height = 0.0
@@ -621,6 +641,7 @@ class ImageListViewPaintSelectionMixin:
         self._thumbnail_cache_misses.clear()
         # Start preloading immediately so users see progress bar right away
         QTimer.singleShot(100, self._preload_all_thumbnails)
+        self._preserve_masonry_during_reset = False
 
 
     @Slot()
