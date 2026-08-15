@@ -23,7 +23,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QKeySequence
+from PySide6.QtGui import QColor, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -386,18 +386,49 @@ class QuickSortHud(QObject):
         self.progress_label.setText(progress)
         viewport_width = max(1, self.viewport.width())
         self._legend_mapping_count = len(mappings)
-        items = [
-            f'<span style="color:{mapping.color};font-weight:900">'
-            f'[{html.escape(mapping.key)}]</span> {html.escape(mapping.name)}'
-            for mapping in mappings
-        ]
         legend_target_width = min(viewport_width - 28, 696)
-        per_row = max(1, min(6, legend_target_width // 115))
-        rows = [
-            " &nbsp;·&nbsp; ".join(items[index:index + per_row])
-            for index in range(0, len(items), per_row)
-        ]
-        legend = "<br>".join(rows)
+        # Keep the key and label in stable columns.  A single flowing line
+        # made it difficult to scan a larger shortcut set and caused long
+        # names to push the following keys out of alignment.
+        per_row = max(1, min(3, legend_target_width // 170))
+        entry_width = max(110, legend_target_width // per_row)
+        label_width = max(64, entry_width - 42)
+        metrics = QFontMetrics(self.legend_label.font())
+        rows: list[str] = []
+        for start in range(0, len(mappings), per_row):
+            cells: list[str] = []
+            for mapping in mappings[start:start + per_row]:
+                accent = QColor(str(mapping.color))
+                color = accent.name() if accent.isValid() else "#62E7D8"
+                key = html.escape(str(mapping.key))
+                display_name = metrics.elidedText(
+                    str(mapping.name or ""),
+                    Qt.TextElideMode.ElideRight,
+                    label_width,
+                )
+                name_parts = display_name.split(" ", 1)
+                first_word = html.escape(name_parts[0]) if name_parts else ""
+                remainder = (
+                    f' <span style="color:#D5D5D5">{html.escape(name_parts[1])}</span>'
+                    if len(name_parts) > 1
+                    else ""
+                )
+                full_name = html.escape(str(mapping.name or ""), quote=True)
+                cells.append(
+                    f'<td width="34" valign="middle">'
+                    f'<span style="color:{color};font-weight:900">[{key}]</span></td>'
+                    f'<td width="{label_width}" valign="middle" '
+                    f'style="padding-right:14px;" title="{full_name}">'
+                    f'<span style="color:{color};font-weight:650">{first_word}</span>'
+                    f'{remainder}</td>'
+                )
+            rows.append(f'<tr>{"".join(cells)}</tr>')
+        legend = (
+            '<table cellspacing="0" cellpadding="0" width="100%">'
+            f'{"".join(rows)}</table>'
+            if rows
+            else ""
+        )
         if standard_keys:
             automatic = (
                 '<span style="color:#7AA2FF;font-weight:700">'

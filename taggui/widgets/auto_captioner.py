@@ -1889,6 +1889,7 @@ def restore_stdout_and_stderr():
 class AutoCaptioner(QDockWidget):
     caption_generated = Signal(object, str, list)
     structured_caption_generated = Signal(object, object)
+    captioning_thread_finished = Signal()
     layout_mode_changed = Signal(str)
 
     def _selected_image_batch(self):
@@ -3005,6 +3006,9 @@ class AutoCaptioner(QDockWidget):
             lambda: self.set_is_captioning(False))
         self.captioning_thread.finished.connect(
             self.image_list_model.commit_streaming_paginated_tag_history
+        )
+        self.captioning_thread.finished.connect(
+            self.captioning_thread_finished
         )
         self.captioning_thread.finished.connect(self._update_unload_button_state)
         self.captioning_thread.finished.connect(self._refresh_model_availability_ui)

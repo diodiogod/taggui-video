@@ -416,17 +416,39 @@ class SignalManager:
         image_tags_editor = self.main_window.image_tags_editor
         menu_manager = self.main_window.menu_manager
 
-        def apply_generated_caption(image_reference, _caption, tags):
+        def apply_generated_caption(image_reference, caption, tags):
+            # Remote/other captioners report connection and empty-response
+            # failures as an empty caption plus the image's unchanged tags.
+            # Treat that as a failed item: never rewrite it or apply the
+            # optional "exclude after first" projection when no new caption
+            # was actually produced.
+            generated_caption = str(caption or '').strip()
+            current_image = image_list_model.resolve_image_reference(
+                image_reference
+            )
+            if not generated_caption or (
+                current_image is not None
+                and list(tags or []) == list(getattr(current_image, 'tags', []))
+            ):
+                return
             image_list_model.record_streaming_paginated_tag_history(
                 image_reference
             )
-            image_list_model.update_image_tags(image_reference, tags)
+            image_list_model.update_image_tags(
+                image_reference,
+                tags,
+                refresh_filter=False,
+                refresh_view=False,
+            )
             if getattr(
                 auto_captioner,
                 'caption_exclude_tags_after_first_for_current_run',
                 False,
             ):
-                image_list_model.exclude_tags_after_first([image_reference])
+                image_list_model.exclude_tags_after_first(
+                    [image_reference],
+                    refresh_view=False,
+                )
 
         auto_captioner.caption_generated.connect(apply_generated_caption)
         def reload_generated_tags_if_loaded(image_reference, *_):
@@ -465,6 +487,9 @@ class SignalManager:
 
         auto_captioner.caption_generated.connect(
             reload_generated_tags_if_loaded
+        )
+        auto_captioner.captioning_thread_finished.connect(
+            image_list_model.refresh_after_caption_batch
         )
         auto_captioner.structured_caption_generated.connect(
             lambda image_index, _caption:

@@ -8797,20 +8797,34 @@ class ImageListModel(QAbstractListModel):
         image.markings = self._deduplicate_markings(image.markings)
         sidecar_path = taggui_sidecar_path(image.path)
         does_exist = sidecar_path.exists()
+        # Preserve metadata owned by other workflows when updating ratings,
+        # markings, or review state. In particular, caption classifications
+        # are stored under caption_workspace and must survive unrelated
+        # metadata writes.
+        meta: dict[str, Any] = {'version': 1}
+        read_path = preferred_taggui_sidecar_read_path(image.path)
+        if read_path is not None:
+            try:
+                with read_path.open(encoding='UTF-8') as source:
+                    existing_meta = json.load(source)
+                if is_taggui_metadata_dict(existing_meta):
+                    meta = dict(existing_meta)
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                pass
         review_rank, review_flags = normalize_review_state(
             getattr(image, 'review_rank', 0),
             getattr(image, 'review_flags', 0),
         )
         image.review_rank = int(review_rank)
         image.review_flags = int(review_flags)
-        meta: dict[str, Any] = {
+        meta.update({
             'version': 1,
             'rating': float(getattr(image, 'rating', 0.0) or 0.0),
             'love': bool(getattr(image, 'love', False)),
             'bomb': bool(getattr(image, 'bomb', False)),
             'review_rank': int(review_rank),
             'review_flags': serialize_review_flags(review_flags),
-        }
+        })
         reaction_updated_at = getattr(image, 'reaction_updated_at', None)
         if isinstance(reaction_updated_at, (int, float)):
             meta['reaction_updated_at'] = float(reaction_updated_at)
@@ -10142,7 +10156,14 @@ class ImageListModel(QAbstractListModel):
         self._schedule_dimensions_updated()
         return True
 
-    def update_image_tags(self, image_index, tags: list[str]):
+    def update_image_tags(
+        self,
+        image_index,
+        tags: list[str],
+        *,
+        refresh_filter: bool = True,
+        refresh_view: bool = True,
+    ):
         image = self.resolve_image_reference(image_index)
         if image is None:
             return
@@ -10153,9 +10174,18 @@ class ImageListModel(QAbstractListModel):
         # Captioning changes searchable metadata. Refresh the active paginated
         # filter so an image that no longer matches cannot remain selectable
         # while its next batch silently resolves to zero images.
-        self._notify_image_metadata_changed(image)
+        self._notify_image_metadata_changed(
+            image,
+            refresh_filter=bool(refresh_filter),
+            refresh_view=bool(refresh_view),
+        )
 
-    def exclude_tags_after_first(self, image_batch) -> int:
+    def exclude_tags_after_first(
+        self,
+        image_batch,
+        *,
+        refresh_view: bool = True,
+    ) -> int:
         """Exclude every caption entry after the first for each batch image."""
         changed_images: list[Image] = []
         for batch_item in image_batch or ():
@@ -10240,18 +10270,115 @@ class ImageListModel(QAbstractListModel):
             changed_images.append(image)
 
         if changed_images:
-            if self._paginated_mode:
+            loaded_indices = [
+                self.get_loaded_index_for_reference(image)
+                for image in changed_images
+            ]
+            loaded_indices = [index for index in loaded_indices if index.isValid()]
+            if loaded_indices:
+                if refresh_view:
+                    self.dataChanged.emit(
+                        min(loaded_indices, key=lambda index: index.row()),
+                        max(loaded_indices, key=lambda index: index.row()),
+                    )
+            if refresh_view and self._paginated_mode:
                 self._reload_loaded_pages_after_paginated_tag_change()
-            else:
-                loaded_indices = [
-                    self.get_loaded_index_for_reference(image)
-                    for image in changed_images
-                ]
-                loaded_indices = [index for index in loaded_indices if index.isValid()]
-                if loaded_indices:
-                    self.dataChanged.emit(min(loaded_indices, key=lambda index: index.row()),
-                                          max(loaded_indices, key=lambda index: index.row()))
         return len(changed_images)
+
+    def include_all_caption_entries(
+        self,
+        image_batch,
+        *,
+        refresh_view: bool = True,
+    ) -> int:
+        """Clear caption exclusions for every selected image in a batch."""
+        changed_images: list[Image] = []
+        for batch_item in image_batch or ():
+            image = getattr(batch_item, 'image', None)
+            if image is None:
+                data_getter = getattr(batch_item, 'data', None)
+                if callable(data_getter):
+                    image = data_getter(Qt.ItemDataRole.UserRole)
+            if image is None or not getattr(image, 'path', None):
+                continue
+
+            entries = load_caption_workspace(image.path)
+            if not entries:
+                continue
+            entries = normalize_caption_entries(entries)
+            if not any(entry.get('excluded') for entry in entries):
+                continue
+            for entry in entries:
+                entry['excluded'] = False
+
+            try:
+                needs_review_count, excluded_count = save_caption_workspace(
+                    image.path,
+                    entries,
+                )
+            except OSError as exc:
+                print(f'Error saving caption classifications for {image.path}: {exc}')
+                continue
+
+            image.tags = included_caption_tags(entries)
+            image.caption_needs_review_count = needs_review_count
+            image.caption_excluded_count = excluded_count
+            self.write_image_tags_to_disk(image)
+            if self._db and self._directory_path:
+                try:
+                    rel_path = str(image.path.relative_to(self._directory_path))
+                except ValueError:
+                    rel_path = image.path.name
+                image_id = self._db.get_image_id(rel_path)
+                if image_id:
+                    self._db.set_caption_attention_counts(
+                        image_id,
+                        needs_review_count,
+                        excluded_count,
+                    )
+            changed_images.append(image)
+
+        if changed_images:
+            loaded_indices = [
+                self.get_loaded_index_for_reference(image)
+                for image in changed_images
+            ]
+            loaded_indices = [index for index in loaded_indices if index.isValid()]
+            if loaded_indices and refresh_view:
+                self.dataChanged.emit(
+                    min(loaded_indices, key=lambda index: index.row()),
+                    max(loaded_indices, key=lambda index: index.row()),
+                )
+            if refresh_view and self._paginated_mode:
+                self._reload_loaded_pages_after_paginated_tag_change()
+        return len(changed_images)
+
+    def refresh_after_caption_batch(self):
+        """Apply one deferred filter refresh after a captioning batch."""
+        if (
+            self._paginated_mode
+            and self._db
+            and self._filter_sql
+            and not getattr(self, '_metadata_filter_refresh_pending', False)
+        ):
+            self._metadata_filter_refresh_pending = True
+            QTimer.singleShot(
+                0,
+                self._refresh_paginated_filter_after_metadata_change,
+            )
+            return
+
+        if self.rowCount() > 0:
+            self.dataChanged.emit(
+                self.index(0),
+                self.index(self.rowCount() - 1),
+                [
+                    Qt.ItemDataRole.DecorationRole,
+                    Qt.ItemDataRole.SizeHintRole,
+                    Qt.ItemDataRole.ToolTipRole,
+                    Qt.ItemDataRole.UserRole,
+                ],
+            )
 
     def update_caption_attention_counts(
         self,
@@ -10306,23 +10433,25 @@ class ImageListModel(QAbstractListModel):
         image: Image | None,
         *,
         refresh_filter: bool = True,
+        refresh_view: bool = True,
     ):
         """Refresh views and paginated SQL results after metadata changes."""
         if image is None:
             return
 
-        loaded_index = self.get_loaded_index_for_reference(image)
-        if loaded_index.isValid():
-            self.dataChanged.emit(
-                loaded_index,
-                loaded_index,
-                [
-                    Qt.ItemDataRole.DecorationRole,
-                    Qt.ItemDataRole.SizeHintRole,
-                    Qt.ItemDataRole.ToolTipRole,
-                    Qt.ItemDataRole.UserRole,
-                ],
-            )
+        if refresh_view:
+            loaded_index = self.get_loaded_index_for_reference(image)
+            if loaded_index.isValid():
+                self.dataChanged.emit(
+                    loaded_index,
+                    loaded_index,
+                    [
+                        Qt.ItemDataRole.DecorationRole,
+                        Qt.ItemDataRole.SizeHintRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                        Qt.ItemDataRole.UserRole,
+                    ],
+                )
 
         if (
             refresh_filter

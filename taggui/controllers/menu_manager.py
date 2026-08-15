@@ -848,6 +848,19 @@ class MenuManager:
         )
         edit_menu.addAction(exclude_after_first_action)
 
+        include_all_caption_entries_action = QAction(
+            'Include All Caption Entries',
+            parent=self.main_window,
+        )
+        include_all_caption_entries_action.setToolTip(
+            'Clear caption exclusions and include every caption entry '
+            'for the selected images.'
+        )
+        include_all_caption_entries_action.triggered.connect(
+            self.main_window.include_all_caption_entries
+        )
+        edit_menu.addAction(include_all_caption_entries_action)
+
         edit_menu.addSeparator()
 
         markings_menu = edit_menu.addMenu('Markings')

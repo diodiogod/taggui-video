@@ -484,15 +484,35 @@ class QuickTagController(QObject):
     def _tags_for_path(self, path: Path) -> tuple[list[str], object | None, object | None]:
         context = self._browser_context or self.sort_controller.resolve_browser_context()
         model = context["model"]
+        sidecar_tags: list[str] | None = None
+        try:
+            txt_path = path.with_suffix(".txt")
+            if txt_path.exists():
+                separator = str(getattr(model, "tag_separator", ",") or ",")
+                sidecar_tags = [
+                    tag.strip()
+                    for tag in txt_path.read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    ).split(separator)
+                    if tag.strip() and tag.strip() != "__no_tags__"
+                ]
+        except (OSError, UnicodeError, TypeError):
+            sidecar_tags = None
         try:
             row = model.get_index_for_path(path)
             if row >= 0:
                 index = model.index(row, 0)
                 image = model.data(index, Qt.ItemDataRole.UserRole)
                 if image is not None and hasattr(image, "tags"):
+                    if sidecar_tags is not None:
+                        image.tags = list(sidecar_tags)
+                        return list(sidecar_tags), image, index
                     return [str(tag) for tag in image.tags if str(tag) != "__no_tags__"], image, index
         except Exception:
             pass
+        if sidecar_tags is not None:
+            return list(sidecar_tags), None, None
         database = getattr(model, "_db", None)
         if database is not None:
             try:
@@ -516,6 +536,20 @@ class QuickTagController(QObject):
         sync = getattr(model, "_sync_paginated_db_tags_for_rel_path", None)
         if callable(sync) and root is not None:
             sync(str(path.relative_to(root)), list(tags), txt_path=path.with_suffix(".txt"))
+        try:
+            row = model.get_index_for_path(path)
+            if row >= 0:
+                live_index = model.index(row, 0)
+                live_image = model.data(live_index, Qt.ItemDataRole.UserRole)
+                if live_image is not None and hasattr(live_image, "tags"):
+                    live_image.tags = list(tags)
+                    model.dataChanged.emit(
+                        live_index,
+                        live_index,
+                        [Qt.ItemDataRole.UserRole, Qt.ItemDataRole.ToolTipRole],
+                    )
+        except (RuntimeError, TypeError, ValueError):
+            pass
 
     def _show_current(self, *, allow_decided: bool = False):
         if not self.active or self.queue is None:
@@ -656,7 +690,15 @@ class QuickTagController(QObject):
         path = self._current_path()
         if path is None:
             return False
-        old_tags, image, index = self._tags_for_path(path)
+        # Quick Tag is additive.  Keep the tags that were displayed when this
+        # image was opened as a second source of truth while the model is being
+        # refreshed.  This matters when returning to an already edited image:
+        # a paginated/model reset can briefly expose an older Image.tags list
+        # even though the sidecar already contains the previous shortcuts.
+        loaded_tags, image, index = self._tags_for_path(path)
+        old_tags = merge_ordered_tags(self._existing_tags, loaded_tags)
+        if self._pending_original_tags is not None:
+            old_tags = merge_ordered_tags(old_tags, self._pending_original_tags)
         if not self._pending_tags:
             record = QuickTagHistoryRecord(
                 self.position,

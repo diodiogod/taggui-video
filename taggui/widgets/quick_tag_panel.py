@@ -312,10 +312,16 @@ class QuickTagPanel(QDockWidget):
 
         mapping_buttons = QHBoxLayout()
         self.add_mapping_button = QPushButton("＋ Add tag shortcut")
+        self.sort_mapping_button = QPushButton("A–Z")
         self.remove_mapping_button = QPushButton("Remove")
         self.add_mapping_button.setMinimumWidth(104)
+        self.sort_mapping_button.setMinimumWidth(48)
+        self.sort_mapping_button.setToolTip(
+            "Reorder tag shortcuts alphabetically (your order is otherwise preserved)"
+        )
         self.remove_mapping_button.setMinimumWidth(64)
         mapping_buttons.addWidget(self.add_mapping_button)
+        mapping_buttons.addWidget(self.sort_mapping_button)
         mapping_buttons.addStretch(1)
         mapping_buttons.addWidget(self.remove_mapping_button)
         layout.addLayout(mapping_buttons)
@@ -358,6 +364,7 @@ class QuickTagPanel(QDockWidget):
         self.copy_profile_button.clicked.connect(self._copy_profile)
         self.delete_profile_button.clicked.connect(self._delete_profile)
         self.add_mapping_button.clicked.connect(self._add_mapping)
+        self.sort_mapping_button.clicked.connect(self._sort_mappings_alphabetically)
         self.remove_mapping_button.clicked.connect(self._remove_mapping)
         self.source_combo.currentIndexChanged.connect(self._schedule_save)
         for widget in (self.subfolders_check, self.videos_check, self.fullscreen_check):
@@ -553,6 +560,31 @@ class QuickTagPanel(QDockWidget):
         )
         self.mapping_table.setCellWidget(row, 3, remove)
 
+    def _sort_mappings_alphabetically(self):
+        """Apply an explicit A–Z order without changing shortcut assignments."""
+        mappings: list[QuickTagMapping] = []
+        for row in range(self.mapping_table.rowCount()):
+            key_button = self.mapping_table.cellWidget(row, 0)
+            tag_item = self.mapping_table.item(row, 1)
+            color_button = self.mapping_table.cellWidget(row, 2)
+            if tag_item is None:
+                continue
+            mappings.append(
+                QuickTagMapping(
+                    id=str(tag_item.data(Qt.ItemDataRole.UserRole) or new_quick_tag_id("tag")),
+                    key=key_button.key if isinstance(key_button, QuickSortKeyButton) else "",
+                    tag=tag_item.text().strip(),
+                    color=str(
+                        color_button.property("quick_tag_color")
+                        if isinstance(color_button, QPushButton)
+                        else "#62E7D8"
+                    ),
+                )
+            )
+        mappings.sort(key=lambda mapping: mapping.tag.casefold())
+        self._populate_table(mappings)
+        self._schedule_save()
+
     @staticmethod
     def _refresh_color_button(button: QPushButton):
         color = QColor(str(button.property("quick_tag_color") or "#62E7D8"))
@@ -737,7 +769,7 @@ class QuickTagPanel(QDockWidget):
 
     def _remove_row_by_id(self, mapping_id: str):
         for row in range(self.mapping_table.rowCount()):
-            item = self.mapping_table.item(row)
+            item = self.mapping_table.item(row, 1)
             if item is not None and str(item.data(Qt.ItemDataRole.UserRole)) == mapping_id:
                 self.mapping_table.removeRow(row)
                 self._schedule_save()
