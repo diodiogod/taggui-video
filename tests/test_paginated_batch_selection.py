@@ -6,7 +6,7 @@ import pytest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QItemSelectionModel, QStringListModel, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QRect, QStringListModel, Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication, QListView
 
@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / 'taggui'))
 
 from models.image_batch import ImageBatchItem, ImageBatchView, PaginatedImageBatch
 from models.image_list_model import ImageListModel
-from utils.image import Image
+from utils.image import Image, ImageMarking, Marking
 from utils.image_index_db import ImageIndexDB
 from widgets.image_list_view_paint_selection_mixin import (
     ImageListViewPaintSelectionMixin,
@@ -475,6 +475,41 @@ def test_unloaded_batch_item_can_persist_generated_tags(tmp_path):
         assert media_path.with_suffix('.txt').read_text(encoding='utf-8') == (
             'generated, tag'
         )
+    finally:
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
+
+
+def test_bulk_crop_refresh_syncs_loaded_page_object(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    media_path = tmp_path / 'cropped.png'
+    media_path.write_bytes(b'updated media')
+    model = ImageListModel(256, ', ')
+    loaded_image = Image(
+        media_path,
+        (100, 100),
+        crop=QRect(10, 10, 50, 50),
+        markings=[
+            Marking('watermark', ImageMarking.HINT, QRect(70, 70, 20, 20)),
+        ],
+    )
+    batch_image = Image(media_path, (100, 100), markings=[])
+
+    model._paginated_mode = True
+    model._directory_path = tmp_path
+    model._total_count = 1
+    model._pages = {0: [loaded_image]}
+    model._page_load_order = [0]
+
+    try:
+        assert model.refresh_image_after_file_change(
+            ImageBatchItem(batch_image),
+            dimensions=(50, 50),
+        )
+        assert loaded_image.crop is None
+        assert loaded_image.markings == []
+        assert loaded_image.dimensions == (50, 50)
     finally:
         model.shutdown_background_workers()
         model.deleteLater()

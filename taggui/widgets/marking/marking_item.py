@@ -181,6 +181,21 @@ class MarkingItem(QGraphicsRectItem):
         MarkingItem.handle_selected = self.handleAt(event.pos())
         if (event.button() == Qt.MouseButton.LeftButton and
             MarkingItem.handle_selected != RectPosition.NONE):
+            scene = self.scene()
+            if scene is not None:
+                additive_selection = bool(
+                    event.modifiers()
+                    & (
+                        Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.MetaModifier
+                    )
+                )
+                if not additive_selection:
+                    scene.clearSelection()
+            self.setSelected(True)
+            if self.image_view is not None:
+                self.image_view._last_interacted_marking = self
+                self.image_view.setFocus(Qt.FocusReason.MouseFocusReason)
             source_model = self._proxy_source_model()
             if source_model is not None:
                 source_model.add_image_to_undo_stack(

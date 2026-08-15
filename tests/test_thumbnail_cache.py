@@ -4,6 +4,7 @@ import sys
 import threading
 from types import MethodType
 
+from PySide6.QtCore import QRect
 
 ROOT = Path(__file__).resolve().parents[1]
 TAGGUI_ROOT = ROOT / "taggui"
@@ -28,6 +29,21 @@ def test_cache_probe_does_not_create_bucket_or_decode(tmp_path):
     cache_path.parent.mkdir()
     cache_path.touch()
     assert cache.has_thumbnail(image_path, 123.0, 512)
+
+
+def test_cropped_thumbnail_uses_a_distinct_cache_key(tmp_path):
+    cache = ThumbnailCache.__new__(ThumbnailCache)
+    image_path = tmp_path / "source.jpg"
+
+    full_key = cache._get_cache_key(image_path, 123.0, 512)
+    crop_key = cache._get_cache_key(
+        image_path,
+        123.0,
+        512,
+        QRect(10, 20, 300, 200),
+    )
+
+    assert full_key != crop_key
 
 
 def test_thumbnail_future_cleanup_handles_fast_and_replaced_tasks(tmp_path):

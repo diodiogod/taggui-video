@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget,
                                QListView, QListWidget, QListWidgetItem,
                                QMenu, QMessageBox, QVBoxLayout, QFrame, QPushButton,
                                QWidget, QStyledItemDelegate, QToolTip, QStyle, QStyleOptionViewItem,
-                               QProgressBar)
+                               QProgressBar, QSizeGrip, QSizePolicy, QSplitter)
 from pyparsing import (CaselessKeyword, CaselessLiteral, Combine, Group, OpAssoc,
                        Optional, ParseException, QuotedString, Suppress, Word,
                        infix_notation, nums, one_of, printables)
@@ -91,9 +91,29 @@ class HoverSelectableListWidget(QListWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._hover_selection_in_progress = False
+        self.setAutoScroll(False)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.itemEntered.connect(self._set_hover_current_item)
+
+    def _select_hovered_item(self, item):
+        if item is None:
+            return
+
+        # Selecting an item normally asks QListView to ensure that the current
+        # item is visible. That is useful for keyboard navigation, but it makes
+        # a hover-only menu jump while the pointer is moving through a list
+        # that has already been scrolled.
+        scrollbar = self.verticalScrollBar()
+        scroll_value = scrollbar.value()
+        self._hover_selection_in_progress = True
+        try:
+            self.setCurrentItem(item)
+        finally:
+            self._hover_selection_in_progress = False
+        if scrollbar.value() != scroll_value:
+            scrollbar.setValue(scroll_value)
 
     def mouseMoveEvent(self, event):
         try:
@@ -102,18 +122,33 @@ class HoverSelectableListWidget(QListWidget):
             hover_pos = event.pos()
         hovered_item = self.itemAt(hover_pos)
         if hovered_item is not None:
-            self.setCurrentItem(hovered_item)
+            self._select_hovered_item(hovered_item)
         super().mouseMoveEvent(event)
 
     def _set_hover_current_item(self, item):
-        if item is not None:
-            self.setCurrentItem(item)
+        self._select_hovered_item(item)
+
+    def wheelEvent(self, event):
+        # Keep wheel input inside the popup instead of allowing it to reach
+        # the image list when the pointer is over a menu list at its boundary.
+        super().wheelEvent(event)
+        event.accept()
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
+        if self._hover_selection_in_progress:
+            return
+        super().scrollTo(index, hint)
 
 
 class FilterSuggestionPopup(QFrame):
     template_selected = Signal(str, bool)
     history_selected = Signal(str)
     clear_history_requested = Signal()
+
+    _MINIMUM_WIDTH = 280
+    _FILTER_MINIMUM_HEIGHT = 108
+    _HISTORY_MINIMUM_HEIGHT = 52
+    _SIZE_GRIP_SIZE = 14
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
@@ -130,11 +165,11 @@ class FilterSuggestionPopup(QFrame):
                 background: transparent;
                 border: none;
                 outline: none;
-                padding: 4px;
+                padding: 2px;
             }
             QListWidget::item {
-                padding: 8px;
-                margin: 2px 0px;
+                padding: 5px 6px;
+                margin: 1px 0px;
                 border-radius: 6px;
             }
             QListWidget::item:hover {
@@ -145,54 +180,116 @@ class FilterSuggestionPopup(QFrame):
                 background: palette(highlight);
                 color: palette(highlighted-text);
             }
+            QSplitter#filterSuggestionSplitter {
+                background: transparent;
+            }
+            QSplitter#filterSuggestionSplitter::handle:vertical {
+                height: 6px;
+                margin: 0px 8px;
+                background: palette(mid);
+                border-radius: 3px;
+            }
+            QSplitter#filterSuggestionSplitter::handle:vertical:hover {
+                background: palette(highlight);
+            }
             """
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
 
-        filters_label = QLabel('Filters', self)
-        filters_label.setStyleSheet('font-weight: 600; padding: 2px 4px;')
-        layout.addWidget(filters_label)
+        self._session_size = None
+        self._session_splitter_ratio = None
+        self._applying_size = False
+        self._applying_splitter_sizes = False
+        self._has_history_items = False
+        self.setMinimumWidth(self._MINIMUM_WIDTH)
 
-        self.list_widget = HoverSelectableListWidget(self)
+        filters_panel = QWidget(self)
+        filters_layout = QVBoxLayout(filters_panel)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
+        filters_layout.setSpacing(2)
+
+        filters_label = QLabel('Filters', filters_panel)
+        filters_label.setStyleSheet('font-weight: 600; padding: 1px 2px;')
+        filters_layout.addWidget(filters_label)
+
+        self.list_widget = HoverSelectableListWidget(filters_panel)
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list_widget.setUniformItemSizes(False)
+        self.list_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.list_widget.setMinimumHeight(self._FILTER_MINIMUM_HEIGHT)
         self.list_widget.itemClicked.connect(self._choose_item)
         self.list_widget.itemActivated.connect(self._choose_item)
-        self._template_row_height = 44
-        self.list_widget.setStyleSheet('margin-left: 10px;')
-        layout.addWidget(self.list_widget)
+        self._template_row_height = 40
+        self.list_widget.setStyleSheet('margin-left: 2px;')
+        filters_layout.addWidget(self.list_widget, 1)
 
         for title, description, template, defer_filter in FILTER_TEMPLATE_SPECS:
             item = QListWidgetItem(f'{title}\n{description}')
             item.setData(Qt.ItemDataRole.UserRole, (template, defer_filter))
-            item.setSizeHint(QSize(0, 44))
+            item.setSizeHint(QSize(0, self._template_row_height))
             self.list_widget.addItem(item)
 
-        self.history_header_widget = QWidget(self)
+        history_panel = QWidget(self)
+        history_layout = QVBoxLayout(history_panel)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        history_layout.setSpacing(2)
+
+        self.history_header_widget = QWidget(history_panel)
         history_header = QHBoxLayout(self.history_header_widget)
         history_header.setContentsMargins(0, 0, 0, 0)
-        history_label = QLabel('History', self)
-        history_label.setStyleSheet('font-weight: 600; padding: 2px 4px;')
+        history_label = QLabel('History', history_panel)
+        history_label.setStyleSheet('font-weight: 600; padding: 1px 2px;')
         history_header.addWidget(history_label)
         history_header.addStretch()
-        self.clear_history_button = QPushButton('Clear', self)
+        self.clear_history_button = QPushButton('Clear', history_panel)
         self.clear_history_button.setFlat(True)
         self.clear_history_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_history_button.clicked.connect(self.clear_history_requested.emit)
         history_header.addWidget(self.clear_history_button)
-        layout.addWidget(self.history_header_widget)
+        history_layout.addWidget(self.history_header_widget)
 
-        self.history_list_widget = HoverSelectableListWidget(self)
+        self.history_list_widget = HoverSelectableListWidget(history_panel)
         self.history_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.history_list_widget.setUniformItemSizes(True)
+        self.history_list_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.history_list_widget.setMinimumHeight(self._HISTORY_MINIMUM_HEIGHT)
         self.history_list_widget.itemClicked.connect(self._choose_history_item)
         self.history_list_widget.itemActivated.connect(self._choose_history_item)
-        self._history_row_height = 28
-        self.history_list_widget.setStyleSheet('margin-left: 10px;')
-        layout.addWidget(self.history_list_widget)
+        self._history_row_height = 26
+        self.history_list_widget.setStyleSheet('margin-left: 2px;')
+        history_layout.addWidget(self.history_list_widget, 1)
+
+        self._filters_panel = filters_panel
+        self._history_panel = history_panel
+        self._splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self._splitter.setObjectName('filterSuggestionSplitter')
+        self._splitter.setHandleWidth(6)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(filters_panel)
+        self._splitter.addWidget(history_panel)
+        splitter_handle = self._splitter.handle(1)
+        splitter_handle.setCursor(Qt.CursorShape.SplitVCursor)
+        splitter_handle.setToolTip('Resize filter and history panels')
+        self._splitter.splitterMoved.connect(self._remember_splitter_ratio)
+        layout.addWidget(self._splitter, 1)
+
+        self._size_grip = QSizeGrip(self)
+        self._size_grip.setFixedSize(self._SIZE_GRIP_SIZE, self._SIZE_GRIP_SIZE)
+        self._size_grip.setToolTip('Resize filter popup')
+        grip_layout = QHBoxLayout()
+        grip_layout.setContentsMargins(0, 0, 0, 0)
+        grip_layout.addStretch()
+        grip_layout.addWidget(self._size_grip)
+        layout.addLayout(grip_layout)
 
     def _choose_item(self, item: QListWidgetItem):
         payload = item.data(Qt.ItemDataRole.UserRole)
@@ -212,55 +309,126 @@ class FilterSuggestionPopup(QFrame):
         for text in items:
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, text)
+            item.setSizeHint(QSize(0, self._history_row_height))
             self.history_list_widget.addItem(item)
         has_items = bool(items)
+        self._has_history_items = has_items
+        self._history_panel.setVisible(has_items)
         self.history_header_widget.setVisible(has_items)
         self.history_list_widget.setVisible(has_items)
         self.clear_history_button.setVisible(has_items)
+        self.history_list_widget.setMinimumHeight(
+            self._HISTORY_MINIMUM_HEIGHT if has_items else 0
+        )
+
+    def _minimum_popup_height(self) -> int:
+        # Account for the compact panel headers, splitter handle, outer
+        # spacing, and the resize grip row.
+        height = (
+            8
+            + 3
+            + self._SIZE_GRIP_SIZE
+            + 22
+            + 2
+            + self._FILTER_MINIMUM_HEIGHT
+            + self._splitter.handleWidth()
+        )
+        if self._has_history_items:
+            height += 22 + 2 + self._HISTORY_MINIMUM_HEIGHT
+        return height
+
+    def _remember_splitter_ratio(self, *_args):
+        if self._applying_splitter_sizes or not self._has_history_items:
+            return
+        sizes = self._splitter.sizes()
+        total = sum(sizes)
+        if total > 0 and sizes[0] > 0:
+            self._session_splitter_ratio = sizes[0] / total
+
+    def _apply_splitter_sizes(self, preferred_filters_height: int, history_height: int):
+        if not self._has_history_items:
+            return
+
+        splitter_height = self._splitter.height()
+        if splitter_height <= 0:
+            return
+
+        if self._session_splitter_ratio is None:
+            filter_section_height = 22 + 2 + preferred_filters_height
+            history_section_height = 22 + 2 + history_height
+            total_preferred = filter_section_height + history_section_height
+            ratio = filter_section_height / total_preferred
+        else:
+            ratio = self._session_splitter_ratio
+
+        ratio = max(0.1, min(0.9, ratio))
+        self._applying_splitter_sizes = True
+        try:
+            self._splitter.setSizes([
+                round(splitter_height * ratio),
+                round(splitter_height * (1.0 - ratio)),
+            ])
+        finally:
+            self._applying_splitter_sizes = False
 
     def show_for(self, line_edit: QLineEdit):
-        width = max(line_edit.width(), 300)
         anchor = line_edit.mapToGlobal(QPoint(0, line_edit.height() + 4))
         screen = QApplication.screenAt(anchor) or line_edit.screen() or QApplication.primaryScreen()
-        available_geometry = screen.availableGeometry() if screen is not None else QRect(anchor.x(), anchor.y(), width, 700)
+        available_geometry = screen.availableGeometry() if screen is not None else QRect(
+            anchor.x(), anchor.y(), self._MINIMUM_WIDTH, 700
+        )
 
         template_rows = min(self.list_widget.count(), 7)
-        preferred_filters_height = max(140, template_rows * self._template_row_height + 10)
+        preferred_filters_height = max(
+            126,
+            template_rows * self._template_row_height + 8,
+        )
 
         history_height = 0
-        if self.history_list_widget.isVisible():
+        if self._has_history_items:
             visible_history_rows = max(2, min(self.history_list_widget.count(), 4))
-            history_height = max(70, visible_history_rows * self._history_row_height + 8)
+            history_height = max(
+                58,
+                visible_history_rows * self._history_row_height + 6,
+            )
 
-        preferred_height = 24 + preferred_filters_height + 16
-        if self.history_list_widget.isVisible():
-            preferred_height += 28 + history_height + 8
+        preferred_height = (
+            8
+            + 3
+            + self._SIZE_GRIP_SIZE
+            + 22
+            + 2
+            + preferred_filters_height
+            + self._splitter.handleWidth()
+        )
+        if self._has_history_items:
+            preferred_height += 22 + 2 + history_height
 
         available_below = max(160, available_geometry.bottom() - anchor.y() - 8)
         available_above = max(160, line_edit.mapToGlobal(QPoint(0, 0)).y() - available_geometry.top() - 8)
         show_above = available_below < preferred_height and available_above > available_below
         available_height = available_above if show_above else available_below
 
-        base_height_without_history = 24 + 120 + 16
-        if self.history_list_widget.isVisible():
-            base_height_without_history += 28 + 60 + 8
-        popup_height = min(preferred_height, max(base_height_without_history, available_height))
+        minimum_height = self._minimum_popup_height()
+        self.setMinimumHeight(minimum_height)
 
-        reserved_history_height = 0
-        if self.history_list_widget.isVisible():
-            reserved_history_height = min(history_height, max(60, popup_height - (24 + 120 + 16 + 28 + 8)))
-            filters_height = max(120, popup_height - (24 + 16 + 28 + 8 + reserved_history_height))
+        if self._session_size is not None:
+            width = max(self._MINIMUM_WIDTH, self._session_size.width())
+            popup_height = max(minimum_height, self._session_size.height())
         else:
-            filters_height = max(120, popup_height - (24 + 16))
+            width = max(line_edit.width(), self._MINIMUM_WIDTH)
+            popup_height = min(preferred_height, max(minimum_height, available_height))
 
-        self.list_widget.setMinimumHeight(filters_height)
-        self.list_widget.setMaximumHeight(filters_height)
+        width = min(width, max(self._MINIMUM_WIDTH, available_geometry.width()))
+        popup_height = min(popup_height, max(minimum_height, available_height))
 
-        if self.history_list_widget.isVisible():
-            self.history_list_widget.setMinimumHeight(reserved_history_height)
-            self.history_list_widget.setMaximumHeight(reserved_history_height)
-
-        self.resize(width, popup_height)
+        self._applying_size = True
+        try:
+            self.resize(width, popup_height)
+            self.layout().activate()
+            self._apply_splitter_sizes(preferred_filters_height, history_height)
+        finally:
+            self._applying_size = False
         if show_above:
             popup_pos = line_edit.mapToGlobal(QPoint(0, -self.height() - 4))
         else:
@@ -273,6 +441,11 @@ class FilterSuggestionPopup(QFrame):
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
             self.list_widget.setFocus()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.isVisible() and not self._applying_size:
+            self._session_size = self.size()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:

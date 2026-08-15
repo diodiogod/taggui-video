@@ -22,6 +22,40 @@ class Marking:
     confidence: float = 1.0
 
 
+def transform_markings_for_crop(
+    markings: list[Marking],
+    crop_rect: QRect,
+) -> list[Marking]:
+    """Move and clip markings into the coordinate space of a crop.
+
+    A destructive crop moves the image origin to ``crop_rect.topLeft()``.
+    Markings that only existed outside the crop are dropped; markings that
+    cross the crop boundary are retained with their visible part clipped.
+    """
+    crop = QRect(crop_rect).normalized()
+    if crop.width() <= 0 or crop.height() <= 0:
+        return []
+
+    new_image_bounds = QRect(0, 0, crop.width(), crop.height())
+    transformed: list[Marking] = []
+    for marking in markings or []:
+        if marking.type in {ImageMarking.CROP, ImageMarking.NONE}:
+            continue
+        translated = QRect(marking.rect).translated(-crop.x(), -crop.y())
+        visible_rect = translated.intersected(new_image_bounds)
+        if visible_rect.width() <= 0 or visible_rect.height() <= 0:
+            continue
+        transformed.append(
+            Marking(
+                label=str(marking.label or ''),
+                type=marking.type,
+                rect=visible_rect,
+                confidence=float(getattr(marking, 'confidence', 1.0) or 1.0),
+            )
+        )
+    return transformed
+
+
 @dataclass
 class Image:
     path: Path

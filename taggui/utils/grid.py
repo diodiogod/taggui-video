@@ -64,6 +64,18 @@ class Grid:
         self.aspect_ratio = target_dimension.get_noteable_aspect_ratio(
             self.target.width(), self.target.height())
 
+    def __eq__(self, other):
+        if not isinstance(other, Grid):
+            return NotImplemented
+        return (
+            self.screen == other.screen
+            and self.visible == other.visible
+            and self.target == other.target
+            and self.scale_x == other.scale_x
+            and self.scale_y == other.scale_y
+            and self.aspect_ratio == other.aspect_ratio
+        )
+
     def is_visible_equal_screen_size(self) -> bool:
         return self.screen.size() == self.visible
 

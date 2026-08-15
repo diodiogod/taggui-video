@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from PIL import Image
 from PySide6.QtCore import QRect
+from utils.media_file_lock import get_media_file_lock
 from utils.sidecar import existing_json_sidecar_paths_for_media, sidecar_backup_path
 from utils.video.ffmpeg_gpu import ffmpeg_base_args
 
@@ -48,12 +49,23 @@ def apply_crop_to_image(image_path: Path, crop_rect: QRect) -> tuple[bool, str]:
         (success, message) tuple
     """
     try:
+        with get_media_file_lock(image_path):
+            return _apply_crop_to_image_locked(image_path, crop_rect)
+    except Exception as e:
+        return False, f"Error cropping {image_path.name}: {str(e)}"
+
+
+def _apply_crop_to_image_locked(image_path: Path, crop_rect: QRect) -> tuple[bool, str]:
+    """Apply an image crop while the caller owns the per-file lock."""
+    try:
         # Create backup first
         if not create_backup(image_path):
             return False, f"Failed to create backup for {image_path.name}"
 
-        # Open image
-        img = Image.open(image_path)
+        # Load the source fully before replacing it. Keeping the file open
+        # while saving over it can race readers on Windows.
+        with Image.open(image_path) as source:
+            img = source.copy()
 
         # Convert QRect to PIL crop box (left, top, right, bottom)
         # QRect uses (x, y, width, height), PIL uses (left, top, right, bottom)
@@ -77,6 +89,8 @@ def apply_crop_to_image(image_path: Path, crop_rect: QRect) -> tuple[bool, str]:
             save_kwargs['optimize'] = True
 
         cropped.save(image_path, **save_kwargs)
+        cropped.close()
+        img.close()
 
         return True, f"Cropped {image_path.name} to {crop_rect.width()}x{crop_rect.height()}"
 
@@ -95,13 +109,21 @@ def apply_crop_to_video(video_path: Path, crop_rect: QRect) -> tuple[bool, str]:
         (success, message) tuple
     """
     try:
+        with get_media_file_lock(video_path):
+            return _apply_crop_to_video_locked(video_path, crop_rect)
+    except Exception as e:
+        return False, f"Error cropping {video_path.name}: {str(e)}"
+
+
+def _apply_crop_to_video_locked(video_path: Path, crop_rect: QRect) -> tuple[bool, str]:
+    """Apply a video crop while the caller owns the per-file lock."""
+    temp_output = video_path.with_suffix('.temp' + video_path.suffix)
+    try:
         # Create backup first
         if not create_backup(video_path):
             return False, f"Failed to create backup for {video_path.name}"
 
         # Create temp output path
-        temp_output = video_path.with_suffix('.temp' + video_path.suffix)
-
         # Build ffmpeg crop filter
         # Format: crop=width:height:x:y
         crop_filter = f"crop={crop_rect.width()}:{crop_rect.height()}:{crop_rect.x()}:{crop_rect.y()}"

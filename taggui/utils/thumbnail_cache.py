@@ -181,7 +181,7 @@ class ThumbnailCache:
             print(f'Cache migration failed: {e}')
             print('Cache will be rebuilt at new location')
 
-    def _get_cache_key(self, file_path: Path, mtime: float, size: int) -> str:
+    def _get_cache_key(self, file_path: Path, mtime: float, size: int, crop=None) -> str:
         """
         Generate cache key from file path, modification time, and thumbnail size.
 
@@ -193,8 +193,15 @@ class ThumbnailCache:
         Returns:
             Cache key as hex string
         """
-        # Use path + mtime + size as key (so modified files get new thumbnails)
-        key_string = f"{file_path}_{mtime}_{size}"
+        # Keep full-image keys backward-compatible, but separate cropped
+        # thumbnails so a crop cannot poison the normal image preview cache.
+        crop_suffix = ''
+        if crop is not None:
+            try:
+                crop_suffix = f"_crop_{','.join(str(value) for value in crop.getRect())}"
+            except Exception:
+                crop_suffix = f'_crop_{crop}'
+        key_string = f"{file_path}_{mtime}_{size}{crop_suffix}"
         return hashlib.md5(key_string.encode()).hexdigest()
 
     def _get_cache_path(self, cache_key: str, *, ensure_parent: bool = False) -> Path:
@@ -206,7 +213,7 @@ class ThumbnailCache:
             cache_subdir.mkdir(parents=True, exist_ok=True)
         return cache_subdir / f"{cache_key}.webp"
 
-    def get_thumbnail(self, file_path: Path, mtime: float, size: int) -> QIcon | None:
+    def get_thumbnail(self, file_path: Path, mtime: float, size: int, crop=None) -> QIcon | None:
         """
         Get cached thumbnail if it exists.
 
@@ -221,7 +228,7 @@ class ThumbnailCache:
         if not self.enabled:
             return None
 
-        cache_key = self._get_cache_key(file_path, mtime, size)
+        cache_key = self._get_cache_key(file_path, mtime, size, crop)
         cache_path = self._get_cache_path(cache_key)
 
         if not cache_path.exists():
@@ -242,28 +249,38 @@ class ThumbnailCache:
                 pass
             return None
 
-    def has_thumbnail(self, file_path: Path, mtime: float, size: int) -> bool:
+    def has_thumbnail(self, file_path: Path, mtime: float, size: int, crop=None) -> bool:
         """Return whether a cache entry exists without decoding it."""
         if not self.enabled:
             return False
 
-        cache_key = self._get_cache_key(file_path, mtime, size)
+        cache_key = self._get_cache_key(file_path, mtime, size, crop)
         return self._get_cache_path(cache_key).is_file()
 
-    def save_thumbnail(self, file_path: Path, mtime: float, size: int, icon: QIcon):
+    def invalidate(self, file_path: Path, mtime: float, size: int, crop=None):
+        """Remove one cached thumbnail variant if it exists."""
+        try:
+            cache_key = self._get_cache_key(file_path, mtime, size, crop)
+            cache_path = self._get_cache_path(cache_key)
+            if cache_path.exists():
+                cache_path.unlink()
+        except OSError:
+            pass
+
+    def save_thumbnail(self, file_path: Path, mtime: float, size: int, icon: QIcon, crop=None):
         """Save thumbnail to cache from QIcon (DEPRECATED — prefer save_thumbnail_qimage)."""
         if not self.enabled or icon.isNull():
             return
         try:
             pixmap = icon.pixmap(size, size)
             if not pixmap.isNull():
-                cache_key = self._get_cache_key(file_path, mtime, size)
+                cache_key = self._get_cache_key(file_path, mtime, size, crop)
                 cache_path = self._get_cache_path(cache_key, ensure_parent=True)
                 pixmap.save(str(cache_path), 'WEBP', quality=85)
         except Exception as e:
             print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
 
-    def save_thumbnail_qimage(self, file_path: Path, mtime: float, size: int, qimage):
+    def save_thumbnail_qimage(self, file_path: Path, mtime: float, size: int, qimage, crop=None):
         """Save thumbnail to cache from QImage (thread-safe, no QPixmap needed).
 
         Unlike save_thumbnail(), this method uses only QImage which is safe
@@ -275,7 +292,7 @@ class ThumbnailCache:
         if qimage is None or qimage.isNull():
             return
 
-        cache_key = self._get_cache_key(file_path, mtime, size)
+        cache_key = self._get_cache_key(file_path, mtime, size, crop)
         cache_path = self._get_cache_path(cache_key, ensure_parent=True)
 
         try:

@@ -19,7 +19,12 @@ from utils.settings import (
     VIDEO_CONTROLS_VISIBILITY_OFF,
 )
 from models.proxy_image_list_model import ProxyImageListModel
-from utils.image import Image, ImageMarking, Marking
+from utils.image import (
+    Image,
+    ImageMarking,
+    Marking,
+    transform_markings_for_crop,
+)
 from utils.ideogram_caption import (
     IdeogramCaptionError,
     bbox_to_pixel_rect,
@@ -490,6 +495,7 @@ class ImageViewer(QWidget):
         self.current_media = None
         self._viewer_model_resetting = False
         self.marking_items: list[MarkingItem] = []
+        self._recalculating_markings = False
         self.ideogram_overlay_items: list[QGraphicsItem] = []
 
         self.view.wheelEvent = self.wheelEvent
@@ -3684,6 +3690,28 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
+    def _invalidate_thumbnail_cache_for_image(self, image, crops=()):
+        """Invalidate full and crop-specific thumbnail variants for an image."""
+        try:
+            from utils.thumbnail_cache import get_thumbnail_cache
+
+            source_model = getattr(
+                self.proxy_image_list_model,
+                'sourceModel',
+                lambda: None,
+            )()
+            cache = get_thumbnail_cache()
+            if not cache.enabled or source_model is None:
+                return
+            mtime = image.path.stat().st_mtime
+            thumb_width = getattr(source_model, 'thumbnail_generation_width', 512)
+            cache.invalidate(image.path, mtime, thumb_width)
+            for crop in crops:
+                if crop is not None:
+                    cache.invalidate(image.path, mtime, thumb_width, crop)
+        except Exception:
+            pass
+
     def _live_hud_item(self):
         """Return the crop HUD only while its underlying Qt item is alive."""
         hud_item = getattr(self, 'hud_item', None)
@@ -3828,6 +3856,14 @@ class ImageViewer(QWidget):
             return
         self.proxy_image_index = QPersistentModelIndex(proxy_index)
         self.current_media = image
+        if not self.is_spawned_viewer:
+            try:
+                # Crop measurements are a transient resize aid, not a
+                # persistent thumbnail overlay. Clear any label left by the
+                # previously selected image before loading this one.
+                self.crop_changed.emit(None)
+            except RuntimeError:
+                pass
         if self.is_spawned_viewer or bool(getattr(image, "is_video", False)):
             self._floating_double_click_return_scale = None
         self._floating_last_auto_double_click_zoom_scale = None
@@ -4518,17 +4554,28 @@ class ImageViewer(QWidget):
     def recalculate_markings(self, ignore: MarkingItem | None = None):
         from widgets.marking import grid
 
-        if self.crop_marking:
-            calculate_grid(self.crop_marking.rect().toRect())
-            if MarkingItem.handle_selected != RectPosition.NONE:
-                # currently editing the crop marking -> update display
-                self.crop_changed.emit(grid)
-        else:
-            calculate_grid(MarkingItem.image_size)
-        for marking in self.marking_items:
-            if marking != ignore:
-                marking.size_changed()
-        self.scene.invalidate()
+        if self._recalculating_markings:
+            return
+        self._recalculating_markings = True
+        try:
+            if self.crop_marking:
+                calculate_grid(self.crop_marking.rect().toRect())
+                crop_resize_active = (
+                    MarkingItem.handle_selected != RectPosition.NONE
+                    and ignore is self.crop_marking
+                    and getattr(ignore, '_drag_press_pos', None) is not None
+                )
+                if crop_resize_active:
+                    # currently editing the crop marking -> update display
+                    self.crop_changed.emit(grid)
+            else:
+                calculate_grid(MarkingItem.image_size)
+            for marking in list(self.marking_items):
+                if marking != ignore:
+                    marking.size_changed()
+            self.scene.invalidate()
+        finally:
+            self._recalculating_markings = False
 
     def refresh_marking_overlays(self, image: Image | None = None):
         """Add missing marking graphics for the currently displayed image."""
@@ -4562,7 +4609,7 @@ class ImageViewer(QWidget):
 
     def rebuild_marking_overlays(self, image: Image | None = None):
         """Rebuild marking graphics after metadata history is restored."""
-        if not self.proxy_image_index.isValid():
+        if self.proxy_image_index is None or not self.proxy_image_index.isValid():
             return
         current_image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
         if current_image is None or (image is not None and current_image is not image):
@@ -4637,6 +4684,7 @@ class ImageViewer(QWidget):
                     pass
         self.marking_items.clear()
         self.crop_marking = None
+        self.view._last_interacted_marking = None
 
     def _scene_marking_items(self) -> list[MarkingItem]:
         return [
@@ -5118,8 +5166,14 @@ class ImageViewer(QWidget):
         if marking.rect_type == ImageMarking.CROP:
             self.inhibit_reload_image = True
             try:
+                previous_crop = image.crop
                 image.thumbnail = None
+                image.thumbnail_qimage = None
                 image.crop = marking.rect().toRect() # ensure int!
+                self._invalidate_thumbnail_cache_for_image(
+                    image,
+                    crops=(previous_crop, image.crop),
+                )
                 image.target_dimension = grid.target
                 # Persist first so a later UI-only failure cannot lose the crop.
                 source_model.write_meta_to_disk(image)
@@ -5137,13 +5191,19 @@ class ImageViewer(QWidget):
                 except RuntimeError:
                     pass
                 try:
-                    source_model.changePersistentIndex(
-                        self.proxy_image_index, self.proxy_image_index)
-                    source_model.dataChanged.emit(
-                        self.proxy_image_index, self.proxy_image_index,
-                        [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
-                         Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
-                except RuntimeError:
+                    source_index = source_model.get_loaded_index_for_reference(image)
+                    if source_index.isValid():
+                        source_model.dataChanged.emit(
+                            source_index,
+                            source_index,
+                            [
+                                Qt.ItemDataRole.DecorationRole,
+                                Qt.ItemDataRole.SizeHintRole,
+                                Qt.ToolTipRole,
+                                Qt.ItemDataRole.UserRole,
+                            ],
+                        )
+                except (RuntimeError, AttributeError):
                     pass
             finally:
                 self.inhibit_reload_image = False
@@ -5214,6 +5274,17 @@ class ImageViewer(QWidget):
             for item in self.scene.selectedItems()
             if isinstance(item, MarkingItem)
         ]
+        if not selected_markings:
+            last_marking = getattr(self.view, '_last_interacted_marking', None)
+            try:
+                last_marking_is_live = (
+                    isinstance(last_marking, MarkingItem)
+                    and last_marking.scene() is self.scene
+                )
+            except RuntimeError:
+                last_marking_is_live = False
+            if last_marking_is_live:
+                selected_markings = [last_marking]
         if selected_markings:
             self.delete_markings(selected_markings)
             return True
@@ -5395,24 +5466,31 @@ class ImageViewer(QWidget):
         )
         for item in items:
             if item.rect_type == ImageMarking.CROP:
-                self.crop_marking = None
+                if item in self.marking_items:
+                    self.marking_items.remove(item)
+                if self.crop_marking is item:
+                    self.crop_marking = None
+                previous_crop = image.crop
                 image.thumbnail = None
+                image.thumbnail_qimage = None
                 image.crop = None
+                self._invalidate_thumbnail_cache_for_image(
+                    image,
+                    crops=(previous_crop,),
+                )
                 image.target_dimension = None
                 # Reset HUD when crop is deleted
                 self._clear_hud_crop_if_alive()
                 self.accept_crop_addition.emit(True)
                 calculate_grid(MarkingItem.image_size)
-                source_model.dataChanged.emit(
-                    self.proxy_image_index, self.proxy_image_index,
-                    [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.SizeHintRole,
-                     Qt.ToolTipRole, Qt.ItemDataRole.UserRole])
                 source_model.write_meta_to_disk(image)
             else:
                 if item in self.marking_items:
                     self.marking_items.remove(item)
                 self.label_changed(add_undo=False)
                 source_model.write_meta_to_disk(image)
+            if getattr(self.view, '_last_interacted_marking', None) is item:
+                self.view._last_interacted_marking = None
             self.scene.removeItem(item)
 
     @Slot()
@@ -5444,6 +5522,13 @@ class ImageViewer(QWidget):
         scan_progress.setWindowTitle('Apply Folder Crops')
         scan_progress.setMinimumDuration(250)
         crop_targets: list[tuple[Image, QRect]] = []
+        current_image = (
+            self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
+            if self.proxy_image_index is not None and self.proxy_image_index.isValid()
+            else None
+        )
+        current_path = Path(current_image.path) if current_image is not None else None
+        current_image_was_applied = False
         for position, image_reference in enumerate(image_source, start=1):
             if scan_progress.wasCanceled():
                 scan_progress.close()
@@ -5503,17 +5588,48 @@ class ImageViewer(QWidget):
             success, message = apply_crop(Path(image.path), crop_rect)
             if success:
                 succeeded += 1
+                previous_crop = image.crop
+                transformed_markings = transform_markings_for_crop(
+                    image.markings,
+                    crop_rect,
+                )
+                markings_changed = transformed_markings != image.markings
+                image.markings = transformed_markings
                 image.crop = None
                 image.target_dimension = None
                 image.thumbnail = None
-                source_model.write_meta_to_disk(image)
+                image.thumbnail_qimage = None
+                self._invalidate_thumbnail_cache_for_image(
+                    image,
+                    crops=(previous_crop,),
+                )
+                source_model.write_meta_to_disk(image, notify=False)
+                source_model.refresh_image_after_file_change(
+                    image,
+                    dimensions=(crop_rect.width(), crop_rect.height()),
+                    refresh_filter=markings_changed,
+                )
+                if current_path is not None and Path(image.path) == current_path:
+                    current_image_was_applied = True
             else:
                 failures.append(message)
             progress.setValue(position)
 
         progress.close()
-        if succeeded:
-            self.directory_reload_requested.emit()
+        current_image_was_applied = bool(succeeded and current_image_was_applied)
+        current_index = (
+            QPersistentModelIndex(self.proxy_image_index)
+            if current_image_was_applied
+            and self.proxy_image_index is not None
+            and self.proxy_image_index.isValid()
+            else None
+        )
+        if current_image_was_applied:
+            # Remove graphics owned by the replaced image before repainting
+            # the current viewer. Other images are updated in-place above.
+            self._clear_marking_items_from_scene()
+            self._clear_hud_crop_if_alive()
+            self.accept_crop_addition.emit(True)
 
         summary = f'Applied {succeeded} of {target_count} saved crop(s).'
         if canceled:
@@ -5532,6 +5648,8 @@ class ImageViewer(QWidget):
                 'Folder Crop Canceled' if canceled else 'Folder Crop Complete',
                 summary,
             )
+        if current_index is not None:
+            QTimer.singleShot(0, lambda index=current_index: self.load_image(index))
 
     @Slot()
     def apply_crop_to_file(self):
@@ -5546,8 +5664,21 @@ class ImageViewer(QWidget):
             return
 
         # Get current image
+        if self.proxy_image_index is None or not self.proxy_image_index.isValid():
+            QMessageBox.warning(self, "No Image", "The current image is no longer available.")
+            self._clear_marking_items_from_scene()
+            return
         image: Image = self.proxy_image_index.data(Qt.ItemDataRole.UserRole)
-        crop_rect = self.crop_marking.rect().toRect()
+        if image is None:
+            QMessageBox.warning(self, "No Image", "The current image is no longer available.")
+            self._clear_marking_items_from_scene()
+            return
+        try:
+            crop_rect = self.crop_marking.rect().toRect()
+        except RuntimeError:
+            self._clear_marking_items_from_scene()
+            QMessageBox.warning(self, "No Crop", "The crop marking is no longer available.")
+            return
 
         # Warning dialog
         file_type = "video" if image.is_video else "image"
@@ -5585,13 +5716,36 @@ class ImageViewer(QWidget):
         success, message = apply_crop(Path(image.path), crop_rect)
 
         if success:
-            QMessageBox.information(self, "Success", message + "\n\nReloading directory...")
+            QMessageBox.information(self, "Success", message)
             # Clear the crop marking from metadata (since it's now applied)
+            previous_crop = image.crop
+            transformed_markings = transform_markings_for_crop(
+                image.markings,
+                crop_rect,
+            )
+            markings_changed = transformed_markings != image.markings
+            image.markings = transformed_markings
             image.crop = None
             image.target_dimension = None
             image.thumbnail = None
-            self.proxy_image_list_model.sourceModel().write_meta_to_disk(image)
-            # Request directory reload via signal
-            self.directory_reload_requested.emit()
+            image.thumbnail_qimage = None
+            self._invalidate_thumbnail_cache_for_image(
+                image,
+                crops=(previous_crop,),
+            )
+            source_model = self.proxy_image_list_model.sourceModel()
+            source_model.write_meta_to_disk(image, notify=False)
+            source_model.refresh_image_after_file_change(
+                image,
+                dimensions=(crop_rect.width(), crop_rect.height()),
+                refresh_filter=markings_changed,
+            )
+            current_index = QPersistentModelIndex(self.proxy_image_index)
+            # Replace only the current viewer image; the list model receives a
+            # targeted dataChanged notification instead of a folder reload.
+            self._clear_marking_items_from_scene()
+            self._clear_hud_crop_if_alive()
+            self.accept_crop_addition.emit(True)
+            QTimer.singleShot(0, lambda index=current_index: self.load_image(index))
         else:
             QMessageBox.critical(self, "Error", message)

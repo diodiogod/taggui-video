@@ -1,6 +1,6 @@
 """Graphics view for image marking with insertion mode and context menus."""
 
-from PySide6.QtCore import QSize, Qt, QRect
+from PySide6.QtCore import QSize, Qt, QRect, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QIcon, QMouseEvent, QPainter
 from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu, QWidget
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -63,6 +63,8 @@ class ImageGraphicsView(QGraphicsView):
         self._forced_ideogram_resize_item = None
         self._temporarily_raised_marking_item = None
         self._temporarily_disabled_marking_items = []
+        self._last_interacted_marking = None
+        self._suppress_next_floating_context = False
         self.clear_scene()
 
     def _interactive_region_at(self, scene_pos):
@@ -301,6 +303,10 @@ class ImageGraphicsView(QGraphicsView):
         if isinstance(item, MarkingLabel):
             item = item.parentItem().parentItem()
         if isinstance(item, MarkingItem):
+            # MainWindow also listens to the view's context-menu signal. Keep
+            # this right-click consumed even if the chosen action removes the
+            # marking before the floating-viewer handler runs.
+            self._suppress_next_floating_context = True
             menu = QMenu()
             if item.rect_type != ImageMarking.NONE:
                 if item.rect_type == ImageMarking.CROP:
@@ -355,6 +361,14 @@ class ImageGraphicsView(QGraphicsView):
                     lambda: self.image_viewer.delete_markings([item]))
                 menu.addAction(delete_marking_action)
             menu.exec(self.mapToGlobal(pos))
+            QTimer.singleShot(
+                500,
+                lambda view=self: setattr(
+                    view,
+                    '_suppress_next_floating_context',
+                    False,
+                ),
+            )
 
     def clear_scene(self):
         """Use this and not scene().clear() due to resource management."""

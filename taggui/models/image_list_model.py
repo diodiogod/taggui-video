@@ -53,6 +53,7 @@ from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, s
 from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
 from utils.thumbnail_cache import get_thumbnail_cache
+from utils.media_file_lock import synchronized_media_file
 from utils.load_options import LimitedLoadOptions
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
@@ -86,6 +87,17 @@ def _get_imagesize_module():
 _video_lock = threading.Lock()
 # Global lock for thumbnail cache writes (limits I/O contention during scroll).
 _thumbnail_save_lock = threading.Lock()
+
+
+def _thumbnail_crop_key(crop) -> tuple[int, int, int, int] | None:
+    if crop is None:
+        return None
+    try:
+        return tuple(int(value) for value in crop.getRect())
+    except Exception:
+        return None
+
+
 _extensionless_repair_log_lock = threading.Lock()
 _extensionless_repair_log_counts: dict[str, int] = {}
 _mismatched_repair_lock = threading.Lock()
@@ -334,6 +346,12 @@ def _is_legacy_repair_artifact(path: Path) -> bool:
     return False
 
 
+def _is_transient_media_artifact(path: Path) -> bool:
+    """Return whether a file is an app-created backup or temporary output."""
+    name = str(path.name).casefold()
+    return name.endswith('.backup') or Path(name).stem.endswith('.temp')
+
+
 def convert_image_with_ffmpeg(path: Path) -> Path:
     """Convert one unsupported still image to PNG as a last-resort fallback."""
     existing_png = _find_existing_repaired_sibling(path, ('.png',))
@@ -410,6 +428,7 @@ def fallback_decode_qimage(path: Path) -> tuple[QImage | None, tuple[int, int] |
 
     return None, None, path
 
+@synchronized_media_file
 def load_thumbnail_data(
     image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool
 ) -> tuple[QImage | None, bool, tuple[int, int] | None, Path]:
@@ -434,7 +453,12 @@ def load_thumbnail_data(
         if cache.enabled:
             mtime = image_path.stat().st_mtime
             # Get cache path directly and load as QImage (thread-safe)
-            cache_key = cache._get_cache_key(image_path, mtime, thumbnail_width)
+            cache_key = cache._get_cache_key(
+                image_path,
+                mtime,
+                thumbnail_width,
+                crop,
+            )
             cache_path = cache._get_cache_path(cache_key)
 
             cached_qimage = None
@@ -652,7 +676,7 @@ def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
             continue
         # Accept regular files or symlinks (for organized workflows and test datasets)
         if path.is_file() or path.is_symlink():
-            if _is_legacy_repair_artifact(path):
+            if _is_transient_media_artifact(path) or _is_legacy_repair_artifact(path):
                 continue
             file_paths.add(path)
             count += 1
@@ -1167,6 +1191,8 @@ def scan_directory_snapshot(
 
                     if stat_module.S_ISREG(mode) or entry.is_symlink():
                         file_path = Path(entry.path)
+                        if _is_transient_media_artifact(file_path):
+                            continue
                         if repair_extensionless_images and _needs_image_extension_repair(file_path):
                             file_path = repair_extensionless_image_path(
                                 file_path,
@@ -1320,6 +1346,8 @@ def scan_image_paths_in_subtrees(
                         continue
 
                     file_path = Path(entry.path)
+                    if _is_transient_media_artifact(file_path):
+                        continue
                     if repair_extensionless_images and _needs_image_extension_repair(file_path):
                         file_path = repair_extensionless_image_path(
                             file_path,
@@ -1421,6 +1449,8 @@ def repair_extensionless_images_in_directory(
                             pass
 
                     file_path = Path(entry.path)
+                    if _is_transient_media_artifact(file_path):
+                        continue
                     if not _needs_image_extension_repair(file_path):
                         continue
 
@@ -2426,6 +2456,7 @@ class ImageListModel(QAbstractListModel):
         self._pending_page_range = None
         self._page_load_priority_page = None
         self._page_load_priority_until = 0.0
+        self._metadata_filter_refresh_pending = False
         # DISABLED: Cache warming causes UI blocking
         # Cache warming executor: 2 workers for proactive cache building when idle (low priority)
         # Reduced to 1 worker to minimize resource usage during idle warming
@@ -2463,7 +2494,7 @@ class ImageListModel(QAbstractListModel):
 
         # Defer cache writes during scrolling to avoid I/O blocking
         self._is_scrolling = False  # Set by view during active scrolling
-        self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail) to save when idle
+        self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail, crop)
         self._pending_cache_saves_lock = threading.Lock()
         self._pending_db_cache_flags = []  # Batch DB updates for thumbnail_cached flag (file_name strings)
         self._pending_db_cache_flags_lock = threading.Lock()
@@ -4572,7 +4603,12 @@ class ImageListModel(QAbstractListModel):
                     continue
                 try:
                     mtime = image.path.stat().st_mtime
-                    if not cache.has_thumbnail(image.path, mtime, self.thumbnail_generation_width):
+                    if not cache.has_thumbnail(
+                        image.path,
+                        mtime,
+                        self.thumbnail_generation_width,
+                        image.crop,
+                    ):
                         uncached_count += 1
                 except:
                     uncached_count += 1
@@ -4622,7 +4658,12 @@ class ImageListModel(QAbstractListModel):
             if cache.enabled:
                 try:
                     mtime = image.path.stat().st_mtime
-                    if cache.has_thumbnail(image.path, mtime, self.thumbnail_generation_width):
+                    if cache.has_thumbnail(
+                        image.path,
+                        mtime,
+                        self.thumbnail_generation_width,
+                        image.crop,
+                    ):
                         skipped_cache += 1
                         continue  # Don't submit - will be loaded on-demand from cache
                 except Exception:
@@ -4985,10 +5026,10 @@ class ImageListModel(QAbstractListModel):
             # Print and submit all saves
             print(f"[CACHE] Flushing {len(saves_to_submit)} pending cache saves")
 
-            for path, mtime, width, qimage in saves_to_submit:
+            for path, mtime, width, qimage, crop in saves_to_submit:
                 self._save_executor.submit(
                     self._save_thumbnail_worker,
-                    path, mtime, width, qimage
+                    path, mtime, width, qimage, crop
                 )
 
         # Run the ENTIRE flush (including lock acquisition) in executor
@@ -5009,10 +5050,15 @@ class ImageListModel(QAbstractListModel):
                 if img is None or img.path != path:
                     img = next((candidate for candidate in self.images
                                 if candidate.path == path), None)
-                if img is not None:
+                if (
+                    img is not None
+                    and _thumbnail_crop_key(getattr(img, 'crop', None))
+                    == _thumbnail_crop_key(crop)
+                ):
                     if resolved_path != path:
                         img.path = resolved_path
                     img.thumbnail_qimage = qimage
+                    img._thumbnail_crop_key = _thumbnail_crop_key(crop)
                     img._last_thumbnail_was_cached = was_cached
 
                 # DON'T emit dataChanged - let Qt request thumbnails on-demand
@@ -5022,7 +5068,14 @@ class ImageListModel(QAbstractListModel):
             print(f"Error in thumbnail worker for {path}: {e}")
             import traceback
             traceback.print_exc()
-    def _save_thumbnail_worker(self, path: Path, mtime: float, width: int, qimage):
+    def _save_thumbnail_worker(
+        self,
+        path: Path,
+        mtime: float,
+        width: int,
+        qimage,
+        crop=None,
+    ):
         """Worker function that saves thumbnail QImage to disk cache.
 
         Accepts a QImage (thread-safe) instead of QIcon/QPixmap to avoid
@@ -5038,7 +5091,13 @@ class ImageListModel(QAbstractListModel):
         try:
             from utils.thumbnail_cache import get_thumbnail_cache
             with _thumbnail_save_lock:
-                get_thumbnail_cache().save_thumbnail_qimage(path, mtime, width, qimage)
+                get_thumbnail_cache().save_thumbnail_qimage(
+                    path,
+                    mtime,
+                    width,
+                    qimage,
+                    crop,
+                )
 
             # Queue DB update for deferred batch write (when truly idle)
             if self._db and self._directory_path:
@@ -5529,16 +5588,24 @@ class ImageListModel(QAbstractListModel):
                 else:
                     return self._get_placeholder_icon()  # Don't load new ones during drag
 
+            # Check if background thread loaded a QImage for us. A crop change
+            # invalidates any result that was generated for the old rectangle.
+            current_crop_key = _thumbnail_crop_key(getattr(image, 'crop', None))
+            loaded_crop_key = getattr(image, '_thumbnail_crop_key', current_crop_key)
+            if loaded_crop_key != current_crop_key:
+                image.thumbnail = None
+                image.thumbnail_qimage = None
+
             # Check if we already have a QIcon (from cache or previous lazy conversion)
             if image.thumbnail:
                 return image.thumbnail
 
-            # Check if background thread loaded a QImage for us
             if image.thumbnail_qimage and not image.thumbnail_qimage.isNull():
                 # Lazy conversion: QImage → QPixmap → QIcon (on main thread, but only for visible items)
                 pixmap = QPixmap.fromImage(image.thumbnail_qimage)
                 thumbnail = QIcon(pixmap)
                 image.thumbnail = thumbnail
+                image._thumbnail_crop_key = current_crop_key
 
                 # Save to disk cache in background thread if not from cache
                 # Only save if flag is explicitly set AND false (not from cache)
@@ -5553,15 +5620,21 @@ class ImageListModel(QAbstractListModel):
                     if save_qimage and not save_qimage.isNull():
                         if self._is_scrolling:
                             with self._pending_cache_saves_lock:
-                                self._pending_cache_saves.append((image.path, image.path.stat().st_mtime,
-                                                                  self.thumbnail_generation_width, save_qimage))
+                                self._pending_cache_saves.append((
+                                    image.path,
+                                    image.path.stat().st_mtime,
+                                    self.thumbnail_generation_width,
+                                    save_qimage,
+                                    image.crop,
+                                ))
                         else:
                             self._save_executor.submit(
                                 self._save_thumbnail_worker,
                                 image.path,
                                 image.path.stat().st_mtime,
                                 self.thumbnail_generation_width,
-                                save_qimage
+                                save_qimage,
+                                image.crop,
                             )
 
                 return thumbnail
@@ -5583,6 +5656,7 @@ class ImageListModel(QAbstractListModel):
                         pixmap = QPixmap.fromImage(qimage)
                         thumbnail = QIcon(pixmap)
                         image.thumbnail = thumbnail
+                        image._thumbnail_crop_key = current_crop_key
                         image._last_thumbnail_was_cached = was_cached
 
                         # Save to disk cache in background thread if not from cache
@@ -5591,15 +5665,21 @@ class ImageListModel(QAbstractListModel):
                             # Defer during scroll to avoid I/O blocking
                             if self._is_scrolling:
                                 with self._pending_cache_saves_lock:
-                                    self._pending_cache_saves.append((image.path, mtime,
-                                                                      self.thumbnail_generation_width, qimage))
+                                    self._pending_cache_saves.append((
+                                        image.path,
+                                        mtime,
+                                        self.thumbnail_generation_width,
+                                        qimage,
+                                        image.crop,
+                                    ))
                             else:
                                 self._save_executor.submit(
                                     self._save_thumbnail_worker,
                                     image.path,
                                     mtime,
                                     self.thumbnail_generation_width,
-                                    qimage
+                                    qimage,
+                                    image.crop,
                                 )
 
                         return thumbnail
@@ -5612,14 +5692,20 @@ class ImageListModel(QAbstractListModel):
                 return None
 
             # Pagination mode: Async loading with placeholders for smooth scrolling
-            # _thumbnail_futures stores (future, submitted_path) tuples so we can
-            # verify the row still maps to the same image after page eviction.
+            # _thumbnail_futures stores the future, path, and crop signature so
+            # stale results cannot replace a thumbnail after a crop edit.
             with self._thumbnail_lock:
                 # Check if already loading
                 if row in self._thumbnail_futures:
                     entry = self._thumbnail_futures[row]
-                    future, submitted_path = (entry if isinstance(entry, tuple)
-                                              else (entry, None))
+                    if isinstance(entry, tuple):
+                        future = entry[0]
+                        submitted_path = entry[1] if len(entry) > 1 else None
+                        submitted_crop_key = entry[2] if len(entry) > 2 else None
+                    else:
+                        future = entry
+                        submitted_path = None
+                        submitted_crop_key = None
                     if not future.done():
                         # Still loading - return placeholder
                         return self._get_placeholder_icon()
@@ -5627,7 +5713,13 @@ class ImageListModel(QAbstractListModel):
                     try:
                         # Path check: if pages were evicted/reloaded, this row
                         # may now map to a different image.  Discard stale result.
-                        if submitted_path is not None and image.path != submitted_path:
+                        if (
+                            submitted_path is not None
+                            and image.path != submitted_path
+                        ) or (
+                            submitted_crop_key is not None
+                            and submitted_crop_key != current_crop_key
+                        ):
                             del self._thumbnail_futures[row]
                             # Fall through to re-submit below
                         else:
@@ -5637,6 +5729,7 @@ class ImageListModel(QAbstractListModel):
                                 pixmap = QPixmap.fromImage(qimage)
                                 thumbnail = QIcon(pixmap)
                                 image.thumbnail = thumbnail
+                                image._thumbnail_crop_key = current_crop_key
                                 image._last_thumbnail_was_cached = was_cached
 
                                 # Save to cache if needed
@@ -5645,15 +5738,21 @@ class ImageListModel(QAbstractListModel):
                                     # Defer during scroll to avoid I/O blocking
                                     if self._is_scrolling:
                                         with self._pending_cache_saves_lock:
-                                            self._pending_cache_saves.append((image.path, mtime,
-                                                                              self.thumbnail_generation_width, qimage))
+                                            self._pending_cache_saves.append((
+                                                image.path,
+                                                mtime,
+                                                self.thumbnail_generation_width,
+                                                qimage,
+                                                image.crop,
+                                            ))
                                     else:
                                         self._save_executor.submit(
                                             self._save_thumbnail_worker,
                                             image.path,
                                             mtime,
                                             self.thumbnail_generation_width,
-                                            qimage
+                                            qimage,
+                                            image.crop,
                                         )
 
                             del self._thumbnail_futures[row]
@@ -5672,7 +5771,11 @@ class ImageListModel(QAbstractListModel):
                         image.is_video,
                         row
                     )
-                    self._thumbnail_futures[row] = (future, image.path)
+                    self._thumbnail_futures[row] = (
+                        future,
+                        image.path,
+                        current_crop_key,
+                    )
 
                 # Return placeholder immediately (smooth scrolling)
                 # print(f"[DATA DEBUG] Returning PLACEHOLDER for row {row}")
@@ -8533,7 +8636,7 @@ class ImageListModel(QAbstractListModel):
             return
         self.write_meta_to_disk(image)
 
-    def write_meta_to_disk(self, image: Image):
+    def write_meta_to_disk(self, image: Image, *, notify: bool = True):
         # Keep DB rating synchronized even when only metadata changes.
         self._save_rating_to_db(image)
         self.save_review_state_to_db(image)
@@ -8588,6 +8691,8 @@ class ImageListModel(QAbstractListModel):
                 error_message_box.setText(f'Failed to save JSON for {image.path}.')
                 error_message_box.exec()
         self._save_markings_to_db(image)
+        if notify:
+            self._notify_image_metadata_changed(image)
 
     @staticmethod
     def _deduplicate_markings(markings: list[Marking]) -> list[Marking]:
@@ -9620,6 +9725,99 @@ class ImageListModel(QAbstractListModel):
             return index
         return QModelIndex()
 
+    def refresh_image_after_file_change(
+        self,
+        image_reference,
+        *,
+        dimensions: tuple[int, int] | None = None,
+        refresh_filter: bool = False,
+    ) -> bool:
+        """Update one in-memory image after its media file was replaced."""
+        image = self.resolve_image_reference(image_reference)
+        if image is None or not getattr(image, 'path', None):
+            return False
+
+        loaded_index = self.get_loaded_index_for_reference(image)
+        loaded_image = None
+        if loaded_index.isValid():
+            try:
+                candidate = self.data(
+                    loaded_index,
+                    Qt.ItemDataRole.UserRole,
+                )
+                if (
+                    isinstance(candidate, Image)
+                    and candidate.path == image.path
+                    and candidate is not image
+                ):
+                    loaded_image = candidate
+                    # Bulk operations use fresh DB-batch objects. Copy the
+                    # crop-related state into the object currently rendered
+                    # by the list/viewer before notifying Qt.
+                    loaded_image.crop = image.crop
+                    loaded_image.markings = list(image.markings)
+                    loaded_image.target_dimension = image.target_dimension
+                    loaded_image.thumbnail = None
+                    loaded_image.thumbnail_qimage = None
+            except (RuntimeError, AttributeError):
+                loaded_image = None
+
+        target_image = loaded_image or image
+
+        try:
+            stat = target_image.path.stat()
+        except OSError:
+            return False
+
+        if dimensions is None:
+            dimensions = target_image.valid_dimensions()
+        try:
+            width, height = int(dimensions[0]), int(dimensions[1])
+        except (TypeError, IndexError, ValueError):
+            return False
+        if width <= 0 or height <= 0:
+            return False
+
+        target_image.dimensions = (width, height)
+        target_image.file_size = int(stat.st_size)
+        target_image.file_type = target_image.path.suffix.lower().lstrip('.')
+        target_image.mtime = float(stat.st_mtime)
+        target_image.ctime = float(stat.st_ctime)
+        target_image.thumbnail = None
+        target_image.thumbnail_qimage = None
+
+        if self._db and self._directory_path:
+            try:
+                relative_path = str(target_image.path.relative_to(self._directory_path))
+            except ValueError:
+                relative_path = target_image.path.name
+            self._db.save_info(
+                file_name=relative_path,
+                width=width,
+                height=height,
+                is_video=bool(target_image.is_video),
+                mtime=float(stat.st_mtime),
+                video_metadata=getattr(target_image, 'video_metadata', None),
+                rating=float(getattr(target_image, 'rating', 0.0) or 0.0),
+                file_size=int(stat.st_size),
+                file_type=target_image.file_type,
+                ctime=float(stat.st_ctime),
+                reaction_updated_at=getattr(target_image, 'reaction_updated_at', None),
+                review_rank=int(getattr(target_image, 'review_rank', 0) or 0),
+                review_flags=int(getattr(target_image, 'review_flags', 0) or 0),
+                review_updated_at=getattr(target_image, 'review_updated_at', None),
+            )
+
+        # Crop application normally changes dimensions and thumbnails without
+        # changing searchable metadata. Callers that also transform markings
+        # can request the targeted SQL filter refresh.
+        self._notify_image_metadata_changed(
+            target_image,
+            refresh_filter=bool(refresh_filter),
+        )
+        self._schedule_dimensions_updated()
+        return True
+
     def update_image_tags(self, image_index, tags: list[str]):
         image = self.resolve_image_reference(image_index)
         if image is None:
@@ -9652,6 +9850,81 @@ class ImageListModel(QAbstractListModel):
         self.save_reactions_to_db(image)
         self.save_review_state_to_db(image)
         self.refresh_ideogram_caption_index_for_image(image)
+        self._notify_image_metadata_changed(image)
+
+    def _notify_image_metadata_changed(
+        self,
+        image: Image | None,
+        *,
+        refresh_filter: bool = True,
+    ):
+        """Refresh views and paginated SQL results after metadata changes."""
+        if image is None:
+            return
+
+        loaded_index = self.get_loaded_index_for_reference(image)
+        if loaded_index.isValid():
+            self.dataChanged.emit(
+                loaded_index,
+                loaded_index,
+                [
+                    Qt.ItemDataRole.DecorationRole,
+                    Qt.ItemDataRole.SizeHintRole,
+                    Qt.ItemDataRole.ToolTipRole,
+                    Qt.ItemDataRole.UserRole,
+                ],
+            )
+
+        if (
+            refresh_filter
+            and self._paginated_mode
+            and self._db
+            and self._filter_sql
+            and not getattr(self, '_metadata_filter_refresh_pending', False)
+        ):
+            self._metadata_filter_refresh_pending = True
+            QTimer.singleShot(
+                0,
+                self._refresh_paginated_filter_after_metadata_change,
+            )
+
+    def _refresh_paginated_filter_after_metadata_change(self):
+        """Requery loaded pages after a searchable field changes in-place."""
+        self._metadata_filter_refresh_pending = False
+        if not self._paginated_mode or not self._db or not self._filter_sql:
+            return
+
+        try:
+            new_total_count = int(self._db.count(
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+            ))
+        except Exception as exc:
+            print(f'[FILTER] Metadata refresh failed: {exc}')
+            return
+
+        current_pages = sorted(self._pages.keys())
+        last_page = max(
+            0,
+            (new_total_count - 1) // self.PAGE_SIZE,
+        ) if new_total_count else -1
+        old_total_count = int(self._total_count)
+
+        self._advance_page_load_generation()
+        self.beginResetModel()
+        try:
+            self._total_count = new_total_count
+            self._pages.clear()
+            self._page_load_order.clear()
+            for page_num in current_pages:
+                if page_num <= last_page:
+                    self._load_page_sync(page_num)
+        finally:
+            self.endResetModel()
+
+        self._emit_pages_updated()
+        if old_total_count != new_total_count:
+            self.total_count_changed.emit(new_total_count)
 
     @Slot(list, object)
     def add_tags(self, tags: list[str], image_indices):

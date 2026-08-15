@@ -6034,6 +6034,8 @@ class MainWindow(QMainWindow):
     def _on_main_viewer_context_menu_spawn(self, pos):
         """Main-view right-click behavior with compare-exit support."""
         view = self.image_viewer.view
+        if view is not None and getattr(view, '_suppress_next_floating_context', False):
+            return
         global_pos = view.mapToGlobal(pos) if view is not None else QCursor.pos()
         if self._viewer_is_fullscreen(self.image_viewer):
             menu = QMenu(self)
@@ -6045,19 +6047,21 @@ class MainWindow(QMainWindow):
 
         try:
             scene_pos = view.mapToScene(pos)
-            item = view.scene().itemAt(scene_pos, view.transform())
+            scene_items = view.scene().items(scene_pos)
         except Exception:
-            self.spawn_floating_viewer()
+            # A context click must never fall through to floating-viewer
+            # creation when the scene is being rebuilt.
             return
 
         from widgets.marking import MarkingItem, MarkingLabel
         from widgets.ideogram_region_item import IdeogramRegionItem
 
-        current = item
-        while current is not None:
-            if isinstance(current, (MarkingItem, MarkingLabel)):
-                return
-            current = current.parentItem()
+        for scene_item in scene_items:
+            current = scene_item
+            while current is not None:
+                if isinstance(current, (MarkingItem, MarkingLabel)):
+                    return
+                current = current.parentItem()
 
         if bool(getattr(self.image_viewer, 'ideogram_editing_enabled', False)):
             try:
