@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-15
+
+### Added
+
+- Add caption status workflow
+- Mark caption entries as needing review or excluded from the final caption
+- Apply actions to multiple selected tags from the context menu
+- Search images with caption entries needing attention
+- Show a separate caption-status badge on affected thumbnails
+- Preserve the existing tag workflow for users who do not use classifications
 ## [1.5.3] - 2026-08-14
 
 ### Added
