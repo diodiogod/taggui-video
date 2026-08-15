@@ -10414,6 +10414,26 @@ class MainWindow(QMainWindow):
         self.image_list_model.update_image_tags(image, included_tags)
         self._persist_caption_workspace(image, entries)
 
+    @Slot()
+    def exclude_all_tags_except_first(self):
+        """Exclude all caption entries after the first on selected images."""
+        batch_getter = getattr(self.image_list.list_view, 'get_selected_image_batch', None)
+        selected_batch = batch_getter() if callable(batch_getter) else []
+        if not selected_batch:
+            self.statusBar().showMessage(
+                'Select one or more images first.',
+                3000,
+            )
+            return
+        changed_count = self.image_list_model.exclude_tags_after_first(
+            selected_batch,
+        )
+        self.statusBar().showMessage(
+            f'Excluded tags after the first caption on {changed_count} image'
+            f'{"s" if changed_count != 1 else ""}.',
+            4000,
+        )
+
     def _persist_caption_workspace(self, image: Image, entries: list[dict]):
         try:
             needs_review_count, excluded_count = save_caption_workspace(

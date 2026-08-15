@@ -835,6 +835,19 @@ class MenuManager:
             self.main_window.remove_empty_tags)
         edit_menu.addAction(remove_empty_tags_action)
 
+        exclude_after_first_action = QAction(
+            'Exclude All Tags Except First',
+            parent=self.main_window,
+        )
+        exclude_after_first_action.setToolTip(
+            'Keep the first caption entry and exclude all later entries '
+            'from final captions for the selected images.'
+        )
+        exclude_after_first_action.triggered.connect(
+            self.main_window.exclude_all_tags_except_first
+        )
+        edit_menu.addAction(exclude_after_first_action)
+
         edit_menu.addSeparator()
 
         markings_menu = edit_menu.addMenu('Markings')

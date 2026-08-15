@@ -566,6 +566,20 @@ class CaptionSettingsForm:
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
             key='caption_position')
         self.caption_position_combo_box.addItems(list(CaptionPosition))
+        self.caption_exclude_tags_after_first_check_box = self._make_boolean_checkbox(
+            'caption_exclude_tags_after_first',
+            False,
+            self.use_compact_style,
+        )
+        self.caption_exclude_tags_after_first_container = self._make_toggle_row(
+            'Exclude existing tags after first caption',
+            self.caption_exclude_tags_after_first_check_box,
+            compact=self.use_compact_style,
+        )
+        self.caption_exclude_tags_after_first_container.setToolTip(
+            'Before captioning, keep the first existing caption entry and '
+            'exclude all later entries from the final caption.'
+        )
         self.output_format_combo_box = FocusedScrollSettingsComboBox(
             key='caption_output_format'
         )
@@ -1120,6 +1134,7 @@ class CaptionSettingsForm:
         form.addRow(self.prompt_label, self.prompt_container)
         form.addRow(self.caption_start_label, self.caption_start_container)
         form.addRow('Caption position', self.caption_position_combo_box)
+        form.addRow(self.caption_exclude_tags_after_first_container)
         form.addRow(self.skip_hash_container)
         form.addRow(self.device_label, self.device_combo_box)
         form.addRow(self.gpu_index_label, self.gpu_index_spin_box)
@@ -1171,6 +1186,7 @@ class CaptionSettingsForm:
         form.addRow(self.prompt_label, self.prompt_container)
         form.addRow(self.caption_start_label, self.caption_start_container)
         form.addRow('Caption position', self.caption_position_combo_box)
+        form.addRow(self.caption_exclude_tags_after_first_container)
         form.addRow(self.skip_hash_container)
         form.addRow(self.remove_tag_separators_container)
         form.addRow(self.remove_new_lines_container)
@@ -1235,6 +1251,7 @@ class CaptionSettingsForm:
             'Caption position',
             self.caption_position_combo_box,
         ))
+        layout.addWidget(self.caption_exclude_tags_after_first_container)
         layout.addWidget(self.skip_hash_container)
         layout.addWidget(self.remove_tag_separators_container)
         layout.addWidget(self.remove_new_lines_container)
@@ -1666,6 +1683,7 @@ class CaptionSettingsForm:
         ignored_controls = (
             self.caption_start_container,
             self.caption_position_combo_box,
+            self.caption_exclude_tags_after_first_container,
             self.remove_tag_separators_container,
             self.remove_new_lines_container,
             self.limit_to_crop_container,
@@ -1827,6 +1845,9 @@ class CaptionSettingsForm:
             'skip_hash': self.skip_hash_check_box.isChecked(),
             'caption_start': self.caption_start_line_edit.text(),
             'caption_position': self.caption_position_combo_box.currentText(),
+            'caption_exclude_tags_after_first': (
+                self.caption_exclude_tags_after_first_check_box.isChecked()
+            ),
             'device': self.device_combo_box.currentText(),
             'gpu_index': self.gpu_index_spin_box.value(),
             'load_in_4_bit': self.load_in_4_bit_check_box.isChecked(),
@@ -1937,6 +1958,7 @@ class AutoCaptioner(QDockWidget):
         self.image_viewer = image_viewer
         self.is_captioning = False
         self.captioning_thread = None
+        self.caption_exclude_tags_after_first_for_current_run = False
         self._stdout_output_stream = ModelThreadOutputStream(sys.stdout)
         self._stderr_output_stream = ModelThreadOutputStream(sys.stderr)
         self.processor = None
@@ -2929,6 +2951,10 @@ class AutoCaptioner(QDockWidget):
         self.set_is_captioning(True)
         self._update_unload_button_state()
         caption_settings = self.caption_settings_form.get_caption_settings()
+        self.caption_exclude_tags_after_first_for_current_run = bool(
+            caption_settings.get('output_format') != 'Ideogram 4 JSON'
+            and caption_settings.get('caption_exclude_tags_after_first', False)
+        )
         if (
             caption_settings.get('output_format') != 'Ideogram 4 JSON'
             and caption_settings['caption_position'] != CaptionPosition.DO_NOT_ADD

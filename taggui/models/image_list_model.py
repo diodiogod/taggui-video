@@ -27,7 +27,13 @@ import threading
 
 
 from utils.image import Image, ImageMarking, Marking
-from utils.caption_annotations import caption_attention_counts, normalize_caption_entries
+from utils.caption_annotations import (
+    caption_attention_counts,
+    included_caption_tags,
+    load_caption_workspace,
+    normalize_caption_entries,
+    save_caption_workspace,
+)
 from utils.image_index_db import (
     ImageIndexDB,
     build_sidecar_reaction_recovery,
@@ -10148,6 +10154,104 @@ class ImageListModel(QAbstractListModel):
         # filter so an image that no longer matches cannot remain selectable
         # while its next batch silently resolves to zero images.
         self._notify_image_metadata_changed(image)
+
+    def exclude_tags_after_first(self, image_batch) -> int:
+        """Exclude every caption entry after the first for each batch image."""
+        changed_images: list[Image] = []
+        for batch_item in image_batch or ():
+            image = getattr(batch_item, 'image', None)
+            if image is None:
+                data_getter = getattr(batch_item, 'data', None)
+                if callable(data_getter):
+                    image = data_getter(Qt.ItemDataRole.UserRole)
+            if image is None or not getattr(image, 'path', None):
+                continue
+
+            entries = load_caption_workspace(image.path)
+            if entries is None:
+                entries = [
+                    {
+                        'text': str(tag).strip(),
+                        'needs_review': False,
+                        'excluded': False,
+                    }
+                    for tag in getattr(image, 'tags', [])
+                    if str(tag).strip()
+                ]
+            else:
+                # A captioning run may have changed the normal .txt tags while
+                # older excluded entries remain only in the workspace JSON.
+                # Merge newly written tags before applying the bulk exclusion.
+                disk_tags = self._read_sidecar_tags(image.path)
+                pools: dict[str, list[dict]] = {}
+                for entry in entries:
+                    if not entry.get('excluded'):
+                        pools.setdefault(entry['text'], []).append(entry)
+                merged_entries = []
+                for tag in disk_tags:
+                    candidates = pools.get(tag) or []
+                    merged_entries.append(candidates.pop(0) if candidates else {
+                        'text': tag,
+                        'needs_review': False,
+                        'excluded': False,
+                    })
+                for position, entry in enumerate(entries):
+                    if entry.get('excluded'):
+                        merged_entries.insert(min(position, len(merged_entries)), entry)
+                entries = merged_entries
+            entries = normalize_caption_entries(entries)
+            if len(entries) < 2:
+                continue
+            changed = False
+            if entries[0].get('excluded'):
+                entries[0]['excluded'] = False
+                changed = True
+            for entry in entries[1:]:
+                if not entry.get('excluded'):
+                    entry['excluded'] = True
+                    changed = True
+            if not changed:
+                continue
+
+            try:
+                needs_review_count, excluded_count = save_caption_workspace(
+                    image.path,
+                    entries,
+                )
+            except OSError as exc:
+                print(f'Error saving caption classifications for {image.path}: {exc}')
+                continue
+            image.tags = included_caption_tags(entries)
+            image.caption_needs_review_count = needs_review_count
+            image.caption_excluded_count = excluded_count
+            self.write_image_tags_to_disk(image)
+            if self._db and self._directory_path:
+                try:
+                    rel_path = str(image.path.relative_to(self._directory_path))
+                except ValueError:
+                    rel_path = image.path.name
+                image_id = self._db.get_image_id(rel_path)
+                if image_id:
+                    self._db.set_caption_attention_counts(
+                        image_id,
+                        needs_review_count,
+                        excluded_count,
+                    )
+            changed_images.append(image)
+
+        if changed_images:
+            if self._paginated_mode:
+                self._reload_loaded_pages_after_paginated_tag_change()
+            else:
+                loaded_indices = [
+                    self.get_loaded_index_for_reference(image)
+                    for image in changed_images
+                ]
+                loaded_indices = [index for index in loaded_indices if index.isValid()]
+                if loaded_indices:
+                    self.dataChanged.emit(min(loaded_indices, key=lambda index: index.row()),
+                                          max(loaded_indices, key=lambda index: index.row()))
+        return len(changed_images)
 
     def update_caption_attention_counts(
         self,

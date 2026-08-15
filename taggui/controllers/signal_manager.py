@@ -421,9 +421,31 @@ class SignalManager:
                 image_reference
             )
             image_list_model.update_image_tags(image_reference, tags)
+            if getattr(
+                auto_captioner,
+                'caption_exclude_tags_after_first_for_current_run',
+                False,
+            ):
+                image_list_model.exclude_tags_after_first([image_reference])
 
         auto_captioner.caption_generated.connect(apply_generated_caption)
         def reload_generated_tags_if_loaded(image_reference, *_):
+            # Captioning runs can process many images in the background.  Do
+            # not replace the tag panel contents for each completed image;
+            # refresh only when the completed image is the one currently open
+            # in the editor.
+            current_reference = getattr(image_tags_editor, 'image_reference', None)
+            resolver = getattr(image_list_model, 'resolve_image_reference', None)
+            generated_image = (
+                resolver(image_reference)
+                if callable(resolver) else image_reference
+            )
+            if current_reference is not None and generated_image is not None:
+                try:
+                    if Path(current_reference.path) != Path(generated_image.path):
+                        return
+                except (AttributeError, TypeError, ValueError):
+                    pass
             stable_loader = getattr(
                 image_tags_editor,
                 'load_image_tags_for_reference',
