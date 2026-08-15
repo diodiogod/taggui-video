@@ -33,6 +33,10 @@ from utils.icons import taggui_icon
 from utils.big_widgets import BigPushButton
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.image import Image
+from utils.caption_annotations import (
+    included_caption_tags,
+    save_caption_workspace,
+)
 from utils.key_press_forwarder import KeyPressForwarder
 from utils.review_marks import (
     REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
@@ -1792,6 +1796,7 @@ class MainWindow(QMainWindow):
             REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
             REVIEW_BADGE_CORNER_RADIUS_SETTINGS_KEY,
             'thumbnail_show_review_badges',
+            'thumbnail_show_caption_status_badges',
             'thumbnail_show_reaction_badges',
             'thumbnail_show_star_rating_badge',
             'thumbnail_review_badge_style',
@@ -10351,6 +10356,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def update_image_tags(self):
+        if getattr(self.image_tags_editor, 'is_loading_tags', False):
+            return
         image_index = self.image_tags_editor.image_index
         image: Image | None = None
         if image_index is not None and image_index.isValid():
@@ -10363,8 +10370,11 @@ class MainWindow(QMainWindow):
         if image is None:
             return
         old_tags = image.tags
-        new_tags = self.image_tag_list_model.stringList()
+        entries = self.image_tags_editor.caption_entries()
+        new_tags = included_caption_tags(entries)
         if old_tags == new_tags:
+            if self.image_tags_editor.should_persist_caption_workspace():
+                self._persist_caption_workspace(image, entries)
             return
         old_tags_count = len(old_tags)
         new_tags_count = len(new_tags)
@@ -10392,6 +10402,42 @@ class MainWindow(QMainWindow):
             else image_index
         )
         self.image_list_model.update_image_tags(image_reference, new_tags)
+        if self.image_tags_editor.should_persist_caption_workspace():
+            self._persist_caption_workspace(image, entries)
+
+    @Slot(object, list)
+    def update_caption_workspace(self, image: Image, entries: list[dict]):
+        """Apply opt-in caption classifications and final-caption projection."""
+        if image is None:
+            return
+        included_tags = included_caption_tags(entries)
+        self.image_list_model.update_image_tags(image, included_tags)
+        self._persist_caption_workspace(image, entries)
+
+    def _persist_caption_workspace(self, image: Image, entries: list[dict]):
+        try:
+            needs_review_count, excluded_count = save_caption_workspace(
+                image.path,
+                entries,
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                'Caption Status Error',
+                f'Could not save caption classifications for {image.path.name}: {exc}',
+            )
+            return
+        image.caption_needs_review_count = needs_review_count
+        image.caption_excluded_count = excluded_count
+        if image is getattr(self.image_tags_editor, 'image_reference', None):
+            self.image_tags_editor.mark_caption_workspace_persisted(
+                needs_review_count > 0 or excluded_count > 0
+            )
+        self.image_list_model.update_caption_attention_counts(
+            image,
+            needs_review_count,
+            excluded_count,
+        )
 
 
     @Slot(str, str)

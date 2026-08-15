@@ -1137,10 +1137,10 @@ class SettingsDialog(QDialog):
         review_style_combo.setMinimumWidth(180)
         thumbnail_layout.addWidget(review_style_combo, 0, 3, Qt.AlignmentFlag.AlignLeft)
 
-        thumbnail_layout.addWidget(QLabel('Show reaction badges'), 1, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Show caption-status badges'), 1, 0, Qt.AlignmentFlag.AlignRight)
         thumbnail_layout.addWidget(
             SettingsBigCheckBox(
-                key='thumbnail_show_reaction_badges',
+                key='thumbnail_show_caption_status_badges',
                 text='Enabled',
             ),
             1,
@@ -1148,50 +1148,61 @@ class SettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignLeft,
         )
 
-        thumbnail_layout.addWidget(QLabel('Reaction side'), 1, 2, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Show reaction badges'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(
+            SettingsBigCheckBox(
+                key='thumbnail_show_reaction_badges',
+                text='Enabled',
+            ),
+            2,
+            1,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+        thumbnail_layout.addWidget(QLabel('Reaction side'), 2, 2, Qt.AlignmentFlag.AlignRight)
         reaction_position_combo = SettingsComboBox(
             key='thumbnail_reaction_badge_position',
             default='Left',
         )
         reaction_position_combo.addItems(['Left', 'Right'])
-        thumbnail_layout.addWidget(reaction_position_combo, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        thumbnail_layout.addWidget(reaction_position_combo, 2, 3, Qt.AlignmentFlag.AlignLeft)
 
-        thumbnail_layout.addWidget(QLabel('Reaction style'), 2, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Reaction style'), 3, 0, Qt.AlignmentFlag.AlignRight)
         reaction_style_combo = SettingsComboBox(
             key='thumbnail_reaction_badge_style',
             default='Review Tile',
         )
         reaction_style_combo.addItems([label for _key, label in THUMBNAIL_BADGE_STYLE_OPTIONS])
         reaction_style_combo.setMinimumWidth(180)
-        thumbnail_layout.addWidget(reaction_style_combo, 2, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        thumbnail_layout.addWidget(reaction_style_combo, 3, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
 
-        thumbnail_layout.addWidget(QLabel('Show star badge'), 3, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Show star badge'), 4, 0, Qt.AlignmentFlag.AlignRight)
         thumbnail_layout.addWidget(
             SettingsBigCheckBox(
                 key='thumbnail_show_star_rating_badge',
                 text='Enabled',
             ),
-            3,
+            4,
             1,
             Qt.AlignmentFlag.AlignLeft,
         )
 
-        thumbnail_layout.addWidget(QLabel('Star side'), 3, 2, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Star side'), 4, 2, Qt.AlignmentFlag.AlignRight)
         star_position_combo = SettingsComboBox(
             key='thumbnail_star_rating_badge_position',
             default='Right',
         )
         star_position_combo.addItems(['Left', 'Right'])
-        thumbnail_layout.addWidget(star_position_combo, 3, 3, Qt.AlignmentFlag.AlignLeft)
+        thumbnail_layout.addWidget(star_position_combo, 4, 3, Qt.AlignmentFlag.AlignLeft)
 
-        thumbnail_layout.addWidget(QLabel('Star style'), 4, 0, Qt.AlignmentFlag.AlignRight)
+        thumbnail_layout.addWidget(QLabel('Star style'), 5, 0, Qt.AlignmentFlag.AlignRight)
         star_style_combo = SettingsComboBox(
             key='thumbnail_star_rating_badge_style',
             default='Halo Tag: 3★',
         )
         star_style_combo.addItems([label for _key, label in THUMBNAIL_STAR_BADGE_STYLE_OPTIONS])
         star_style_combo.setMinimumWidth(220)
-        thumbnail_layout.addWidget(star_style_combo, 4, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        thumbnail_layout.addWidget(star_style_combo, 5, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
 
         thumbnail_group_layout.addWidget(controls_widget, 1)
         thumbnail_preview = ThumbnailOverlayPreviewWidget(self)

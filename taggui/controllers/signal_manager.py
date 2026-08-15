@@ -336,6 +336,9 @@ class SignalManager:
         image_tag_list_model.modelReset.connect(self.main_window.update_image_tags)
         image_tag_list_model.dataChanged.connect(self.main_window.update_image_tags)
         image_tag_list_model.rowsMoved.connect(self.main_window.update_image_tags)
+        image_tags_editor.caption_workspace_changed.connect(
+            self.main_window.update_caption_workspace
+        )
         image_tags_editor.visibilityChanged.connect(
             lambda: menu_manager.toggle_image_tags_editor_action.setChecked(
                 image_tags_editor.isVisible()))

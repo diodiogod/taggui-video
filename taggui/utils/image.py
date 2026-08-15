@@ -71,6 +71,8 @@ class Image:
     review_rank: int = 0
     review_flags: int = 0
     review_updated_at: float | None = None
+    caption_needs_review_count: int = 0
+    caption_excluded_count: int = 0
     thumbnail: QIcon | None = None
     thumbnail_qimage: QImage | None = None  # Store QImage, convert to QPixmap/QIcon lazily
     is_video: bool = False

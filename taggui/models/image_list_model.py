@@ -27,6 +27,7 @@ import threading
 
 
 from utils.image import Image, ImageMarking, Marking
+from utils.caption_annotations import caption_attention_counts, normalize_caption_entries
 from utils.image_index_db import (
     ImageIndexDB,
     build_sidecar_reaction_recovery,
@@ -1730,6 +1731,14 @@ class ImageListModel(QAbstractListModel):
             if review_updated_at is not None:
                 image.review_updated_at = review_updated_at
 
+        workspace = meta.get('caption_workspace')
+        if isinstance(workspace, dict) and workspace.get('version') == 1:
+            needs_review, excluded = caption_attention_counts(
+                normalize_caption_entries(workspace.get('entries'))
+            )
+            image.caption_needs_review_count = needs_review
+            image.caption_excluded_count = excluded
+
         markings = meta.get('markings')
         if isinstance(markings, list):
             parsed_markings = []
@@ -3222,6 +3231,8 @@ class ImageListModel(QAbstractListModel):
                 review_rank=int(row.get('review_rank', 0) or 0),
                 review_flags=int(row.get('review_flags', 0) or 0),
                 review_updated_at=row.get('review_updated_at'),
+                caption_needs_review_count=int(row.get('caption_needs_review_count', 0) or 0),
+                caption_excluded_count=int(row.get('caption_excluded_count', 0) or 0),
             )
 
             # Populate metadata
@@ -3570,6 +3581,17 @@ class ImageListModel(QAbstractListModel):
                         except Exception:
                             return "0", ()
                         return "COALESCE(review_rank, 0) " + cmp_sql + " ?", (review_rank_value,)
+                    if key in {'caption_review_count', 'caption_excluded_count'}:
+                        try:
+                            count_value = float(value_raw)
+                        except Exception:
+                            return "0", ()
+                        column = (
+                            'caption_needs_review_count'
+                            if key == 'caption_review_count'
+                            else 'caption_excluded_count'
+                        )
+                        return f"COALESCE({column}, 0) {cmp_sql} ?", (count_value,)
                 
             # Handle infix notation [A, 'AND', B] or prefix ['tag', 'val']
             # Determine type by inspection
@@ -3733,6 +3755,22 @@ class ImageListModel(QAbstractListModel):
                     if review_flag is not None:
                         return "(COALESCE(review_flags, 0) & ?) != 0", (int(review_flag),)
                     return "", ()
+                if op in {'caption_review', 'caption_excluded', 'caption_attention'}:
+                    normalized = str(val).strip().lower()
+                    positive = normalized in {'1', 'true', 'yes', 'on', 'any'}
+                    negative = normalized in {'0', 'false', 'no', 'off', 'none'}
+                    if not positive and not negative:
+                        return "", ()
+                    if op == 'caption_review':
+                        expression = "COALESCE(caption_needs_review_count, 0) > 0"
+                    elif op == 'caption_excluded':
+                        expression = "COALESCE(caption_excluded_count, 0) > 0"
+                    else:
+                        expression = (
+                            "(COALESCE(caption_needs_review_count, 0) > 0 OR "
+                            "COALESCE(caption_excluded_count, 0) > 0)"
+                        )
+                    return (expression if positive else f"NOT ({expression})"), ()
                 if op in ('love', 'bomb'):
                     normalized = str(val).strip().lower()
                     if normalized in {'1', 'true', 'yes', 'on'}:
@@ -7323,6 +7361,8 @@ class ImageListModel(QAbstractListModel):
                 review_rank=int((cached or {}).get('review_rank', 0) or 0),
                 review_flags=int((cached or {}).get('review_flags', 0) or 0),
                 review_updated_at=(cached or {}).get('review_updated_at'),
+                caption_needs_review_count=int((cached or {}).get('caption_needs_review_count', 0) or 0),
+                caption_excluded_count=int((cached or {}).get('caption_excluded_count', 0) or 0),
             )
             # Store DB cached info (including thumbnail_cached flag) for fast cache checks
             image._db_cached_info = cached if cached else {}
@@ -10107,6 +10147,32 @@ class ImageListModel(QAbstractListModel):
         # Captioning changes searchable metadata. Refresh the active paginated
         # filter so an image that no longer matches cannot remain selectable
         # while its next batch silently resolves to zero images.
+        self._notify_image_metadata_changed(image)
+
+    def update_caption_attention_counts(
+        self,
+        image_reference,
+        needs_review_count: int,
+        excluded_count: int,
+    ):
+        """Persist and repaint derived caption-status summary counts."""
+        image = self.resolve_image_reference(image_reference)
+        if image is None:
+            return
+        image.caption_needs_review_count = max(0, int(needs_review_count))
+        image.caption_excluded_count = max(0, int(excluded_count))
+        if self._db and self._directory_path:
+            try:
+                rel_path = str(image.path.relative_to(self._directory_path))
+            except ValueError:
+                rel_path = image.path.name
+            image_id = self._db.get_image_id(rel_path)
+            if image_id:
+                self._db.set_caption_attention_counts(
+                    image_id,
+                    image.caption_needs_review_count,
+                    image.caption_excluded_count,
+                )
         self._notify_image_metadata_changed(image)
 
     def refresh_ideogram_caption_index_for_image(self, image: Image | None):

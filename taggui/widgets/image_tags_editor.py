@@ -16,6 +16,12 @@ else:
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.image import Image
+from utils.caption_annotations import (
+    caption_attention_counts,
+    included_caption_tags,
+    load_caption_workspace,
+    normalize_caption_entries,
+)
 from utils.ideogram_caption import (
     IdeogramCaptionError,
     discover_ideogram_caption,
@@ -157,6 +163,29 @@ class IdeogramCaptionItemDelegate(TextEditItemDelegate):
             QPalette.ColorRole.HighlightedText,
             QColor('#c2c7d0'),
         )
+        super().paint(painter, paint_option, index)
+
+
+class CaptionStatusItemDelegate(TextEditItemDelegate):
+    """Keep ordinary tags unchanged and style only explicitly classified rows."""
+
+    def paint(self, painter, option, index):
+        owner = self.parent()
+        status_getter = getattr(owner, 'caption_status_for_row', None)
+        status = status_getter(index.row()) if callable(status_getter) else {}
+        if not status or not (status.get('needs_review') or status.get('excluded')):
+            super().paint(painter, option, index)
+            return
+        paint_option = QStyleOptionViewItem(option)
+        if status.get('excluded'):
+            font = QFont(paint_option.font)
+            font.setStrikeOut(True)
+            paint_option.font = font
+            paint_option.palette.setColor(QPalette.ColorRole.Text, QColor('#8a8f98'))
+            paint_option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#c2c7d0'))
+        elif status.get('needs_review'):
+            paint_option.palette.setColor(QPalette.ColorRole.Text, QColor('#F59E0B'))
+            paint_option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#FFE0A3'))
         super().paint(painter, paint_option, index)
 
 
@@ -314,6 +343,7 @@ class ImageTagsEditor(QDockWidget):
     ideogram_json_text_changed = Signal(str)
     ideogram_global_field_changed = Signal(str, str)
     ideogram_editor_open_requested = Signal(int)
+    caption_workspace_changed = Signal(object, list)
 
     HIGH_LEVEL_PLACEHOLDER = 'High-level description...'
     BACKGROUND_PLACEHOLDER = 'Background...'
@@ -340,6 +370,9 @@ class ImageTagsEditor(QDockWidget):
         self._ideogram_available = False
         self._ideogram_has_media = False
         self._ideogram_json_dirty = False
+        self._caption_entries: list[dict] = []
+        self._caption_workspace_active = False
+        self._loading_tags = False
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
@@ -443,7 +476,15 @@ class ImageTagsEditor(QDockWidget):
         self.tag_input_box.current_image_reference_getter = (
             lambda: self.image_reference
         )
-        self.image_tags_list = ImageTagsList(self.image_tag_list_model)
+        self.image_tags_list = ImageTagsList(
+            self.image_tag_list_model,
+            delegate_cls=CaptionStatusItemDelegate,
+        )
+        self.image_tags_list.caption_status_for_row = self.caption_status_for_row
+        self.image_tags_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.image_tags_list.customContextMenuRequested.connect(
+            self._show_caption_status_menu
+        )
         self.ideogram_tag_list_model = QStringListModel()
         self.ideogram_caption_list = IdeogramCaptionList(
             self.ideogram_tag_list_model,
@@ -510,6 +551,9 @@ class ImageTagsEditor(QDockWidget):
         # is emitted when a tag is added.
         self.image_tag_list_model.modelReset.connect(self.count_tokens)
         self.image_tag_list_model.dataChanged.connect(self.count_tokens)
+        self.image_tag_list_model.dataChanged.connect(self._on_caption_text_rows_changed)
+        self.image_tag_list_model.modelReset.connect(self._reconcile_caption_entries)
+        self.image_tag_list_model.rowsMoved.connect(self._reconcile_caption_entries)
         self.tag_input_box.ideogram_tags_addition_requested.connect(
             self._request_ideogram_object_add
         )
@@ -541,9 +585,114 @@ class ImageTagsEditor(QDockWidget):
             # Setting checked will trigger toggle_display_mode via the signal
             self.descriptive_mode_checkbox.setChecked(True)
 
+    @property
+    def is_loading_tags(self) -> bool:
+        return self._loading_tags
+
+    def caption_entries(self) -> list[dict]:
+        self._reconcile_caption_entries()
+        return [dict(entry) for entry in self._caption_entries]
+
+    def included_tags(self) -> list[str]:
+        return included_caption_tags(self.caption_entries())
+
+    def has_caption_classifications(self) -> bool:
+        return any(caption_attention_counts(self._caption_entries))
+
+    def should_persist_caption_workspace(self) -> bool:
+        return self._caption_workspace_active or self.has_caption_classifications()
+
+    def mark_caption_workspace_persisted(self, active: bool):
+        self._caption_workspace_active = bool(active)
+
+    def caption_status_for_row(self, row: int) -> dict:
+        if 0 <= row < len(self._caption_entries):
+            return self._caption_entries[row]
+        return {}
+
+    def _reconcile_caption_entries(self, *_args):
+        if self._loading_tags:
+            return
+        texts = self.image_tag_list_model.stringList()
+        pools: dict[str, list[dict]] = {}
+        for entry in self._caption_entries:
+            pools.setdefault(str(entry.get('text') or ''), []).append(entry)
+        reconciled = []
+        for text in texts:
+            candidates = pools.get(text) or []
+            entry = candidates.pop(0) if candidates else {
+                'text': text,
+                'needs_review': False,
+                'excluded': False,
+            }
+            entry['text'] = text
+            reconciled.append(entry)
+        self._caption_entries = normalize_caption_entries(reconciled)
+        self.image_tags_list.viewport().update()
+
+    def _on_caption_text_rows_changed(self, top_left, bottom_right, *_args):
+        if self._loading_tags:
+            return
+        texts = self.image_tag_list_model.stringList()
+        while len(self._caption_entries) < len(texts):
+            self._caption_entries.append({
+                'text': texts[len(self._caption_entries)],
+                'needs_review': False,
+                'excluded': False,
+            })
+        for row in range(top_left.row(), bottom_right.row() + 1):
+            if 0 <= row < len(texts) and row < len(self._caption_entries):
+                self._caption_entries[row]['text'] = texts[row]
+        self._reconcile_caption_entries()
+
+    def _show_caption_status_menu(self, position: QPoint):
+        indexes = self.image_tags_list.selectedIndexes()
+        clicked = self.image_tags_list.indexAt(position)
+        if clicked.isValid() and clicked not in indexes:
+            self.image_tags_list.setCurrentIndex(clicked)
+            indexes = [clicked]
+        rows = sorted({index.row() for index in indexes if index.isValid()})
+        if not rows:
+            return
+
+        menu = QMenu(self.image_tags_list)
+        needs_review_action = menu.addAction('Mark as Needing Review')
+        reviewed_action = menu.addAction('Clear Needs Review')
+        menu.addSeparator()
+        exclude_action = menu.addAction('Exclude from Final Caption')
+        include_action = menu.addAction('Include in Final Caption')
+        menu.addSeparator()
+        clear_action = menu.addAction('Clear Caption Classifications')
+        chosen = menu.exec(self.image_tags_list.viewport().mapToGlobal(position))
+        if chosen is None:
+            return
+        self._reconcile_caption_entries()
+        for row in rows:
+            if row < 0 or row >= len(self._caption_entries):
+                continue
+            entry = self._caption_entries[row]
+            if chosen is needs_review_action:
+                entry['needs_review'] = True
+            elif chosen is reviewed_action:
+                entry['needs_review'] = False
+            elif chosen is exclude_action:
+                entry['excluded'] = True
+            elif chosen is include_action:
+                entry['excluded'] = False
+            elif chosen is clear_action:
+                entry['needs_review'] = False
+                entry['excluded'] = False
+        self.image_tags_list.viewport().update()
+        if self.image_reference is not None:
+            self._caption_workspace_active = True
+            self.caption_workspace_changed.emit(
+                self.image_reference,
+                self.caption_entries(),
+            )
+
     @Slot()
     def count_tokens(self):
-        caption = self.tag_separator.join(self.image_tag_list_model.stringList())
+        caption = self.tag_separator.join(self.included_tags())
         self._set_token_count_from_caption(caption)
 
     def _set_token_count_from_caption(self, caption: str):
@@ -950,20 +1099,57 @@ class ImageTagsEditor(QDockWidget):
         self.image_reference = image
         # Safety check: if no image is selected or available, clear the tags
         if image is None:
+            self._caption_entries = []
+            self._caption_workspace_active = False
             self.image_tag_list_model.setStringList([])
             self._set_ideogram_caption_chips_for_image(None)
             return
         self._set_ideogram_caption_chips_for_image(image)
         caption_text = self._read_caption_text_from_disk(image)
-        tags_from_source = (
-            self._tags_from_descriptive_text(caption_text)
-            if caption_text is not None
-            else self._filter_internal_tags(image.tags)
-        )
+        stored_workspace = load_caption_workspace(image.path)
+        if stored_workspace is not None:
+            self._caption_workspace_active = True
+            disk_tags = (
+                self._tags_from_descriptive_text(caption_text)
+                if caption_text is not None else included_caption_tags(stored_workspace)
+            )
+            stored_included = included_caption_tags(stored_workspace)
+            if disk_tags != stored_included:
+                classified_pools: dict[str, list[dict]] = {}
+                for entry in stored_workspace:
+                    if not entry.get('excluded'):
+                        classified_pools.setdefault(entry['text'], []).append(entry)
+                merged = []
+                for tag in disk_tags:
+                    candidates = classified_pools.get(tag) or []
+                    merged.append(candidates.pop(0) if candidates else {
+                        'text': tag,
+                        'needs_review': False,
+                        'excluded': False,
+                    })
+                for position, entry in enumerate(stored_workspace):
+                    if entry.get('excluded'):
+                        merged.insert(min(position, len(merged)), entry)
+                self._caption_entries = normalize_caption_entries(merged)
+            else:
+                self._caption_entries = stored_workspace
+            tags_from_source = [entry['text'] for entry in self._caption_entries]
+        else:
+            self._caption_workspace_active = False
+            tags_from_source = (
+                self._tags_from_descriptive_text(caption_text)
+                if caption_text is not None
+                else self._filter_internal_tags(image.tags)
+            )
+            self._caption_entries = [
+                {'text': tag, 'needs_review': False, 'excluded': False}
+                for tag in tags_from_source
+            ]
+        included_tags = included_caption_tags(self._caption_entries)
         should_refresh_source_row = False
         # Keep the in-memory image tags aligned with the sidecar source of truth.
-        if image.tags != tags_from_source:
-            image.tags = tags_from_source
+        if image.tags != included_tags:
+            image.tags = included_tags
             should_refresh_source_row = bool(self.image_index.isValid())
             if (source_model is not None
                     and getattr(source_model, '_paginated_mode', False)
@@ -975,7 +1161,7 @@ class ImageTagsEditor(QDockWidget):
                     # Full paginated reloads are reserved for bulk tag edits.
                     source_model._sync_paginated_db_tags_for_rel_path(
                         rel_path,
-                        tags_from_source,
+                        included_tags,
                         txt_path=image.path.with_suffix('.txt'),
                     )
                 except Exception:
@@ -996,14 +1182,20 @@ class ImageTagsEditor(QDockWidget):
             if should_refresh_source_row:
                 self._emit_source_row_data_changed(source_model)
             return
-        self.image_tag_list_model.setStringList(tags_from_source)
+        self._loading_tags = True
+        try:
+            self.image_tag_list_model.setStringList(tags_from_source)
+        finally:
+            self._loading_tags = False
         self.count_tokens()
         self._pending_descriptive_tags = None
         self._descriptive_dirty = False
         # Update descriptive text if in descriptive mode
         if self.descriptive_mode_checkbox.isChecked():
             tags_text = (
-                caption_text
+                self.tag_separator.join(tags_from_source)
+                if stored_workspace is not None
+                else caption_text
                 if caption_text is not None
                 else self.tag_separator.join(tags_from_source)
             )
@@ -1093,7 +1285,7 @@ class ImageTagsEditor(QDockWidget):
                     proxy_index, Qt.ItemDataRole.UserRole)
                 if image is not None:
                     caption_text = self._read_caption_text_from_disk(image)
-                    if caption_text is not None:
+                    if caption_text is not None and not self.has_caption_classifications():
                         tags_text = caption_text
             # Block signals to avoid triggering textChanged
             self.descriptive_text_edit.blockSignals(True)

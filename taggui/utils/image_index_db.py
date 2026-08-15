@@ -24,6 +24,7 @@ from utils.ideogram_caption import (
     discover_ideogram_search_text,
     ideogram_caption_chips,
 )
+from utils.caption_annotations import caption_attention_counts, normalize_caption_entries
 
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
@@ -675,6 +676,8 @@ class ImageIndexDB:
                         review_rank INTEGER DEFAULT 0,
                         review_flags INTEGER DEFAULT 0,
                         review_updated_at REAL,
+                        caption_needs_review_count INTEGER DEFAULT 0,
+                        caption_excluded_count INTEGER DEFAULT 0,
                         indexed_at REAL,
                         thumbnail_cached INTEGER DEFAULT 0,
                         file_size INTEGER,
@@ -731,6 +734,8 @@ class ImageIndexDB:
                     ('review_rank', 'ALTER TABLE images ADD COLUMN review_rank INTEGER DEFAULT 0'),
                     ('review_flags', 'ALTER TABLE images ADD COLUMN review_flags INTEGER DEFAULT 0'),
                     ('review_updated_at', 'ALTER TABLE images ADD COLUMN review_updated_at REAL'),
+                    ('caption_needs_review_count', 'ALTER TABLE images ADD COLUMN caption_needs_review_count INTEGER DEFAULT 0'),
+                    ('caption_excluded_count', 'ALTER TABLE images ADD COLUMN caption_excluded_count INTEGER DEFAULT 0'),
                 ):
                     if column_name not in columns:
                         cursor.execute(ddl)
@@ -748,6 +753,8 @@ class ImageIndexDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_rank ON images(review_rank)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_flags ON images(review_flags)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_review_updated_at ON images(review_updated_at)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_caption_review ON images(caption_needs_review_count)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_caption_excluded ON images(caption_excluded_count)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_ordered_image_cache_image ON ordered_image_cache(cache_key, image_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
@@ -821,6 +828,8 @@ class ImageIndexDB:
                                 review_rank INTEGER DEFAULT 0,
                                 review_flags INTEGER DEFAULT 0,
                                 review_updated_at REAL,
+                                caption_needs_review_count INTEGER DEFAULT 0,
+                                caption_excluded_count INTEGER DEFAULT 0,
                                 indexed_at REAL,
                                 thumbnail_cached INTEGER DEFAULT 0,
                                 file_size INTEGER,
@@ -900,6 +909,12 @@ class ImageIndexDB:
                     if 'review_updated_at' not in columns:
                         print("Migrating DB: Adding review_updated_at column...")
                         cursor.execute('ALTER TABLE images ADD COLUMN review_updated_at REAL')
+                        self.conn.commit()
+                    if 'caption_needs_review_count' not in columns:
+                        cursor.execute('ALTER TABLE images ADD COLUMN caption_needs_review_count INTEGER DEFAULT 0')
+                        self.conn.commit()
+                    if 'caption_excluded_count' not in columns:
+                        cursor.execute('ALTER TABLE images ADD COLUMN caption_excluded_count INTEGER DEFAULT 0')
                         self.conn.commit()
                         
                     # Ensure indexes exist
@@ -1029,6 +1044,8 @@ class ImageIndexDB:
                     float(row['review_updated_at'])
                     if row['review_updated_at'] is not None else None
                 ),
+                'caption_needs_review_count': int(row['caption_needs_review_count'] or 0),
+                'caption_excluded_count': int(row['caption_excluded_count'] or 0),
             }
 
             if row['is_video']:
@@ -1372,9 +1389,58 @@ class ImageIndexDB:
                 print(f"[DB] Marking migration: imported {migrated_markings} marking(s) from {scanned_marking_sidecars} candidate sidecar(s).")
             elif not marking_done and scanned_marking_sidecars > 0:
                 print(f"[DB] Marking migration: scanned {scanned_marking_sidecars} candidate sidecar(s) (no indexed markings yet).")
+
+            self.migrate_caption_attention_from_sidecars(directory_path)
             
         except sqlite3.Error as e:
             print(f"[DB] Maintenance error: {e}")
+
+    def migrate_caption_attention_from_sidecars(self, directory_path: Path) -> int:
+        """One-time backfill of caption-status counts from TagGUI JSON sidecars."""
+        migration_key = 'caption_attention_migration_v1_done'
+        if not self.enabled or not self.conn:
+            return 0
+        with self._db_lock:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT value FROM meta WHERE key = ?', (migration_key,))
+            if cursor.fetchone() is not None:
+                return 0
+            cursor.execute('SELECT id, file_name FROM images')
+            rows = cursor.fetchall()
+
+        updates = []
+        for image_id, file_name in rows:
+            sidecar_path = preferred_taggui_sidecar_read_path(directory_path / str(file_name))
+            if sidecar_path is None:
+                continue
+            try:
+                with sidecar_path.open(encoding='utf-8') as source:
+                    payload = json.load(source)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            workspace = payload.get('caption_workspace') if isinstance(payload, dict) else None
+            if not isinstance(workspace, dict) or workspace.get('version') != 1:
+                continue
+            needs_review, excluded = caption_attention_counts(
+                normalize_caption_entries(workspace.get('entries'))
+            )
+            updates.append((needs_review, excluded, int(image_id)))
+
+        with self._db_lock:
+            cursor = self.conn.cursor()
+            if updates:
+                cursor.executemany(
+                    '''UPDATE images
+                       SET caption_needs_review_count = ?, caption_excluded_count = ?
+                       WHERE id = ?''',
+                    updates,
+                )
+            cursor.execute(
+                'INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)',
+                (migration_key, '1'),
+            )
+            self.conn.commit()
+        return len(updates)
 
     def migrate_ratings_from_sidecars(
         self,
@@ -3795,6 +3861,31 @@ class ImageIndexDB:
             self.commit()
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
+
+    def set_caption_attention_counts(
+        self,
+        image_id: int,
+        needs_review_count: int,
+        excluded_count: int,
+    ):
+        """Update searchable caption-classification summary counts."""
+        if not self.enabled or not self.conn:
+            return
+        try:
+            with self._db_lock:
+                self.conn.execute(
+                    '''UPDATE images
+                       SET caption_needs_review_count = ?, caption_excluded_count = ?
+                       WHERE id = ?''',
+                    (
+                        max(0, int(needs_review_count)),
+                        max(0, int(excluded_count)),
+                        int(image_id),
+                    ),
+                )
+            self.commit()
+        except sqlite3.Error as exc:
+            print(f'Database caption-status update error: {exc}')
 
     def set_txt_sidecar_mtime(self, image_id: int, txt_sidecar_mtime: float | None):
         """Persist the observed .txt sidecar mtime for one image."""

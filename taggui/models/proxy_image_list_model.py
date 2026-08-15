@@ -283,6 +283,21 @@ class ProxyImageListModel(QSortFilterProxyModel):
                 if review_flag is not None:
                     return (review_flags & int(review_flag)) != 0
                 return False
+            if op in {'caption_review', 'caption_excluded', 'caption_attention'}:
+                normalized = str(filter_[1]).strip().lower()
+                if normalized not in {
+                    '0', '1', 'true', 'false', 'yes', 'no', 'on', 'off', 'any', 'none'
+                }:
+                    return False
+                review_count = int(getattr(image, 'caption_needs_review_count', 0) or 0)
+                excluded_count = int(getattr(image, 'caption_excluded_count', 0) or 0)
+                if op == 'caption_review':
+                    matched = review_count > 0
+                elif op == 'caption_excluded':
+                    matched = excluded_count > 0
+                else:
+                    matched = review_count > 0 or excluded_count > 0
+                return matched if normalized in {'1', 'true', 'yes', 'on', 'any'} else not matched
         if str(filter_[1]).strip().upper() == 'AND':
             if len(filter_) < 3:
                 return self.does_image_match_filter(image, filter_[0])
@@ -313,6 +328,10 @@ class ProxyImageListModel(QSortFilterProxyModel):
             number_to_compare = image.rating * 5.0
         elif number_key == 'review_rank':
             number_to_compare = int(getattr(image, 'review_rank', 0) or 0)
+        elif number_key == 'caption_review_count':
+            number_to_compare = int(getattr(image, 'caption_needs_review_count', 0) or 0)
+        elif number_key == 'caption_excluded_count':
+            number_to_compare = int(getattr(image, 'caption_excluded_count', 0) or 0)
         elif number_key == 'width':
             number_to_compare = image.dimensions[0]
         elif number_key == 'height':

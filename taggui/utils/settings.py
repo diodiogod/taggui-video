@@ -109,6 +109,7 @@ DEFAULT_SETTINGS = {
     'review_badge_font_size': 9,
     'review_badge_corner_radius': 5,
     'thumbnail_show_review_badges': True,
+    'thumbnail_show_caption_status_badges': True,
     'thumbnail_show_reaction_badges': True,
     'thumbnail_show_star_rating_badge': True,
     'thumbnail_review_badge_style': 'Review Tile',

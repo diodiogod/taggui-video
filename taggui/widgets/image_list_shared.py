@@ -78,6 +78,9 @@ FILTER_TEMPLATE_SPECS = [
     ('Review', 'Filter reviewed items', 'review:true', False),
     ('Review Rank', 'Filter by review rank', 'review_rank:>={cursor}', True),
     ('Rejected', 'Filter rejected items', 'review:reject', False),
+    ('Caption Attention', 'Images with classified caption entries', 'caption_attention:true', False),
+    ('Caption Review', 'Images with caption entries needing review', 'caption_review:true', False),
+    ('Caption Excluded', 'Images with excluded caption entries', 'caption_excluded:true', False),
     ('Width', 'Filter by image width', 'width:>1024', False),
     ('Height', 'Filter by image height', 'height:>1024', False),
     ('Name', 'Filter by file name', 'name:"{cursor}"', True),
@@ -679,6 +682,11 @@ class ImageDelegate(QStyledItemDelegate):
             defaultValue=True,
             type=bool,
         )
+        self._show_caption_status_badges = settings.value(
+            'thumbnail_show_caption_status_badges',
+            defaultValue=True,
+            type=bool,
+        )
         self._show_reaction_badges = settings.value(
             'thumbnail_show_reaction_badges',
             defaultValue=True,
@@ -878,6 +886,7 @@ class ImageDelegate(QStyledItemDelegate):
 
         # Draw N*4+1 stamp for video files (in both modes)
         self._draw_n4_plus_1_stamp(painter, option, index)
+        self._draw_caption_status_badge(painter, option, index)
         self._draw_review_badges(painter, option, index)
         self._draw_reaction_badges(painter, option, index)
         self._draw_star_rating_badge(painter, option, index)
@@ -908,6 +917,15 @@ class ImageDelegate(QStyledItemDelegate):
 
     def _video_stamp_rect(self, option):
         return self._video_stamp_rect_from_rect(option.rect)
+
+    def _caption_status_badge_rect(self, option):
+        size = 22
+        return QRect(
+            option.rect.right() - 5 - size + 1,
+            option.rect.bottom() - 5 - size + 1,
+            size,
+            size,
+        )
 
     def _video_stamp_rect_from_rect(self, rect):
         return QRect(
@@ -1132,6 +1150,39 @@ class ImageDelegate(QStyledItemDelegate):
 
         except Exception:
             # Silently ignore any errors in stamp drawing
+            pass
+
+    def _draw_caption_status_badge(self, painter, option, index):
+        """Draw a dedicated indicator for classified caption entries."""
+        try:
+            if not painter or not painter.isActive():
+                return
+            if not bool(getattr(self, '_show_caption_status_badges', True)):
+                return
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if not image:
+                return
+            needs_review = int(getattr(image, 'caption_needs_review_count', 0) or 0)
+            excluded = int(getattr(image, 'caption_excluded_count', 0) or 0)
+            if needs_review <= 0 and excluded <= 0:
+                return
+            if option.rect.width() < 34 or option.rect.height() < 30:
+                return
+
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = self._caption_status_badge_rect(option)
+            painter.setPen(QPen(QColor('#FFF1C2'), 1.2))
+            painter.setBrush(QColor(180, 83, 9, 238))
+            painter.drawRoundedRect(rect, 6, 6)
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSizeF(8.0)
+            painter.setFont(font)
+            painter.setPen(QColor('#FFFFFF'))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, 'T!')
+            painter.restore()
+        except Exception:
             pass
 
     def _draw_review_badges(self, painter, option, index):
