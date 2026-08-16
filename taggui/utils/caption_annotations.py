@@ -48,6 +48,89 @@ def included_caption_tags(entries: list[dict]) -> list[str]:
     ]
 
 
+def merge_caption_entries_with_disk_tags(
+    entries: list[dict],
+    disk_tags: list[str],
+) -> list[dict]:
+    """Merge the current ``.txt`` tags into a classified workspace.
+
+    Excluded entries are intentionally absent from the ``.txt`` projection.
+    When all previous entries are excluded, newly generated tags therefore
+    have no existing included anchor. Put those new tags first so an
+    ``exclude after first`` captioning run keeps the new caption instead of
+    accidentally promoting an older excluded entry.
+    """
+    normalized_entries = normalize_caption_entries(entries)
+    normalized_tags = [
+        str(tag).strip()
+        for tag in (disk_tags or [])
+        if str(tag).strip()
+    ]
+    if (
+        normalized_tags
+        and normalized_entries
+        and all(entry["excluded"] for entry in normalized_entries)
+    ):
+        return normalize_caption_entries([
+            *[
+                {"text": tag, "needs_review": False, "excluded": False}
+                for tag in normalized_tags
+            ],
+            *normalized_entries,
+        ])
+
+    pools: dict[str, list[dict]] = {}
+    for entry in normalized_entries:
+        if not entry["excluded"]:
+            pools.setdefault(entry["text"], []).append(entry)
+    merged_entries: list[dict] = []
+    for tag in normalized_tags:
+        candidates = pools.get(tag) or []
+        merged_entries.append(candidates.pop(0) if candidates else {
+            "text": tag,
+            "needs_review": False,
+            "excluded": False,
+        })
+
+    # Reinsert excluded entries around their original included neighbours.
+    # This keeps a newly inserted tag from displacing an older excluded entry
+    # ahead of the included tag it originally followed.
+    def index_by_identity(target) -> int:
+        for index, candidate in enumerate(merged_entries):
+            if candidate is target:
+                return index
+        return -1
+
+    segments: list[tuple[dict | None, dict | None, list[dict]]] = []
+    previous_included = None
+    pending_excluded: list[dict] = []
+    for entry in normalized_entries:
+        if entry["excluded"]:
+            pending_excluded.append(entry)
+            continue
+        if pending_excluded:
+            segments.append((previous_included, entry, pending_excluded))
+            pending_excluded = []
+        previous_included = entry
+    if pending_excluded:
+        segments.append((previous_included, None, pending_excluded))
+
+    for previous_included, next_included, excluded_segment in segments:
+        next_index = index_by_identity(next_included) if next_included else -1
+        previous_index = (
+            index_by_identity(previous_included)
+            if previous_included else -1
+        )
+        if next_index >= 0:
+            insert_at = next_index
+        elif previous_index >= 0:
+            insert_at = previous_index + 1
+        else:
+            insert_at = len(merged_entries)
+        merged_entries[insert_at:insert_at] = excluded_segment
+    return normalize_caption_entries(merged_entries)
+
+
 def load_caption_workspace(media_path: Path) -> list[dict] | None:
     sidecar_path = preferred_taggui_sidecar_read_path(Path(media_path))
     if sidecar_path is None:

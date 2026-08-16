@@ -31,6 +31,7 @@ from utils.caption_annotations import (
     caption_attention_counts,
     included_caption_tags,
     load_caption_workspace,
+    merge_caption_entries_with_disk_tags,
     normalize_caption_entries,
     save_caption_workspace,
 )
@@ -10198,6 +10199,7 @@ class ImageListModel(QAbstractListModel):
                 continue
 
             entries = load_caption_workspace(image.path)
+            previous_entries = None
             if entries is None:
                 entries = [
                     {
@@ -10213,26 +10215,18 @@ class ImageListModel(QAbstractListModel):
                 # older excluded entries remain only in the workspace JSON.
                 # Merge newly written tags before applying the bulk exclusion.
                 disk_tags = self._read_sidecar_tags(image.path)
-                pools: dict[str, list[dict]] = {}
-                for entry in entries:
-                    if not entry.get('excluded'):
-                        pools.setdefault(entry['text'], []).append(entry)
-                merged_entries = []
-                for tag in disk_tags:
-                    candidates = pools.get(tag) or []
-                    merged_entries.append(candidates.pop(0) if candidates else {
-                        'text': tag,
-                        'needs_review': False,
-                        'excluded': False,
-                    })
-                for position, entry in enumerate(entries):
-                    if entry.get('excluded'):
-                        merged_entries.insert(min(position, len(merged_entries)), entry)
-                entries = merged_entries
+                previous_entries = normalize_caption_entries(entries)
+                entries = merge_caption_entries_with_disk_tags(
+                    previous_entries,
+                    disk_tags,
+                )
             entries = normalize_caption_entries(entries)
             if len(entries) < 2:
                 continue
-            changed = False
+            changed = (
+                previous_entries is not None
+                and entries != previous_entries
+            )
             if entries[0].get('excluded'):
                 entries[0]['excluded'] = False
                 changed = True

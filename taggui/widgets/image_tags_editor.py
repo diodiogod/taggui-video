@@ -20,6 +20,7 @@ from utils.caption_annotations import (
     caption_attention_counts,
     included_caption_tags,
     load_caption_workspace,
+    merge_caption_entries_with_disk_tags,
     normalize_caption_entries,
 )
 from utils.ideogram_caption import (
@@ -1115,22 +1116,10 @@ class ImageTagsEditor(QDockWidget):
             )
             stored_included = included_caption_tags(stored_workspace)
             if disk_tags != stored_included:
-                classified_pools: dict[str, list[dict]] = {}
-                for entry in stored_workspace:
-                    if not entry.get('excluded'):
-                        classified_pools.setdefault(entry['text'], []).append(entry)
-                merged = []
-                for tag in disk_tags:
-                    candidates = classified_pools.get(tag) or []
-                    merged.append(candidates.pop(0) if candidates else {
-                        'text': tag,
-                        'needs_review': False,
-                        'excluded': False,
-                    })
-                for position, entry in enumerate(stored_workspace):
-                    if entry.get('excluded'):
-                        merged.insert(min(position, len(merged)), entry)
-                self._caption_entries = normalize_caption_entries(merged)
+                self._caption_entries = merge_caption_entries_with_disk_tags(
+                    stored_workspace,
+                    disk_tags,
+                )
             else:
                 self._caption_entries = stored_workspace
             tags_from_source = [entry['text'] for entry in self._caption_entries]
