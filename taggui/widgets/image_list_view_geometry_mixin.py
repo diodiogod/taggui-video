@@ -1725,17 +1725,13 @@ class ImageListViewGeometryMixin:
             else:
                 drop_action = drag.exec(supportedActions)
         finally:
-            self._active_qt_drag_mime = None
-            self._active_qt_drag = None
             drag_session_service.finish(drag_session_state)
             finish_tracking = getattr(self, "_finish_qt_drag_gesture_tracking", None)
             if callable(finish_tracking):
                 finish_tracking()
-            if drag is not None:
-                try:
-                    drag.deleteLater()
-                except RuntimeError:
-                    pass
+            drag_session_service.retire_drag(drag)
+            self._active_qt_drag_mime = None
+            self._active_qt_drag = None
         try:
             drop_action_text = str(drop_action)
         except Exception:

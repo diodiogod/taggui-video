@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QCoreApplication, QEvent
+
 
 class QtDragSessionService:
     """Keep model/view work stable while ``QDrag.exec()`` processes events."""
@@ -89,3 +91,20 @@ class QtDragSessionService:
                     pass
         finally:
             self._view._qt_drag_active = False
+
+    @staticmethod
+    def retire_drag(drag) -> None:
+        """Destroy a completed native drag before another nested loop starts.
+
+        On Windows, leaving ``deleteLater()`` queued allows the old OLE data
+        object to be destroyed from inside a later ``QDrag.exec()`` loop. Keep
+        retirement outside that next native loop by delivering this object's
+        deferred-delete event immediately after the completed drag returns.
+        """
+        if drag is None:
+            return
+        try:
+            drag.deleteLater()
+            QCoreApplication.sendPostedEvents(drag, QEvent.Type.DeferredDelete)
+        except RuntimeError:
+            pass
