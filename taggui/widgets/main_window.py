@@ -10401,9 +10401,18 @@ class MainWindow(QMainWindow):
             if image_index is None or not image_index.isValid()
             else image_index
         )
+        persist_workspace = self.image_tags_editor.should_persist_caption_workspace()
+        if persist_workspace:
+            # Save classification state before changing the .txt projection.
+            # The subsequent model refresh can then reload a complete
+            # workspace instead of observing a transient partial state.
+            if not self._persist_caption_workspace(
+                image,
+                entries,
+                refresh_view=False,
+            ):
+                return
         self.image_list_model.update_image_tags(image_reference, new_tags)
-        if self.image_tags_editor.should_persist_caption_workspace():
-            self._persist_caption_workspace(image, entries)
 
     @Slot(object, list)
     def update_caption_workspace(self, image: Image, entries: list[dict]):
@@ -10411,8 +10420,13 @@ class MainWindow(QMainWindow):
         if image is None:
             return
         included_tags = included_caption_tags(entries)
+        if not self._persist_caption_workspace(
+            image,
+            entries,
+            refresh_view=False,
+        ):
+            return
         self.image_list_model.update_image_tags(image, included_tags)
-        self._persist_caption_workspace(image, entries)
 
     @Slot()
     def exclude_all_tags_except_first(self):
@@ -10454,7 +10468,13 @@ class MainWindow(QMainWindow):
             4000,
         )
 
-    def _persist_caption_workspace(self, image: Image, entries: list[dict]):
+    def _persist_caption_workspace(
+        self,
+        image: Image,
+        entries: list[dict],
+        *,
+        refresh_view: bool = True,
+    ) -> bool:
         try:
             needs_review_count, excluded_count = save_caption_workspace(
                 image.path,
@@ -10466,7 +10486,7 @@ class MainWindow(QMainWindow):
                 'Caption Status Error',
                 f'Could not save caption classifications for {image.path.name}: {exc}',
             )
-            return
+            return False
         image.caption_needs_review_count = needs_review_count
         image.caption_excluded_count = excluded_count
         if image is getattr(self.image_tags_editor, 'image_reference', None):
@@ -10477,7 +10497,9 @@ class MainWindow(QMainWindow):
             image,
             needs_review_count,
             excluded_count,
+            refresh_view=refresh_view,
         )
+        return True
 
 
     @Slot(str, str)

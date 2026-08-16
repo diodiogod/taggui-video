@@ -10385,6 +10385,8 @@ class ImageListModel(QAbstractListModel):
         image_reference,
         needs_review_count: int,
         excluded_count: int,
+        *,
+        refresh_view: bool = True,
     ):
         """Persist and repaint derived caption-status summary counts."""
         image = self.resolve_image_reference(image_reference)
@@ -10404,7 +10406,10 @@ class ImageListModel(QAbstractListModel):
                     image.caption_needs_review_count,
                     image.caption_excluded_count,
                 )
-        self._notify_image_metadata_changed(image)
+        self._notify_image_metadata_changed(
+            image,
+            refresh_view=bool(refresh_view),
+        )
 
     def refresh_ideogram_caption_index_for_image(self, image: Image | None):
         """Refresh DB-searchable Ideogram text for a saved structured caption."""

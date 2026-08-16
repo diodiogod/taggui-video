@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-08-15
+
+### Added
+
+- Keep included and excluded caption entries saved when navigating between images
+- Prevent failed auto-caption requests from excluding existing tags
+- Add a batch action to include all caption entries again
+- Preserve caption review state across tag updates and reloads
+
+### Changed
+
+- Improve caption review reliability
 ## [1.6.0] - 2026-08-15
 
 ### Added
