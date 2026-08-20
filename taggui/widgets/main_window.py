@@ -5269,7 +5269,15 @@ class MainWindow(QMainWindow):
     @Slot(Qt.ApplicationState)
     def _on_application_state_changed(self, state):
         """Hide floating wall controls when the app is not the active application."""
-        if state != Qt.ApplicationState.ApplicationActive:
+        app_active = state == Qt.ApplicationState.ApplicationActive
+        for viewer in self._iter_all_viewers():
+            player = getattr(viewer, 'video_player', None)
+            if player is not None:
+                try:
+                    player.set_application_render_active(app_active)
+                except RuntimeError:
+                    pass
+        if not app_active:
             self._selection_wall_speed_overlay.hide()
             return
         self._remember_instance_as_preferred_target()

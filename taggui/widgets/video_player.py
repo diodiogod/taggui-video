@@ -68,6 +68,7 @@ class MpvGlWidget(QOpenGLWidget):
         self._mpv_render_ctx = None
         self._update_pending = False
         self._render_ready = False  # True only when MPV has signalled a new frame
+        self._application_render_suspended = False
         self._emit_frame_painted = False  # set True by _begin_mpv_reveal to arm one-shot signal
         # Keep proc address resolver alive — ctypes GCs CFUNCTYPE objects otherwise
         self._proc_address_fn = None
@@ -103,7 +104,11 @@ class MpvGlWidget(QOpenGLWidget):
         pass  # Render context is created externally via set_render_context()
 
     def paintGL(self):
-        if self._mpv_render_ctx is None or not self._render_ready:
+        if (
+            self._application_render_suspended
+            or self._mpv_render_ctx is None
+            or not self._render_ready
+        ):
             return
         self._render_ready = False
         try:
@@ -195,6 +200,9 @@ class VideoPlayerWidget(QWidget):
         self.mpv_widget = None
         self.mpv_host_view = None
         self._mpv_surface_active = False  # True only when MPV should be covering the viewport
+        self._mpv_surface_active_before_app_suspend = False
+        self._application_render_suspended = False
+        self._application_render_resume_generation = 0
         # Parking widget: mpv_widget is reparented here while not playing.
         # It stays hidden the entire time it is parked, so no native window
         # flash occurs — the GL context is preserved, just detached from the
@@ -548,6 +556,9 @@ class VideoPlayerWidget(QWidget):
         The geometry timer keeps the widget sized to the viewport during active
         playback (e.g. window resize while playing).
         """
+        if visible and self._application_render_suspended:
+            self._mpv_surface_active_before_app_suspend = True
+            return
         if not visible:
             self._mpv_surface_active = False
             self.mpv_geometry_timer.stop()
@@ -581,6 +592,50 @@ class VideoPlayerWidget(QWidget):
                 pass
             if not self.mpv_geometry_timer.isActive():
                 self.mpv_geometry_timer.start()
+
+    def set_application_render_active(self, active: bool) -> None:
+        """Keep MPV GL work away from cross-GPU app activation transitions."""
+        self._application_render_resume_generation += 1
+        generation = self._application_render_resume_generation
+        gl_widget = getattr(self, 'mpv_widget', None)
+
+        if not active:
+            self._application_render_suspended = True
+            was_active = bool(self._mpv_surface_active)
+            self._mpv_surface_active_before_app_suspend = was_active
+            if gl_widget is not None:
+                gl_widget._application_render_suspended = True
+            if was_active:
+                self._set_mpv_visible(False)
+                # _set_mpv_visible(False) changes the live flag; retain the
+                # intent so activation can restore the surface after settling.
+                self._mpv_surface_active_before_app_suspend = True
+            return
+
+        if not self._mpv_surface_active_before_app_suspend:
+            self._application_render_suspended = False
+            if gl_widget is not None:
+                gl_widget._application_render_suspended = False
+            return
+
+        def _resume_after_display_settles():
+            if generation != self._application_render_resume_generation:
+                return
+            self._application_render_suspended = False
+            self._mpv_surface_active_before_app_suspend = False
+            current_widget = getattr(self, 'mpv_widget', None)
+            if current_widget is None:
+                return
+            current_widget._application_render_suspended = False
+            if self._is_mpv_forward_active() and self.video_path is not None:
+                self._set_mpv_visible(True, keep_opencv_cover=True)
+                current_widget._render_ready = True
+                current_widget.update()
+
+        # Windows may migrate the top-level window between display adapters
+        # while delivering activation/exposure events. Let that finish before
+        # entering libmpv's synchronous OpenGL render callback.
+        QTimer.singleShot(350, _resume_after_display_settles)
 
     def _sync_mpv_widget_to_viewport(self):
         """Resize mpv_widget to match the pixmap item's on-screen rect.
