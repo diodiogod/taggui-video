@@ -1040,8 +1040,53 @@ class ImageTagsEditor(QDockWidget):
         tags = self._pending_descriptive_tags
         self._pending_descriptive_tags = None
         self._descriptive_dirty = False
-        if tags != self.image_tag_list_model.stringList():
-            self.image_tag_list_model.setStringList(tags)
+        self._apply_descriptive_tags_to_workspace(tags)
+
+    def _apply_descriptive_tags_to_workspace(self, tags: list[str]):
+        """Replace included entries while retaining excluded workspace entries."""
+        if not self._caption_workspace_active:
+            if tags != self.image_tag_list_model.stringList():
+                self.image_tag_list_model.setStringList(tags)
+            return
+
+        existing_entries = self.caption_entries()
+        pools: dict[str, list[dict]] = {}
+        for entry in existing_entries:
+            pools.setdefault(entry['text'], []).append(entry)
+        mixed_status_texts = {
+            text
+            for text, candidates in pools.items()
+            if any(entry.get('excluded') for entry in candidates)
+            and any(not entry.get('excluded') for entry in candidates)
+        }
+        for candidates in pools.values():
+            candidates.sort(key=lambda entry: bool(entry.get('excluded')))
+        merged_entries: list[dict] = []
+        for tag in tags:
+            if tag in mixed_status_texts:
+                # Repair duplicates created by the previous Description-mode
+                # merge: retain the excluded original below and discard the
+                # accidental included copy.
+                continue
+            candidates = pools.get(tag) or []
+            if candidates:
+                entry = candidates.pop(0)
+                entry['excluded'] = False
+            else:
+                entry = {
+                    'text': tag,
+                    'needs_review': False,
+                    'excluded': False,
+                }
+            merged_entries.append(entry)
+        for position, entry in enumerate(existing_entries):
+            if entry.get('excluded'):
+                merged_entries.insert(min(position, len(merged_entries)), entry)
+
+        self._caption_entries = normalize_caption_entries(merged_entries)
+        working_tags = [entry['text'] for entry in self._caption_entries]
+        if working_tags != self.image_tag_list_model.stringList():
+            self.image_tag_list_model.setStringList(working_tags)
 
     def _flush_descriptive_sync(self):
         """Force-apply staged descriptive edits immediately."""
@@ -1162,11 +1207,16 @@ class ImageTagsEditor(QDockWidget):
         # after one tag is moved.
         current_string_list = self.image_tag_list_model.stringList()
         if current_string_list == tags_from_source:
+            description_text = (
+                self.tag_separator.join(included_tags)
+                if stored_workspace is not None
+                else caption_text
+            )
             if (self.descriptive_mode_checkbox.isChecked()
-                    and caption_text is not None
-                    and self.descriptive_text_edit.toPlainText() != caption_text):
+                    and description_text is not None
+                    and self.descriptive_text_edit.toPlainText() != description_text):
                 self.descriptive_text_edit.blockSignals(True)
-                self.descriptive_text_edit.setPlainText(caption_text)
+                self.descriptive_text_edit.setPlainText(description_text)
                 self.descriptive_text_edit.blockSignals(False)
             if should_refresh_source_row:
                 self._emit_source_row_data_changed(source_model)
@@ -1182,7 +1232,7 @@ class ImageTagsEditor(QDockWidget):
         # Update descriptive text if in descriptive mode
         if self.descriptive_mode_checkbox.isChecked():
             tags_text = (
-                self.tag_separator.join(tags_from_source)
+                self.tag_separator.join(included_tags)
                 if stored_workspace is not None
                 else caption_text
                 if caption_text is not None
@@ -1267,7 +1317,7 @@ class ImageTagsEditor(QDockWidget):
             self._descriptive_sync_timer.stop()
             # Switch to descriptive mode
             # Prefer exact sidecar caption text to avoid any model-order drift.
-            tags_text = self.tag_separator.join(self.image_tag_list_model.stringList())
+            tags_text = self.tag_separator.join(self.included_tags())
             if self.image_index and self.image_index.isValid():
                 proxy_index = self.proxy_image_list_model.mapFromSource(self.image_index)
                 image: Image = self.proxy_image_list_model.data(
@@ -1288,8 +1338,7 @@ class ImageTagsEditor(QDockWidget):
             tags = self._tags_from_descriptive_text(
                 self.descriptive_text_edit.toPlainText()
             )
-            if tags != self.image_tag_list_model.stringList():
-                self.image_tag_list_model.setStringList(tags)
+            self._apply_descriptive_tags_to_workspace(tags)
         self._sync_caption_mode_widgets()
 
     @Slot()
