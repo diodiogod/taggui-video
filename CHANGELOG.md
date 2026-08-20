@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-08-20
+
+### Added
+
+- Reduce crashes during repeated external file drags on Windows
+- Avoid long MPV interface stalls when returning to TagGUI across GPU-driven monitors
+- Keep excluded tags out of generated descriptions as configured
+
+### Changed
+
+- Improve video workflow stability and caption filtering
 ## [1.6.1] - 2026-08-15
 
 ### Added
