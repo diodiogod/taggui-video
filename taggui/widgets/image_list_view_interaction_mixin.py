@@ -2288,6 +2288,20 @@ class ImageListViewInteractionMixin:
 
     def _current_global_from_current_index(self, source_model):
         """Map current proxy index to stable global index."""
+        cached_global = getattr(self, '_current_global_row_cache', -1)
+        try:
+            cached_global = int(cached_global)
+        except (TypeError, ValueError):
+            cached_global = -1
+        if cached_global >= 0 and (
+            bool(getattr(self, '_model_resetting', False))
+            or bool(getattr(source_model, '_loading_pages', set()))
+            or bool(getattr(source_model, '_enrichment_running', False))
+        ):
+            # A QModelIndex is only a volatile row handle while buffered pages
+            # are being replaced. Avoid mapToSource() during that transition;
+            # the global cache is the authoritative selection identity.
+            return cached_global
         try:
             cur_idx = self.currentIndex()
             if not cur_idx.isValid():

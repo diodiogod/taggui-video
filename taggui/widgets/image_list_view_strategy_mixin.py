@@ -1316,11 +1316,13 @@ class ImageListViewStrategyMixin:
 
     def _schedule_rebind_current_index_to_selected_global(self):
         """Queue a single rebind attempt on the next event-loop tick."""
+        expected_proxy_model = self.model()
         source_model = (
-            self.model().sourceModel()
-            if self.model() and hasattr(self.model(), "sourceModel")
-            else self.model()
+            expected_proxy_model.sourceModel()
+            if expected_proxy_model and hasattr(expected_proxy_model, "sourceModel")
+            else expected_proxy_model
         )
+        expected_epoch = int(getattr(self, '_selection_model_epoch', 0))
         virtual_list_active = bool(
             hasattr(self, "_virtual_list_is_active")
             and self._virtual_list_is_active(source_model)
@@ -1338,6 +1340,19 @@ class ImageListViewStrategyMixin:
 
         def _run_rebind():
             self._rebind_selected_global_pending = False
+            if bool(getattr(self, '_model_resetting', False)):
+                return
+            if self.model() is not expected_proxy_model:
+                return
+            if int(getattr(self, '_selection_model_epoch', 0)) != expected_epoch:
+                return
+            live_source_model = (
+                expected_proxy_model.sourceModel()
+                if expected_proxy_model and hasattr(expected_proxy_model, 'sourceModel')
+                else expected_proxy_model
+            )
+            if live_source_model is not source_model:
+                return
             try:
                 self._rebind_current_index_to_selected_global(source_model=source_model)
             except Exception:

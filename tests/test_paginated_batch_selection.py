@@ -52,6 +52,21 @@ class _FakeIndex:
         return True
 
 
+def test_current_global_uses_stable_cache_during_enrichment():
+    class View:
+        _current_global_row_cache = 321
+        _model_resetting = False
+
+        def currentIndex(self):
+            raise AssertionError('volatile Qt index must not be queried')
+
+    source_model = type('SourceModel', (), {'_enrichment_running': True})()
+
+    assert ImageListViewInteractionMixin._current_global_from_current_index(
+        View(), source_model
+    ) == 321
+
+
 class _FakeSignal:
     def __init__(self):
         self.emissions = 0
