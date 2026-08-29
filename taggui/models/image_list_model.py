@@ -4034,21 +4034,36 @@ class ImageListModel(QAbstractListModel):
         ):
             return
 
+        effective_generation = (
+            int(self._page_load_generation)
+            if generation is None
+            else int(generation)
+        )
         with self._page_load_lock:
             page_result = self._pending_page_results.pop(
-                (int(generation), int(page_num)),
+                (effective_generation, int(page_num)),
                 None,
             )
-        if page_result is None:
-            return
-        images, missing_rel_paths = page_result
-        if not self._store_page(page_num, images, generation=generation):
+            page_already_stored = int(page_num) in self._pages
+        if page_result is not None:
+            images, missing_rel_paths = page_result
+            if not self._store_page(
+                page_num,
+                images,
+                generation=effective_generation,
+            ):
+                return
+        elif page_already_stored:
+            # Compatibility for the legacy PageLoadedEvent path, whose worker
+            # stored the page before notifying the UI thread.
+            missing_rel_paths = []
+        else:
             return
         if missing_rel_paths:
             self.stale_index_paths_detected.emit(
                 missing_rel_paths,
                 int(page_num),
-                int(generation),
+                effective_generation,
             )
 
         initial_page_finished = bool(
@@ -4599,6 +4614,18 @@ class ImageListModel(QAbstractListModel):
         ordered_pages = sorted(preloaded.keys())
         for page_num in ordered_pages:
             self._store_page(int(page_num), preloaded[int(page_num)])
+
+        # A refresh can supersede the asynchronous bootstrap page worker. When
+        # the refreshed page zero is installed here, complete the same activity
+        # lifecycle that _on_page_loaded_signal() would have completed; without
+        # this, the collapsible title/progress strip remains red indefinitely.
+        if (
+            bool(getattr(self, '_initial_page_load_pending', False))
+            and 0 in ordered_pages
+        ):
+            self._initial_page_load_pending = False
+            self._initial_warm_pages = ()
+            self.initial_page_load_finished.emit()
 
         self.total_count_changed.emit(self._total_count)
         self._emit_paginated_layout_refresh()
@@ -6891,6 +6918,7 @@ class ImageListModel(QAbstractListModel):
                     return
                 if load_generation == int(getattr(self, '_path_validation_satisfied_generation', -1) or -1):
                     print("[CACHE] Skipping background validation; index already synchronized")
+                    self.background_validation_progress.emit("", -1, 0, True)
                     return
                 print("[CACHE] Starting background validation...")
                 self._load_executor.submit(

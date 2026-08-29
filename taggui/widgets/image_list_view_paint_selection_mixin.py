@@ -126,9 +126,11 @@ class ImageListViewPaintSelectionMixin:
                     super().paintEvent(event)
                     return
 
-                # Paint background
+                # Create the painter now, but preserve the last good backing
+                # store until the current masonry window has drawable items.
+                # Async page/layout handoffs can briefly produce an empty
+                # geometry window; clearing first makes the list flash gray.
                 painter = QPainter(self.viewport())
-                painter.fillRect(self.viewport().rect(), self.palette().base())
 
                 # Get visible viewport rect in absolute coordinates
                 scroll_offset = self.verticalScrollBar().value()
@@ -143,6 +145,8 @@ class ImageListViewPaintSelectionMixin:
                 _t_vis0 = time.time()
                 visible_items = self._get_masonry_visible_items(expanded_viewport)
                 _t_vis1 = time.time()
+                if visible_items:
+                    painter.fillRect(self.viewport().rect(), self.palette().base())
 
                 # Keep page loading aligned with what is actually visible.
                 # Paint-time fallback exists only for blind-spot recovery during drag jumps.

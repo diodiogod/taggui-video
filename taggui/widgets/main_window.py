@@ -1126,18 +1126,23 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._apply_freeze_if_idle)
 
     def _apply_freeze_if_idle(self):
-        """Actually freeze the list view if no interaction is happening."""
-        if self._video_is_playing and not self._unfreeze_timer.isActive():
-            if not self._list_view_frozen:
-                self._set_list_view_updates_enabled(False)
-                self._list_view_frozen = True
-                # print("[VIDEO] List view frozen for playback")
+        """Keep the static list paintable while video playback is active.
+
+        Qt already repaints an idle item view only when it is invalidated.
+        Disabling updates for the whole native viewport loses its backing store
+        on some GPU/monitor paths and produces a black flash when re-enabled.
+        """
+        if self._list_view_frozen:
+            self._set_list_view_updates_enabled(True)
+            self._list_view_frozen = False
 
     def _unfreeze_list_view(self):
         """Called when video is paused/stopped."""
         self._video_is_playing = False
-        # Don't unfreeze automatically - let user interaction handle it
-        # Static list doesn't need repaints whether video is playing or not
+        self._unfreeze_timer.stop()
+        if self._list_view_frozen:
+            self._set_list_view_updates_enabled(True)
+            self._list_view_frozen = False
 
     def _unfreeze_for_interaction(self, *args, hold_ms: int = 200, **kwargs):
         """Temporarily unfreeze during user interaction, then re-freeze after idle.
@@ -1162,27 +1167,10 @@ class MainWindow(QMainWindow):
         self._unfreeze_timer.start(max(50, hold_ms))
 
     def _refreeze_after_interaction(self):
-        """Re-freeze list view after interaction has stopped."""
-        # Only re-freeze if video is playing (otherwise keep unfrozen for responsiveness)
-        if self._video_is_playing and not self._list_view_frozen:
-            list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
-            if list_view is not None:
-                masonry_busy = bool(getattr(list_view, '_masonry_calculating', False))
-                resize_busy = bool(hasattr(list_view, '_resize_timer') and list_view._resize_timer.isActive())
-                recalc_busy = bool(hasattr(list_view, '_masonry_recalc_timer') and list_view._masonry_recalc_timer.isActive())
-                # Don't freeze during decisive geometry/recalc work; this causes
-                # stale masonry paint until another manual interaction.
-                if masonry_busy or resize_busy or recalc_busy:
-                    self._unfreeze_timer.start(250)
-                    return
-            self._set_list_view_updates_enabled(False)
-            self._list_view_frozen = True
-            # print("[VIDEO] List view re-frozen (interaction ended)")
-        elif not self._video_is_playing and self._list_view_frozen:
-            # Video stopped while frozen - unfreeze for normal use
+        """Finish an interaction without disabling the native viewport."""
+        if self._list_view_frozen:
             self._set_list_view_updates_enabled(True)
             self._list_view_frozen = False
-            # print("[VIDEO] List view unfrozen (no video playing)")
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
@@ -4120,7 +4108,6 @@ class MainWindow(QMainWindow):
             if owner_proxy_model is self.proxy_image_list_model:
                 self._arm_masonry_refresh_anchor()
             owner_proxy_model.set_filter(active_filter)
-        self._force_immediate_review_badge_repaint()
         return True
 
     def clear_review_marks_for_scope(self, scope: str, interactive: bool = False):
@@ -4343,10 +4330,6 @@ class MainWindow(QMainWindow):
             list_view = list_view or self._resolve_list_view_for_proxy_model(proxy_model)
             if list_view is None:
                 return
-            try:
-                list_view._last_masonry_window_signature = None
-            except Exception:
-                pass
             delegate = getattr(list_view, 'delegate', None)
             if delegate is not None and hasattr(delegate, 'clear_labels'):
                 try:
@@ -4358,15 +4341,6 @@ class MainWindow(QMainWindow):
                 rect = list_view.visualRect(proxy_index)
                 if rect.isValid():
                     viewport.update(rect)
-                    viewport.repaint(rect)
-            viewport.update()
-            viewport.repaint()
-            recalc = getattr(list_view, '_recalculate_masonry_if_needed', None)
-            if callable(recalc):
-                try:
-                    recalc("review_changed")
-                except Exception:
-                    pass
         except Exception:
             pass
 
@@ -4393,25 +4367,6 @@ class MainWindow(QMainWindow):
                 continue
             except Exception:
                 continue
-        for list_view in (
-            getattr(getattr(self, 'image_list', None), 'list_view', None),
-            getattr(getattr(getattr(self, '_secondary_browser', None), 'dock', None), 'list_view', None),
-        ):
-            if list_view is None:
-                continue
-            try:
-                delegate = getattr(list_view, 'delegate', None)
-                if delegate is not None and hasattr(delegate, 'clear_labels'):
-                    delegate.clear_labels()
-            except Exception:
-                pass
-            try:
-                source_model = getattr(list_view.model(), 'sourceModel', None)
-                source_model = source_model() if callable(source_model) else list_view.model()
-                if source_model is not None and hasattr(source_model, 'thumbnail_updates_ready'):
-                    source_model.thumbnail_updates_ready.emit()
-            except Exception:
-                pass
         self._sync_review_controls_from_context()
 
     def _refresh_review_badge_config(self):
@@ -7612,7 +7567,7 @@ class MainWindow(QMainWindow):
 
         # Capture folder restore target before model/filter churn can emit
         # transient currentChanged signals and overwrite the saved selection.
-        if not select_path:
+        if not select_path and self._current_directory_load_options is None:
             folder_saved_path = self._get_folder_last_selected_path(self.directory_path)
             if folder_saved_path:
                 select_path = folder_saved_path
@@ -10722,6 +10677,10 @@ class MainWindow(QMainWindow):
             if self._session_settings_contains('image_index')
             else 0
         )
+        if self._startup_load_options is not None and not self._startup_select_path:
+            # A sorted limited launch starts at the head of that scope rather
+            # than jumping back to an older folder-session selection.
+            image_index = 0
 
         if self._startup_directory is not None and self._startup_directory.is_dir():
             directory_path = self._startup_directory
@@ -10734,9 +10693,13 @@ class MainWindow(QMainWindow):
 
         if directory_path is not None and directory_path.is_dir():
             select_path = self._startup_select_path
-            if not select_path:
+            if not select_path and self._startup_load_options is None:
                 select_path = self._get_folder_last_selected_path(directory_path)
-            if not select_path and self._session_settings_contains('last_selected_path'):
+            if (
+                not select_path
+                and self._startup_load_options is None
+                and self._session_settings_contains('last_selected_path')
+            ):
                 select_path = self._session_settings_value('last_selected_path', '', value_type=str)
 
             def _restore_directory():

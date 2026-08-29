@@ -158,6 +158,35 @@ def test_stale_page_worker_cannot_mutate_reloaded_model(tmp_path, monkeypatch):
         app.processEvents()
 
 
+def test_refresh_page_zero_completes_superseded_initial_activity(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    model = ImageListModel(256, ', ')
+    activity_finished = []
+    model._paginated_mode = True
+    model._total_count = 1
+    model._pages = {}
+    model._initial_page_load_pending = True
+    model._initial_warm_pages = (1, 2)
+    model.initial_page_load_finished.connect(lambda: activity_finished.append(True))
+    monkeypatch.setattr(model, '_emit_paginated_layout_refresh', lambda: None)
+    monkeypatch.setattr(model, '_start_paginated_enrichment', lambda **_kwargs: None)
+
+    try:
+        reloaded = model._reload_paginated_model_after_db_update(
+            new_total=1,
+            preloaded_pages={0: [object()]},
+        )
+
+        assert reloaded == [0]
+        assert model._initial_page_load_pending is False
+        assert model._initial_warm_pages == ()
+        assert activity_finished == [True]
+    finally:
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
+
+
 def test_limited_validation_refreshes_current_model_without_folder_reload(
     tmp_path,
     monkeypatch,
