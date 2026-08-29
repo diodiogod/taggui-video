@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] - 2026-08-28
+
+### Added
+
+- Stop the collapsible loading strip from remaining red after startup refreshes
+- Prevent the media list from flashing gray while paginated layouts settle
+- Make review badge changes feel smoother without rebuilding the entire list
+- Open sorted limited folders at their newest item instead of an older saved selection
+- Keep the media list responsive after pausing video playback
+
+### Changed
+
+- Improve startup and review smoothness
 ## [1.6.3] - 2026-08-28
 
 ### Added
