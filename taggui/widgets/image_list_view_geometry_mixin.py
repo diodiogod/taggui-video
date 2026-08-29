@@ -1,7 +1,7 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 import math
-import sys
-from PySide6.QtCore import Property
+import time
+from PySide6.QtCore import QObject, Property
 from PySide6.QtWidgets import QDockWidget, QMainWindow
 from utils.diagnostic_logging import append_crash_context, diagnostic_print
 from widgets.image_list_qt_drag_session_service import QtDragSessionService
@@ -1711,36 +1711,26 @@ class ImageListViewGeometryMixin:
             return
 
         drag = None
-        isolated_external_drag = external_only and sys.platform == "win32"
+        drag_source = None
         try:
-            if isolated_external_drag:
-                from utils.windows_external_drag import run_isolated_external_drag
-
-                external_paths = [url.toLocalFile() for url in mime_data.urls()]
-                helper_returncode = run_isolated_external_drag(external_paths, drag_pixmap)
-                drop_action = Qt.DropAction.IgnoreAction
-                if helper_returncode != 0:
-                    helper_message = (
-                        f"[DRAG] Isolated Windows drag exited {helper_returncode}; "
-                        "TagGUI remained active"
-                    )
-                    diagnostic_print(helper_message, detail="essential")
-                    append_crash_context(helper_message)
-            else:
-                # Keep the native drag owner outside the OpenGL-backed viewport.
-                drag = QDrag(self.window())
-                drag.setMimeData(mime_data)
-                drag.setPixmap(drag_pixmap)
-                drag.setHotSpot(drag_pixmap.rect().center())
-                self._active_qt_drag = drag
-                self._active_qt_drag_mime = mime_data
-                drop_action = drag.exec(supportedActions)
+            # Keep the native drag owner detached from the main window and its
+            # MPV/OpenGL children, while remaining in this process so Windows
+            # can continue the mouse gesture that began in the image list.
+            drag_source = QObject(QApplication.instance())
+            drag = QDrag(drag_source)
+            drag.setMimeData(mime_data)
+            drag.setPixmap(drag_pixmap)
+            drag.setHotSpot(drag_pixmap.rect().center())
+            self._active_qt_drag = drag
+            self._active_qt_drag_mime = mime_data
+            drop_action = drag.exec(supportedActions)
         finally:
             drag_session_service.finish(drag_session_state)
             finish_tracking = getattr(self, "_finish_qt_drag_gesture_tracking", None)
             if callable(finish_tracking):
                 finish_tracking()
             drag_session_service.retire_drag(drag)
+            drag_session_service.retire_drag(drag_source)
             self._active_qt_drag_mime = None
             self._active_qt_drag = None
         try:

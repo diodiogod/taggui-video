@@ -1325,12 +1325,16 @@ class ImageIndexDB:
         try:
             cursor = self.conn.cursor()
             
-            # 1. Reset suspicious dimensions (Super Tall/Fat OR Huge) to force re-scan with Smart Logic
-            # Thresholds match Smart Verification (0.2, 5.0, 12000px)
+            # 1. Reset suspicious image dimensions to force a re-scan with
+            # Smart Logic. Video dimensions already come from the media probe,
+            # so extreme portrait/panorama videos are valid and must not be
+            # invalidated on every launch.
+            # Thresholds match Smart Verification (0.2, 5.0, 12000px).
             cursor.execute("""
                 UPDATE images 
                 SET width=NULL, height=NULL, aspect_ratio=1.0 
                 WHERE width > 0 AND height > 0 
+                AND COALESCE(is_video, 0) = 0
                 AND (
                     (CAST(width AS FLOAT)/height < 0.2 OR CAST(width AS FLOAT)/height > 5.0)
                     OR
