@@ -5,6 +5,23 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-08-28
+
+### Added
+
+- Add spatial review and reusable text transformations for caption editing
+- Keep paginated selections stable when new media is indexed in the background
+- Prevent native Windows file-drag failures from closing TagGUI
+- Keep review filters and visible badges consistent when metadata copies differ
+
+### Changed
+
+- Add spatial caption tools and improve media workflow reliability
+- Improve deletion of videos still held by TagGUI playback windows
+
+### Fixed
+
+- Fix global marked-item deletion and review metadata saving errors
 ## [1.6.2] - 2026-08-20
 
 ### Added
