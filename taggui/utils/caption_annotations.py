@@ -24,10 +24,22 @@ def normalize_caption_entries(raw_entries) -> list[dict]:
         text = str(raw.get("text") or "").strip()
         if not text:
             continue
+        reviewed_phrases = raw.get("direction_reviewed_phrases", [])
+        if not isinstance(reviewed_phrases, list):
+            reviewed_phrases = []
+        reviewed_phrases = list(dict.fromkeys(
+            str(phrase).strip().casefold()
+            for phrase in reviewed_phrases
+            if str(phrase).strip()
+        ))
+        # The short-lived row-level ``direction_reviewed`` flag is
+        # intentionally not migrated: it could hide sibling phrases that the
+        # user never reviewed. Those phrases should become visible again.
         entries.append({
             "text": text,
             "needs_review": bool(raw.get("needs_review", False)),
             "excluded": bool(raw.get("excluded", False)),
+            "direction_reviewed_phrases": reviewed_phrases,
         })
     return entries
 
@@ -165,7 +177,9 @@ def save_caption_workspace(media_path: Path, entries: list[dict]) -> tuple[int, 
         except (OSError, UnicodeError, json.JSONDecodeError):
             pass
 
-    if any(counts):
+    if any(counts) or any(
+        entry.get("direction_reviewed_phrases") for entry in normalized
+    ):
         payload[CAPTION_WORKSPACE_KEY] = {
             "version": 1,
             "entries": normalized,

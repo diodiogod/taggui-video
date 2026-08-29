@@ -6,12 +6,17 @@ for corrections and grammar checking.
 """
 
 from PySide6.QtCore import Qt, Slot, Signal, QTimer, QPoint
-from PySide6.QtGui import QAction, QTextCursor, QContextMenuEvent, QFont, QWheelEvent, QMouseEvent, QScreen
-from PySide6.QtWidgets import QPlainTextEdit, QMenu, QListWidget, QListWidgetItem, QApplication
+from PySide6.QtGui import (QAction, QColor, QContextMenuEvent, QFont,
+                           QMouseEvent, QScreen, QTextCharFormat, QTextCursor,
+                           QWheelEvent)
+from PySide6.QtWidgets import (QApplication, QListWidget, QListWidgetItem,
+                               QMenu, QPlainTextEdit, QTextEdit)
 
 from utils.spell_highlighter import SpellHighlighter
 from utils.grammar_checker import GrammarChecker, GrammarCheckMode, GrammarIssue, IssueType
 from utils.settings import settings, DEFAULT_SETTINGS
+from utils.spatial_caption import spatial_expression_spans
+from utils.spatial_caption import spatial_gesture_actions, spatial_reference_label
 
 
 class DescriptiveTextEdit(QPlainTextEdit):
@@ -29,6 +34,11 @@ class DescriptiveTextEdit(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.text_transform_requested = None
+        self.apply_last_text_transform_requested = None
+        self.spatial_correction_requested = None
+        self.spatial_span_reviewed = None
+        self.spatial_review_enabled = False
 
         # Spell highlighter (enabled based on settings)
         spell_check_enabled = settings.value('spell_check_enabled', defaultValue=True, type=bool)
@@ -67,6 +77,7 @@ class DescriptiveTextEdit(QPlainTextEdit):
             self._resume_spell_highlighting_after_typing
         )
         self.textChanged.connect(self._on_text_changed_for_spell_performance)
+        self.textChanged.connect(self._refresh_spatial_highlights)
 
         # Initialize zoom level from settings
         self.min_zoom = 50  # Percent
@@ -167,6 +178,38 @@ class DescriptiveTextEdit(QPlainTextEdit):
         if include_standard_actions:
             menu = QMenu(self)
 
+            spatial_span = self._spatial_span_at_position(cursor.position())
+            if spatial_span and callable(self.spatial_correction_requested):
+                spatial_menu = menu.addMenu('Spatial Correction')
+                reference = spatial_reference_label().title()
+                for label, action_name in (
+                    ('Set Body Direction to Left', 'word_left'),
+                    ('Set Body Direction to Right', 'word_right'),
+                    (f'Convert to {reference} Left', 'frame_left'),
+                    (f'Convert to {reference} Right', 'frame_right'),
+                    ('Set Position to Background', 'background'),
+                    ('Set Position to Foreground', 'foreground'),
+                ):
+                    action = spatial_menu.addAction(label)
+                    selected_phrase = self.toPlainText()[spatial_span[0]:spatial_span[1]]
+                    action.setEnabled(
+                        action_name in spatial_gesture_actions(selected_phrase)
+                    )
+                    action.triggered.connect(
+                        lambda _checked=False, name=action_name, span=spatial_span:
+                        self.spatial_correction_requested(name, span[0], span[1])
+                    )
+                menu.addSeparator()
+
+            if callable(self.text_transform_requested):
+                transform_action = menu.addAction('Send Selection to Text Transform…')
+                transform_action.triggered.connect(self.text_transform_requested)
+                apply_last_action = menu.addAction('Apply Last Text Transform')
+                apply_last_action.triggered.connect(
+                    self.apply_last_text_transform_requested
+                )
+                menu.addSeparator()
+
             # Spelling suggestions if word is misspelled
             if word and self.spell_highlighter.is_misspelled(word):
                 suggestions = self.spell_highlighter.get_suggestions(word)
@@ -224,6 +267,45 @@ class DescriptiveTextEdit(QPlainTextEdit):
             # For left-click on misspelled word, show non-blocking popup
             if word and self.spell_highlighter.is_misspelled(word):
                 self._show_spell_popup(word, word_start, word_end, global_pos)
+
+    def set_spatial_review_enabled(self, enabled: bool):
+        self.spatial_review_enabled = bool(enabled)
+        self._refresh_spatial_highlights()
+
+    def setPlainText(self, text: str):
+        super().setPlainText(text)
+        self._refresh_spatial_highlights()
+
+    def _spatial_span_at_position(self, position: int):
+        if not self.spatial_review_enabled:
+            return None
+        for start, end, kind in spatial_expression_spans(self.toPlainText()):
+            if start <= position <= end:
+                return start, end, kind
+        return None
+
+    def _refresh_spatial_highlights(self):
+        if not self.spatial_review_enabled:
+            self.setExtraSelections([])
+            return
+        selections = []
+        for start, end, _kind in spatial_expression_spans(self.toPlainText()):
+            if (callable(self.spatial_span_reviewed)
+                    and self.spatial_span_reviewed(start)):
+                continue
+            selection = QTextEdit.ExtraSelection()
+            cursor = self.textCursor()
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            selection.cursor = cursor
+            selection.format = QTextCharFormat()
+            selection.format.setBackground(QColor(245, 158, 11, 55))
+            selection.format.setUnderlineColor(QColor('#F59E0B'))
+            selection.format.setUnderlineStyle(
+                QTextCharFormat.UnderlineStyle.DashUnderline
+            )
+            selections.append(selection)
+        self.setExtraSelections(selections)
 
     def _show_spell_popup(self, word: str, word_start: int, word_end: int, global_pos):
         """Show non-blocking spell suggestion popup."""

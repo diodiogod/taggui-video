@@ -104,6 +104,10 @@ DEFAULT_SETTINGS = {
     'auto_captioner_layout_mode': 'compact',  # compact, classic
     'caption_output_format': 'Plain caption',
     'caption_exclude_tags_after_first': False,
+    'spatial_review_enabled': True,
+    'spatial_gestures_enabled': True,
+    'spatial_highlight_depth_expressions': False,
+    'spatial_reference_noun': 'Frame',
     'remote_ideogram_structured_output': False,
     'review_badge_schema': '',
     'review_badge_text_color': '#FFFFFF',

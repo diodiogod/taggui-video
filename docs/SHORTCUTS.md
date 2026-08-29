@@ -67,6 +67,11 @@ Quick Sort owns these keys only while its focused session is active. Named overr
 - Rename a tag: double-click it or press `F2`
 - Reorder tags: drag and drop
 - Select multiple tags: hold `Ctrl` or `Shift` and click
+- Open the compact Text Transform window: `Ctrl` + `Shift` + `T`
+- Apply the last configured Text Transform: `Ctrl` + `Alt` + `T`
+- Open Text Transform from the pane: click the `⇄` title-bar button
+- Open quick spatial corrections: right-click a highlighted spatial row or phrase
+- Open the radial correction disk: left-drag the amber `↔` row handle or a highlighted phrase
 
 To add the same tag to multiple files, select the images first and then add the tag.
 
@@ -98,6 +103,8 @@ selects its bounding box in the main viewer.
 
 - Find and Replace: `Ctrl` + `R`
 - Batch Reorder Tags: `Ctrl` + `B`
+- Text Transform: `Ctrl` + `Shift` + `T`
+- Apply Last Text Transform: `Ctrl` + `Alt` + `T`
 
 These actions are available from the `Edit` menu.
 
@@ -186,3 +193,4 @@ Floating viewers do not have their own fullscreen mode.
 - [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
+- [Text Transform and Spatial Caption Review Guide](TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md)

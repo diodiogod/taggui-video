@@ -819,6 +819,19 @@ class MenuManager:
             self.main_window.show_find_and_replace_dialog)
         edit_menu.addAction(find_and_replace_action)
 
+        text_transform_action = QAction('Text Transform…', parent=self.main_window)
+        text_transform_action.setShortcut(QKeySequence('Ctrl+Shift+T'))
+        text_transform_action.triggered.connect(
+            self.main_window.show_text_transform_tool)
+        edit_menu.addAction(text_transform_action)
+
+        apply_text_transform_action = QAction(
+            'Apply Last Text Transform', parent=self.main_window)
+        apply_text_transform_action.setShortcut(QKeySequence('Ctrl+Alt+T'))
+        apply_text_transform_action.triggered.connect(
+            self.main_window.apply_last_text_transform)
+        edit_menu.addAction(apply_text_transform_action)
+
         batch_reorder_tags_action = QAction('Batch Reorder Tags...', parent=self.main_window)
         batch_reorder_tags_action.setShortcut(QKeySequence('Ctrl+B'))
         batch_reorder_tags_action.triggered.connect(

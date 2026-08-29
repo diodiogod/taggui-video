@@ -23,6 +23,7 @@ This is the main documentation map for TagGUI Video 1M.
 - [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)
+- [Text Transform and Spatial Caption Review Guide](TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md)
 - [Ideogram 4 Structured Caption Guide](IDEOGRAM4_GUIDE.md)
 - [Pipelines Guide](PIPELINES_GUIDE.md)
 - [Quick Sort Guide](QUICK_SORT_GUIDE.md)

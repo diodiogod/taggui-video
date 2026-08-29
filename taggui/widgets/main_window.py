@@ -9,7 +9,7 @@ import threading
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QTimer, Slot, QSize, QRect, QRectF, Signal
+from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QThread, QTimer, Slot, QSize, QRect, QRectF, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QMainWindow,
@@ -820,6 +820,19 @@ class MainWindow(QMainWindow):
             tag_separator)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
                            self.image_tags_editor)
+        self.text_transform_tool = None
+        self.image_tags_editor.open_text_transform_requested = (
+            self.show_text_transform_tool
+        )
+        self.image_tags_editor.apply_last_text_transform_requested = (
+            self.apply_last_text_transform
+        )
+        self.image_tags_editor.descriptive_text_edit.text_transform_requested = (
+            self.show_text_transform_tool
+        )
+        self.image_tags_editor.descriptive_text_edit.apply_last_text_transform_requested = (
+            self.apply_last_text_transform
+        )
         self.all_tags_editor = AllTagsEditor(self.tag_counter_model)
         self.tag_counter_model.all_tags_list = (self.all_tags_editor
                                                 .all_tags_list)
@@ -3622,21 +3635,36 @@ class MainWindow(QMainWindow):
         if not unique_images_by_path:
             return
 
+        target_video_paths = {
+            os.path.normcase(os.path.abspath(os.fspath(path)))
+            for path, image in unique_images_by_path.items()
+            if bool(getattr(image, 'is_video', False))
+            or path.suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        }
         video_was_cleaned = False
-        video_player = _get_loaded_video_player(self)
-        if video_player is not None:
-            video_path = getattr(video_player, 'video_path', None)
-            if video_path:
-                try:
-                    current_video_path = Path(video_path)
-                except Exception:
-                    current_video_path = None
-                if current_video_path is not None and current_video_path in unique_images_by_path:
-                    try:
-                        video_player.cleanup()
-                        video_was_cleaned = True
-                    except Exception:
-                        pass
+        cleaned_player_ids = set()
+        for viewer in self._iter_all_viewers():
+            try:
+                video_player = getattr(viewer, 'video_player', None)
+                video_path = getattr(video_player, 'video_path', None)
+                normalized_video_path = (
+                    os.path.normcase(os.path.abspath(os.fspath(video_path)))
+                    if video_path else None
+                )
+            except (OSError, TypeError, ValueError, RuntimeError):
+                continue
+            if (
+                video_player is None
+                or normalized_video_path not in target_video_paths
+                or id(video_player) in cleaned_player_ids
+            ):
+                continue
+            try:
+                video_player.cleanup()
+                cleaned_player_ids.add(id(video_player))
+                video_was_cleaned = True
+            except Exception:
+                pass
 
         for info in dock_infos:
             for image in info['images']:
@@ -3652,7 +3680,10 @@ class MainWindow(QMainWindow):
 
         deleted_paths = []
         import gc
-        max_retries = 3
+        # Native video backends may release their Windows file handle shortly
+        # after cleanup returns. Allow a bounded grace period before offering
+        # permanent deletion; both trash and unlink fail while that handle lives.
+        max_retries = 12 if video_was_cleaned else 3
         for path in list(unique_images_by_path.keys()):
             success = False
             for attempt in range(max_retries):
@@ -3666,6 +3697,10 @@ class MainWindow(QMainWindow):
                     success = True
                     break
                 if attempt == max_retries - 1:
+                    diagnostic_print(
+                        f"[DELETE] Trash failed for {path}: {image_file.errorString()}",
+                        detail="essential",
+                    )
                     reply = QMessageBox.question(
                         self,
                         'Trash Failed',
@@ -9367,6 +9402,23 @@ class MainWindow(QMainWindow):
         find_and_replace_dialog = FindAndReplaceDialog(
             parent=self, image_list_model=self.image_list_model)
         find_and_replace_dialog.exec()
+
+    @Slot()
+    def show_text_transform_tool(self):
+        from dialogs.text_transform_tool import TextTransformTool
+        if self.text_transform_tool is None:
+            self.text_transform_tool = TextTransformTool(self)
+        self.text_transform_tool.capture_editor_selection()
+        self.text_transform_tool.show()
+        self.text_transform_tool.raise_()
+        self.text_transform_tool.activateWindow()
+
+    @Slot()
+    def apply_last_text_transform(self):
+        if self.text_transform_tool is None:
+            from dialogs.text_transform_tool import TextTransformTool
+            self.text_transform_tool = TextTransformTool(self)
+        self.text_transform_tool.apply_last()
 
     @Slot()
     def show_batch_reorder_tags_dialog(self):

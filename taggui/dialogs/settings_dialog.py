@@ -854,6 +854,7 @@ class SettingsDialog(QDialog):
         tab_widget.addTab(self._create_models_tab(), 'Models')
         tab_widget.addTab(self._create_cache_tab(), 'Cache')
         tab_widget.addTab(self._create_spell_check_tab(), 'Spell Check')
+        tab_widget.addTab(self._create_spatial_review_tab(), 'Spatial Review')
         tab_widget.addTab(self._create_advanced_tab(), 'Advanced')
 
         # Restore last selected tab
@@ -1944,6 +1945,65 @@ class SettingsDialog(QDialog):
         layout.addLayout(grid_layout)
         layout.addStretch()
 
+        scroll_area.setWidget(widget)
+        return scroll_area
+
+    def _create_spatial_review_tab(self):
+        """Create manual spatial-caption review settings."""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+
+        description = QLabel(
+            'Spatial review highlights potentially ambiguous positioning. '
+            'It never changes captions automatically.'
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        group = QGroupBox('Spatial caption review')
+        grid = QGridLayout(group)
+
+        enabled = SettingsBigCheckBox(
+            key='spatial_review_enabled', default=True)
+        grid.addWidget(QLabel('Highlight spatial expressions'), 0, 0,
+                       Qt.AlignmentFlag.AlignRight)
+        grid.addWidget(enabled, 0, 1, Qt.AlignmentFlag.AlignLeft)
+
+        gestures = SettingsBigCheckBox(
+            key='spatial_gestures_enabled', default=True)
+        grid.addWidget(QLabel('Enable left-drag correction disk'), 1, 0,
+                       Qt.AlignmentFlag.AlignRight)
+        grid.addWidget(gestures, 1, 1, Qt.AlignmentFlag.AlignLeft)
+
+        highlight_depth = SettingsBigCheckBox(
+            key='spatial_highlight_depth_expressions', default=False)
+        highlight_depth.setToolTip(
+            'Highlight standalone foreground/background wording for manual '
+            'review. This does not remove depth targets from the correction disk.'
+        )
+        grid.addWidget(QLabel('Highlight foreground/background expressions'),
+                       2, 0, Qt.AlignmentFlag.AlignRight)
+        grid.addWidget(highlight_depth, 2, 1, Qt.AlignmentFlag.AlignLeft)
+
+        reference = SettingsComboBox(
+            key='spatial_reference_noun', default='Frame')
+        reference.addItems(['Frame', 'Image'])
+        reference.setToolTip(
+            'Choose whether frame-relative corrections say “the left side '
+            'of the frame” or “the left side of the image”.'
+        )
+        grid.addWidget(QLabel('Position reference wording'), 3, 0,
+                       Qt.AlignmentFlag.AlignRight)
+        grid.addWidget(reference, 3, 1, Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(group)
+        layout.addStretch()
         scroll_area.setWidget(widget)
         return scroll_area
 

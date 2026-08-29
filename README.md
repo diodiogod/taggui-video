@@ -38,6 +38,7 @@ Captioning and tagging remain core to the project, including workflows that supp
 - [Masonry Review Wall and Badges](docs/MASONRY_REVIEW_WALL_GUIDE.md)
 - [Quick Sort Keyboard Classification](docs/QUICK_SORT_GUIDE.md)
 - [Ideogram 4 Structured Captions](docs/IDEOGRAM4_GUIDE.md)
+- [Text Transform and Spatial Caption Review](docs/TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md)
 - [Skins and Skin Designer](docs/SKIN_DESIGNER_GUIDE.md)
 
 ## Support

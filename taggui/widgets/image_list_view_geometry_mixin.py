@@ -1,5 +1,6 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 import math
+import sys
 from PySide6.QtCore import Property
 from PySide6.QtWidgets import QDockWidget, QMainWindow
 from utils.diagnostic_logging import append_crash_context, diagnostic_print
@@ -1710,19 +1711,29 @@ class ImageListViewGeometryMixin:
             return
 
         drag = None
+        isolated_external_drag = external_only and sys.platform == "win32"
         try:
-            drag = QDrag(self)
-            drag.setMimeData(mime_data)
-            drag.setPixmap(drag_pixmap)
-            drag.setHotSpot(drag_pixmap.rect().center())
-            # Keep Python wrappers strongly reachable for the whole native OLE
-            # operation. Explicitly retire the parent-owned QDrag afterward so old
-            # COM data objects cannot accumulate across repeated external drags.
-            self._active_qt_drag = drag
-            self._active_qt_drag_mime = mime_data
-            if external_only and (supportedActions & Qt.DropAction.CopyAction):
-                drop_action = drag.exec(supportedActions, Qt.DropAction.CopyAction)
+            if isolated_external_drag:
+                from utils.windows_external_drag import run_isolated_external_drag
+
+                external_paths = [url.toLocalFile() for url in mime_data.urls()]
+                helper_returncode = run_isolated_external_drag(external_paths, drag_pixmap)
+                drop_action = Qt.DropAction.IgnoreAction
+                if helper_returncode != 0:
+                    helper_message = (
+                        f"[DRAG] Isolated Windows drag exited {helper_returncode}; "
+                        "TagGUI remained active"
+                    )
+                    diagnostic_print(helper_message, detail="essential")
+                    append_crash_context(helper_message)
             else:
+                # Keep the native drag owner outside the OpenGL-backed viewport.
+                drag = QDrag(self.window())
+                drag.setMimeData(mime_data)
+                drag.setPixmap(drag_pixmap)
+                drag.setHotSpot(drag_pixmap.rect().center())
+                self._active_qt_drag = drag
+                self._active_qt_drag_mime = mime_data
                 drop_action = drag.exec(supportedActions)
         finally:
             drag_session_service.finish(drag_session_state)

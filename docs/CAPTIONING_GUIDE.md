@@ -230,6 +230,23 @@ Captioning in TagGUI Video 1M is useful for:
 - captioning cropped subjects instead of whole images
 - supporting image and video model preparation workflows
 
+## Manual Text and Spatial Review
+
+The Image Tags pane includes a compact Text Transform utility for configurable
+replacement, atomic two-way swaps, presets, selection/current-caption scopes,
+and previewed batch operations. Open it with the `⇄` title-bar button,
+`Edit -> Text Transform...`, or `Ctrl` + `Shift` + `T`.
+
+TagGUI can also highlight potentially ambiguous anatomical and frame-relative
+left/right expressions produced by captioning models. These highlights never
+trigger automatic corrections. Review the visible image or video, then use the
+right-click Spatial Correction menu or the left-drag correction disk to choose
+an anatomical side, frame/image side, foreground, or background explicitly.
+
+See the [Text Transform and Spatial Caption Review Guide](TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md)
+for matching options, batch scopes, gestures, phrase-level reviewed state, and
+Settings controls.
+
 ## Notes
 
 - Caption generation may take time on first use, especially when models need to be loaded or downloaded.

@@ -49,6 +49,7 @@ from utils.review_marks import (
     serialize_review_flags,
 )
 from utils.sidecar import (
+    is_taggui_metadata_dict,
     legacy_json_sidecar_path,
     preferred_taggui_sidecar_read_path,
     taggui_sidecar_path,
@@ -61,6 +62,7 @@ from utils.ideogram_caption import (
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
+from utils.text_transform import TextTransformOptions, transform_text
 from utils.thumbnail_cache import get_thumbnail_cache
 from utils.media_file_lock import synchronized_media_file
 from utils.load_options import LimitedLoadOptions
@@ -3259,6 +3261,7 @@ class ImageListModel(QAbstractListModel):
             json_file_path = self._preferred_sidecar_meta_path(file_path)
             meta = self._read_cached_sidecar_meta(json_file_path)
             if meta is not None:
+                merged_review_state = build_sidecar_review_recovery(row, meta)
                 self._apply_image_metadata_from_meta(image, meta)
                 merged_state = build_sidecar_reaction_recovery(row, meta)
                 if merged_state:
@@ -3271,7 +3274,18 @@ class ImageListModel(QAbstractListModel):
                             int(img_id),
                         )
                     )
-                merged_review_state = build_sidecar_review_recovery(row, meta)
+                # Filtering reads the indexed state while badges paint the
+                # materialized Image. Keep both views identical: use a newer
+                # sidecar recovery when one exists, otherwise retain the DB
+                # state (which may be newer than a stale/failed sidecar write).
+                display_review_state = merged_review_state or row
+                display_rank, display_flags = normalize_review_state(
+                    display_review_state.get('review_rank', 0),
+                    display_review_state.get('review_flags', 0),
+                )
+                image.review_rank = int(display_rank)
+                image.review_flags = int(display_flags)
+                image.review_updated_at = display_review_state.get('review_updated_at')
                 if merged_review_state:
                     sidecar_review_updates.append(
                         (
@@ -9201,6 +9215,120 @@ class ImageListModel(QAbstractListModel):
         if changed_image_indices:
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
+
+    def count_text_transform(
+        self,
+        options: TextTransformOptions,
+        scope: Scope | str,
+    ) -> tuple[int, int]:
+        """Count captions and individual replacements for Text Transform."""
+        return self._text_transform_in_scope(options, scope, apply=False)
+
+    def apply_text_transform(
+        self,
+        options: TextTransformOptions,
+        scope: Scope | str,
+    ) -> tuple[int, int]:
+        """Apply a reusable replace/swap operation with one undo checkpoint."""
+        self.add_to_undo_stack(
+            action_name='Text Transform',
+            should_ask_for_confirmation=False,
+        )
+        return self._text_transform_in_scope(options, scope, apply=True)
+
+    def _text_transform_in_scope(
+        self,
+        options: TextTransformOptions,
+        scope: Scope | str,
+        *,
+        apply: bool,
+    ) -> tuple[int, int]:
+        if self._paginated_mode and scope == Scope.ALL_IMAGES:
+            return self._text_transform_paginated_all(options, apply=apply)
+        if self._paginated_mode and scope != Scope.ALL_IMAGES:
+            raise ValueError(
+                'Selected and filtered batch scopes are unavailable for '
+                'paginated folders. Use All media or the current caption.'
+            )
+
+        changed_indices = []
+        changed_captions = 0
+        replacement_count = 0
+        for image_index, image in enumerate(self.iter_all_images()):
+            if not self.is_image_in_scope(scope, image_index, image):
+                continue
+            caption = self.tag_separator.join(image.tags)
+            updated, count_a, count_b = transform_text(caption, options)
+            replacements = count_a + count_b
+            if not replacements:
+                continue
+            changed_captions += 1
+            replacement_count += replacements
+            if not apply:
+                continue
+            image.tags = self._normalize_tags(updated.split(self.tag_separator))
+            self.write_image_tags_to_disk(image)
+            if self._paginated_mode:
+                self._save_tags_to_db(image)
+            changed_indices.append(image_index)
+
+        if apply and changed_indices:
+            self.dataChanged.emit(
+                self.index(changed_indices[0]),
+                self.index(changed_indices[-1]),
+            )
+            self.update_undo_and_redo_actions_requested.emit()
+        return changed_captions, replacement_count
+
+    def _text_transform_paginated_all(
+        self,
+        options: TextTransformOptions,
+        *,
+        apply: bool,
+    ) -> tuple[int, int]:
+        patterns = [options.first]
+        if options.swap:
+            patterns.append(options.second)
+        candidate_paths = set()
+        for pattern in patterns:
+            candidate_paths.update(
+                self._db.get_files_matching_tag_text(pattern, options.use_regex)
+            )
+
+        changed_captions = 0
+        replacement_count = 0
+        for rel_path in candidate_paths:
+            media_path = self._directory_path / rel_path
+            txt_path = media_path.with_suffix('.txt')
+            if not txt_path.exists():
+                continue
+            try:
+                caption = txt_path.read_text(encoding='utf-8', errors='replace')
+            except OSError:
+                continue
+            updated, count_a, count_b = transform_text(caption, options)
+            replacements = count_a + count_b
+            if not replacements:
+                continue
+            changed_captions += 1
+            replacement_count += replacements
+            if not apply:
+                continue
+            new_tags = self._normalize_tags(updated.split(self.tag_separator))
+            try:
+                txt_path.write_text(updated, encoding='utf-8')
+                self._sync_paginated_db_tags_for_rel_path(
+                    rel_path,
+                    new_tags,
+                    txt_path=txt_path,
+                )
+            except OSError as error:
+                print(f'Error applying Text Transform to {rel_path}: {error}')
+
+        if apply and changed_captions:
+            self._reload_loaded_pages_after_paginated_tag_change()
+            self.update_undo_and_redo_actions_requested.emit()
+        return changed_captions, replacement_count
 
     def _find_and_replace_paginated(self, find_text: str, replace_text: str,
                                     use_regex: bool) -> int:

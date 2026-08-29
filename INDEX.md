@@ -27,6 +27,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/PIPELINES_GUIDE.md`: Pipeline creation, step configuration, linking, execution, and import/export guide.
 - `docs/MARKINGS_GUIDE.md`: Manual and automatic marking workflows, class actions, and model safety notes.
 - `docs/QUICK_SORT_GUIDE.md`: Zero-setup keyboard sorting, named destination overrides, qualifier routing, file handling, and session controls.
+- `docs/TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md`: Configurable text swaps/replacements, manual spatial review, quick corrections, radial gestures, and settings.
 
 ## Archived Docs (`docs/archive/`)
 

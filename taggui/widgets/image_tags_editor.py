@@ -1,8 +1,10 @@
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QModelIndex, QStringListModel,
-                            QPoint, QTimer, Qt, Signal, Slot)
-from PySide6.QtGui import QColor, QCloseEvent, QKeyEvent, QIcon, QFont, QPalette, QWheelEvent
+                            QPoint, QRectF, QTimer, Qt, Signal, Slot)
+from PySide6.QtGui import (QColor, QCloseEvent, QKeyEvent, QIcon, QFont,
+                           QMouseEvent, QPainter, QPalette, QPen, QTextCursor,
+                           QWheelEvent)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView,
                                QMenu, QMessageBox, QPushButton, QStackedWidget, QStyle,
@@ -30,6 +32,14 @@ from utils.ideogram_caption import (
     ideogram_caption_path,
 )
 from utils.settings import DEFAULT_SETTINGS, settings
+from utils.spatial_caption import (
+    apply_spatial_action,
+    has_spatial_expression,
+    spatial_expression_spans,
+    spatial_gesture_actions,
+    spatial_reference_label,
+)
+from utils.text_transform import TextTransformOptions, transform_text
 from utils.text_edit_item_delegate import TextEditItemDelegate
 from utils.utils import get_confirmation_dialog_reply
 from widgets.image_list import ImageList
@@ -174,7 +184,11 @@ class CaptionStatusItemDelegate(TextEditItemDelegate):
         owner = self.parent()
         status_getter = getattr(owner, 'caption_status_for_row', None)
         status = status_getter(index.row()) if callable(status_getter) else {}
-        if not status or not (status.get('needs_review') or status.get('excluded')):
+        if not status or not (
+            status.get('needs_review')
+            or status.get('excluded')
+            or status.get('directional_attention')
+        ):
             super().paint(painter, option, index)
             return
         paint_option = QStyleOptionViewItem(option)
@@ -184,13 +198,149 @@ class CaptionStatusItemDelegate(TextEditItemDelegate):
             paint_option.font = font
             paint_option.palette.setColor(QPalette.ColorRole.Text, QColor('#8a8f98'))
             paint_option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#c2c7d0'))
-        elif status.get('needs_review'):
+        elif status.get('needs_review') or status.get('directional_attention'):
             paint_option.palette.setColor(QPalette.ColorRole.Text, QColor('#F59E0B'))
             paint_option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#FFE0A3'))
         super().paint(painter, paint_option, index)
+        if (status.get('directional_attention') and settings.value(
+                'spatial_gestures_enabled',
+                DEFAULT_SETTINGS['spatial_gestures_enabled'],
+                type=bool)):
+            painter.save()
+            painter.setPen(QPen(QColor('#F59E0B'), 1.5))
+            handle_rect = QRectF(
+                option.rect.right() - 19,
+                option.rect.center().y() - 8,
+                16,
+                16,
+            )
+            painter.drawEllipse(handle_rect)
+            painter.drawText(handle_rect, Qt.AlignmentFlag.AlignCenter, '↔')
+            painter.restore()
+
+
+class SpatialGestureOverlay(QWidget):
+    LABELS = {
+        'word_left': 'BODY LEFT',
+        'word_right': 'BODY RIGHT',
+        'frame_left': 'FRAME LEFT',
+        'frame_right': 'FRAME RIGHT',
+        'background': 'BACKGROUND',
+        'foreground': 'FOREGROUND',
+        'background_left': 'BACKGROUND · FRAME LEFT',
+        'background_right': 'BACKGROUND · FRAME RIGHT',
+        'foreground_left': 'FOREGROUND · FRAME LEFT',
+        'foreground_right': 'FOREGROUND · FRAME RIGHT',
+    }
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.center = QPoint()
+        self.action = None
+        self.preview = ''
+        self.allowed_actions = set()
+        self.hide()
+
+    def begin(self, center: QPoint, allowed_actions: set[str]):
+        self.center = center
+        self.allowed_actions = allowed_actions
+        self.action = None
+        self.preview = ''
+        self.setGeometry(self.parentWidget().rect())
+        self.show()
+        self.raise_()
+        self.update()
+
+    def choose(self, position: QPoint, source_text: str) -> str | None:
+        dx = position.x() - self.center.x()
+        dy = position.y() - self.center.y()
+        distance = (dx * dx + dy * dy) ** 0.5
+        action = None
+        if distance >= 14:
+            horizontal = abs(dx) > abs(dy) * 1.45
+            vertical = abs(dy) > abs(dx) * 1.45
+            if 'word_left' in self.allowed_actions and horizontal:
+                if distance < 68:
+                    action = 'word_right' if dx > 0 else 'word_left'
+                else:
+                    action = 'frame_right' if dx > 0 else 'frame_left'
+            elif horizontal:
+                action = 'frame_right' if dx > 0 else 'frame_left'
+            elif vertical:
+                action = 'foreground' if dy > 0 else 'background'
+            else:
+                depth = 'foreground' if dy > 0 else 'background'
+                side = 'right' if dx > 0 else 'left'
+                action = f'{depth}_{side}'
+        if action not in self.allowed_actions:
+            action = None
+        self.action = action
+        self.preview = apply_spatial_action(source_text, action) if action else ''
+        self.update()
+        return action
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(245, 158, 11, 210), 2))
+        painter.setBrush(QColor(25, 25, 25, 225))
+        painter.drawEllipse(self.center, 104, 104)
+        painter.setPen(QPen(QColor(115, 115, 115, 210), 1))
+        painter.drawEllipse(self.center, 68, 68)
+        painter.drawEllipse(self.center, 14, 14)
+
+        painter.setPen(QColor('#f2f2f2'))
+        font = painter.font()
+        font.setPointSize(8)
+        font.setBold(True)
+        painter.setFont(font)
+        reference = spatial_reference_label()
+        labels = [
+            (f'{reference}-L', -87, 4), (f'{reference}-R', 87, 4),
+        ]
+        if 'word_left' in self.allowed_actions:
+            labels.extend([('LEFT', -44, 4), ('RIGHT', 44, 4)])
+        if 'background' in self.allowed_actions:
+            labels.append(('BACKGROUND', 0, -84))
+        if 'foreground' in self.allowed_actions:
+            labels.append(('FOREGROUND', 0, 88))
+        for label, x, y in labels:
+            painter.drawText(
+                QRectF(self.center.x() + x - 35, self.center.y() + y - 10, 70, 20),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+        if self.action:
+            painter.setPen(QPen(QColor('#8ab4f8'), 4))
+            painter.drawEllipse(self.center, 108, 108)
+            preview_rect = QRectF(
+                max(4, self.center.x() - 180),
+                max(4, self.center.y() - 142),
+                360,
+                42,
+            )
+            painter.setPen(QColor('#ffffff'))
+            painter.setBrush(QColor(20, 20, 20, 235))
+            painter.drawRoundedRect(preview_rect, 5, 5)
+            preview = self.preview
+            if len(preview) > 90:
+                preview = preview[:87] + '…'
+            painter.drawText(
+                preview_rect.adjusted(6, 3, -6, -3),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                f'{self._action_label(self.action)}\n{preview}',
+            )
+
+    def _action_label(self, action: str) -> str:
+        label = self.LABELS[action]
+        return label.replace('FRAME', spatial_reference_label())
 
 
 class ImageTagsList(QListView):
+    spatial_gesture_requested = Signal(int, str)
+
     def __init__(
         self,
         image_tag_list_model: QStringListModel,
@@ -210,6 +360,9 @@ class ImageTagsList(QListView):
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setWordWrap(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._spatial_gesture_row = -1
+        self._spatial_gesture_source = ''
+        self._spatial_gesture_overlay = SpatialGestureOverlay(self.viewport())
 
         # Initialize tag list zoom level from settings
         self.min_zoom = 50  # Percent
@@ -247,6 +400,63 @@ class ImageTagsList(QListView):
         elif remaining_row_count:
             # Select the last tag.
             self.select_tag(remaining_row_count - 1)
+
+    def _direction_handle_hit(self, position: QPoint):
+        if not settings.value(
+            'spatial_gestures_enabled',
+            DEFAULT_SETTINGS['spatial_gestures_enabled'],
+            type=bool,
+        ):
+            return QModelIndex()
+        index = self.indexAt(position)
+        if not index.isValid():
+            return QModelIndex()
+        status_getter = getattr(self, 'caption_status_for_row', None)
+        status = status_getter(index.row()) if callable(status_getter) else {}
+        if not status.get('directional_attention'):
+            return QModelIndex()
+        rect = self.visualRect(index)
+        if position.x() < rect.right() - 26:
+            return QModelIndex()
+        return index
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            position = event.position().toPoint()
+            index = self._direction_handle_hit(position)
+            if index.isValid():
+                source = str(index.data(Qt.ItemDataRole.DisplayRole) or '')
+                allowed = spatial_gesture_actions(source)
+                if allowed:
+                    self._spatial_gesture_row = index.row()
+                    self._spatial_gesture_source = source
+                    self._spatial_gesture_overlay.begin(position, allowed)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._spatial_gesture_row >= 0:
+            self._spatial_gesture_overlay.choose(
+                event.position().toPoint(),
+                self._spatial_gesture_source,
+            )
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._spatial_gesture_row >= 0:
+            row = self._spatial_gesture_row
+            action = self._spatial_gesture_overlay.action
+            self._spatial_gesture_row = -1
+            self._spatial_gesture_source = ''
+            self._spatial_gesture_overlay.hide()
+            if action:
+                self.spatial_gesture_requested.emit(row, action)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def select_tag(self, row: int):
         # If the current index is not set, using the arrow keys to navigate
@@ -374,6 +584,8 @@ class ImageTagsEditor(QDockWidget):
         self._caption_entries: list[dict] = []
         self._caption_workspace_active = False
         self._loading_tags = False
+        self.open_text_transform_requested = None
+        self.apply_last_text_transform_requested = None
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
@@ -445,6 +657,35 @@ class ImageTagsEditor(QDockWidget):
         """)
         self.grammar_check_button.hide()
 
+        self.text_transform_button = QPushButton('⇄')
+        self.text_transform_button.setToolTip(
+            'Open Text Transform (replace or swap caption text)'
+        )
+        self.text_transform_button.setAccessibleName('Open Text Transform')
+        self.text_transform_button.setMaximumSize(24, 20)
+        self.text_transform_button.setFlat(True)
+        self.text_transform_button.setStyleSheet("""
+            QPushButton {
+                font-size: 15px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #3a3a3a;
+                padding: 1px;
+                color: #d0d0d0;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #8ab4f8;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #2a2a2a;
+            }
+        """)
+        self.text_transform_button.clicked.connect(
+            self._request_open_text_transform
+        )
+
         # Don't connect signals yet - will do it after creating all widgets
 
         # Create float and close buttons
@@ -466,6 +707,7 @@ class ImageTagsEditor(QDockWidget):
         title_layout.addStretch()
         title_layout.addWidget(self.descriptive_mode_checkbox)
         title_layout.addWidget(self.grammar_check_button)
+        title_layout.addWidget(self.text_transform_button)
         title_layout.addWidget(float_button)
         title_layout.addWidget(close_button)
 
@@ -485,6 +727,11 @@ class ImageTagsEditor(QDockWidget):
         self.image_tags_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.image_tags_list.customContextMenuRequested.connect(
             self._show_caption_status_menu
+        )
+        self.image_tags_list.spatial_gesture_requested.connect(
+            lambda row, action: self._apply_spatial_action_to_rows(
+                [row], action
+            )
         )
         self.ideogram_tag_list_model = QStringListModel()
         self.ideogram_caption_list = IdeogramCaptionList(
@@ -507,10 +754,29 @@ class ImageTagsEditor(QDockWidget):
 
         # Descriptive text editor with spell/grammar checking (hidden by default)
         self.descriptive_text_edit = DescriptiveTextEdit()
+        self.descriptive_text_edit.set_spatial_review_enabled(
+            settings.value(
+                'spatial_review_enabled',
+                DEFAULT_SETTINGS['spatial_review_enabled'],
+                type=bool,
+            )
+        )
+        self.descriptive_text_edit.spatial_correction_requested = (
+            self._apply_descriptive_spatial_action
+        )
+        self.descriptive_text_edit.spatial_span_reviewed = (
+            self._descriptive_direction_reviewed_at
+        )
         self.descriptive_text_edit.setPlaceholderText('Enter descriptive text with commas...')
         self.descriptive_text_edit.textChanged.connect(self.on_descriptive_text_changed)
         self.descriptive_text_edit.hide()
         self.descriptive_text_edit.installEventFilter(self)
+        self.descriptive_text_edit.viewport().installEventFilter(self)
+        self._descriptive_gesture_candidate = None
+        self._descriptive_gesture_active = False
+        self._descriptive_gesture_overlay = SpatialGestureOverlay(
+            self.descriptive_text_edit.viewport()
+        )
         self._descriptive_sync_timer = QTimer(self)
         self._descriptive_sync_timer.setSingleShot(True)
         self._descriptive_sync_timer.timeout.connect(self._apply_pending_descriptive_sync)
@@ -576,6 +842,7 @@ class ImageTagsEditor(QDockWidget):
         # Now connect descriptive mode signals and load persistent state
         self.descriptive_mode_checkbox.toggled.connect(self.toggle_display_mode)
         self.descriptive_mode_checkbox.toggled.connect(self.save_descriptive_mode_state)
+        settings.change.connect(self._on_spatial_setting_changed)
 
         # Connect grammar check button
         self.grammar_check_button.clicked.connect(self.descriptive_text_edit.check_grammar)
@@ -598,7 +865,13 @@ class ImageTagsEditor(QDockWidget):
         return included_caption_tags(self.caption_entries())
 
     def has_caption_classifications(self) -> bool:
-        return any(caption_attention_counts(self._caption_entries))
+        return (
+            any(caption_attention_counts(self._caption_entries))
+            or any(
+                entry.get('direction_reviewed_phrases')
+                for entry in self._caption_entries
+            )
+        )
 
     def should_persist_caption_workspace(self) -> bool:
         return self._caption_workspace_active or self.has_caption_classifications()
@@ -608,8 +881,32 @@ class ImageTagsEditor(QDockWidget):
 
     def caption_status_for_row(self, row: int) -> dict:
         if 0 <= row < len(self._caption_entries):
-            return self._caption_entries[row]
+            status = dict(self._caption_entries[row])
+            status['directional_attention'] = bool(
+                settings.value(
+                    'spatial_review_enabled',
+                    DEFAULT_SETTINGS['spatial_review_enabled'],
+                    type=bool,
+                )
+                and self._unreviewed_spatial_phrases(status)
+            )
+            return status
         return {}
+
+    @staticmethod
+    def _unreviewed_spatial_phrases(entry: dict) -> list[str]:
+        text = str(entry.get('text') or '')
+        reviewed = {
+            str(value).casefold()
+            for value in entry.get('direction_reviewed_phrases', [])
+        }
+        if '*' in reviewed:
+            return []
+        return [
+            text[start:end]
+            for start, end, _kind in spatial_expression_spans(text)
+            if text[start:end].casefold() not in reviewed
+        ]
 
     def _reconcile_caption_entries(self, *_args):
         if self._loading_tags:
@@ -625,6 +922,7 @@ class ImageTagsEditor(QDockWidget):
                 'text': text,
                 'needs_review': False,
                 'excluded': False,
+                'direction_reviewed_phrases': [],
             }
             entry['text'] = text
             reconciled.append(entry)
@@ -640,6 +938,7 @@ class ImageTagsEditor(QDockWidget):
                 'text': texts[len(self._caption_entries)],
                 'needs_review': False,
                 'excluded': False,
+                'direction_reviewed_phrases': [],
             })
         for row in range(top_left.row(), bottom_right.row() + 1):
             if 0 <= row < len(texts) and row < len(self._caption_entries):
@@ -657,6 +956,56 @@ class ImageTagsEditor(QDockWidget):
             return
 
         menu = QMenu(self.image_tags_list)
+        transform_action = menu.addAction('Send to Text Transform…')
+        apply_transform_action = menu.addAction('Apply Last Text Transform')
+        menu.addSeparator()
+        spatial_actions = {}
+        selected_spatial_texts = [
+            str(self.image_tag_list_model.data(
+                self.image_tag_list_model.index(row),
+                Qt.ItemDataRole.DisplayRole,
+            ) or '')
+            for row in rows
+        ]
+        allowed_spatial_actions = set().union(*(
+            spatial_gesture_actions(text) for text in selected_spatial_texts
+        )) if selected_spatial_texts else set()
+        if any(has_spatial_expression(text) for text in selected_spatial_texts):
+            spatial_menu = menu.addMenu('Spatial Correction')
+            reference = spatial_reference_label().title()
+            spatial_actions['word_left'] = spatial_menu.addAction(
+                'Set Body Direction to Left'
+            )
+            spatial_actions['word_right'] = spatial_menu.addAction(
+                'Set Body Direction to Right'
+            )
+            spatial_menu.addSeparator()
+            spatial_actions['frame_left'] = spatial_menu.addAction(
+                f'Convert to {reference} Left'
+            )
+            spatial_actions['frame_right'] = spatial_menu.addAction(
+                f'Convert to {reference} Right'
+            )
+            spatial_menu.addSeparator()
+            spatial_actions['background'] = spatial_menu.addAction(
+                'Set Position to Background'
+            )
+            spatial_actions['foreground'] = spatial_menu.addAction(
+                'Set Position to Foreground'
+            )
+            for action_name, action in spatial_actions.items():
+                action.setEnabled(action_name in allowed_spatial_actions)
+            spatial_menu.addSeparator()
+            direction_checked_action = spatial_menu.addAction(
+                'Mark Direction as Checked / Ignore Highlight'
+            )
+            direction_unchecked_action = spatial_menu.addAction(
+                'Restore Direction Highlight'
+            )
+            menu.addSeparator()
+        else:
+            direction_checked_action = None
+            direction_unchecked_action = None
         needs_review_action = menu.addAction('Mark as Needing Review')
         reviewed_action = menu.addAction('Clear Needs Review')
         menu.addSeparator()
@@ -666,6 +1015,24 @@ class ImageTagsEditor(QDockWidget):
         clear_action = menu.addAction('Clear Caption Classifications')
         chosen = menu.exec(self.image_tags_list.viewport().mapToGlobal(position))
         if chosen is None:
+            return
+        if chosen is transform_action:
+            if callable(self.open_text_transform_requested):
+                self.open_text_transform_requested()
+            return
+        if chosen is apply_transform_action:
+            if callable(self.apply_last_text_transform_requested):
+                self.apply_last_text_transform_requested()
+            return
+        for action_name, action in spatial_actions.items():
+            if chosen is action:
+                self._apply_spatial_action_to_rows(rows, action_name)
+                return
+        if chosen is direction_checked_action:
+            self._set_direction_reviewed(rows, True)
+            return
+        if chosen is direction_unchecked_action:
+            self._set_direction_reviewed(rows, False)
             return
         self._reconcile_caption_entries()
         for row in rows:
@@ -690,6 +1057,186 @@ class ImageTagsEditor(QDockWidget):
                 self.image_reference,
                 self.caption_entries(),
             )
+
+    def _apply_spatial_action_to_rows(self, rows: list[int], action: str):
+        self._reconcile_caption_entries()
+        tags = self.image_tag_list_model.stringList()
+        changed = False
+        for row in rows:
+            if not 0 <= row < len(tags):
+                continue
+            updated = apply_spatial_action(tags[row], action)
+            if updated == tags[row]:
+                continue
+            tags[row] = updated
+            changed = True
+            if row < len(self._caption_entries):
+                self._caption_entries[row]['text'] = updated
+                self._caption_entries[row]['direction_reviewed_phrases'] = [
+                    updated[start:end].casefold()
+                    for start, end, _kind in spatial_expression_spans(updated)
+                ]
+        if not changed:
+            return
+        self._caption_workspace_active = True
+        self.image_tag_list_model.setStringList(tags)
+        self.image_tags_list.viewport().update()
+        if self.image_reference is not None:
+            self.caption_workspace_changed.emit(
+                self.image_reference,
+                self.caption_entries(),
+            )
+
+    def _set_direction_reviewed(self, rows: list[int], reviewed: bool):
+        self._reconcile_caption_entries()
+        changed = False
+        for row in rows:
+            if not 0 <= row < len(self._caption_entries):
+                continue
+            new_value = ['*'] if reviewed else []
+            if (self._caption_entries[row].get('direction_reviewed_phrases', [])
+                    == new_value):
+                continue
+            self._caption_entries[row]['direction_reviewed_phrases'] = new_value
+            changed = True
+        if not changed:
+            return
+        self._caption_workspace_active = True
+        self.image_tags_list.viewport().update()
+        self.descriptive_text_edit._refresh_spatial_highlights()
+        if self.image_reference is not None:
+            self.caption_workspace_changed.emit(
+                self.image_reference,
+                self.caption_entries(),
+            )
+
+    def _descriptive_direction_reviewed_at(self, position: int) -> bool:
+        text = self.descriptive_text_edit.toPlainText()
+        row = text[:position].count(self.tag_separator)
+        if not 0 <= row < len(self._caption_entries):
+            return False
+        reviewed = {
+            str(value).casefold()
+            for value in self._caption_entries[row].get(
+                'direction_reviewed_phrases', []
+            )
+        }
+        if '*' in reviewed:
+            return True
+        for start, end, _kind in spatial_expression_spans(text):
+            if start <= position <= end:
+                return text[start:end].casefold() in reviewed
+        return False
+
+    def _mark_direction_phrase_reviewed(self, row: int, phrase: str):
+        self._reconcile_caption_entries()
+        if not 0 <= row < len(self._caption_entries):
+            return
+        reviewed = self._caption_entries[row].setdefault(
+            'direction_reviewed_phrases', []
+        )
+        normalized = phrase.strip().casefold()
+        if not normalized or normalized in reviewed:
+            return
+        reviewed.append(normalized)
+        self._caption_workspace_active = True
+        self.image_tags_list.viewport().update()
+        self.descriptive_text_edit._refresh_spatial_highlights()
+        if self.image_reference is not None:
+            self.caption_workspace_changed.emit(
+                self.image_reference,
+                self.caption_entries(),
+            )
+
+    def _apply_descriptive_spatial_action(
+        self,
+        action: str,
+        start: int,
+        end: int,
+    ):
+        text = self.descriptive_text_edit.toPlainText()
+        phrase = text[start:end]
+        updated_phrase = apply_spatial_action(phrase, action)
+        if updated_phrase == phrase:
+            return
+        row = text[:start].count(self.tag_separator)
+        cursor = self.descriptive_text_edit.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        cursor.beginEditBlock()
+        cursor.insertText(updated_phrase)
+        cursor.endEditBlock()
+        self.descriptive_text_edit.setTextCursor(cursor)
+        self._flush_descriptive_sync()
+        self._mark_direction_phrase_reviewed(row, updated_phrase)
+
+    def selected_descriptive_text(self) -> str:
+        if not self.descriptive_mode_checkbox.isChecked():
+            return ''
+        return self.descriptive_text_edit.textCursor().selectedText()
+
+    def _request_open_text_transform(self):
+        if callable(self.open_text_transform_requested):
+            self.open_text_transform_requested()
+
+    def apply_text_transform(
+        self,
+        scope: str,
+        options: TextTransformOptions,
+        *,
+        preview: bool = False,
+    ) -> tuple[int, int]:
+        """Preview or apply a transform to the active caption editor."""
+        if self._caption_mode != 'tags':
+            raise ValueError('Text Transform is only available for normal captions.')
+
+        if scope == 'Selected text':
+            if not self.descriptive_mode_checkbox.isChecked():
+                raise ValueError('Enable Desc mode and select caption text first.')
+            cursor = self.descriptive_text_edit.textCursor()
+            if not cursor.hasSelection():
+                raise ValueError('Select caption text first.')
+            updated, count_a, count_b = transform_text(
+                cursor.selectedText(), options
+            )
+            replacements = count_a + count_b
+            if replacements and not preview:
+                cursor.beginEditBlock()
+                cursor.insertText(updated)
+                cursor.endEditBlock()
+                self.descriptive_text_edit.setTextCursor(cursor)
+                self._flush_descriptive_sync()
+            return (1 if replacements else 0), replacements
+
+        if self.descriptive_mode_checkbox.isChecked():
+            self._flush_descriptive_sync()
+        tags = self.image_tag_list_model.stringList()
+        if scope == 'Selected caption rows':
+            rows = sorted({
+                index.row() for index in self.image_tags_list.selectedIndexes()
+                if index.isValid()
+            })
+            if not rows:
+                raise ValueError('Select one or more caption rows first.')
+        elif scope == 'Current media caption':
+            rows = list(range(len(tags)))
+        else:
+            raise ValueError(f'Unsupported editor scope: {scope}')
+
+        changed = False
+        replacements = 0
+        updated_tags = list(tags)
+        for row in rows:
+            if row < 0 or row >= len(updated_tags):
+                continue
+            updated, count_a, count_b = transform_text(updated_tags[row], options)
+            if updated != updated_tags[row]:
+                changed = True
+                updated_tags[row] = updated
+            replacements += count_a + count_b
+        if changed and not preview:
+            self.image_tag_list_model.setStringList(updated_tags)
+        return (1 if changed else 0), replacements
 
     @Slot()
     def count_tokens(self):
@@ -1373,6 +1920,9 @@ class ImageTagsEditor(QDockWidget):
                 self.create_ideogram_button.hide()
         descriptive_text_edit = getattr(self, 'descriptive_text_edit', None)
         ideogram_json_text_edit = getattr(self, 'ideogram_json_text_edit', None)
+        if watched is getattr(descriptive_text_edit, 'viewport', lambda: None)():
+            if self._handle_descriptive_spatial_gesture_event(event):
+                return True
         if (watched is descriptive_text_edit
                 and event.type() == QEvent.Type.FocusOut):
             self._flush_descriptive_sync()
@@ -1380,6 +1930,76 @@ class ImageTagsEditor(QDockWidget):
                 and event.type() == QEvent.Type.FocusOut):
             self._flush_ideogram_json_sync()
         return super().eventFilter(watched, event)
+
+    def _handle_descriptive_spatial_gesture_event(self, event) -> bool:
+        if not settings.value(
+            'spatial_gestures_enabled',
+            DEFAULT_SETTINGS['spatial_gestures_enabled'],
+            type=bool,
+        ):
+            return False
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonPress:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            position = event.position().toPoint()
+            cursor = self.descriptive_text_edit.cursorForPosition(position)
+            text = self.descriptive_text_edit.toPlainText()
+            for start, end, _kind in spatial_expression_spans(text):
+                if not start <= cursor.position() <= end:
+                    continue
+                if self._descriptive_direction_reviewed_at(start):
+                    continue
+                phrase = text[start:end]
+                allowed = spatial_gesture_actions(phrase)
+                if allowed:
+                    self._descriptive_gesture_candidate = (
+                        position, start, end, phrase, allowed
+                    )
+                break
+            return False
+
+        if event_type == QEvent.Type.MouseMove and self._descriptive_gesture_candidate:
+            origin, start, end, phrase, allowed = self._descriptive_gesture_candidate
+            position = event.position().toPoint()
+            dx = position.x() - origin.x()
+            dy = position.y() - origin.y()
+            if not self._descriptive_gesture_active and dx * dx + dy * dy < 144:
+                return False
+            if not self._descriptive_gesture_active:
+                self._descriptive_gesture_active = True
+                self._descriptive_gesture_overlay.begin(origin, allowed)
+            self._descriptive_gesture_overlay.choose(position, phrase)
+            return True
+
+        if event_type == QEvent.Type.MouseButtonRelease and self._descriptive_gesture_candidate:
+            _origin, start, end, _phrase, _allowed = self._descriptive_gesture_candidate
+            action = self._descriptive_gesture_overlay.action
+            was_active = self._descriptive_gesture_active
+            self._descriptive_gesture_candidate = None
+            self._descriptive_gesture_active = False
+            self._descriptive_gesture_overlay.hide()
+            if was_active and action:
+                self._apply_descriptive_spatial_action(action, start, end)
+            return was_active
+        return False
+
+    @Slot(str, object)
+    def _on_spatial_setting_changed(self, key: str, _value):
+        if key == 'spatial_review_enabled':
+            enabled = settings.value(
+                key, DEFAULT_SETTINGS[key], type=bool
+            )
+            self.descriptive_text_edit.set_spatial_review_enabled(enabled)
+            self.image_tags_list.viewport().update()
+        elif key in {
+            'spatial_reference_noun',
+            'spatial_highlight_depth_expressions',
+            'spatial_gestures_enabled',
+        }:
+            if key == 'spatial_highlight_depth_expressions':
+                self.descriptive_text_edit._refresh_spatial_highlights()
+            self.image_tags_list.viewport().update()
 
     def closeEvent(self, event: QCloseEvent):
         self._flush_descriptive_sync()
