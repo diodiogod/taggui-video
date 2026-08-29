@@ -4091,6 +4091,13 @@ class MainWindow(QMainWindow):
             image.review_rank = int(next_rank)
             image.review_flags = int(next_flags)
             image.review_updated_at = review_updated_at
+            # SQL-backed review filters must see the new state before they
+            # rebuild. The deferred full persistence below also writes the
+            # sidecar, but would otherwise leave this refresh one event behind.
+            try:
+                owner_model.save_review_state_to_db(image)
+            except Exception:
+                pass
             QTimer.singleShot(
                 0,
                 lambda img=image, model=owner_model: model.persist_review_state(img),
@@ -4107,8 +4114,51 @@ class MainWindow(QMainWindow):
         if self._filter_uses_review(active_filter):
             if owner_proxy_model is self.proxy_image_list_model:
                 self._arm_masonry_refresh_anchor()
+            self._cover_list_during_filtered_relayout(owner_list_view)
             owner_proxy_model.set_filter(active_filter)
         return True
+
+    def _cover_list_during_filtered_relayout(self, list_view, timeout_ms: int = 500):
+        """Preserve the last painted frame until filtered masonry is ready."""
+        if list_view is None:
+            return
+        try:
+            viewport = list_view.viewport()
+            snapshot = viewport.grab()
+            if snapshot.isNull():
+                return
+            previous = getattr(list_view, '_filter_transition_cover', None)
+            if previous is not None:
+                previous.hide()
+                previous.deleteLater()
+            cover = QLabel(viewport)
+            cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            cover.setPixmap(snapshot)
+            cover.setGeometry(viewport.rect())
+            cover.show()
+            cover.raise_()
+            list_view._filter_transition_cover = cover
+
+            finished = [False]
+
+            def finish_cover():
+                if finished[0]:
+                    return
+                finished[0] = True
+                try:
+                    list_view.layout_ready.disconnect(finish_cover)
+                except Exception:
+                    pass
+                if getattr(list_view, '_filter_transition_cover', None) is cover:
+                    list_view._filter_transition_cover = None
+                cover.hide()
+                cover.deleteLater()
+                viewport.update()
+
+            list_view.layout_ready.connect(finish_cover)
+            QTimer.singleShot(max(100, int(timeout_ms)), finish_cover)
+        except (RuntimeError, AttributeError):
+            return
 
     def clear_review_marks_for_scope(self, scope: str, interactive: bool = False):
         if not interactive:
@@ -4252,7 +4302,7 @@ class MainWindow(QMainWindow):
         )
 
     def _force_immediate_review_badge_repaint(self):
-        """Force an immediate masonry/list repaint after bulk badge changes."""
+        """Queue badge repaints without invalidating masonry or flashing the viewport."""
         source_models = [getattr(self, 'image_list_model', None)]
         secondary = getattr(self, '_secondary_browser', None)
         secondary_model = getattr(secondary, 'image_list_model', None)
@@ -4265,12 +4315,6 @@ class MainWindow(QMainWindow):
                     source_model.thumbnail_updates_ready.emit()
                 except Exception:
                     pass
-            if bool(getattr(source_model, '_paginated_mode', False)) and hasattr(source_model, '_emit_pages_updated'):
-                try:
-                    source_model._emit_pages_updated()
-                except Exception:
-                    pass
-
         list_views = [getattr(getattr(self, 'image_list', None), 'list_view', None)]
         secondary_list_view = getattr(getattr(secondary, 'dock', None), 'list_view', None)
         if secondary_list_view is not None and secondary_list_view not in list_views:
@@ -4280,13 +4324,7 @@ class MainWindow(QMainWindow):
             if list_view is None:
                 continue
             try:
-                list_view._last_masonry_window_signature = None
-            except Exception:
-                pass
-            try:
-                viewport = list_view.viewport()
-                viewport.update()
-                viewport.repaint()
+                list_view.viewport().update()
             except Exception:
                 pass
 

@@ -17,6 +17,29 @@ class QtDragSessionService:
             return model.sourceModel()
         return model
 
+    def _suspend_video_rendering(self):
+        """Quiesce MPV/OpenGL surfaces before entering Windows' drag loop."""
+        try:
+            window = self._view.window()
+        except (AttributeError, RuntimeError):
+            return []
+        iterator = getattr(window, "_iter_all_viewers", None)
+        if not callable(iterator):
+            return []
+
+        suspended_players = []
+        for viewer in iterator():
+            try:
+                player = getattr(viewer, "video_player", None)
+                setter = getattr(player, "set_application_render_active", None)
+                if player is None or not callable(setter):
+                    continue
+                setter(False)
+                suspended_players.append(player)
+            except (RuntimeError, AttributeError):
+                continue
+        return suspended_players
+
     def begin(self):
         """Start one guarded drag session, returning restoration state."""
         if bool(getattr(self._view, "_qt_drag_active", False)):
@@ -47,6 +70,7 @@ class QtDragSessionService:
             "resume_pointer_enrichment": bool(
                 getattr(self._view, "_suppress_selection_commit_until_release", False)
             ),
+            "suspended_video_players": self._suspend_video_rendering(),
         }
 
         self._view._qt_drag_active = True
@@ -90,6 +114,11 @@ class QtDragSessionService:
                 except Exception:
                     pass
         finally:
+            for player in state.get("suspended_video_players", ()):
+                try:
+                    player.set_application_render_active(True)
+                except (RuntimeError, AttributeError):
+                    continue
             self._view._qt_drag_active = False
 
     @staticmethod

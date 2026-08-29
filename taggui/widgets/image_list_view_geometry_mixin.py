@@ -1,7 +1,7 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 import math
 import time
-from PySide6.QtCore import QObject, Property
+from PySide6.QtCore import Property
 from PySide6.QtWidgets import QDockWidget, QMainWindow
 from utils.diagnostic_logging import append_crash_context, diagnostic_print
 from widgets.image_list_qt_drag_session_service import QtDragSessionService
@@ -1705,19 +1705,15 @@ class ImageListViewGeometryMixin:
         )
         diagnostic_print(drag_message, detail="essential")
         append_crash_context(drag_message)
+
         drag_session_service = QtDragSessionService(self)
         drag_session_state = drag_session_service.begin()
         if drag_session_state is None:
             return
 
         drag = None
-        drag_source = None
         try:
-            # Keep the native drag owner detached from the main window and its
-            # MPV/OpenGL children, while remaining in this process so Windows
-            # can continue the mouse gesture that began in the image list.
-            drag_source = QObject(QApplication.instance())
-            drag = QDrag(drag_source)
+            drag = QDrag(self.window())
             drag.setMimeData(mime_data)
             drag.setPixmap(drag_pixmap)
             drag.setHotSpot(drag_pixmap.rect().center())
@@ -1730,7 +1726,6 @@ class ImageListViewGeometryMixin:
             if callable(finish_tracking):
                 finish_tracking()
             drag_session_service.retire_drag(drag)
-            drag_session_service.retire_drag(drag_source)
             self._active_qt_drag_mime = None
             self._active_qt_drag = None
         try:

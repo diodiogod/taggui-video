@@ -36,13 +36,33 @@ class FakeSourceModel:
 
 
 class FakeView:
-    def __init__(self, source_model, *, pointer_drag=True):
+    def __init__(self, source_model, *, pointer_drag=True, window=None):
         self._source_model = source_model
         self._qt_drag_active = False
         self._suppress_selection_commit_until_release = pointer_drag
+        self._window = window
 
     def model(self):
         return self._source_model
+
+    def window(self):
+        return self._window
+
+
+class FakeVideoPlayer:
+    def __init__(self):
+        self.render_states = []
+
+    def set_application_render_active(self, active):
+        self.render_states.append(bool(active))
+
+
+class FakeWindow:
+    def __init__(self, players):
+        self._viewers = [type("Viewer", (), {"video_player": player})() for player in players]
+
+    def _iter_all_viewers(self):
+        return list(self._viewers)
 
 
 def test_drag_session_pauses_churn_and_restores_pointer_interaction():
@@ -90,3 +110,17 @@ def test_completed_drag_is_destroyed_before_the_next_native_loop():
     QtDragSessionService.retire_drag(drag)
 
     assert isValid(drag) is False
+
+
+def test_drag_session_suspends_and_restores_video_rendering():
+    timer = FakeTimer()
+    source_model = FakeSourceModel(timer)
+    players = [FakeVideoPlayer(), FakeVideoPlayer()]
+    view = FakeView(source_model, window=FakeWindow(players))
+    service = QtDragSessionService(view)
+
+    state = service.begin()
+    assert [player.render_states for player in players] == [[False], [False]]
+
+    service.finish(state)
+    assert [player.render_states for player in players] == [[False, True], [False, True]]
