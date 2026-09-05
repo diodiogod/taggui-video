@@ -58,6 +58,17 @@ class VideoEditor:
         )
 
     @staticmethod
+    def fix_frame_count(input_path: Path, output_path: Path, fps: float,
+                        repeat_last: bool = True, target_frames: Optional[int] = None,
+                        frame_step: int = 4, frame_offset: int = 1,
+                        rule_label: Optional[str] = None) -> Tuple[bool, str]:
+        """Adjust video frame count to a configurable linear frame rule."""
+        return FrameEditor.fix_frame_count(
+            input_path, output_path, fps, repeat_last, target_frames,
+            frame_step, frame_offset, rule_label
+        )
+
+    @staticmethod
     def change_speed(input_path: Path, output_path: Path,
                     speed_multiplier: float, target_fps: Optional[float] = None) -> Tuple[bool, str]:
         """Change video speed by adjusting frame count (drops/duplicates frames)."""

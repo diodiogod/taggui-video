@@ -43,6 +43,7 @@ from utils.settings import (
     normalize_thumbnail_star_badge_style,
 )
 from utils.settings_widgets import SettingsComboBox
+from utils.video.training_profile import get_video_training_profile
 from utils.utils import get_confirmation_dialog_reply, pluralize
 from utils.grid import Grid
 from widgets.masonry_worker import calculate_masonry_layout
@@ -884,7 +885,7 @@ class ImageDelegate(QStyledItemDelegate):
                 painter.drawRect(option.rect)
                 painter.drawText(option.rect, label_text, Qt.AlignCenter)
 
-        # Draw N*4+1 stamp for video files (in both modes)
+        # Draw the selected training profile's frame-rule stamp for videos.
         self._draw_n4_plus_1_stamp(painter, option, index)
         self._draw_caption_status_badge(painter, option, index)
         self._draw_review_badges(painter, option, index)
@@ -1031,7 +1032,7 @@ class ImageDelegate(QStyledItemDelegate):
                 if not image:
                     return super().helpEvent(event, view, option, index)
 
-                # Keep existing N*4+1 stamp tooltip when hovering the stamp.
+                # Keep the frame-rule stamp tooltip when hovering the stamp.
                 if (
                     hasattr(image, 'is_video')
                     and image.is_video
@@ -1074,10 +1075,12 @@ class ImageDelegate(QStyledItemDelegate):
             frame_count = 0
 
         if frame_count > 0:
-            is_valid = (frame_count - 1) % 4 == 0
+            profile = get_video_training_profile()
+            is_valid = profile.is_valid_frame_count(frame_count)
             color = QColor(76, 175, 80, 235) if is_valid else QColor(244, 67, 54, 235)
             tooltip = (
-                f"N*4+1 validation: {'Valid' if is_valid else 'Invalid'}\n"
+                f"{profile.display_name} {profile.frame_rule} validation: "
+                f"{'Valid' if is_valid else 'Invalid'}\n"
                 f"Frame count: {frame_count}"
             )
             return color, tooltip

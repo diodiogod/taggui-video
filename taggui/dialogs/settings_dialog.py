@@ -39,6 +39,11 @@ from utils.video.playback_backend import (
     normalize_playback_backend_name,
     playback_backend_display_name,
 )
+from utils.video.training_profile import (
+    VIDEO_TRAINING_PROFILE_SETTING,
+    VIDEO_TRAINING_PROFILES,
+    get_video_training_profile,
+)
 from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
                                     SettingsSpinBox, SettingsComboBox,
                                     SettingsSlider)
@@ -2398,6 +2403,30 @@ class SettingsDialog(QDialog):
         mpv_available, mpv_error = get_playback_backend_status(PLAYBACK_BACKEND_MPV)
         vlc_available, vlc_error = get_playback_backend_status('vlc_experimental')
 
+        grid_layout.addWidget(QLabel('Video training profile'), row, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.video_training_profile_combo = QComboBox()
+        for profile in VIDEO_TRAINING_PROFILES.values():
+            self.video_training_profile_combo.addItem(
+                f'{profile.display_name} ({profile.frame_rule}, {profile.recommended_fps:g} FPS)',
+                profile.key,
+            )
+        configured_profile = get_video_training_profile()
+        profile_index = self.video_training_profile_combo.findData(configured_profile.key)
+        self.video_training_profile_combo.setCurrentIndex(max(0, profile_index))
+        self.video_training_profile_combo.setToolTip(
+            'Controls frame-count validation, frame-count repair, and the recommended\n'
+            'FPS offered by video speed/extract tools. Applied live.\n\n'
+            'WAN: 4n+1 frames, 16 FPS.\n'
+            'H3 MinMax: 17n+5 frames, 24 FPS.'
+        )
+        self.video_training_profile_combo.currentIndexChanged.connect(
+            self._on_video_training_profile_changed
+        )
+        grid_layout.addWidget(self.video_training_profile_combo, row, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
         # Playback backend selector. Keep stable storage IDs behind friendly labels.
         grid_layout.addWidget(QLabel('Video playback backend'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
@@ -2550,6 +2579,12 @@ class SettingsDialog(QDialog):
         gpu_detect_row.addStretch()
         grid_layout.addLayout(gpu_detect_row, row, 1, Qt.AlignmentFlag.AlignLeft)
         self._refresh_detected_gpus()
+
+    @Slot(int)
+    def _on_video_training_profile_changed(self, index: int):
+        profile_key = self.video_training_profile_combo.itemData(index)
+        if profile_key in VIDEO_TRAINING_PROFILES:
+            settings.setValue(VIDEO_TRAINING_PROFILE_SETTING, profile_key)
 
     @Slot()
     def _calculate_current_directory_size(self):

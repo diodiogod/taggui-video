@@ -146,7 +146,7 @@ Most frame-edit and repair tools work in place on the current video.
 - speed change
 - FPS change
 - SAR fix
-- `N*4+1` frame-count fix
+- profile-aware frame-count fix (`4n+1` for WAN or `17n+5` for H3 MinMax)
 
 When these tools edit the source video directly, TagGUI keeps `.backup` files for recovery instead of treating those backups as new media items.
 
@@ -159,8 +159,13 @@ That includes tasks such as:
 - extracting exact frame ranges
 - choosing a specific FPS
 - targeting a specific frame count
-- checking whether a clip matches required frame-count patterns such as `N*4+1`
+- checking whether a clip matches the selected training profile's frame-count rule
 - fixing broken clips before training use
+
+Choose the active profile under **Settings → Advanced → Video and GPU → Video training profile**.
+WAN uses `4n+1` frame counts and recommends 16 FPS. H3 MinMax uses `17n+5` and
+recommends 24 FPS. The selection updates thumbnail validation badges, frame-count repair,
+and FPS defaults in the video editing dialogs.
 
 This is one of the places where the project goes well beyond a normal media viewer.
 

@@ -669,7 +669,21 @@ class FrameEditor:
         Returns:
             Tuple of (success: bool, message: str)
         """
+        return FrameEditor.fix_frame_count(
+            input_path, output_path, fps, repeat_last, target_frames,
+            frame_step=4, frame_offset=1, rule_label='4n+1'
+        )
+
+    @staticmethod
+    def fix_frame_count(input_path: Path, output_path: Path, fps: float,
+                        repeat_last: bool = True, target_frames: Optional[int] = None,
+                        frame_step: int = 4, frame_offset: int = 1,
+                        rule_label: Optional[str] = None) -> Tuple[bool, str]:
+        """Adjust a video to the nearest count matching ``step*n + offset``."""
         try:
+            if frame_step <= 0 or frame_offset < 1:
+                return False, "Invalid frame-count rule"
+            rule_label = rule_label or f'{frame_step}n+{frame_offset}'
             # Get current frame count
             probe_cmd = [
                 'ffprobe',
@@ -697,16 +711,15 @@ class FrameEditor:
             # Determine target frame count
             if target_frames is not None:
                 # Validate target
-                if (target_frames - 1) % 4 != 0:
-                    return False, f"Target frame count {target_frames} does not follow N*4+1 rule"
+                if target_frames < frame_offset or (target_frames - frame_offset) % frame_step != 0:
+                    return False, f"Target frame count {target_frames} does not follow {rule_label} rule"
                 final_target = target_frames
             else:
-                # Find nearest valid N*4+1
-                if (current_frames - 1) % 4 == 0:
-                    return True, f"Video already has {current_frames} frames (valid N*4+1)"
-                current_n = (current_frames - 1) // 4
-                lower_target = current_n * 4 + 1
-                upper_target = (current_n + 1) * 4 + 1
+                if current_frames >= frame_offset and (current_frames - frame_offset) % frame_step == 0:
+                    return True, f"Video already has {current_frames} frames (valid {rule_label})"
+                current_n = max(0, (current_frames - frame_offset) // frame_step)
+                lower_target = current_n * frame_step + frame_offset
+                upper_target = (current_n + 1) * frame_step + frame_offset
 
                 # Calculate frames needed for each option
                 frames_to_remove_for_lower = max(0, current_frames - lower_target)

@@ -28,6 +28,7 @@ from utils.settings import (
 from widgets.main_viewer_controls_widget import MainViewerControlsWidget
 from widgets.reaction_controls_widget import ReactionControlsWidget
 from widgets.review_controls_widget import ReviewControlsWidget
+from utils.video.training_profile import get_video_training_profile
 
 
 class ToolbarManager:
@@ -679,9 +680,10 @@ class ToolbarManager:
 
     def _create_video_fix_controls(self, toolbar: QToolBar):
         """Create video repair/transform toolbar controls."""
+        profile = get_video_training_profile()
         self.fix_frame_count_btn = self._create_styled_button(
-            'N*4+1',
-            'Fix N*4+1 for selected videos',
+            profile.frame_rule,
+            f'Fix {profile.frame_rule} for selected videos ({profile.display_name})',
             50,
             '#FF9800',
         )
@@ -689,7 +691,7 @@ class ToolbarManager:
 
         self.fix_all_folder_btn = self._create_styled_button(
             'ALL',
-            'Fix N*4+1 for all videos in folder',
+            f'Fix {profile.frame_rule} for all videos in folder ({profile.display_name})',
             40,
             '#FF9800',
         )
@@ -727,6 +729,19 @@ class ToolbarManager:
             '#03A9F4',
         )
         toolbar.addWidget(self.change_fps_btn)
+
+    def refresh_video_training_profile(self):
+        """Refresh profile-dependent video tool labels and tooltips."""
+        profile = get_video_training_profile()
+        if self.fix_frame_count_btn is not None:
+            self.fix_frame_count_btn.setText(profile.frame_rule)
+            self.fix_frame_count_btn.setToolTip(
+                f'Fix {profile.frame_rule} for selected videos ({profile.display_name})'
+            )
+        if self.fix_all_folder_btn is not None:
+            self.fix_all_folder_btn.setToolTip(
+                f'Fix {profile.frame_rule} for all videos in folder ({profile.display_name})'
+            )
 
     def _create_styled_button(self, text, tooltip, width, hover_color):
         """Create a styled button for video operations."""

@@ -1796,6 +1796,15 @@ class MainWindow(QMainWindow):
     @Slot(str, object)
     def _on_setting_changed(self, key: str, _value):
         """Apply selected settings live without requiring restart."""
+        if key == 'video_training_profile':
+            list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
+            if list_view is not None:
+                list_view.viewport().update()
+            toolbar_manager = getattr(self, 'toolbar_manager', None)
+            if toolbar_manager is not None:
+                toolbar_manager.refresh_video_training_profile()
+            return
+
         if key in (
             REVIEW_BADGE_SCHEMA_SETTINGS_KEY,
             REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,

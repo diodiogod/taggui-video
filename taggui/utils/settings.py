@@ -69,6 +69,7 @@ DEFAULT_SETTINGS = {
     'video_playback_backend': 'mpv_experimental',
     'video_muted': True,
     'video_volume': 1.0,
+    'video_training_profile': 'wan',  # WAN (4n+1 @16fps) or H3 MinMax (17n+5 @24fps)
     'auto_marking_merge_overlaps': False,
     'auto_marking_merge_overlap_threshold': 0.6,
     'auto_marking_crop_padding_percent': 1.0,

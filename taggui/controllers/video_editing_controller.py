@@ -16,6 +16,7 @@ from utils.sidecar import (
 )
 import subprocess
 import json
+from utils.video.training_profile import get_video_training_profile
 
 
 def _video_editor_class():
@@ -790,14 +791,19 @@ class VideoEditingController:
         layout.addLayout(speed_layout)
 
         # FPS override option
-        fps_checkbox = QCheckBox("Override FPS (recommended: 16 fps for LoRA training)")
+        profile = get_video_training_profile()
+        fps_checkbox = QCheckBox(
+            f"Override FPS ({profile.display_name} recommendation: {profile.recommended_fps:g} fps)"
+        )
         fps_checkbox.setChecked(initial_fps is not None)
         layout.addWidget(fps_checkbox)
 
         fps_spinbox = QDoubleSpinBox()
         fps_spinbox.setMinimum(1.0)
         fps_spinbox.setMaximum(120.0)
-        fps_spinbox.setValue(initial_fps if initial_fps is not None else 16.0)
+        fps_spinbox.setValue(
+            initial_fps if initial_fps is not None else profile.recommended_fps
+        )
         fps_spinbox.setSuffix(' fps')
         fps_spinbox.setEnabled(fps_checkbox.isChecked())
         layout.addWidget(fps_spinbox)
@@ -999,7 +1005,8 @@ class VideoEditingController:
             QMessageBox.critical(self.main_window, "Error", message)
 
     def fix_video_frame_count(self):
-        """Fix video frame count to follow N*4+1 rule for selected videos."""
+        """Fix selected videos to the configured training profile's frame rule."""
+        profile = get_video_training_profile()
         if not self.main_window.image_list.ensure_materialized_selection(
             'Fix Video Frame Count'
         ):
@@ -1026,7 +1033,8 @@ class VideoEditingController:
         # Ask for method preference once for all videos
         choice, ok = QInputDialog.getItem(
             self.main_window, "Fix Frame Count",
-            f"Fix {len(video_paths)} video(s) to N*4+1 pattern.\n\nMethod:",
+            f"Fix {len(video_paths)} video(s) to {profile.frame_rule} "
+            f"({profile.display_name}).\n\nMethod:",
             ["Auto (use last frame)", "Auto (use first frame)"], 0, False
         )
 
@@ -1081,11 +1089,14 @@ class VideoEditingController:
                     continue
 
                 # Save undo snapshot before editing
-                self._save_undo_snapshot(video_path, "Fix N*4+1 frame count (single)")
+                self._save_undo_snapshot(
+                    video_path, f"Fix {profile.frame_rule} frame count (single)"
+                )
 
                 # Fix frame count
-                success, message = _video_editor_class().fix_frame_count_to_n4_plus_1(
-                    video_path, video_path, fps, repeat_last, None
+                success, message = _video_editor_class().fix_frame_count(
+                    video_path, video_path, fps, repeat_last, None,
+                    profile.frame_step, profile.frame_offset, profile.frame_rule
                 )
 
                 if success:
@@ -1121,7 +1132,8 @@ class VideoEditingController:
         self.main_window.reload_directory()
 
     def fix_all_folder_frame_count(self):
-        """Fix N*4+1 frame count for all videos in the current folder."""
+        """Fix all folder videos to the configured training profile's frame rule."""
+        profile = get_video_training_profile()
         if not self.main_window.directory_path:
             QMessageBox.warning(self.main_window, "No Directory", "No directory is loaded.")
             return
@@ -1138,7 +1150,8 @@ class VideoEditingController:
         # Ask for method preference
         choice, ok = QInputDialog.getItem(
             self.main_window, "Fix All Videos",
-            f"Fix {len(video_paths)} video(s) in folder to N*4+1 pattern.\n\nMethod:",
+            f"Fix {len(video_paths)} video(s) in folder to {profile.frame_rule} "
+            f"({profile.display_name}).\n\nMethod:",
             ["Auto (use last frame)", "Auto (use first frame)"], 0, False
         )
 
@@ -1194,11 +1207,14 @@ class VideoEditingController:
                     continue
 
                 # Save undo snapshot before editing
-                self._save_undo_snapshot(video_path, "Fix N*4+1 frame count (batch)")
+                self._save_undo_snapshot(
+                    video_path, f"Fix {profile.frame_rule} frame count (batch)"
+                )
 
                 # Fix frame count
-                success, message = _video_editor_class().fix_frame_count_to_n4_plus_1(
-                    video_path, video_path, fps, repeat_last, None
+                success, message = _video_editor_class().fix_frame_count(
+                    video_path, video_path, fps, repeat_last, None,
+                    profile.frame_step, profile.frame_offset, profile.frame_rule
                 )
 
                 if success:
@@ -1470,14 +1486,17 @@ class VideoEditingController:
         speed_spinbox.valueChanged.connect(update_preview)
 
         # FPS override option
-        fps_checkbox = QCheckBox("Override FPS (for LoRA training, recommended: 16 fps)")
+        profile = get_video_training_profile()
+        fps_checkbox = QCheckBox(
+            f"Override FPS ({profile.display_name} recommendation: {profile.recommended_fps:g} fps)"
+        )
         fps_checkbox.setChecked(False)
         layout.addWidget(fps_checkbox)
 
         fps_spinbox = QDoubleSpinBox()
         fps_spinbox.setMinimum(1.0)
         fps_spinbox.setMaximum(120.0)
-        fps_spinbox.setValue(16.0)  # Default suggestion for LoRA training
+        fps_spinbox.setValue(profile.recommended_fps)
         fps_spinbox.setSuffix(' fps')
         fps_spinbox.setEnabled(False)
         layout.addWidget(fps_spinbox)
@@ -1551,6 +1570,7 @@ class VideoEditingController:
         input_path = Path(video_player.video_path)
         current_fps = video_player.get_fps()
         current_frames = video_player.get_total_frames()
+        profile = get_video_training_profile()
 
         # Calculate current duration
         current_duration = current_frames / current_fps if current_fps > 0 else 0
@@ -1568,11 +1588,13 @@ class VideoEditingController:
 
         # Target FPS input
         fps_layout = QHBoxLayout()
-        fps_layout.addWidget(QLabel("Target FPS:"))
+        fps_layout.addWidget(QLabel(
+            f"Target FPS ({profile.display_name} recommendation):"
+        ))
         fps_spinbox = QDoubleSpinBox()
         fps_spinbox.setMinimum(1.0)
         fps_spinbox.setMaximum(120.0)
-        fps_spinbox.setValue(current_fps)
+        fps_spinbox.setValue(profile.recommended_fps)
         fps_spinbox.setSingleStep(0.1)
         fps_spinbox.setDecimals(2)
         fps_spinbox.setSuffix(' fps')
