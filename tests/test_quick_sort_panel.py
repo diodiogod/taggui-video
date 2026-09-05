@@ -313,6 +313,28 @@ def test_profile_switch_persists_valid_draft_and_rejects_invalid_draft(
         _dispose(window, panel)
 
 
+def test_selecting_builtin_preset_loads_its_routes_instead_of_custom_profile(
+    monkeypatch,
+    tmp_path,
+):
+    custom = _profile("My destinations", "R", "Right Arm")
+    window, panel, store = _make_panel(monkeypatch, tmp_path, [custom])
+    try:
+        preset = panel._builtin_profiles[0]
+        preset_index = panel.profile_combo.findData(f"__builtin__:{preset.id}")
+
+        panel.profile_combo.setCurrentIndex(preset_index)
+
+        assert panel.current_profile_id != custom.id
+        assert panel.profile_combo.currentText() == f"{preset.name} (custom)"
+        assert [card.mapping().folder for card in panel.destination_cards] == [
+            mapping.folder for mapping in preset.destinations
+        ]
+        assert store.saved[-1][-1].template_key == "composition_shot_sizes"
+    finally:
+        _dispose(window, panel)
+
+
 def test_mapping_edits_reuse_count_cache_and_readiness_tracks_recounts(
     monkeypatch,
     tmp_path,

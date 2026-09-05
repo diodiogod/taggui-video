@@ -41,6 +41,7 @@ def test_default_profile_is_zero_setup_full_keyboard_sort():
 
 def test_composition_preset_uses_memorable_folder_keys_and_fresh_ids():
     preset = builtin_quick_sort_profiles()[0]
+    assert preset.template_key == "composition_shot_sizes"
     mapping_keys = {mapping.key: mapping.folder for mapping in preset.destinations}
     assert mapping_keys["C"] == "close-up"
     assert mapping_keys["K"] == "cowboy shot"

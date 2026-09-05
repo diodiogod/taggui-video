@@ -510,6 +510,7 @@ def builtin_quick_sort_profiles() -> tuple[QuickSortProfile, ...]:
     """Return built-in Quick Sort templates as fresh profiles."""
     composition = QuickSortProfile(
         name="Composition / Shot sizes",
+        template_key="composition_shot_sizes",
         destinations=[
             QuickSortMapping("Extreme close-up", "E", "extreme close-up", "#E87979"),
             QuickSortMapping("Close-up", "C", "close-up", "#F2C96D"),

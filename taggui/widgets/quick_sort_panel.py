@@ -1110,9 +1110,18 @@ class QuickSortPanel(QDockWidget):
     def _add_preset(self, template: QuickSortProfile, *, committed: bool = False):
         if not committed and self._prepare_profile_transition() is None:
             return
-        existing = next(
-            (item for item in self.profiles if item.template_key == template.template_key),
-            None,
+        template_key = str(template.template_key or "").strip()
+        existing = (
+            next(
+                (
+                    item
+                    for item in self.profiles
+                    if item.template_key == template_key
+                ),
+                None,
+            )
+            if template_key
+            else None
         )
         if existing is not None:
             self._rebuild_profile_combo(existing.id)
