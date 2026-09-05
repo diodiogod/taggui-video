@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.10] - 2026-09-05
+
+### Added
+
+- Preserve loop markers when restoring a video and its metadata backup
+- Prevent viewer reloads from clearing freshly restored loop ranges
+- Step directly to the previous or next WAN or H3-compatible output frame count
+- Use precise speed multipliers without automatically changing existing workflows
+- Recalculate compatible targets when the FPS override changes
+
+### Changed
+
+- Improve video backup restoration and training-compatible speed controls
 ## [1.6.9] - 2026-09-04
 
 ### Added
