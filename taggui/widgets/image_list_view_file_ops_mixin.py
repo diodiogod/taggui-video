@@ -451,7 +451,9 @@ class ImageListViewFileOpsMixin:
     def restore_backup(self):
         """Restore selected images/videos from their .backup files."""
         from PySide6.QtWidgets import QMessageBox
+        import os
         import shutil
+        import uuid
 
         if not self.ensure_materialized_selection('Restore Backups'):
             return
@@ -472,11 +474,18 @@ class ImageListViewFileOpsMixin:
 
         # Confirm restoration
         count = len(images_with_backups)
+        restore_names = '\n'.join(
+            f"• {img.path.name} ← {backup_path.name}"
+            for img, backup_path in images_with_backups[:10]
+        )
+        if count > 10:
+            restore_names += f"\n• …and {count - 10} more"
         reply = QMessageBox.question(
             None,
             "Restore from Backup",
             f"Restore {count} {'file' if count == 1 else 'files'} from backup?\n\n"
-            f"This will replace the current {'file' if count == 1 else 'files'} with the backup version.",
+            f"This will replace the current {'file' if count == 1 else 'files'} with the backup version.\n\n"
+            f"{restore_names}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -486,11 +495,24 @@ class ImageListViewFileOpsMixin:
 
         # Restore files
         restored = 0
+        restored_images = []
         main_window = self.window()
         video_editing_controller = getattr(main_window, 'video_editing_controller', None)
         for img, backup_path in images_with_backups:
+            restore_temp_path = None
             try:
-                shutil.copy2(str(backup_path), str(img.path))
+                is_video = bool(getattr(img, 'is_video', False))
+                if is_video and video_editing_controller is not None:
+                    video_editing_controller._prepare_video_path_for_replacement(img.path)
+
+                restore_temp_path = img.path.with_name(
+                    f'.{img.path.name}.restore-{uuid.uuid4().hex}.tmp'
+                )
+                shutil.copy2(str(backup_path), str(restore_temp_path))
+                if restore_temp_path.stat().st_size != backup_path.stat().st_size:
+                    raise OSError('Temporary restore copy size does not match the backup')
+                os.replace(restore_temp_path, img.path)
+                restore_temp_path = None
                 for json_path in json_sidecar_paths_for_media(img.path):
                     json_backup_path = sidecar_backup_path(json_path)
                     if json_backup_path.exists():
@@ -500,21 +522,37 @@ class ImageListViewFileOpsMixin:
                             json_path.unlink()
                         except Exception:
                             pass
-                if getattr(img, 'is_video', False) and video_editing_controller is not None:
+                if is_video and video_editing_controller is not None:
                     try:
                         video_editing_controller._refresh_edited_video_metadata(img.path)
                     except Exception:
                         pass
                 restored += 1
+                restored_images.append(img)
             except Exception as e:
                 QMessageBox.warning(None, "Restore Error", f"Failed to restore {img.path.name}:\n{str(e)}")
+            finally:
+                if restore_temp_path is not None and restore_temp_path.exists():
+                    try:
+                        restore_temp_path.unlink()
+                    except Exception:
+                        pass
 
         if restored > 0:
-            QMessageBox.information(None, "Restore Complete", f"Successfully restored {restored} {'file' if restored == 1 else 'files'}.")
-            # Trigger reload to update thumbnails
-            self.directory_reload_requested.emit()
+            restored_names = '\n'.join(
+                f"• {img.path.name}"
+                for img in restored_images[:10]
+            )
+            if restored > 10:
+                restored_names += f"\n• …and {restored - 10} more"
+            QMessageBox.information(
+                None,
+                "Restore Complete",
+                f"Successfully restored {restored} {'file' if restored == 1 else 'files'}:\n\n"
+                f"{restored_names}",
+            )
             if video_editing_controller is not None:
-                for img, _backup_path in images_with_backups:
+                for img in restored_images:
                     if getattr(img, 'is_video', False):
                         try:
                             video_editing_controller._force_reload_current_video_viewer(img.path)

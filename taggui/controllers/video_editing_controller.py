@@ -122,6 +122,51 @@ class VideoEditingController:
         QApplication.processEvents()  # Process pending events to keep GUI responsive
         gc.collect()  # Force garbage collection
 
+    def _prepare_video_path_for_replacement(self, video_path: Path):
+        """Release every viewer holding a video that is about to be replaced."""
+        try:
+            target_path = Path(video_path).resolve()
+        except Exception:
+            target_path = Path(video_path)
+
+        viewers = []
+        iter_viewers = getattr(self.main_window, '_iter_all_viewers', None)
+        if callable(iter_viewers):
+            try:
+                viewers = list(iter_viewers())
+            except Exception:
+                viewers = []
+        if not viewers:
+            viewer = getattr(self.main_window, 'image_viewer', None)
+            if viewer is not None:
+                viewers = [viewer]
+
+        released = False
+        for viewer in viewers:
+            video_player = getattr(viewer, 'video_player', None)
+            if video_player is None:
+                continue
+            try:
+                loaded_path = Path(str(video_player.video_path or '')).resolve()
+            except Exception:
+                continue
+            if loaded_path != target_path:
+                continue
+            try:
+                video_player.cleanup()
+                released = True
+            except Exception:
+                pass
+
+        if released:
+            import gc
+            from PySide6.QtCore import QThread
+            from PySide6.QtWidgets import QApplication
+
+            QThread.msleep(200)
+            QApplication.processEvents()
+            gc.collect()
+
     def _refresh_edited_video_metadata(self, video_path: Path):
         """Refresh cached metadata for a video that was edited in place."""
         try:
@@ -140,11 +185,13 @@ class VideoEditingController:
                 return
 
             rating = 0.0
+            changed_index = None
             try:
                 source_row = image_list_model.get_index_for_path(video_path)
                 if source_row != -1:
+                    changed_index = image_list_model.index(source_row, 0)
                     image = image_list_model.data(
-                        image_list_model.index(source_row, 0),
+                        changed_index,
                         Qt.ItemDataRole.UserRole,
                     )
                     if image is not None:
@@ -180,6 +227,8 @@ class VideoEditingController:
                 ctime=getattr(stat, 'st_ctime', stat.st_mtime),
             )
             db.commit()
+            if changed_index is not None and changed_index.isValid():
+                image_list_model.dataChanged.emit(changed_index, changed_index)
         except Exception as e:
             print(f"Failed to refresh edited video metadata for {video_path}: {e}")
 
@@ -517,9 +566,15 @@ class VideoEditingController:
 
             if success:
                 self._copy_extract_sidecars(input_path, new_path)
+                registered = self._register_generated_media(new_path, select=False)
                 self._refresh_edited_video_metadata(new_path)
                 QMessageBox.information(self.main_window, "Success", f"Created copy and extracted range:\n{new_path.name}")
-                self._register_generated_media(new_path, select=False)
+                if not registered:
+                    QMessageBox.warning(
+                        self.main_window,
+                        "Copy Registration Failed",
+                        f"Created the video but could not add it to the image list:\n{new_path.name}",
+                    )
             else:
                 QMessageBox.critical(self.main_window, "Error", message)
         else:
@@ -714,6 +769,7 @@ class VideoEditingController:
 
             if success:
                 self._copy_extract_sidecars(input_path, new_path)
+                registered = self._register_generated_media(new_path, select=False)
                 self._refresh_edited_video_metadata(new_path)
                 operation_desc = f"Created copy and extracted frames {start_frame}-{end_frame}"
                 if reverse:
@@ -723,7 +779,12 @@ class VideoEditingController:
                 if target_fps is not None:
                     operation_desc += f" @ {target_fps}fps"
                 QMessageBox.information(self.main_window, "Success", f"{operation_desc}:\n{new_path.name}")
-                self._register_generated_media(new_path, select=False)
+                if not registered:
+                    QMessageBox.warning(
+                        self.main_window,
+                        "Copy Registration Failed",
+                        f"Created the video but could not add it to the image list:\n{new_path.name}",
+                    )
             else:
                 QMessageBox.critical(self.main_window, "Error", message)
         else:
@@ -1100,6 +1161,8 @@ class VideoEditingController:
                 )
 
                 if success:
+                    self._refresh_edited_video_metadata(video_path)
+                    self._force_reload_current_video_viewer(video_path)
                     success_count += 1
                     if success_count == 1:  # Track first successful edit for undo
                         self.last_edited_video = video_path
@@ -1127,9 +1190,6 @@ class VideoEditingController:
             QMessageBox.warning(self.main_window, "Batch Fix Complete", result_msg)
         else:
             QMessageBox.information(self.main_window, "Success", result_msg)
-
-        # Auto-reload directory to show changes
-        self.main_window.reload_directory()
 
     def fix_all_folder_frame_count(self):
         """Fix all folder videos to the configured training profile's frame rule."""
@@ -1218,6 +1278,8 @@ class VideoEditingController:
                 )
 
                 if success:
+                    self._refresh_edited_video_metadata(video_path)
+                    self._force_reload_current_video_viewer(video_path)
                     if "already" in message.lower():
                         skip_count += 1
                     else:
@@ -1247,9 +1309,6 @@ class VideoEditingController:
             QMessageBox.warning(self.main_window, "Batch Fix Complete", result_msg)
         else:
             QMessageBox.information(self.main_window, "Success", result_msg)
-
-        # Auto-reload directory to show changes
-        self.main_window.reload_directory()
 
     def fix_sar_selected(self):
         """Fix non-square pixels (SAR) for selected videos."""
