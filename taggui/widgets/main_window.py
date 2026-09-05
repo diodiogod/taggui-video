@@ -52,6 +52,7 @@ from utils.image_index_db import ImageIndexDB
 from utils.instance_relay import remember_preferred_server_name
 from utils.lazy_tokenizer import LazyTokenizer
 from utils.load_options import LimitedLoadOptions
+from utils.qt_event_safety import safe_event_type
 from utils.settings import DEFAULT_SETTINGS, settings, get_tag_separator
 from utils.sidecar import (
     is_taggui_metadata_dict,
@@ -1175,9 +1176,8 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         """Filter events for list view to detect splitter resize."""
-        try:
-            event_type = event.type()
-        except Exception:
+        event_type = safe_event_type(event)
+        if event_type is None:
             return False
 
         if event_type in (
