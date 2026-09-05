@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.13] - 2026-09-05
+
+### Added
+
+- Keep TagGUI responsive while precise video extraction runs
+- Highlight the loop marker that will be dragged and select the nearest marker
+- Undo and redo completed marker movements with Ctrl+Z and Ctrl+Y
+- Prevent the timeline handle from jumping when loop playback is disabled
+
+### Changed
+
+- Improve precise extraction and loop marker editing
 ## [1.6.12] - 2026-09-05
 
 ### Added
