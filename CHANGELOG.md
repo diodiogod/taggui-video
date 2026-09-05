@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.12] - 2026-09-05
+
+### Added
+
+- Correctly release videos before deleting them from the thumbnail list
+- Support docked and reparented thumbnail layouts
+- Prevent Windows file-lock errors during selected-video deletion
+
+### Fixed
+
+- Fix deletion of currently loaded videos
 ## [1.6.11] - 2026-09-05
 
 ### Added
