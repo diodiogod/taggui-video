@@ -1560,6 +1560,30 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
     """
     with _video_lock:
         try:
+            # Reject missing/truncated containers out of process before handing
+            # them to OpenCV's in-process FFmpeg backend. Native decoder faults
+            # cannot be caught by Python and would otherwise terminate TagGUI.
+            probe = subprocess.run(
+                [
+                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=codec_type', '-of', 'json',
+                    '--', str(video_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=(
+                    subprocess.CREATE_NO_WINDOW
+                    if sys.platform.startswith('win') else 0
+                ),
+            )
+            if probe.returncode != 0:
+                print(
+                    f"Skipping unreadable video metadata for {video_path}: "
+                    f"{probe.stderr.strip() or 'ffprobe rejected the file'}"
+                )
+                return None, None, None
+
             import cv2
 
             # Force software decoding (CAP_FFMPEG backend, no DXVA/D3D11 HW accel).
@@ -1605,6 +1629,9 @@ def extract_video_info(video_path: Path) -> tuple[tuple[int, int] | None, dict |
             qt_image = QImage(frame_rgb.data.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
 
             return (width, height), video_metadata, qt_image
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"Error probing video info from {video_path}: {e}")
+            return None, None, None
         except Exception as e:
             print(f"Error extracting video info from {video_path}: {e}")
             return None, None, None
@@ -6616,12 +6643,59 @@ class ImageListModel(QAbstractListModel):
         self._path_validation_drag_retry_pending = False
         self._apply_pending_path_validation()
 
+    def _refresh_cached_video_if_stale(
+        self,
+        db,
+        directory_path: Path,
+        media_path: Path,
+    ) -> bool:
+        """Refresh one restored/selected video's stale cached metadata."""
+        try:
+            resolved_directory = directory_path.resolve()
+            resolved_path = media_path.resolve()
+            relative_path = str(resolved_path.relative_to(resolved_directory))
+            if resolved_path.suffix.lower() not in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}:
+                return False
+            stat = resolved_path.stat()
+            if db.get_cached_info(relative_path, stat.st_mtime, stat.st_size) is not None:
+                return False
+
+            image_id = db.get_image_id(relative_path)
+            if not image_id:
+                return False
+            cached_row = db.get_image_by_id(image_id) or {}
+            dimensions, video_metadata, _preview = extract_video_info(resolved_path)
+            if not dimensions or not video_metadata:
+                return False
+
+            db.save_info(
+                relative_path,
+                dimensions[0],
+                dimensions[1],
+                True,
+                stat.st_mtime,
+                video_metadata,
+                rating=float(cached_row.get('rating', 0.0) or 0.0),
+                file_size=stat.st_size,
+                file_type=resolved_path.suffix.lower(),
+                ctime=getattr(stat, 'st_ctime', stat.st_mtime),
+            )
+            db.commit()
+            print(f"[CACHE] Refreshed stale selected video metadata: {relative_path}")
+            return True
+        except (OSError, ValueError):
+            return False
+        except Exception as e:
+            print(f"[CACHE] Failed to refresh selected video metadata: {e}")
+            return False
+
     def _validate_cached_paths_in_background(
         self,
         directory_path: Path,
         cached_rel_paths: list[str] | None,
         image_suffixes: list[str],
         generation: int,
+        force_full_scan: bool = False,
     ):
         """Validate cached paths without blocking startup, then queue a fast refresh if needed."""
         db = None
@@ -6636,9 +6710,13 @@ class ImageListModel(QAbstractListModel):
 
             stored_dir_mtimes = db.get_directory_signatures()
             changed_roots = (
-                get_changed_directory_roots(directory_path, stored_dir_mtimes)
-                if stored_dir_mtimes
-                else [""]
+                [""]
+                if force_full_scan
+                else (
+                    get_changed_directory_roots(directory_path, stored_dir_mtimes)
+                    if stored_dir_mtimes
+                    else [""]
+                )
             )
             if (
                 cached_rel_paths is None
@@ -6844,7 +6922,9 @@ class ImageListModel(QAbstractListModel):
     def load_directory(self, directory_path: Path, *, precomputed_rel_paths=None,
                        skip_background_validation: bool = False,
                        db_synced: bool = False,
-                       load_options: LimitedLoadOptions | None = None):
+                       load_options: LimitedLoadOptions | None = None,
+                       force_background_validation: bool = False,
+                       validate_media_path: Path | None = None):
         from PySide6.QtWidgets import QProgressDialog, QApplication, QMessageBox
         from PySide6.QtCore import Qt
         from utils.settings import settings, DEFAULT_SETTINGS
@@ -6903,6 +6983,11 @@ class ImageListModel(QAbstractListModel):
             type=bool,
         )
 
+        if validate_media_path is not None:
+            self._refresh_cached_video_if_stale(
+                db, directory_path, Path(validate_media_path)
+            )
+
         def _schedule_background_validation(delay_ms: int = 0):
             if skip_background_validation:
                 return
@@ -6927,6 +7012,7 @@ class ImageListModel(QAbstractListModel):
                     list(cached_paths) if cached_paths is not None else None,
                     list(image_suffixes),
                     load_generation,
+                    force_background_validation,
                 )
 
             if delay_ms > 0:

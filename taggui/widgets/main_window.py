@@ -7585,7 +7585,8 @@ class MainWindow(QMainWindow):
     def load_directory(self, path: Path, select_index: int = 0,
                        save_path_to_settings: bool = False,
                        select_path: str | None = None,
-                       load_options: LimitedLoadOptions | None = None):
+                       load_options: LimitedLoadOptions | None = None,
+                       force_background_validation: bool = False):
         ui_load_started_at = time.perf_counter()
 
         def _log_ui_load_stage(label: str):
@@ -7643,6 +7644,8 @@ class MainWindow(QMainWindow):
         self.image_list_model.load_directory(
             path,
             load_options=self._current_directory_load_options,
+            force_background_validation=force_background_validation,
+            validate_media_path=Path(select_path) if select_path else None,
         )
         _log_ui_load_stage('model-bootstrap-returned')
         self.image_list.filter_line_edit.clear()
@@ -8243,6 +8246,7 @@ class MainWindow(QMainWindow):
             select_index=select_index,
             select_path=select_path,
             load_options=self._current_directory_load_options,
+            force_background_validation=True,
         )
         self.image_list.filter_line_edit.setText(filter_text)
         self._restore_directory_selection(

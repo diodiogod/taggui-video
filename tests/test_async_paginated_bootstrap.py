@@ -18,6 +18,66 @@ from models.image_list_model import ImageListModel
 from utils.load_options import LimitedLoadOptions
 
 
+def test_invalid_video_is_rejected_before_in_process_decode(tmp_path, monkeypatch):
+    invalid_video = tmp_path / 'incomplete.mp4'
+    invalid_video.write_bytes(b'not a complete mp4 container')
+
+    dimensions, metadata, preview = image_list_model_module.extract_video_info(
+        invalid_video
+    )
+
+    assert dimensions is None
+    assert metadata is None
+    assert preview is None
+
+
+def test_selected_video_size_mismatch_refreshes_only_that_row(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    model = ImageListModel(256, ', ')
+    video_path = tmp_path / 'restored.mp4'
+    video_path.write_bytes(b'restored video bytes')
+    saved = []
+
+    class FakeDB:
+        def get_cached_info(self, *_args):
+            return None
+
+        def get_image_id(self, relative_path):
+            return 7 if relative_path == video_path.name else None
+
+        def get_image_by_id(self, _image_id):
+            return {'rating': 3.0}
+
+        def save_info(self, *args, **kwargs):
+            saved.append((args, kwargs))
+
+        def commit(self):
+            saved.append(('commit', {}))
+
+    monkeypatch.setattr(
+        image_list_model_module,
+        'extract_video_info',
+        lambda _path: (
+            (720, 720),
+            {'fps': 30.0, 'duration': 17.5, 'frame_count': 525},
+            None,
+        ),
+    )
+
+    try:
+        assert model._refresh_cached_video_if_stale(
+            FakeDB(), tmp_path, video_path
+        ) is True
+        assert saved[0][0][0] == video_path.name
+        assert saved[0][0][5]['frame_count'] == 525
+        assert saved[0][1]['file_size'] == video_path.stat().st_size
+        assert saved[1] == ('commit', {})
+    finally:
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
+
+
 def test_initial_paginated_page_is_queued_without_sync_loading(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     model = ImageListModel(256, ', ')
