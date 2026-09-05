@@ -8,10 +8,57 @@ from utils.sidecar import (
 )
 
 
-def _get_loaded_video_player(main_window):
-    image_viewer = getattr(main_window, 'image_viewer', None)
-    video_player = getattr(image_viewer, 'video_player', None)
-    return video_player if video_player is not None else None
+def _normalized_file_path(path):
+    """Return a case-normalized absolute path suitable for Windows matching."""
+    try:
+        return os.path.normcase(os.path.abspath(os.fspath(path)))
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _release_video_players_for_paths(main_window, target_paths) -> bool:
+    """Release all live viewers that have one of the target videos loaded."""
+    normalized_targets = {
+        normalized
+        for path in target_paths
+        if (normalized := _normalized_file_path(path)) is not None
+    }
+    if not normalized_targets:
+        return False
+
+    iter_viewers = getattr(main_window, '_iter_all_viewers', None)
+    if callable(iter_viewers):
+        try:
+            viewers = list(iter_viewers())
+        except Exception:
+            viewers = []
+    else:
+        image_viewer = getattr(main_window, 'image_viewer', None)
+        viewers = [image_viewer] if image_viewer is not None else []
+
+    if not viewers:
+        image_viewer = getattr(main_window, 'image_viewer', None)
+        viewers = [image_viewer] if image_viewer is not None else []
+
+    released = False
+    cleaned_player_ids = set()
+    for viewer in viewers:
+        try:
+            video_player = getattr(viewer, 'video_player', None)
+        except RuntimeError:
+            continue
+        if video_player is None or id(video_player) in cleaned_player_ids:
+            continue
+        loaded_path = _normalized_file_path(getattr(video_player, 'video_path', None))
+        if loaded_path not in normalized_targets:
+            continue
+        try:
+            video_player.cleanup()
+        except Exception:
+            continue
+        cleaned_player_ids.add(id(video_player))
+        released = True
+    return released
 
 
 class ImageListViewFileOpsMixin:
@@ -320,22 +367,19 @@ class ImageListViewFileOpsMixin:
             main_window = self.parent().parent().parent()
             main_window.post_deletion_index = next_index
 
-        # Check if any selected videos are currently loaded and unload them
+        # Release matching videos from the main, floating, and comparison viewers.
         # Hierarchy: ImageListView -> container -> ImageList (QDockWidget) -> MainWindow
         main_window = self.parent().parent().parent()  # Get main window reference
-        video_was_cleaned = False
-        video_player = _get_loaded_video_player(main_window)
-        if video_player is not None:
-            video_path = getattr(video_player, 'video_path', None)
-            if video_path:
-                currently_loaded_path = Path(video_path)
-                # Check if we're deleting the currently loaded video
-                for image in selected_images:
-                    if image.path == currently_loaded_path:
-                        # Unload the video first (stop playback and release resources)
-                        video_player.cleanup()
-                        video_was_cleaned = True
-                        break
+        target_video_paths = {
+            image.path
+            for image in selected_images
+            if bool(getattr(image, 'is_video', False))
+            or image.path.suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        }
+        video_was_cleaned = _release_video_players_for_paths(
+            main_window,
+            target_video_paths,
+        )
 
         # Clear thumbnails for all selected videos to release graphics resources
         for image in selected_images:
@@ -359,8 +403,12 @@ class ImageListViewFileOpsMixin:
         for image in selected_images:
             success = False
 
-            # For videos, try multiple times with delays (Windows file handle release is async)
-            max_retries = 3 if (hasattr(image, 'is_video') and image.is_video) else 1
+            # Native video backends can release Windows handles asynchronously.
+            is_video = (
+                bool(getattr(image, 'is_video', False))
+                or image.path.suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+            )
+            max_retries = 12 if video_was_cleaned and is_video else (3 if is_video else 1)
 
             for attempt in range(max_retries):
                 if attempt > 0:

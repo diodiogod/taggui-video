@@ -16,6 +16,7 @@ from utils.sidecar import (
 )
 import subprocess
 import json
+from utils.settings import DEFAULT_SETTINGS, settings
 from utils.video.training_profile import get_video_training_profile
 
 
@@ -34,6 +35,20 @@ class VideoEditingController:
         # Undo/redo stacks: store (video_path, operation_name, undo_snapshot_path) tuples
         self.undo_stack = deque(maxlen=10)  # Keep last 10 edits
         self.redo_stack = []
+
+    @staticmethod
+    def _configure_extract_as_copy_checkbox(checkbox):
+        """Restore and persist the shared extract-as-copy preference."""
+        checkbox.setChecked(
+            settings.value(
+                'video_extract_as_copy',
+                defaultValue=DEFAULT_SETTINGS['video_extract_as_copy'],
+                type=bool,
+            )
+        )
+        checkbox.toggled.connect(
+            lambda checked: settings.setValue('video_extract_as_copy', checked)
+        )
 
     @staticmethod
     def _profile_compatible_speed(
@@ -590,7 +605,7 @@ class VideoEditingController:
 
         # Extract as copy option (at the top)
         extract_as_copy_checkbox = QCheckBox("Extract as copy (create new file, don't replace original)")
-        extract_as_copy_checkbox.setChecked(False)
+        self._configure_extract_as_copy_checkbox(extract_as_copy_checkbox)
         extract_as_copy_checkbox.setToolTip("Create a copy with the extracted range instead of replacing the current video")
         layout.addWidget(extract_as_copy_checkbox)
 
@@ -734,7 +749,7 @@ class VideoEditingController:
 
         # Extract as copy option (at the top)
         extract_as_copy_checkbox = QCheckBox("Extract as copy (create new file, don't replace original)")
-        extract_as_copy_checkbox.setChecked(False)
+        self._configure_extract_as_copy_checkbox(extract_as_copy_checkbox)
         extract_as_copy_checkbox.setToolTip("Create a copy with the extracted range instead of replacing the current video")
         layout.addWidget(extract_as_copy_checkbox)
 
