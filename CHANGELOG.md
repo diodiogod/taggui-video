@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.9] - 2026-09-04
+
+### Added
+
+- Make Reload Directory detect renamed media even when cached folder signatures are unchanged
+- Prevent incomplete or transient MP4 files from crashing TagGUI during background indexing
+- Avoid crashes from Qt events referencing already-destroyed interface objects
+
+### Changed
+
+- Improve restored-video reliability and prevent reload crashes
+- Improve backup restoration and generated-video registration feedback
+
+### Fixed
+
+- Correct stale frame counts and FPS after videos are restored or replaced
 ## [1.6.8] - 2026-09-04
 
 ### Added
