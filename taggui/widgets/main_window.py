@@ -591,6 +591,7 @@ class MainWindow(QMainWindow):
         self._folder_panel_last_width = 240
         self._folder_panel_resize_start_width = 0
         self._folder_panel_resize_total_width = 0
+        self._folder_panel_outer_splitter_constraints = None
         self.is_running = True
         self.post_deletion_index = None  # Track index to focus after deletion
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
@@ -1315,6 +1316,10 @@ class MainWindow(QMainWindow):
                 pass
 
         if event_type in (event.Type.MouseButtonPress, event.Type.MouseButtonRelease):
+            try:
+                self._track_folder_panel_outer_splitter_mouse_event(event, event_type)
+            except Exception:
+                pass
             try:
                 self._track_image_browser_splitter_mouse_event(event, event_type)
             except Exception:
@@ -8584,6 +8589,8 @@ class MainWindow(QMainWindow):
     def _request_coordinated_image_browser_masonry_snap(self, view, dock, target_width: int) -> bool:
         docks = self._split_image_browser_docks_for_masonry_snap(dock)
         if not docks:
+            if dock is getattr(self, 'image_list', None) and self._folder_panel_is_left_of_images():
+                return self._resize_image_list_preserving_folder_width(target_width)
             return False
         now = time.time()
         if now < float(getattr(self, '_coordinated_masonry_snap_applying_until', 0.0) or 0.0):
@@ -8631,6 +8638,100 @@ class MainWindow(QMainWindow):
             return event.globalPos()
         except Exception:
             return None
+
+    def _restore_folder_panel_outer_splitter_constraints(self):
+        constraints = getattr(self, '_folder_panel_outer_splitter_constraints', None)
+        if not constraints:
+            return
+        self._folder_panel_outer_splitter_constraints = None
+        folder, old_min, old_max = constraints
+        try:
+            folder.setMinimumWidth(int(old_min))
+            folder.setMaximumWidth(int(old_max))
+        except RuntimeError:
+            pass
+
+    def _lock_folder_panel_width_for_outer_splitter_drag(self) -> bool:
+        if getattr(self, '_folder_panel_outer_splitter_constraints', None):
+            return True
+        folder = getattr(self, 'folder_tree_panel', None)
+        if folder is None or not self._folder_panel_is_left_of_images():
+            return False
+        try:
+            width = max(1, int(folder.width() or folder.minimumWidth() or 1))
+            self._folder_panel_outer_splitter_constraints = (
+                folder,
+                int(folder.minimumWidth() or 0),
+                int(folder.maximumWidth() or 16777215),
+            )
+            folder.setMinimumWidth(width)
+            folder.setMaximumWidth(width)
+            return True
+        except RuntimeError:
+            self._folder_panel_outer_splitter_constraints = None
+            return False
+
+    def _is_image_list_outer_splitter_at_position(self, global_pos: QPoint | None) -> bool:
+        if global_pos is None or not self._folder_panel_is_left_of_images():
+            return False
+        images = getattr(self, 'image_list', None)
+        central = self.centralWidget()
+        if images is None or central is None or not central.isVisible():
+            return False
+        try:
+            image_top_left = images.mapToGlobal(QPoint(0, 0))
+            central_top_left = central.mapToGlobal(QPoint(0, 0))
+            image_right = image_top_left.x() + images.width()
+            central_left = central_top_left.x()
+            boundary_x = (image_right + central_left) / 2.0
+            overlap_top = max(image_top_left.y(), central_top_left.y())
+            overlap_bottom = min(
+                image_top_left.y() + images.height(),
+                central_top_left.y() + central.height(),
+            )
+        except RuntimeError:
+            return False
+        return (
+            overlap_bottom - overlap_top > 24
+            and overlap_top <= global_pos.y() <= overlap_bottom
+            and abs(float(global_pos.x()) - boundary_x) <= 18
+        )
+
+    def _track_folder_panel_outer_splitter_mouse_event(self, event, event_type):
+        if event_type == event.Type.MouseButtonPress:
+            try:
+                if event.button() != Qt.MouseButton.LeftButton:
+                    return
+            except Exception:
+                return
+            self._restore_folder_panel_outer_splitter_constraints()
+            if self._is_image_list_outer_splitter_at_position(
+                self._event_global_position(event)
+            ):
+                self._lock_folder_panel_width_for_outer_splitter_drag()
+            return
+        if event_type == event.Type.MouseButtonRelease:
+            self._restore_folder_panel_outer_splitter_constraints()
+
+    def _resize_image_list_preserving_folder_width(self, target_width: int) -> bool:
+        images = getattr(self, 'image_list', None)
+        folder = getattr(self, 'folder_tree_panel', None)
+        if images is None or folder is None or not self._folder_panel_is_left_of_images():
+            return False
+        already_locked = bool(getattr(self, '_folder_panel_outer_splitter_constraints', None))
+        if not self._lock_folder_panel_width_for_outer_splitter_drag():
+            return False
+        try:
+            images.list_view._masonry_splitter_snapping = True
+            self.resizeDocks(
+                [images],
+                [max(int(images.minimumWidth() or 1), int(target_width))],
+                Qt.Orientation.Horizontal,
+            )
+        finally:
+            if not already_locked:
+                QTimer.singleShot(0, self._restore_folder_panel_outer_splitter_constraints)
+        return True
 
     def _classify_image_browser_splitter_at_position(self, global_pos: QPoint | None, docks) -> str | None:
         if global_pos is None:
