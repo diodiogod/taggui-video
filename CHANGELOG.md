@@ -5,6 +5,14 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.7] - 2026-09-04
+
+### Added
+
+- Keep the folder panel stable while resizing media
+- Preserve the chosen folder-tree width when resizing the image list and main viewer
+- Keep masonry column snapping without shifting the folder panel
+- Retain coordinated resizing for dual-browser layouts
 ## [1.6.6] - 2026-09-04
 
 ### Added
