@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] - 2026-09-04
+
+### Added
+
+- Show immediate progress feedback when Explorer starts TagGUI without a console
+- Automatically recover old folder indexes that could open with no visible media
+
+### Changed
+
+- Improve Explorer launches and media reliability
+- Improve reliability when dragging media from TagGUI while video rendering is active
 ## [1.6.5] - 2026-08-28
 
 ### Added
