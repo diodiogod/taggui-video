@@ -35,6 +35,86 @@ class VideoEditingController:
         self.undo_stack = deque(maxlen=10)  # Keep last 10 edits
         self.redo_stack = []
 
+    @staticmethod
+    def _profile_compatible_speed(
+        input_frames: int,
+        input_fps: float,
+        target_fps: float,
+        target_frames: int,
+    ) -> float:
+        """Calculate the speed multiplier that produces an exact target count."""
+        if input_frames <= 0 or input_fps <= 0 or target_fps <= 0 or target_frames <= 0:
+            return 1.0
+        return (input_frames * target_fps) / (input_fps * target_frames)
+
+    def _add_profile_speed_stepper(
+        self,
+        layout,
+        speed_spinbox,
+        *,
+        input_frames: int,
+        input_fps: float,
+        target_fps_getter,
+        preview_updater,
+    ):
+        """Add opt-in controls for stepping to adjacent profile-valid outputs."""
+        from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton
+
+        profile = get_video_training_profile()
+        row = QHBoxLayout()
+        label = QLabel(f"{profile.display_name} compatible output:")
+        previous_button = QPushButton()
+        next_button = QPushButton()
+        previous_button.setToolTip(
+            f"Adjust speed to the previous valid {profile.frame_rule} frame count."
+        )
+        next_button.setToolTip(
+            f"Adjust speed to the next valid {profile.frame_rule} frame count."
+        )
+        row.addWidget(label)
+        row.addWidget(previous_button)
+        row.addWidget(next_button)
+        layout.addLayout(row)
+
+        def output_frames() -> int:
+            target_fps = float(target_fps_getter())
+            duration = input_frames / input_fps if input_fps > 0 else 0.0
+            return max(1, round(duration / speed_spinbox.value() * target_fps))
+
+        def update_buttons():
+            current_output = output_frames()
+            previous_frames = profile.previous_valid_frame_count(current_output)
+            next_frames = profile.next_valid_frame_count(current_output)
+            previous_button.setText(
+                f"Previous valid ({previous_frames}f)" if previous_frames else "Previous valid"
+            )
+            previous_button.setEnabled(previous_frames is not None)
+            previous_button.setProperty('target_frames', previous_frames)
+            next_button.setText(f"Next valid ({next_frames}f)")
+            next_button.setProperty('target_frames', next_frames)
+
+        def apply_target(button):
+            target_frames = button.property('target_frames')
+            if not isinstance(target_frames, int) or target_frames <= 0:
+                return
+            speed = self._profile_compatible_speed(
+                input_frames,
+                input_fps,
+                float(target_fps_getter()),
+                target_frames,
+            )
+            speed_spinbox.setValue(
+                max(speed_spinbox.minimum(), min(speed_spinbox.maximum(), speed))
+            )
+            preview_updater()
+            update_buttons()
+
+        previous_button.clicked.connect(lambda: apply_target(previous_button))
+        next_button.clicked.connect(lambda: apply_target(next_button))
+        speed_spinbox.valueChanged.connect(update_buttons)
+        update_buttons()
+        return update_buttons
+
     def _save_undo_snapshot(self, video_path: Path, operation_name: str):
         """Save current video state and metadata for undo before editing."""
         import shutil
@@ -844,9 +924,9 @@ class VideoEditingController:
         speed_spinbox = QDoubleSpinBox()
         speed_spinbox.setMinimum(0.1)
         speed_spinbox.setMaximum(100.0)
+        speed_spinbox.setDecimals(4)
         speed_spinbox.setValue(initial_speed)
         speed_spinbox.setSingleStep(0.1)
-        speed_spinbox.setDecimals(2)
         speed_spinbox.setSuffix('x')
         speed_layout.addWidget(speed_spinbox)
         layout.addLayout(speed_layout)
@@ -895,6 +975,19 @@ class VideoEditingController:
         speed_spinbox.valueChanged.connect(update_preview)
         fps_checkbox.toggled.connect(update_preview)
         fps_spinbox.valueChanged.connect(update_preview)
+
+        refresh_profile_targets = self._add_profile_speed_stepper(
+            layout,
+            speed_spinbox,
+            input_frames=frame_count,
+            input_fps=fps,
+            target_fps_getter=lambda: (
+                fps_spinbox.value() if fps_checkbox.isChecked() else fps
+            ),
+            preview_updater=update_preview,
+        )
+        fps_checkbox.toggled.connect(refresh_profile_targets)
+        fps_spinbox.valueChanged.connect(refresh_profile_targets)
 
         # Buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1517,9 +1610,9 @@ class VideoEditingController:
         speed_spinbox = QDoubleSpinBox()
         speed_spinbox.setMinimum(0.1)
         speed_spinbox.setMaximum(100.0)
+        speed_spinbox.setDecimals(4)
         speed_spinbox.setValue(current_speed)
         speed_spinbox.setSingleStep(0.1)
-        speed_spinbox.setDecimals(2)
         speed_spinbox.setSuffix('x')
         speed_layout.addWidget(speed_spinbox)
         layout.addLayout(speed_layout)
@@ -1563,6 +1656,19 @@ class VideoEditingController:
         fps_checkbox.toggled.connect(fps_spinbox.setEnabled)
         fps_checkbox.toggled.connect(update_preview)
         fps_spinbox.valueChanged.connect(update_preview)
+
+        refresh_profile_targets = self._add_profile_speed_stepper(
+            layout,
+            speed_spinbox,
+            input_frames=current_frames,
+            input_fps=fps,
+            target_fps_getter=lambda: (
+                fps_spinbox.value() if fps_checkbox.isChecked() else fps
+            ),
+            preview_updater=update_preview,
+        )
+        fps_checkbox.toggled.connect(refresh_profile_targets)
+        fps_spinbox.valueChanged.connect(refresh_profile_targets)
 
         # Buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)

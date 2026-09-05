@@ -41,6 +41,20 @@ class VideoTrainingProfile:
             return upper
         return lower if frame_count - lower <= upper - frame_count else upper
 
+    def previous_valid_frame_count(self, frame_count: int) -> int | None:
+        """Return the greatest valid frame count strictly below ``frame_count``."""
+        frame_count = int(frame_count)
+        n = (frame_count - self.frame_offset - 1) // self.frame_step
+        if n < 0:
+            return None
+        return n * self.frame_step + self.frame_offset
+
+    def next_valid_frame_count(self, frame_count: int) -> int:
+        """Return the smallest valid frame count strictly above ``frame_count``."""
+        frame_count = int(frame_count)
+        n = (frame_count - self.frame_offset) // self.frame_step + 1
+        return max(0, n) * self.frame_step + self.frame_offset
+
 
 VIDEO_TRAINING_PROFILES = {
     'wan': VideoTrainingProfile('wan', 'WAN', 4, 1, 16.0),
