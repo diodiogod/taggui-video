@@ -32,6 +32,8 @@ class LoopSlider(QSlider):
         self._marker_size = 20  # Click detection radius
         self._marker_gap = 0  # Distance between markers when dragging both
         self._drag_anchor = None  # 'start' or 'end' - which marker was originally clicked for 'both' drag
+        self._hovered_marker = None  # 'start', 'end', or None
+        self.setMouseTracking(True)
 
         # Marker colors (can be set by skin system)
         self._marker_start_color = QColor(255, 0, 128)  # Default pink/magenta
@@ -112,33 +114,43 @@ class LoopSlider(QSlider):
         marker_height = self._marker_height
         marker_offset_y = self._marker_offset_y
 
-        def _build_marker_polygon(x_pos: int) -> QPolygonF:
+        def _build_marker_polygon(x_pos: int, scale: float = 1.0) -> QPolygonF:
+            width = marker_width * scale
+            height = marker_height * scale
             if self._marker_shape == 'diamond':
                 return QPolygonF([
                     QPointF(x_pos, groove.top() + marker_offset_y),
-                    QPointF(x_pos - marker_width / 2, groove.top() + marker_offset_y - marker_height / 2),
-                    QPointF(x_pos, groove.top() + marker_offset_y - marker_height),
-                    QPointF(x_pos + marker_width / 2, groove.top() + marker_offset_y - marker_height / 2),
+                    QPointF(x_pos - width / 2, groove.top() + marker_offset_y - height / 2),
+                    QPointF(x_pos, groove.top() + marker_offset_y - height),
+                    QPointF(x_pos + width / 2, groove.top() + marker_offset_y - height / 2),
                 ])
             # Default: triangle pointing at groove
             return QPolygonF([
                 QPointF(x_pos, groove.top() + marker_offset_y),
-                QPointF(x_pos - marker_width / 2, groove.top() + marker_offset_y - marker_height),
-                QPointF(x_pos + marker_width / 2, groove.top() + marker_offset_y - marker_height),
+                QPointF(x_pos - width / 2, groove.top() + marker_offset_y - height),
+                QPointF(x_pos + width / 2, groove.top() + marker_offset_y - height),
             ])
 
-        if self.loop_start is not None:
-            pos = self._value_to_position(self.loop_start, groove)
-            marker_poly = _build_marker_polygon(pos)
-            painter.setPen(QPen(self._marker_outline_color, self._marker_outline_width))
-            painter.setBrush(self._marker_start_color)
-            painter.drawPolygon(marker_poly)
-
-        if self.loop_end is not None:
-            pos = self._value_to_position(self.loop_end, groove)
-            marker_poly = _build_marker_polygon(pos)
-            painter.setPen(QPen(self._marker_outline_color, self._marker_outline_width))
-            painter.setBrush(self._marker_end_color)
+        markers = [('start', self.loop_start, self._marker_start_color),
+                   ('end', self.loop_end, self._marker_end_color)]
+        markers.sort(key=lambda marker: marker[0] == self._hovered_marker)
+        for marker_name, marker_value, marker_color in markers:
+            if marker_value is None:
+                continue
+            pos = self._value_to_position(marker_value, groove)
+            hovered = marker_name == self._hovered_marker
+            marker_poly = _build_marker_polygon(pos, 1.18 if hovered else 1.0)
+            if hovered:
+                glow = QColor(marker_color)
+                glow.setAlpha(110)
+                painter.setPen(QPen(glow, self._marker_outline_width + 5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolygon(marker_poly)
+            painter.setPen(QPen(
+                self._marker_outline_color,
+                self._marker_outline_width + (1 if hovered else 0),
+            ))
+            painter.setBrush(marker_color)
             painter.drawPolygon(marker_poly)
 
     def _value_to_position(self, value, groove_rect):
@@ -168,6 +180,19 @@ class LoopSlider(QSlider):
         is_in_upper_area = pos.y() < groove_rect.top()
         return is_in_upper_area and abs(pos.x() - marker_x) < self._marker_size
 
+    def _marker_at_position(self, pos, groove_rect):
+        """Return the nearest marker under the pointer, matching paint order on ties."""
+        candidates = []
+        for name, value, tie_priority in (
+            ('start', self.loop_start, 0),
+            ('end', self.loop_end, 1),
+        ):
+            if not self._is_near_marker(pos, value, groove_rect):
+                continue
+            marker_x = self._value_to_position(value, groove_rect)
+            candidates.append((abs(pos.x() - marker_x), -tie_priority, name))
+        return min(candidates)[2] if candidates else None
+
     def mousePressEvent(self, event):
         """Handle mouse press for marker dragging and position jumping."""
         opt = QStyleOptionSlider()
@@ -175,8 +200,9 @@ class LoopSlider(QSlider):
         groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
 
         # Check if clicking near a marker
-        near_start = self._is_near_marker(event.pos(), self.loop_start, groove)
-        near_end = self._is_near_marker(event.pos(), self.loop_end, groove)
+        selected_marker = self._marker_at_position(event.pos(), groove)
+        near_start = selected_marker == 'start'
+        near_end = selected_marker == 'end'
 
         # Check if Shift is pressed and both markers exist
         shift_pressed = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
@@ -272,7 +298,31 @@ class LoopSlider(QSlider):
             event.accept()
             return
 
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider,
+            opt,
+            QStyle.SubControl.SC_SliderGroove,
+            self,
+        )
+        hovered_marker = self._marker_at_position(event.pos(), groove)
+        if hovered_marker != self._hovered_marker:
+            self._hovered_marker = hovered_marker
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if hovered_marker is not None
+                else Qt.CursorShape.ArrowCursor
+            )
+            self.update()
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hovered_marker is not None:
+            self._hovered_marker = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
         """Handle mouse release."""
@@ -602,6 +652,7 @@ class VideoControlsWidget(QWidget):
     loop_end_set = Signal()
     loop_reset = Signal()
     loop_toggled = Signal(bool)
+    loop_history_changed = Signal()
     speed_changed = Signal(float)  # Playback speed multiplier
     mute_toggled = Signal(bool)  # Mute state (True = muted)
     volume_changed = Signal(float)  # Normalized volume (0.0 - 1.0)
@@ -1046,6 +1097,10 @@ class VideoControlsWidget(QWidget):
         self.current_image = None
         self.proxy_image_list_model = None
         self._loop_persistence_scope = 'main'
+        self._loop_history_media_key = None
+        self._loop_undo_history = []
+        self._loop_redo_history = []
+        self._loop_drag_original_state = None
 
         # Loop state
         self.loop_start_frame = None
@@ -2907,6 +2962,14 @@ class VideoControlsWidget(QWidget):
         if not metadata:
             return
 
+        media_key = str(getattr(image, 'path', '') or '')
+        if media_key != self._loop_history_media_key:
+            self._loop_history_media_key = media_key
+            self._loop_undo_history.clear()
+            self._loop_redo_history.clear()
+            self._loop_drag_original_state = None
+            self.loop_history_changed.emit()
+
         # Store references for persistence
         self.current_image = image
         self.proxy_image_list_model = proxy_model
@@ -3404,6 +3467,49 @@ class VideoControlsWidget(QWidget):
             'enabled': bool(self.is_looping),
         }
 
+    def can_undo_loop_marker_move(self) -> bool:
+        return bool(self._loop_undo_history)
+
+    def can_redo_loop_marker_move(self) -> bool:
+        return bool(self._loop_redo_history)
+
+    def loop_marker_undo_timestamp(self) -> int:
+        return int(self._loop_undo_history[-1]['created_at_ns']) if self._loop_undo_history else 0
+
+    def loop_marker_redo_timestamp(self) -> int:
+        return int(self._loop_redo_history[-1]['created_at_ns']) if self._loop_redo_history else 0
+
+    def clear_loop_marker_redo(self):
+        if self._loop_redo_history:
+            self._loop_redo_history.clear()
+            self.loop_history_changed.emit()
+
+    def _apply_loop_marker_history_state(self, state):
+        start_frame, end_frame = state
+        self.apply_loop_state(
+            start_frame,
+            end_frame,
+            self.is_looping,
+            save=True,
+            emit_signals=True,
+        )
+
+    def undo_loop_marker_move(self):
+        if not self._loop_undo_history:
+            return
+        record = self._loop_undo_history.pop()
+        self._loop_redo_history.append(record)
+        self._apply_loop_marker_history_state(record['before'])
+        self.loop_history_changed.emit()
+
+    def redo_loop_marker_move(self):
+        if not self._loop_redo_history:
+            return
+        record = self._loop_redo_history.pop()
+        self._loop_undo_history.append(record)
+        self._apply_loop_marker_history_state(record['after'])
+        self.loop_history_changed.emit()
+
     def apply_loop_state(
         self,
         start_frame: int | None,
@@ -3472,8 +3578,6 @@ class VideoControlsWidget(QWidget):
         self.loop_start_set.emit()
         # Update range display
         self._update_marker_range_display()
-        # Save to JSON
-        self._save_loop_markers()
 
     @Slot(int)
     def _on_loop_end_dragged(self, frame):
@@ -3483,12 +3587,15 @@ class VideoControlsWidget(QWidget):
         self.loop_end_set.emit()
         # Update range display
         self._update_marker_range_display()
-        # Save to JSON
-        self._save_loop_markers()
 
     @Slot()
     def _on_marker_drag_started(self):
         """Handle marker drag start - pause playback and store position."""
+        self._loop_drag_original_state = (
+            self.loop_start_frame,
+            self.loop_end_frame,
+        )
+
         # Store current frame position from the spinbox
         self._preview_restore_frame = self.frame_spinbox.value()
 
@@ -3514,6 +3621,22 @@ class VideoControlsWidget(QWidget):
     @Slot()
     def _on_marker_drag_ended(self):
         """Handle marker drag end - restore position and resume playback."""
+        final_state = (self.loop_start_frame, self.loop_end_frame)
+        if (
+            self._loop_drag_original_state is not None
+            and final_state != self._loop_drag_original_state
+        ):
+            self._loop_undo_history.append({
+                'before': self._loop_drag_original_state,
+                'after': final_state,
+                'created_at_ns': time.time_ns(),
+            })
+            del self._loop_undo_history[:-50]
+            self._loop_redo_history.clear()
+            self._save_loop_markers()
+            self.loop_history_changed.emit()
+        self._loop_drag_original_state = None
+
         # Exit preview mode first (allows seekbar updates again)
         self._in_marker_preview = False
 

@@ -1352,6 +1352,11 @@ class MenuManager:
         ]
         return [view for view in views if view is not None]
 
+    def _active_video_controls(self):
+        viewer = self.main_window.get_active_viewer()
+        controls = getattr(viewer, 'video_controls', None)
+        return controls if controls is not None else None
+
     def _unified_history_candidates(self, *, is_undo: bool):
         candidates = []
         model = self._active_image_list_model()
@@ -1374,6 +1379,22 @@ class MenuManager:
                     else view.selection_redo_timestamp()
                 )
                 candidates.append((timestamp, 'Selection', ('selection', view)))
+        video_controls = self._active_video_controls()
+        if video_controls is not None:
+            can_apply = (
+                video_controls.can_undo_loop_marker_move() if is_undo
+                else video_controls.can_redo_loop_marker_move()
+            )
+            if can_apply:
+                timestamp = (
+                    video_controls.loop_marker_undo_timestamp() if is_undo
+                    else video_controls.loop_marker_redo_timestamp()
+                )
+                candidates.append((
+                    timestamp,
+                    'Move loop marker',
+                    ('loop_marker', video_controls),
+                ))
         effects = self.main_window.marking_effects_controller
         can_apply_effect = effects.can_undo() if is_undo else effects.can_redo()
         if can_apply_effect:
@@ -1412,6 +1433,10 @@ class MenuManager:
         for view in self._selection_history_views():
             view._selection_redo_history.clear()
             getattr(view, '_selection_redo_timestamps', []).clear()
+        for viewer in self.main_window._iter_all_viewers():
+            controls = getattr(viewer, 'video_controls', None)
+            if controls is not None:
+                controls.clear_loop_marker_redo()
         self.main_window.marking_effects_controller.clear_redo()
         folder_history = getattr(
             getattr(self.main_window, 'folder_tree_panel', None),
@@ -1456,6 +1481,8 @@ class MenuManager:
         provider_type, provider = candidate[2]
         if provider_type == 'selection':
             provider.undo_selection()
+        elif provider_type == 'loop_marker':
+            provider.undo_loop_marker_move()
         elif provider_type == 'effect':
             provider.undo_last_effect(confirm=False)
         elif provider_type == 'folder':
@@ -1475,6 +1502,8 @@ class MenuManager:
         provider_type, provider = candidate[2]
         if provider_type == 'selection':
             provider.redo_selection()
+        elif provider_type == 'loop_marker':
+            provider.redo_loop_marker_move()
         elif provider_type == 'effect':
             provider.redo_last_effect()
         elif provider_type == 'folder':

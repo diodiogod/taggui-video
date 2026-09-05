@@ -3753,6 +3753,23 @@ class VideoPlayerWidget(QWidget):
 
     def set_loop(self, enabled: bool, start_frame: int = None, end_frame: int = None):
         """Set loop playback parameters."""
+        # MPV position tracking uses a local monotonic clock. While an A/B loop
+        # is active, that estimate is wrapped into the marker range. Preserve
+        # the wrapped position before disabling the loop, then re-anchor the
+        # clock after clearing MPV's loop properties. This updates timeline
+        # bookkeeping only; it must not seek or disturb playback.
+        disabling_active_mpv_loop = bool(
+            not enabled
+            and self._is_segment_loop_active()
+            and self.is_playing
+            and self._is_mpv_forward_active()
+        )
+        mpv_position_at_disable = (
+            self._get_mpv_position_ms()
+            if disabling_active_mpv_loop
+            else None
+        )
+
         self.loop_enabled = enabled
         self.loop_start = start_frame
         self.loop_end = end_frame
@@ -3781,6 +3798,10 @@ class VideoPlayerWidget(QWidget):
         if self.mpv_player is not None:
             if self._apply_mpv_loop_settings(clear_when_inactive=True):
                 self._mpv_loop_fallback_warned = False
+        if mpv_position_at_disable is not None:
+            self._mpv_estimated_position_ms = float(mpv_position_at_disable)
+            self._mpv_play_base_position_ms = float(mpv_position_at_disable)
+            self._mpv_play_started_monotonic = time.monotonic()
 
     def set_playback_speed(self, speed: float):
         """Set playback speed multiplier (-8.0 to 8.0)."""

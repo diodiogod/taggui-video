@@ -4679,6 +4679,9 @@ class MainWindow(QMainWindow):
         video_controls.loop_reset.connect(
             lambda: self._apply_loop_state_to_viewer_player(viewer)
         )
+        video_controls.loop_history_changed.connect(
+            self.menu_manager.update_undo_and_redo_actions
+        )
         video_controls.speed_changed.connect(video_player.set_playback_speed)
         video_controls.mute_toggled.connect(video_player.set_muted)
         video_controls.volume_changed.connect(video_player.set_volume)
