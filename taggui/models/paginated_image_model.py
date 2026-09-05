@@ -189,10 +189,13 @@ class PaginatedImageModel(QAbstractListModel):
         for i, file_path in enumerate(all_files):
             try:
                 relative_path = file_path.relative_to(self.directory_path)
-                mtime = file_path.stat().st_mtime
+                stat = file_path.stat()
+                mtime = stat.st_mtime
 
                 # Check if already cached and up-to-date
-                cached = self.db.get_cached_info(str(relative_path), mtime)
+                cached = self.db.get_cached_info(
+                    str(relative_path), mtime, stat.st_size
+                )
                 if cached:
                     continue  # Already indexed
 
@@ -218,7 +221,10 @@ class PaginatedImageModel(QAbstractListModel):
                         dimensions[1],
                         is_video,
                         mtime,
-                        video_metadata
+                        video_metadata,
+                        file_size=stat.st_size,
+                        file_type=file_path.suffix.lower(),
+                        ctime=getattr(stat, 'st_ctime', mtime),
                     )
 
                 # Progress update

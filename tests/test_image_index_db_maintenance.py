@@ -79,3 +79,34 @@ def test_maintenance_preserves_extreme_video_dimensions(tmp_path):
         assert (image["width"], image["height"]) == (None, None)
     finally:
         database.close()
+
+
+def test_cached_info_rejects_same_mtime_when_file_size_changed(tmp_path):
+    video_path = tmp_path / "restored.mp4"
+    video_path.write_bytes(b"original video")
+    stat = video_path.stat()
+
+    database = ImageIndexDB(tmp_path)
+    if not database.enabled:
+        pytest.skip("Dimension/index cache is disabled in this test environment")
+
+    try:
+        database.save_info(
+            video_path.name,
+            720,
+            720,
+            True,
+            stat.st_mtime,
+            {"fps": 24.0, "duration": 3.3, "frame_count": 80},
+            file_size=stat.st_size,
+        )
+        database.commit()
+
+        assert database.get_cached_info(
+            video_path.name, stat.st_mtime, stat.st_size
+        ) is not None
+        assert database.get_cached_info(
+            video_path.name, stat.st_mtime, stat.st_size + 100
+        ) is None
+    finally:
+        database.close()

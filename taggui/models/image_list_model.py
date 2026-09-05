@@ -7304,9 +7304,10 @@ class ImageListModel(QAbstractListModel):
             if use_fast_load:
                 # Fast load: only check cache, skip expensive operations
                 try:
-                    mtime = image_path.stat().st_mtime
+                    stat = image_path.stat()
+                    mtime = stat.st_mtime
                     relative_path = str(image_path.relative_to(directory_path))
-                    cached = db.get_cached_info(relative_path, mtime)
+                    cached = db.get_cached_info(relative_path, mtime, stat.st_size)
 
                     if cached:
                         dimensions = cached['dimensions']
@@ -7325,9 +7326,10 @@ class ImageListModel(QAbstractListModel):
             else:
                 # Normal load: read dimensions from files as before
                 try:
-                    mtime = image_path.stat().st_mtime
+                    stat = image_path.stat()
+                    mtime = stat.st_mtime
                     relative_path = str(image_path.relative_to(directory_path))
-                    cached = db.get_cached_info(relative_path, mtime)
+                    cached = db.get_cached_info(relative_path, mtime, stat.st_size)
 
                     if cached:
                         dimensions = cached['dimensions']
@@ -7354,8 +7356,13 @@ class ImageListModel(QAbstractListModel):
                                 dimensions = pilimage.open(image_path).size
 
                         if dimensions:
-                            db.save_info(relative_path, dimensions[0], dimensions[1],
-                                        is_video, mtime, video_metadata)
+                            db.save_info(
+                                relative_path, dimensions[0], dimensions[1],
+                                is_video, mtime, video_metadata,
+                                file_size=stat.st_size,
+                                file_type=image_path.suffix.lower(),
+                                ctime=getattr(stat, 'st_ctime', mtime),
+                            )
 
                             if cache_misses % 100 == 0:
                                 db.commit()
@@ -11053,7 +11060,10 @@ class ImageListModel(QAbstractListModel):
         if self._db and self._directory_path:
             try:
                 relative_path = str(image_path.relative_to(self._directory_path))
-                cached_info = self._db.get_cached_info(relative_path, image_path.stat().st_mtime) or {}
+                stat = image_path.stat()
+                cached_info = self._db.get_cached_info(
+                    relative_path, stat.st_mtime, stat.st_size
+                ) or {}
             except Exception:
                 cached_info = {}
 

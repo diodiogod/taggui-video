@@ -1002,13 +1002,15 @@ class ImageIndexDB:
         if moved_any:
             print(f"[DB] Migrated legacy index to {self.DB_DIR_NAME}/{self.DB_FILE_NAME}")
 
-    def get_cached_info(self, file_name: str, mtime: float) -> Optional[dict]:
+    def get_cached_info(self, file_name: str, mtime: float,
+                        file_size: int | None = None) -> Optional[dict]:
         """
         Get cached image info if it exists and is up-to-date.
 
         Args:
             file_name: Name of the image file
             mtime: Current modification time of the file
+            file_size: Current file size when already available from ``stat()``
 
         Returns:
             Dict with dimensions and metadata, or None if cache miss/stale
@@ -1022,7 +1024,9 @@ class ImageIndexDB:
                 SELECT width, height, is_video, video_fps, video_duration,
                        video_frame_count, mtime, thumbnail_cached, rating,
                        love, bomb, reaction_updated_at,
-                       review_rank, review_flags, review_updated_at
+                       review_rank, review_flags, review_updated_at,
+                       caption_needs_review_count, caption_excluded_count,
+                       file_size
                 FROM images
                 WHERE file_name = ?
             ''', (file_name,))
@@ -1033,6 +1037,12 @@ class ImageIndexDB:
 
             # Check if file was modified since cache
             if abs(row['mtime'] - mtime) > 0.1:  # Allow 0.1s tolerance
+                return None
+            if (
+                file_size is not None
+                and row['file_size'] is not None
+                and int(row['file_size']) != int(file_size)
+            ):
                 return None
 
             result = {
