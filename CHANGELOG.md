@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.8] - 2026-09-04
+
+### Added
+
+- Choose between WAN 4n+1 at 16 FPS and H3 MinMax 17n+5 at 24 FPS
+- Use the selected profile for video badges, frame-count repairs, and FPS suggestions
+
+### Changed
+
+- Add H3 MinMax dataset preparation support and improve Quick Sort presets
+- Improve reliability when adding and switching Quick Sort templates
+
+### Fixed
+
+- Fix built-in Quick Sort presets so selecting them consistently reuses the intended preset
 ## [1.6.7] - 2026-09-04
 
 ### Added
