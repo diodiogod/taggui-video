@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.11] - 2026-09-05
+
+### Added
+
+- Remember the Extract as copy choice across dialogs and app restarts
+- Allow extracted videos to be deleted when open in floating or comparison viewers
+
+### Changed
+
+- Improve extracted-video workflows
+- Improve deletion reliability while Windows releases video file handles
 ## [1.6.10] - 2026-09-05
 
 ### Added
