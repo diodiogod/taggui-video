@@ -3453,7 +3453,7 @@ class VideoControlsWidget(QWidget):
 
     @Slot()
     def reset(self):
-        """Reset controls to default state."""
+        """Reset controls without modifying the previously loaded media."""
         self.frame_spinbox.setValue(0)
         self.timeline_slider.setValue(0)
         self.time_label.setText('00:00.000 / 00:00.000')
@@ -3462,7 +3462,7 @@ class VideoControlsWidget(QWidget):
         self.frame_total_label.setText('/ 0')
         # N*4+1 frame rule indicator removed - now shown as stamp on sidebar preview
         self.set_playing(False)
-        self._reset_loop()
+        self._reset_loop(save=False)
 
     @Slot(int)
     def _on_loop_start_dragged(self, frame):

@@ -1851,6 +1851,19 @@ class ImageListModel(QAbstractListModel):
 
         return meta
 
+    def reload_image_metadata_from_sidecar(self, image: Image) -> bool:
+        """Rehydrate one loaded image after its sidecar was restored externally."""
+        sidecar_path = self._preferred_sidecar_meta_path(image.path)
+        if sidecar_path is None:
+            return False
+        with self._sidecar_meta_cache_lock:
+            self._sidecar_meta_cache.pop(str(sidecar_path), None)
+        meta = self._read_cached_sidecar_meta(sidecar_path)
+        if not isinstance(meta, dict) or meta.get('version') != 1:
+            return False
+        self._apply_image_metadata_from_meta(image, meta)
+        return True
+
     def _preferred_sidecar_meta_path(
         self,
         media_path: Path,

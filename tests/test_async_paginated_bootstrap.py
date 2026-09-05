@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 import sys
 import threading
@@ -15,7 +16,46 @@ from PySide6.QtWidgets import QApplication
 
 from models import image_list_model as image_list_model_module
 from models.image_list_model import ImageListModel
+from utils.image import Image
 from utils.load_options import LimitedLoadOptions
+
+
+def test_reloading_restored_sidecar_rehydrates_loop_markers(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    model = ImageListModel(256, ', ')
+    video_path = tmp_path / 'restored.mp4'
+    video_path.write_bytes(b'video')
+    sidecar_path = tmp_path / 'restored.taggui.json'
+    sidecar_path.write_text(
+        json.dumps({
+            'version': 1,
+            'loop_start_frame': 0,
+            'loop_end_frame': 168,
+            'viewer_loop_markers': {
+                'main': {'loop_start_frame': 0, 'loop_end_frame': 168},
+            },
+        }),
+        encoding='utf-8',
+    )
+    image = Image(
+        video_path,
+        (720, 720),
+        is_video=True,
+        loop_start_frame=None,
+        loop_end_frame=None,
+    )
+
+    try:
+        assert model.reload_image_metadata_from_sidecar(image) is True
+        assert (image.loop_start_frame, image.loop_end_frame) == (0, 168)
+        assert image.viewer_loop_markers['main'] == {
+            'loop_start_frame': 0,
+            'loop_end_frame': 168,
+        }
+    finally:
+        model.shutdown_background_workers()
+        model.deleteLater()
+        app.processEvents()
 
 
 def test_invalid_video_is_rejected_before_in_process_decode(tmp_path, monkeypatch):

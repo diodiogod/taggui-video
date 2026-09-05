@@ -522,6 +522,13 @@ class ImageListViewFileOpsMixin:
                             json_path.unlink()
                         except Exception:
                             pass
+                source_model = getattr(main_window, 'image_list_model', None)
+                if source_model is not None:
+                    reload_sidecar = getattr(
+                        source_model, 'reload_image_metadata_from_sidecar', None
+                    )
+                    if callable(reload_sidecar):
+                        reload_sidecar(img)
                 if is_video and video_editing_controller is not None:
                     try:
                         video_editing_controller._refresh_edited_video_metadata(img.path)
