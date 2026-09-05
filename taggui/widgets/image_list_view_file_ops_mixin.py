@@ -352,6 +352,8 @@ class ImageListViewFileOpsMixin:
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        main_window = self._main_window_host()
+
         # Calculate the index to focus after deletion
         # Get all selected indices and find the maximum (last in sort order)
         selected_indices = sorted([idx.row() for idx in self.selectedIndexes()])
@@ -364,21 +366,20 @@ class ImageListViewFileOpsMixin:
                 # If we're deleting at the end, focus on the image before the first deleted one
                 next_index = max(0, selected_indices[0] - 1)
             # Store in main window for use after reload
-            main_window = self.parent().parent().parent()
-            main_window.post_deletion_index = next_index
+            if main_window is not None:
+                main_window.post_deletion_index = next_index
 
         # Release matching videos from the main, floating, and comparison viewers.
-        # Hierarchy: ImageListView -> container -> ImageList (QDockWidget) -> MainWindow
-        main_window = self.parent().parent().parent()  # Get main window reference
         target_video_paths = {
             image.path
             for image in selected_images
             if bool(getattr(image, 'is_video', False))
             or image.path.suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
         }
-        video_was_cleaned = _release_video_players_for_paths(
-            main_window,
-            target_video_paths,
+        video_was_cleaned = (
+            _release_video_players_for_paths(main_window, target_video_paths)
+            if main_window is not None
+            else False
         )
 
         # Clear thumbnails for all selected videos to release graphics resources
