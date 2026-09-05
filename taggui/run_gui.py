@@ -364,6 +364,7 @@ def _parse_startup_launch_args(
     parser.add_argument('--qt-system-colors', action='store_true')
     parser.add_argument('--qt-plain-colors', action='store_true')
     parser.add_argument('--startup-profile', action='store_true')
+    parser.add_argument('--startup-ready-file')
     parser.add_argument('--background-validation-delay-ms', type=int)
     parser.add_argument('--limited-validation-delay-ms', type=int)
     parser.add_argument('--skip-limited-validation', action='store_true')
@@ -373,6 +374,9 @@ def _parse_startup_launch_args(
     parser.add_argument('--sort-by', choices=['mtime', 'name', 'rating'])
     parser.add_argument('--sort-dir', choices=['asc', 'desc', 'ASC', 'DESC'])
     parsed, extras = parser.parse_known_args(list(argv or []))
+
+    if parsed.startup_ready_file:
+        os.environ['TAGGUI_STARTUP_READY_FILE'] = str(parsed.startup_ready_file)
 
     if parsed.startup_profile:
         os.environ['TAGGUI_STARTUP_PROFILE'] = '1'
@@ -530,6 +534,13 @@ def run_gui(argv: list[str] | None = None):
         app.aboutToQuit.connect(lambda: forget_preferred_server_name(relay_server_name))
         app.aboutToQuit.connect(relay.stop)
     main_window.show()
+    try:
+        app.processEvents()
+        ready_file = str(os.getenv('TAGGUI_STARTUP_READY_FILE', '') or '').strip()
+        if ready_file:
+            Path(ready_file).touch()
+    except Exception as ready_error:
+        print(f"[STARTUP] Could not signal launcher readiness: {ready_error}")
     _log_startup("main-window-shown")
 
     if os.getenv('TAGGUI_STARTUP_PROFILE', '0') == '1':
