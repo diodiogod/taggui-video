@@ -3,7 +3,7 @@
 from pathlib import Path
 from PIL import Image as PILImage
 from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal
 from collections import deque
 
 from utils.sidecar import (
@@ -26,6 +26,27 @@ def _video_editor_class():
     return VideoEditor
 
 
+class _VideoOperationSignals(QObject):
+    finished = Signal(object, object)
+
+
+class _VideoOperationWorker(QRunnable):
+    """Run one blocking video backend operation outside the UI thread."""
+
+    def __init__(self, operation):
+        super().__init__()
+        self.operation = operation
+        self.signals = _VideoOperationSignals()
+
+    def run(self):
+        try:
+            result = self.operation()
+        except Exception as exc:
+            self.signals.finished.emit(None, exc)
+        else:
+            self.signals.finished.emit(result, None)
+
+
 class VideoEditingController:
     """Handles all video editing operations."""
 
@@ -35,6 +56,8 @@ class VideoEditingController:
         # Undo/redo stacks: store (video_path, operation_name, undo_snapshot_path) tuples
         self.undo_stack = deque(maxlen=10)  # Keep last 10 edits
         self.redo_stack = []
+        self._video_operation_workers = set()
+        self._video_operation_active = False
 
     @staticmethod
     def _configure_extract_as_copy_checkbox(checkbox):
@@ -575,6 +598,63 @@ class VideoEditingController:
         finally:
             progress.close()
 
+    def _run_video_operation_async(
+        self,
+        operation_name: str,
+        operation,
+        completion,
+        *,
+        window_modal: bool,
+    ) -> bool:
+        """Run blocking video work in a retained worker and finish on the UI thread."""
+        if self._video_operation_active:
+            QMessageBox.information(
+                self.main_window,
+                "Video Operation in Progress",
+                "Wait for the current video operation to finish before starting another.",
+            )
+            return False
+
+        progress = QProgressDialog(
+            f"Processing {operation_name}...",
+            "",
+            0,
+            0,
+            self.main_window,
+        )
+        progress.setWindowTitle("Video Processing")
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setWindowModality(
+            Qt.WindowModality.WindowModal
+            if window_modal
+            else Qt.WindowModality.NonModal
+        )
+
+        worker = _VideoOperationWorker(operation)
+        self._video_operation_workers.add(worker)
+        self._video_operation_active = True
+
+        def finish(result, error):
+            self._video_operation_workers.discard(worker)
+            self._video_operation_active = False
+            progress.close()
+            progress.deleteLater()
+            if error is not None:
+                QMessageBox.critical(
+                    self.main_window,
+                    "Video Processing Error",
+                    str(error),
+                )
+                return
+            completion(result)
+
+        worker.signals.finished.connect(finish)
+        progress.show()
+        QThreadPool.globalInstance().start(worker)
+        return True
+
     def extract_video_range_rough(self):
         """Extract the marked range using keyframe cuts (fast, no re-encoding)."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel,
@@ -712,6 +792,14 @@ class VideoEditingController:
         """Extract the marked range with frame accuracy (re-encodes)."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel,
                                        QCheckBox, QDialogButtonBox, QPushButton)
+
+        if self._video_operation_active:
+            QMessageBox.information(
+                self.main_window,
+                "Video Operation in Progress",
+                "Wait for the current video operation to finish before starting another.",
+            )
+            return
 
         video_player = self.main_window.image_viewer.video_player
         video_controls = self.main_window.image_viewer.video_controls
@@ -851,28 +939,22 @@ class VideoEditingController:
 
         if extract_as_copy:
             new_path = self._build_extract_copy_path(input_path, start_frame, end_frame)
+            operation_desc = f"Created copy and extracted frames {start_frame}-{end_frame}"
+            if reverse:
+                operation_desc += " (reversed)"
+            if abs(speed_factor - 1.0) >= 0.01:
+                operation_desc += f" at {speed_factor}x speed"
+            if target_fps is not None:
+                operation_desc += f" @ {target_fps}fps"
 
-            # Extract directly to the new file so extract-as-copy does not generate
-            # .backup files for the newly created clip.
-            success, message = _video_editor_class().extract_range(
-                input_path, new_path,
-                start_frame, end_frame, fps,
-                reverse=reverse,
-                speed_factor=speed_factor,
-                target_fps=target_fps
-            )
-
-            if success:
+            def finish_copy(result):
+                success, message = result
+                if not success:
+                    QMessageBox.critical(self.main_window, "Error", message)
+                    return
                 self._copy_extract_sidecars(input_path, new_path)
                 registered = self._register_generated_media(new_path, select=False)
                 self._refresh_edited_video_metadata(new_path)
-                operation_desc = f"Created copy and extracted frames {start_frame}-{end_frame}"
-                if reverse:
-                    operation_desc += " (reversed)"
-                if abs(speed_factor - 1.0) >= 0.01:
-                    operation_desc += f" at {speed_factor}x speed"
-                if target_fps is not None:
-                    operation_desc += f" @ {target_fps}fps"
                 QMessageBox.information(self.main_window, "Success", f"{operation_desc}:\n{new_path.name}")
                 if not registered:
                     QMessageBox.warning(
@@ -880,8 +962,22 @@ class VideoEditingController:
                         "Copy Registration Failed",
                         f"Created the video but could not add it to the image list:\n{new_path.name}",
                     )
-            else:
-                QMessageBox.critical(self.main_window, "Error", message)
+
+            self._run_video_operation_async(
+                "precise range extraction",
+                lambda: _video_editor_class().extract_range(
+                    input_path,
+                    new_path,
+                    start_frame,
+                    end_frame,
+                    fps,
+                    reverse=reverse,
+                    speed_factor=speed_factor,
+                    target_fps=target_fps,
+                ),
+                finish_copy,
+                window_modal=False,
+            )
         else:
             # Save undo snapshot before editing
             operation_desc = f"Extract frames {start_frame}-{end_frame}"
@@ -896,16 +992,11 @@ class VideoEditingController:
             # Release file handles before editing
             self._prepare_video_for_editing(video_player)
 
-            # Extract range with optional speed/FPS changes (all in one ffmpeg pass)
-            success, message = _video_editor_class().extract_range(
-                input_path, input_path,
-                start_frame, end_frame, fps,
-                reverse=reverse,
-                speed_factor=speed_factor,
-                target_fps=target_fps
-            )
-
-            if success:
+            def finish_replacement(result):
+                success, message = result
+                if not success:
+                    QMessageBox.critical(self.main_window, "Error", message)
+                    return
                 self._clear_video_loop_markers(input_path, disable_current_loop=True)
                 self._refresh_edited_video_metadata(input_path)
                 QMessageBox.information(self.main_window, "Success", message)
@@ -914,8 +1005,22 @@ class VideoEditingController:
                 # Reset speed slider to 1.0x if speed was applied
                 if abs(speed_factor - 1.0) >= 0.01:
                     video_controls.speed_slider.setValue(200)  # 1.0x = 200 in slider units
-            else:
-                QMessageBox.critical(self.main_window, "Error", message)
+
+            self._run_video_operation_async(
+                "precise range extraction",
+                lambda: _video_editor_class().extract_range(
+                    input_path,
+                    input_path,
+                    start_frame,
+                    end_frame,
+                    fps,
+                    reverse=reverse,
+                    speed_factor=speed_factor,
+                    target_fps=target_fps,
+                ),
+                finish_replacement,
+                window_modal=True,
+            )
 
     def _show_speed_fps_dialog(self, frame_count, fps, initial_speed=1.0, initial_fps=None):
         """
