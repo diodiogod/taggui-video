@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -8,7 +9,51 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "taggui"))
 
-from taggui.utils.image_index_db import ImageIndexDB
+from taggui.utils.image_index_db import DB_VERSION, ImageIndexDB
+
+
+def test_version_2_cache_rebuilds_before_new_indexes_are_created(tmp_path):
+    db_dir = tmp_path / ImageIndexDB.DB_DIR_NAME
+    db_dir.mkdir()
+    connection = sqlite3.connect(db_dir / ImageIndexDB.DB_FILE_NAME)
+    connection.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO meta (key, value) VALUES ('version', '2');
+        CREATE TABLE images (
+            file_name TEXT UNIQUE NOT NULL,
+            width INTEGER,
+            height INTEGER,
+            is_video INTEGER NOT NULL,
+            video_fps REAL,
+            video_duration REAL,
+            video_frame_count INTEGER,
+            mtime REAL NOT NULL
+        );
+        CREATE TABLE image_tags (image_id INTEGER NOT NULL, tag TEXT NOT NULL);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    database = ImageIndexDB(tmp_path)
+    if not database.enabled:
+        pytest.skip("Dimension/index cache is disabled in this test environment")
+
+    try:
+        assert database.conn is not None
+        columns = {
+            row["name"]
+            for row in database.conn.execute("PRAGMA table_info(images)").fetchall()
+        }
+        version = database.conn.execute(
+            "SELECT value FROM meta WHERE key = 'version'"
+        ).fetchone()["value"]
+
+        assert version == str(DB_VERSION)
+        assert {"id", "aspect_ratio", "rating", "indexed_at", "thumbnail_cached"} <= columns
+    finally:
+        database.close()
 
 
 def test_maintenance_preserves_extreme_video_dimensions(tmp_path):

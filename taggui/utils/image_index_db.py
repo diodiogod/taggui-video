@@ -724,6 +724,14 @@ class ImageIndexDB:
                 cursor.execute("PRAGMA table_info(images)")
                 columns = [info[1] for info in cursor.fetchall()]
                 for column_name, ddl in (
+                    # Index creation happens before the version-specific rebuild
+                    # below. Very old caches therefore need every indexed column
+                    # present temporarily, or initialization stops before it can
+                    # detect and rebuild their obsolete schema.
+                    ('aspect_ratio', 'ALTER TABLE images ADD COLUMN aspect_ratio REAL'),
+                    ('rating', 'ALTER TABLE images ADD COLUMN rating REAL DEFAULT 0.0'),
+                    ('indexed_at', 'ALTER TABLE images ADD COLUMN indexed_at REAL'),
+                    ('thumbnail_cached', 'ALTER TABLE images ADD COLUMN thumbnail_cached INTEGER DEFAULT 0'),
                     ('file_size', 'ALTER TABLE images ADD COLUMN file_size INTEGER'),
                     ('file_type', 'ALTER TABLE images ADD COLUMN file_type TEXT'),
                     ('ctime', 'ALTER TABLE images ADD COLUMN ctime REAL'),
