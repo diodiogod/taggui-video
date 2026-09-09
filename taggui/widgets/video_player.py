@@ -358,6 +358,18 @@ class VideoPlayerWidget(QWidget):
         else:
             self._backend_fallback_warned = False
 
+    def apply_mpv_hwdec_change(self):
+        """Recreate an active MPV instance so a decoder change applies live."""
+        if self.mpv_player is None:
+            return
+        resume_playback = bool(self.is_playing and self.playback_speed >= 0)
+        self.is_playing = False
+        self.position_timer.stop()
+        self._teardown_mpv(drop_player=True)
+        self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
+        if resume_playback and self.video_path:
+            QTimer.singleShot(0, self.play)
+
     def _log_loop_debug(self, message: str, force: bool = False):
         """Loop debug logging intentionally disabled for normal runtime."""
         _ = (message, force)
@@ -2136,7 +2148,7 @@ class VideoPlayerWidget(QWidget):
             with VideoPlayerWidget._mpv_init_lock:
                 self.mpv_player = mpv.MPV(
                     vo='libmpv',
-                    hwdec='auto-copy',  # copy decoded frames to OpenGL — no zero-copy D3D11
+                    hwdec=playback_backend.get_mpv_hwdec_mode(),
                     keep_open='yes',
                     pause=True,
                     speed=str(speed),

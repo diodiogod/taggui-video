@@ -67,6 +67,7 @@ DEFAULT_SETTINGS = {
     'video_multi_compare_experimental': True,  # Allow adding 3rd/4th video layers in compare window
     # Persisted backend IDs; MPV is the recommended primary player.
     'video_playback_backend': 'mpv_experimental',
+    'mpv_hardware_decoding': 'automatic',
     'video_muted': True,
     'video_volume': 1.0,
     'video_training_profile': 'wan',  # WAN (4n+1 @16fps) or H3 MinMax (17n+5 @24fps)

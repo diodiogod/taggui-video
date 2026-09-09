@@ -105,7 +105,8 @@ configured operation and scope.
 
 Potentially ambiguous spatial phrases are highlighted in amber:
 
-- normal Image Tags rows use amber text and display a small `↔` gesture handle
+- normal Image Tags rows highlight only detected phrases in amber; the
+  highlighted phrase itself is the gesture target
 - descriptive mode highlights the detected phrase directly
 
 Examples include:
@@ -161,8 +162,9 @@ track reviewed phrases individually.
 
 Spatial corrections can also be applied with one left-button gesture.
 
-In normal tag mode, begin the drag on the small amber `↔` handle. In
-descriptive mode, begin on the highlighted phrase itself. A normal click does
+In normal tag mode, begin the drag directly on the highlighted phrase you want
+to change. Captions containing several spatial phrases treat each phrase as an
+independent drag target. Descriptive mode uses the same direct interaction. A normal click does
 not change the caption; the disk activates only after the pointer crosses the
 drag threshold.
 
@@ -198,8 +200,8 @@ edit existing captions.
 
 ### Enable left-drag correction disk
 
-Enables the gesture interaction and tag-row handles. Right-click corrections
-and Text Transform remain available when gestures are disabled.
+Enables direct dragging from highlighted phrases. Right-click corrections and
+Text Transform remain available when gestures are disabled.
 
 ### Highlight foreground/background expressions
 

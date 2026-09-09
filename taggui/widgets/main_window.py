@@ -1796,6 +1796,13 @@ class MainWindow(QMainWindow):
     @Slot(str, object)
     def _on_setting_changed(self, key: str, _value):
         """Apply selected settings live without requiring restart."""
+        if key == 'mpv_hardware_decoding':
+            for viewer in self._iter_all_viewers():
+                player = getattr(viewer, 'video_player', None)
+                if player is not None:
+                    player.apply_mpv_hwdec_change()
+            return
+
         if key == 'video_training_profile':
             list_view = getattr(getattr(self, 'image_list', None), 'list_view', None)
             if list_view is not None:

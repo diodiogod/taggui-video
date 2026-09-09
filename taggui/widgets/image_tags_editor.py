@@ -4,7 +4,7 @@ from PySide6.QtCore import (QEvent, QItemSelectionModel, QModelIndex, QStringLis
                             QPoint, QRectF, QTimer, Qt, Signal, Slot)
 from PySide6.QtGui import (QColor, QCloseEvent, QKeyEvent, QIcon, QFont,
                            QMouseEvent, QPainter, QPalette, QPen, QTextCursor,
-                           QWheelEvent)
+                           QTextDocument, QTextCharFormat, QWheelEvent)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QCompleter, QDockWidget,
                                QHBoxLayout, QLabel, QLineEdit, QListView,
                                QMenu, QMessageBox, QPushButton, QStackedWidget, QStyle,
@@ -180,6 +180,126 @@ class IdeogramCaptionItemDelegate(TextEditItemDelegate):
 class CaptionStatusItemDelegate(TextEditItemDelegate):
     """Keep ordinary tags unchanged and style only explicitly classified rows."""
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._spatial_phrase_rects = {}
+
+    def spatial_phrase_at(self, row: int, position: QPoint):
+        for rect, start, end, phrase in self._spatial_phrase_rects.get(row, []):
+            if rect.contains(position):
+                return start, end, phrase
+        return None
+
+    def _paint_directional_phrases(self, painter, option, index, status):
+        """Paint detected phrases without tinting the rest of the caption row."""
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or '')
+        reviewed = {
+            str(value).casefold()
+            for value in status.get('direction_reviewed_phrases', [])
+        }
+        spans = [
+            (start, end)
+            for start, end, _kind in spatial_expression_spans(text)
+            if '*' not in reviewed and text[start:end].casefold() not in reviewed
+        ]
+        if not spans:
+            super().paint(painter, option, index)
+            return
+
+        paint_option = QStyleOptionViewItem(option)
+        self.initStyleOption(paint_option, index)
+        paint_option.text = ''
+        style = (
+            paint_option.widget.style()
+            if paint_option.widget is not None
+            else self.parent().style()
+        )
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem,
+            paint_option,
+            painter,
+            paint_option.widget,
+        )
+
+        document = QTextDocument()
+        document.setDocumentMargin(0)
+        document.setDefaultFont(option.font)
+        document.setPlainText(text)
+        text_color = option.palette.color(
+            QPalette.ColorRole.HighlightedText
+            if option.state & QStyle.StateFlag.State_Selected
+            else QPalette.ColorRole.Text
+        )
+        base_format = QTextCharFormat()
+        base_format.setForeground(text_color)
+        cursor = QTextCursor(document)
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.mergeCharFormat(base_format)
+
+        phrase_format = QTextCharFormat()
+        phrase_format.setForeground(QColor('#F59E0B'))
+        phrase_format.setBackground(QColor(245, 158, 11, 45))
+        phrase_format.setUnderlineColor(QColor('#F59E0B'))
+        phrase_format.setUnderlineStyle(
+            QTextCharFormat.UnderlineStyle.DashUnderline
+        )
+        for start, end in spans:
+            cursor = QTextCursor(document)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.mergeCharFormat(phrase_format)
+
+        content_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText,
+            paint_option,
+            paint_option.widget,
+        )
+        content_rect.adjust(4, 0, 0, 0)
+        document.setTextWidth(max(1, content_rect.width()))
+        painter.save()
+        painter.setClipRect(content_rect)
+        painter.translate(content_rect.topLeft())
+        document.drawContents(
+            painter,
+            QRectF(0, 0, content_rect.width(), content_rect.height()),
+        )
+        painter.restore()
+
+        phrase_rects = []
+        if settings.value(
+            'spatial_gestures_enabled',
+            DEFAULT_SETTINGS['spatial_gestures_enabled'],
+            type=bool,
+        ):
+            for start, end in spans:
+                block = document.findBlock(start)
+                while block.isValid() and block.position() < end:
+                    layout = block.layout()
+                    block_rect = document.documentLayout().blockBoundingRect(block)
+                    for line_index in range(layout.lineCount()):
+                        line = layout.lineAt(line_index)
+                        line_start = block.position() + line.textStart()
+                        line_end = line_start + line.textLength()
+                        segment_start = max(start, line_start)
+                        segment_end = min(end, line_end)
+                        if segment_start >= segment_end:
+                            continue
+                        x1 = line.cursorToX(segment_start - block.position())
+                        x2 = line.cursorToX(segment_end - block.position())
+                        if isinstance(x1, tuple):
+                            x1 = x1[0]
+                        if isinstance(x2, tuple):
+                            x2 = x2[0]
+                        rect = QRectF(
+                            content_rect.left() + min(x1, x2),
+                            content_rect.top() + block_rect.top() + line.y(),
+                            max(2, abs(x2 - x1)),
+                            line.height(),
+                        )
+                        phrase_rects.append((rect, start, end, text[start:end]))
+                    block = block.next()
+        self._spatial_phrase_rects[index.row()] = phrase_rects
+
     def paint(self, painter, option, index):
         owner = self.parent()
         status_getter = getattr(owner, 'caption_status_for_row', None)
@@ -191,6 +311,14 @@ class CaptionStatusItemDelegate(TextEditItemDelegate):
         ):
             super().paint(painter, option, index)
             return
+        if (status.get('directional_attention')
+                and not status.get('needs_review')
+                and not status.get('excluded')):
+            self._paint_directional_phrases(
+                painter, option, index, status
+            )
+            return
+
         paint_option = QStyleOptionViewItem(option)
         if status.get('excluded'):
             font = QFont(paint_option.font)
@@ -202,21 +330,6 @@ class CaptionStatusItemDelegate(TextEditItemDelegate):
             paint_option.palette.setColor(QPalette.ColorRole.Text, QColor('#F59E0B'))
             paint_option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#FFE0A3'))
         super().paint(painter, paint_option, index)
-        if (status.get('directional_attention') and settings.value(
-                'spatial_gestures_enabled',
-                DEFAULT_SETTINGS['spatial_gestures_enabled'],
-                type=bool)):
-            painter.save()
-            painter.setPen(QPen(QColor('#F59E0B'), 1.5))
-            handle_rect = QRectF(
-                option.rect.right() - 19,
-                option.rect.center().y() - 8,
-                16,
-                16,
-            )
-            painter.drawEllipse(handle_rect)
-            painter.drawText(handle_rect, Qt.AlignmentFlag.AlignCenter, '↔')
-            painter.restore()
 
 
 class SpatialGestureOverlay(QWidget):
@@ -339,7 +452,7 @@ class SpatialGestureOverlay(QWidget):
 
 
 class ImageTagsList(QListView):
-    spatial_gesture_requested = Signal(int, str)
+    spatial_gesture_requested = Signal(int, int, int, str)
 
     def __init__(
         self,
@@ -361,6 +474,8 @@ class ImageTagsList(QListView):
         self.setWordWrap(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._spatial_gesture_row = -1
+        self._spatial_gesture_start = -1
+        self._spatial_gesture_end = -1
         self._spatial_gesture_source = ''
         self._spatial_gesture_overlay = SpatialGestureOverlay(self.viewport())
 
@@ -401,34 +516,45 @@ class ImageTagsList(QListView):
             # Select the last tag.
             self.select_tag(remaining_row_count - 1)
 
-    def _direction_handle_hit(self, position: QPoint):
+    def _direction_phrase_hit(self, position: QPoint):
         if not settings.value(
             'spatial_gestures_enabled',
             DEFAULT_SETTINGS['spatial_gestures_enabled'],
             type=bool,
         ):
-            return QModelIndex()
+            return None
         index = self.indexAt(position)
         if not index.isValid():
-            return QModelIndex()
+            return None
         status_getter = getattr(self, 'caption_status_for_row', None)
         status = status_getter(index.row()) if callable(status_getter) else {}
         if not status.get('directional_attention'):
-            return QModelIndex()
-        rect = self.visualRect(index)
-        if position.x() < rect.right() - 26:
-            return QModelIndex()
-        return index
+            return None
+        phrase_getter = getattr(self.delegate, 'spatial_phrase_at', None)
+        phrase = (
+            phrase_getter(index.row(), position)
+            if callable(phrase_getter) else None
+        )
+        if phrase is None:
+            return None
+        return index, phrase
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
             position = event.position().toPoint()
-            index = self._direction_handle_hit(position)
-            if index.isValid():
-                source = str(index.data(Qt.ItemDataRole.DisplayRole) or '')
+            hit = self._direction_phrase_hit(position)
+            if hit is not None:
+                index, (start, end, source) = hit
                 allowed = spatial_gesture_actions(source)
                 if allowed:
+                    self.setCurrentIndex(index)
+                    self.selectionModel().select(
+                        index,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    )
                     self._spatial_gesture_row = index.row()
+                    self._spatial_gesture_start = start
+                    self._spatial_gesture_end = end
                     self._spatial_gesture_source = source
                     self._spatial_gesture_overlay.begin(position, allowed)
                     event.accept()
@@ -448,12 +574,16 @@ class ImageTagsList(QListView):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self._spatial_gesture_row >= 0:
             row = self._spatial_gesture_row
+            start = self._spatial_gesture_start
+            end = self._spatial_gesture_end
             action = self._spatial_gesture_overlay.action
             self._spatial_gesture_row = -1
+            self._spatial_gesture_start = -1
+            self._spatial_gesture_end = -1
             self._spatial_gesture_source = ''
             self._spatial_gesture_overlay.hide()
             if action:
-                self.spatial_gesture_requested.emit(row, action)
+                self.spatial_gesture_requested.emit(row, start, end, action)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -729,9 +859,7 @@ class ImageTagsEditor(QDockWidget):
             self._show_caption_status_menu
         )
         self.image_tags_list.spatial_gesture_requested.connect(
-            lambda row, action: self._apply_spatial_action_to_rows(
-                [row], action
-            )
+            self._apply_spatial_action_to_row_span
         )
         self.ideogram_tag_list_model = QStringListModel()
         self.ideogram_caption_list = IdeogramCaptionList(
@@ -1086,6 +1214,30 @@ class ImageTagsEditor(QDockWidget):
                 self.image_reference,
                 self.caption_entries(),
             )
+
+    @Slot(int, int, int, str)
+    def _apply_spatial_action_to_row_span(
+        self,
+        row: int,
+        start: int,
+        end: int,
+        action: str,
+    ):
+        """Apply a row gesture only to the highlighted phrase being dragged."""
+        self._reconcile_caption_entries()
+        tags = self.image_tag_list_model.stringList()
+        if not 0 <= row < len(tags):
+            return
+        phrase = tags[row][start:end]
+        updated_phrase = apply_spatial_action(phrase, action)
+        if updated_phrase == phrase:
+            return
+        tags[row] = tags[row][:start] + updated_phrase + tags[row][end:]
+        if row < len(self._caption_entries):
+            self._caption_entries[row]['text'] = tags[row]
+        self._caption_workspace_active = True
+        self.image_tag_list_model.setStringList(tags)
+        self._mark_direction_phrase_reviewed(row, updated_phrase)
 
     def _set_direction_reviewed(self, rows: list[int], reviewed: bool):
         self._reconcile_caption_entries()

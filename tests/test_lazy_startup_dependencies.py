@@ -335,6 +335,13 @@ def test_playback_backend_uses_stable_user_facing_mpv_name():
     )
 
 
+def test_mpv_hwdec_override_is_honored(monkeypatch):
+    from utils.video import playback_backend
+
+    monkeypatch.setenv('TAGGUI_MPV_HWDEC', 'no')
+    assert playback_backend.get_mpv_hwdec_mode() == 'no'
+
+
 def test_mpv_falls_back_to_qt_when_software_opengl_is_forced(monkeypatch):
     from utils.video import playback_backend
 

@@ -6,6 +6,7 @@ This module defines stable backend identifiers and runtime resolution rules.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 
 from utils.settings import DEFAULT_SETTINGS, settings
 from .mpv_runtime import bootstrap_mpv_runtime_search_paths
@@ -50,6 +51,52 @@ VLC_PYTHON_MODULE = None
 VLC_BACKEND_AVAILABLE = False
 VLC_BACKEND_ERROR = ''
 _BACKEND_LOAD_ATTEMPTED: set[str] = set()
+
+
+MPV_HWDEC_CHOICES = ('automatic', 'disabled', 'nvdec-copy', 'd3d11va-copy')
+MPV_HWDEC_DISPLAY_NAMES = {
+    'automatic': 'Automatic (Recommended)',
+    'disabled': 'Off (CPU Decode)',
+    'nvdec-copy': 'NVIDIA NVDEC Copy',
+    'd3d11va-copy': 'Windows D3D11 Copy',
+}
+
+
+@lru_cache(maxsize=1)
+def _has_nvidia_decoder() -> bool:
+    if os.name != 'nt':
+        return False
+    try:
+        import ctypes
+        nvcuvid = ctypes.WinDLL('nvcuvid.dll')
+    except (AttributeError, OSError):
+        return False
+    del nvcuvid
+    return True
+
+
+def get_mpv_hwdec_mode() -> str:
+    """Resolve the user preference to an mpv hardware-decoder mode."""
+    override = str(os.getenv('TAGGUI_MPV_HWDEC', '') or '').strip()
+    if override:
+        return override
+    preference = str(settings.value(
+        'mpv_hardware_decoding',
+        DEFAULT_SETTINGS.get('mpv_hardware_decoding', 'automatic'),
+        type=str,
+    ) or 'automatic').strip().lower()
+    if preference == 'disabled':
+        return 'no'
+    if preference in ('nvdec-copy', 'd3d11va-copy'):
+        return preference
+    if os.name != 'nt' or not _has_nvidia_decoder():
+        return 'auto-copy'
+
+    # auto-copy normally selects d3d11va-copy on Windows. That still creates a
+    # D3D11 device and can crash inside d3d11.dll when a window crosses GPUs.
+    # NVIDIA's recommended copy-back decoder avoids that cross-adapter device
+    # while preserving hardware decode and the libmpv OpenGL render path.
+    return 'nvdec-copy'
 
 
 def load_playback_backend(backend_name: str):

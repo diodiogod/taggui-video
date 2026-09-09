@@ -71,7 +71,7 @@ Quick Sort owns these keys only while its focused session is active. Named overr
 - Apply the last configured Text Transform: `Ctrl` + `Alt` + `T`
 - Open Text Transform from the pane: click the `⇄` title-bar button
 - Open quick spatial corrections: right-click a highlighted spatial row or phrase
-- Open the radial correction disk: left-drag the amber `↔` row handle or a highlighted phrase
+- Open the radial correction disk: left-drag a highlighted spatial phrase in either caption view
 
 To add the same tag to multiple files, select the images first and then add the tag.
 

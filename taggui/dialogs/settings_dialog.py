@@ -28,6 +28,8 @@ from utils.settings import (
     settings,
 )
 from utils.video.playback_backend import (
+    MPV_HWDEC_CHOICES,
+    MPV_HWDEC_DISPLAY_NAMES,
     PLAYBACK_BACKEND_CHOICES,
     PLAYBACK_BACKEND_MPV,
     PLAYBACK_BACKEND_QT_HYBRID,
@@ -2472,6 +2474,32 @@ class SettingsDialog(QDialog):
                               Qt.AlignmentFlag.AlignLeft)
         row += 1
 
+        grid_layout.addWidget(QLabel('MPV hardware decoding'), row, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        self.mpv_hwdec_combo = QComboBox()
+        configured_hwdec = str(settings.value(
+            'mpv_hardware_decoding',
+            DEFAULT_SETTINGS.get('mpv_hardware_decoding', 'automatic'),
+            type=str,
+        ) or 'automatic').strip().lower()
+        for mode in MPV_HWDEC_CHOICES:
+            self.mpv_hwdec_combo.addItem(MPV_HWDEC_DISPLAY_NAMES[mode], mode)
+        configured_hwdec_index = self.mpv_hwdec_combo.findData(configured_hwdec)
+        self.mpv_hwdec_combo.setCurrentIndex(max(0, configured_hwdec_index))
+        self.mpv_hwdec_combo.setToolTip(
+            'Temporary developer control for comparing MPV decoder paths.\n\n'
+            'Automatic: NVDEC copy on NVIDIA Windows systems; normal automatic copy elsewhere.\n'
+            'Off: Decode on the CPU.\n'
+            'NVDEC/D3D11: Force that hardware decoder for comparison.\n\n'
+            'Changes apply immediately. Active MPV playback briefly restarts.'
+        )
+        self.mpv_hwdec_combo.currentIndexChanged.connect(
+            self._on_mpv_hwdec_index_changed
+        )
+        grid_layout.addWidget(self.mpv_hwdec_combo, row, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
         self.mpv_download_btn = QPushButton('Download libmpv-2.dll for Windows ↗')
         self.mpv_download_btn.setToolTip(
             'Opens the official mpv Windows builds page on SourceForge.\n'
@@ -2782,6 +2810,17 @@ class SettingsDialog(QDialog):
         configured = normalize_playback_backend_name(backend_id)
         settings.setValue('video_playback_backend', configured)
         self._on_playback_backend_changed(configured)
+
+    @Slot(int)
+    def _on_mpv_hwdec_index_changed(self, index: int):
+        mode = str(self.mpv_hwdec_combo.itemData(index) or 'automatic')
+        settings.setValue('mpv_hardware_decoding', mode)
+        self.warning_label.setText(
+            f'MPV hardware decoding set to {MPV_HWDEC_DISPLAY_NAMES.get(mode, mode)}. '
+            'The active MPV player has been refreshed.'
+        )
+        self.warning_label.setStyleSheet('color: #0a7f2e;')
+        self.warning_label.show()
 
     @Slot(str)
     def _on_playback_gpu_preference_changed(self, _value: str):
