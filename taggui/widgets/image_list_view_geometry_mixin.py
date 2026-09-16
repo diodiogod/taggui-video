@@ -1713,7 +1713,10 @@ class ImageListViewGeometryMixin:
 
         drag = None
         try:
-            drag = QDrag(self.window())
+            # Qt expects the widget where the gesture originated to own the
+            # drag. It also owns the QMimeData and completes their native OLE
+            # lifetime after exec() returns, so do not force their deletion.
+            drag = QDrag(self)
             drag.setMimeData(mime_data)
             drag.setPixmap(drag_pixmap)
             drag.setHotSpot(drag_pixmap.rect().center())
@@ -1725,7 +1728,6 @@ class ImageListViewGeometryMixin:
             finish_tracking = getattr(self, "_finish_qt_drag_gesture_tracking", None)
             if callable(finish_tracking):
                 finish_tracking()
-            drag_session_service.retire_drag(drag)
             self._active_qt_drag_mime = None
             self._active_qt_drag = None
         try:

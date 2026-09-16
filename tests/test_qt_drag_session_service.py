@@ -1,6 +1,5 @@
 from taggui.widgets.image_list_qt_drag_session_service import QtDragSessionService
-from PySide6.QtCore import QCoreApplication, QObject
-from shiboken6 import isValid
+from PySide6.QtCore import QCoreApplication
 
 
 APP = QCoreApplication.instance() or QCoreApplication([])
@@ -102,14 +101,6 @@ def test_drag_session_preserves_preexisting_timer_state():
     assert source_model._native_qt_drag_active is False
     assert timer.started == [100]
     assert view._qt_drag_active is False
-
-
-def test_completed_drag_is_destroyed_before_the_next_native_loop():
-    drag = QObject()
-
-    QtDragSessionService.retire_drag(drag)
-
-    assert isValid(drag) is False
 
 
 def test_drag_session_suspends_and_restores_video_rendering():
