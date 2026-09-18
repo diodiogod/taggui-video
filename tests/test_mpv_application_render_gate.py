@@ -32,3 +32,35 @@ def test_application_deactivation_hides_and_suspends_mpv_surface():
 
     player.mpv_widget = None
     player.deleteLater()
+
+
+def test_display_change_releases_mpv_before_adapter_migration(monkeypatch):
+    player = VideoPlayerWidget()
+    player.is_playing = True
+    player.playback_speed = 1.0
+    player.video_path = Path('example.mp4')
+    player.mpv_player = object()
+    player.fps = 20.0
+    player.total_frames = 1000
+    calls = []
+    monkeypatch.setattr(
+        player,
+        'set_application_render_active',
+        lambda active: calls.append(('active', active)),
+    )
+    monkeypatch.setattr(
+        player,
+        '_teardown_mpv',
+        lambda drop_player=False: calls.append(('teardown', drop_player)),
+    )
+    monkeypatch.setattr(player, 'play', lambda: calls.append(('play',)))
+    monkeypatch.setattr(player, '_get_mpv_position_ms', lambda: 4321.0)
+
+    player.prepare_for_display_change()
+    player.prepare_for_display_change()
+    player.finish_display_change()
+
+    assert calls == [('active', False), ('teardown', True), ('play',)]
+    assert player.current_frame == 86
+    assert player._mpv_estimated_position_ms == 4321.0
+    player.deleteLater()

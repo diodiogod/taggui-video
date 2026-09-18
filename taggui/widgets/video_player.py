@@ -53,9 +53,10 @@ VIDEO_DISPLAY_FIT_MODES = {
 class MpvGlWidget(QOpenGLWidget):
     """QOpenGLWidget that renders MPV frames via the libmpv render API.
 
-    This avoids the native HWND / D3D11 swap chain entirely — MPV renders into
-    Qt's FBO via OpenGL, so loadfile replace and window resizes are always safe.
-    No more 0xe24c4a02 GPU driver crashes.
+    MPV renders into Qt's OpenGL framebuffer instead of owning a separate
+    playback window. Qt and the Windows compositor can still use D3D11 while
+    moving that top-level window between display adapters, so host movement
+    must suspend this renderer.
     """
 
     # Emitted on the Qt thread after the first frame is painted (used to
@@ -203,6 +204,9 @@ class VideoPlayerWidget(QWidget):
         self._mpv_surface_active_before_app_suspend = False
         self._application_render_suspended = False
         self._application_render_resume_generation = 0
+        self._display_change_pending = False
+        self._display_change_resume_playback = False
+        self._display_change_rebuild_mpv = False
         # Parking widget: mpv_widget is reparented here while not playing.
         # It stays hidden the entire time it is parked, so no native window
         # flash occurs — the GL context is preserved, just detached from the
@@ -649,12 +653,64 @@ class VideoPlayerWidget(QWidget):
         # entering libmpv's synchronous OpenGL render callback.
         QTimer.singleShot(350, _resume_after_display_settles)
 
+    def prepare_for_display_change(self) -> None:
+        """Park MPV rendering while a window crosses display adapters.
+
+        Playback keeps advancing while the GL surface is hidden. The render
+        context is rebuilt only after movement settles, preserving the current
+        playback position instead of visibly restarting the clip.
+        """
+        rebuild_mpv = self.mpv_player is not None
+        self._display_change_rebuild_mpv = bool(
+            self._display_change_rebuild_mpv or rebuild_mpv
+        )
+        self._display_change_resume_playback = bool(
+            getattr(self, '_display_change_resume_playback', False)
+            or (rebuild_mpv and self.is_playing)
+        )
+        if bool(getattr(self, '_display_change_pending', False)):
+            return
+        self._display_change_pending = True
+        if rebuild_mpv:
+            self.set_application_render_active(False)
+
+    def finish_display_change(self) -> None:
+        """Recreate video resources after the destination display settles."""
+        resume_playback = bool(getattr(self, '_display_change_resume_playback', False))
+        rebuild_mpv = bool(getattr(self, '_display_change_rebuild_mpv', False))
+        self._display_change_resume_playback = False
+        self._display_change_rebuild_mpv = False
+        self._display_change_pending = False
+        if not rebuild_mpv:
+            return
+
+        if self.fps > 0:
+            position_ms = float(self._get_mpv_position_ms() or 0.0)
+            resume_frame = max(0, int(round(position_ms * self.fps / 1000.0)))
+            if self.total_frames > 0:
+                resume_frame = min(self.total_frames - 1, resume_frame)
+        else:
+            position_ms = 0.0
+            resume_frame = max(0, int(self.current_frame))
+
+        if self.is_playing:
+            self.is_playing = False
+            self.position_timer.stop()
+        self._teardown_mpv(drop_player=True)
+        self.current_frame = resume_frame
+        self._mpv_estimated_position_ms = position_ms
+        self._application_render_suspended = False
+        self._mpv_surface_active_before_app_suspend = False
+        if resume_playback and self.video_path:
+            self.play()
+
     def _sync_mpv_widget_to_viewport(self):
         """Resize mpv_widget to match the pixmap item's on-screen rect.
 
         When zoom-to-fit, this equals the full viewport. When zoomed/panned,
         this follows the transformed pixmap bounds — same approach as VLC.
-        With vo=libmpv (QOpenGLWidget) resizing is always safe — no D3D11 swap chain.
+        With vo=libmpv, MPV renders into the QOpenGLWidget framebuffer rather
+        than resizing an independent playback window.
         """
         try:
             if not self.mpv_widget:

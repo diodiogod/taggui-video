@@ -25,6 +25,7 @@ function Quote-ProcessArgument {
 function Start-TagGUI {
     $argumentLine = @(
         (Quote-ProcessArgument -Value $targetText),
+        '--skip-git',
         '--startup-ready-file',
         (Quote-ProcessArgument -Value $readyFile)
     ) -join ' '
@@ -37,6 +38,33 @@ function Start-TagGUI {
         -PassThru
 }
 
+function Stop-TagGUIStartup {
+    param([System.Diagnostics.Process]$RootProcess)
+
+    if ($null -eq $RootProcess) {
+        return
+    }
+
+    try {
+        if (-not $RootProcess.HasExited) {
+            # The batch launcher can have Python and setup commands beneath it.
+            # Stop the complete tree so cancellation cannot leave hidden work behind.
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $RootProcess.Id /T /F 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Stop-Process -Id $RootProcess.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        try {
+            Stop-Process -Id $RootProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            # The process may have exited between the readiness check and cancellation.
+        }
+    }
+}
+
 try {
     Add-Type -AssemblyName PresentationFramework
     Add-Type -AssemblyName WindowsBase
@@ -44,7 +72,7 @@ try {
     $window = New-Object System.Windows.Window
     $window.Title = 'Opening TagGUI'
     $window.Width = 360
-    $window.Height = 126
+    $window.Height = 170
     $window.WindowStartupLocation = 'CenterScreen'
     $window.WindowStyle = 'None'
     $window.ResizeMode = 'NoResize'
@@ -85,19 +113,48 @@ try {
     $progress = New-Object System.Windows.Controls.ProgressBar
     $progress.Height = 5
     $progress.IsIndeterminate = $true
+    $progress.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
+
+    $cancelButton = New-Object System.Windows.Controls.Button
+    $cancelButton.Content = 'Cancel'
+    $cancelButton.Width = 76
+    $cancelButton.Height = 25
+    $cancelButton.HorizontalAlignment = 'Right'
+    $cancelButton.IsCancel = $true
+    $cancelButton.ToolTip = 'Cancel this launch and close the loading window'
 
     [void]$panel.Children.Add($title)
     [void]$panel.Children.Add($folder)
     [void]$panel.Children.Add($progress)
+    [void]$panel.Children.Add($cancelButton)
     $border.Child = $panel
     $window.Content = $border
 
     $process = Start-TagGUI
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(150)
-    $state = @{ FailureShownAt = $null }
+    $state = @{
+        FailureShownAt = $null
+        Ready = $false
+    }
+    $cancelButton.Add_Click({
+        $title.Text = 'Cancelling...'
+        $folder.Text = 'Stopping TagGUI startup.'
+        $cancelButton.IsEnabled = $false
+        $window.Close()
+    })
+    $window.Add_Closing({
+        if (Test-Path -LiteralPath $readyFile -PathType Leaf) {
+            $state.Ready = $true
+        }
+        if (-not $state.Ready) {
+            $timer.Stop()
+            Stop-TagGUIStartup -RootProcess $process
+        }
+    })
     $timer.Add_Tick({
         if (Test-Path -LiteralPath $readyFile -PathType Leaf) {
+            $state.Ready = $true
             $timer.Stop()
             $window.Close()
             return

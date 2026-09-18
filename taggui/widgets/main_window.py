@@ -739,6 +739,12 @@ class MainWindow(QMainWindow):
         self._hud_shortcut_last_toggle_at = 0.0
         self._floating_hold_shortcut_last_toggle_at = 0.0
         self._active_nav_mouse_buttons = set()
+        self._display_move_windows = {}
+        self._display_window_screens = {}
+        self._display_change_timer = QTimer(self)
+        self._display_change_timer.setSingleShot(True)
+        self._display_change_timer.setInterval(500)
+        self._display_change_timer.timeout.connect(self._finish_display_change)
         self.app.applicationStateChanged.connect(self._on_application_state_changed)
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
@@ -1574,6 +1580,7 @@ class MainWindow(QMainWindow):
 
     def moveEvent(self, event):
         """Keep HUD anchored when the main window moves."""
+        self._on_video_host_move(self)
         super().moveEvent(event)
         if self._perf_hud_enabled:
             self._reposition_perf_hud()
@@ -1581,6 +1588,10 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         """Apply any deferred workspace preset once window is visible."""
         super().showEvent(event)
+        try:
+            self._display_window_screens[id(self)] = self.screen()
+        except RuntimeError:
+            pass
         menu_manager = getattr(self, 'menu_manager', None)
         if menu_manager is not None:
             menu_manager.position_menu_bar_right_host()
@@ -1589,6 +1600,67 @@ class MainWindow(QMainWindow):
         if self._workspace_apply_pending_id:
             # Let startup restore/layout settle before touching docks.
             self._schedule_workspace_apply(700)
+
+    @staticmethod
+    def _video_viewers_for_host(window):
+        if isinstance(window, MainWindow):
+            return [window.image_viewer]
+        viewer = getattr(window, 'viewer', None)
+        if viewer is not None:
+            return [viewer]
+        getter = getattr(window, 'viewers', None)
+        if callable(getter):
+            try:
+                return list(getter())
+            except RuntimeError:
+                return []
+        return []
+
+    def _on_video_host_move(self, window):
+        """Quiesce video only when its host crosses onto another screen."""
+        if not self.isVisible():
+            return
+        key = id(window)
+        try:
+            handle = window.windowHandle()
+            native_screen = handle.screen() if handle is not None else window.screen()
+            target_screen = QApplication.screenAt(window.frameGeometry().center()) or native_screen
+        except RuntimeError:
+            return
+        previous_screen = self._display_window_screens.get(key, native_screen)
+        self._display_window_screens[key] = target_screen
+        if target_screen is previous_screen:
+            if key in self._display_move_windows:
+                self._display_change_timer.start()
+            return
+
+        pending = self._display_move_windows
+        if key not in pending:
+            viewers = self._video_viewers_for_host(window)
+            pending[key] = (window, viewers)
+            for viewer in viewers:
+                player = getattr(viewer, 'video_player', None)
+                if player is not None:
+                    try:
+                        player.prepare_for_display_change()
+                    except RuntimeError:
+                        continue
+            if viewers:
+                print('[DISPLAY] Window crossed screens; rebuilding its native video surface')
+        self._display_change_timer.start()
+
+    @Slot()
+    def _finish_display_change(self):
+        pending = list(self._display_move_windows.values())
+        self._display_move_windows.clear()
+        for _window, viewers in pending:
+            for viewer in viewers:
+                player = getattr(viewer, 'video_player', None)
+                if player is not None:
+                    try:
+                        player.finish_display_change()
+                    except RuntimeError:
+                        continue
 
     def dragEnterEvent(self, event):
         """Accept external folder/media drops that can load a directory."""

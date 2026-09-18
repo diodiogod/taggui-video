@@ -2098,6 +2098,13 @@ class FloatingViewerWindow(QWidget):
         self._update_overlay_hover_from_global_pos(QCursor.pos())
         super().resizeEvent(event)
 
+    def moveEvent(self, event):
+        parent = self.parentWidget()
+        handler = getattr(parent, '_on_video_host_move', None)
+        if callable(handler):
+            handler(self)
+        super().moveEvent(event)
+
     def enterEvent(self, event):
         self._update_overlay_hover_from_global_pos(QCursor.pos())
         super().enterEvent(event)

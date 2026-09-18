@@ -195,3 +195,6 @@ taggui/skins/user/*.yaml
 tools/taggui_profile_switch.py
 tools/benchmark_profile.ps1
 docs/BRANCH_BENCHMARK_FRAMEWORK.md
+
+# Local Codex mistake evidence
+/.agents/oops/ledger.md
