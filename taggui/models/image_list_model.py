@@ -2036,6 +2036,16 @@ class ImageListModel(QAbstractListModel):
             end_page = min(last_page, target_page + buffer_pages)
         return int(target_page), int(start_page), int(end_page), int(last_page)
 
+    @staticmethod
+    def _order_window_pages(start_page: int, end_page: int, target_page: int,
+                            prefer_forward: bool = False) -> list[int]:
+        """Visit the target, then alternating neighbors at increasing distance."""
+        return sorted(
+            range(start_page, end_page + 1),
+            key=lambda page: (abs(page - target_page),
+                              -page if prefer_forward else page),
+        )
+
     def prepare_target_window(
         self,
         target_global: int,
@@ -2093,6 +2103,7 @@ class ImageListModel(QAbstractListModel):
         self._page_debouncer.stop()
         self._pending_page_range = None
         self.cancel_pending_loads_except({int(target_page)})
+        self._cancel_queued_thumbnails_outside_window(start_page, end_page)
         try:
             self._page_load_priority_page = int(target_page)
             self._page_load_priority_until = time.time() + 20.0
@@ -2117,14 +2128,12 @@ class ImageListModel(QAbstractListModel):
                     self._emit_pages_updated()
 
         if request_async_window:
-            requested_pages = []
-            if not state['loaded_sync']:
-                requested_pages.append(int(target_page))
-            for page_num in range(int(start_page), int(end_page) + 1):
-                if int(page_num) == int(target_page):
-                    continue
-                requested_pages.append(int(page_num))
+            requested_pages = self._order_window_pages(
+                int(start_page), int(end_page), int(target_page), prefer_forward,
+            )
             for page_num in requested_pages:
+                if state['loaded_sync'] and page_num == target_page:
+                    continue
                 self._request_page_load(int(page_num))
 
         if restart_enrichment and hasattr(self, '_start_paginated_enrichment'):
@@ -2675,12 +2684,15 @@ class ImageListModel(QAbstractListModel):
     def _schedule_dimensions_updated(self):
         """Coalesce frequent dimension updates into one masonry refresh signal."""
         now = time.time()
-        # In paginated mode, limit refresh pressure from continuous thumbnail/JIT updates.
-        if self._paginated_mode and (now - self._last_dimensions_emit_at) < 1.0:
-            return
         if self._dimensions_update_timer.isActive():
             return
-        self._dimensions_update_timer.start()
+        delay_ms = 300
+        # Throttle without dropping the last update in a burst. Otherwise a
+        # repaired thumbnail can retain placeholder geometry until another event.
+        if self._paginated_mode:
+            remaining_ms = int((1.0 - (now - self._last_dimensions_emit_at)) * 1000)
+            delay_ms = max(delay_ms, remaining_ms + 1)
+        self._dimensions_update_timer.start(delay_ms)
 
     def _emit_dimensions_updated_debounced(self):
         self._last_dimensions_emit_at = time.time()
@@ -3979,22 +3991,41 @@ class ImageListModel(QAbstractListModel):
 
     def _cancel_page_thumbnails(self, page_num: int):
         """Cancel pending thumbnail loading futures for an evicted page."""
-        start_idx = page_num * self.PAGE_SIZE
-        end_idx = start_idx + self.PAGE_SIZE
-
+        # Future keys are buffered row numbers, not global indices. Rows move
+        # whenever an earlier page arrives or is evicted; identify work by path.
+        page_paths = {image.path for image in self._pages.get(page_num, []) if image}
+        futures = []
         with self._thumbnail_lock:
-            cancelled_count = 0
-            for idx in range(start_idx, end_idx):
-                if idx in self._thumbnail_futures:
-                    entry = self._thumbnail_futures[idx]
-                    future = entry[0] if isinstance(entry, tuple) else entry
-                    if not future.done():
-                        future.cancel()
-                        cancelled_count += 1
-                    del self._thumbnail_futures[idx]
+            for idx, entry in list(self._thumbnail_futures.items()):
+                if not isinstance(entry, tuple) or len(entry) < 2 or entry[1] not in page_paths:
+                    continue
+                futures.append(entry[0])
+                del self._thumbnail_futures[idx]
+        # cancel() invokes completion callbacks synchronously; those callbacks
+        # may acquire _thumbnail_lock themselves.
+        cancelled_count = sum(future.cancel() for future in futures)
+        if cancelled_count > 0:
+            print(f"[PAGE] Cancelled {cancelled_count} pending thumbnails for evicted page {page_num}")
 
-            if cancelled_count > 0:
-                print(f"[PAGE] Cancelled {cancelled_count} pending thumbnails for evicted page {page_num}")
+    def _cancel_queued_thumbnails_outside_window(self, start_page: int, end_page: int):
+        """Let newly visible thumbnails bypass queued work from a previous jump."""
+        with self._page_load_lock:
+            keep_paths = {
+                image.path
+                for page_num, images in self._pages.items()
+                if start_page <= page_num <= end_page
+                for image in images if image
+            }
+        with self._thumbnail_lock:
+            candidates = list(self._thumbnail_futures.items())
+        for row, entry in candidates:
+            if not isinstance(entry, tuple) or len(entry) < 2 or entry[1] in keep_paths:
+                continue
+            # Running decoders finish normally; never wait on them here.
+            if entry[0].cancel():
+                with self._thumbnail_lock:
+                    if self._thumbnail_futures.get(row) is entry:
+                        del self._thumbnail_futures[row]
 
     def ensure_pages_for_range(self, start_idx: int, end_idx: int):
         """Ensure pages covering the given index range are loaded (throttled for smooth scrolling)."""
@@ -4068,7 +4099,7 @@ class ImageListModel(QAbstractListModel):
 
         # 2. Submit new requests
         requested_any = False
-        request_pages = list(range(start_page, end_page + 1))
+        center_page = (start_page + end_page) // 2
         try:
             priority_page = getattr(self, "_page_load_priority_page", None)
             priority_until = float(getattr(self, "_page_load_priority_until", 0.0) or 0.0)
@@ -4077,13 +4108,10 @@ class ImageListModel(QAbstractListModel):
                 and time.time() <= priority_until
                 and start_page <= int(priority_page) <= end_page
             ):
-                request_pages = [int(priority_page)] + [
-                    int(page_num)
-                    for page_num in request_pages
-                    if int(page_num) != int(priority_page)
-                ]
+                center_page = int(priority_page)
         except Exception:
             pass
+        request_pages = self._order_window_pages(start_page, end_page, center_page)
 
         for page_num in request_pages:
              should_load = False
@@ -4197,7 +4225,7 @@ class ImageListModel(QAbstractListModel):
             # Show the destination immediately instead of waiting for 300ms
             # of silence from adjacent page completions.
             self._emit_pages_updated()
-        if not self._bootstrap_complete:
+        elif not self._bootstrap_complete:
             # Bootstrap phase: trigger layout updates so user sees images appear
             # Use layoutChanged here (not pages_updated) because Qt needs to know about new items
             if not hasattr(self, '_page_load_debounce_timer'):
@@ -4216,10 +4244,10 @@ class ImageListModel(QAbstractListModel):
                 self._post_bootstrap_debounce_timer.setSingleShot(True)
                 self._post_bootstrap_debounce_timer.timeout.connect(self._emit_pages_updated)
 
-            # Trigger layout change after 300ms of no new page loads
-            # This batches rapid page loads during scrolling
-            self._post_bootstrap_debounce_timer.stop()
-            self._post_bootstrap_debounce_timer.start(300)
+            # Deliver arrived pages every 300ms during a burst, without
+            # postponing nearby content until all farther pages finish.
+            if not self._post_bootstrap_debounce_timer.isActive():
+                self._post_bootstrap_debounce_timer.start(300)
 
         if initial_page_finished:
             self._start_paginated_enrichment(
@@ -5586,8 +5614,8 @@ class ImageListModel(QAbstractListModel):
             initializer=self._set_low_priority_thread,
         )
 
-    @Slot(int, int, int)
-    def _notify_thumbnail_ready(self, idx: int, width: int = -1, height: int = -1):
+    @Slot(int, int, int, str)
+    def _notify_thumbnail_ready(self, idx: int, width: int = -1, height: int = -1, path: str = ""):
         """Called on main thread when thumbnail QImage is ready (batched to reduce repaints).
         
         Args:
@@ -5600,6 +5628,10 @@ class ImageListModel(QAbstractListModel):
         
         # Use safe accessor for both Normal and Buffered modes
         image = self.get_image_at_row(idx)
+        if path and (image is None or image.path != Path(path)):
+            # The submitted row can now belong to another buffered page. A
+            # stale completion must not persist its dimensions on that image.
+            return
         
         if image and width > 0 and height > 0:
             # Update dimensions if missing
@@ -5650,8 +5682,10 @@ class ImageListModel(QAbstractListModel):
 
         if valid_idx:
             self._pending_thumbnail_updates.add(idx)
-            # Restart timer to batch updates (coalesces rapid thumbnail loads)
-            self._thumbnail_batch_timer.start()
+            # Keep a fixed delivery deadline. Restarting for every completion
+            # can suppress repaint indefinitely while thumbnails keep arriving.
+            if not self._thumbnail_batch_timer.isActive():
+                self._thumbnail_batch_timer.start()
 
     def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
         """Load thumbnail in background thread, then notify UI."""
@@ -5672,7 +5706,8 @@ class ImageListModel(QAbstractListModel):
                 Qt.ConnectionType.QueuedConnection,
                 Q_ARG(int, row),
                 Q_ARG(int, width),
-                Q_ARG(int, height)
+                Q_ARG(int, height),
+                Q_ARG(str, str(path)),
             )
             return qimage, was_cached
         except Exception as e:
@@ -5999,10 +6034,6 @@ class ImageListModel(QAbstractListModel):
                         future = entry
                         submitted_path = None
                         submitted_crop_key = None
-                    if not future.done():
-                        # Still loading - return placeholder
-                        return self._get_placeholder_icon()
-                    # Future done - check result
                     try:
                         # Path check: if pages were evicted/reloaded, this row
                         # may now map to a different image.  Discard stale result.
@@ -6010,12 +6041,14 @@ class ImageListModel(QAbstractListModel):
                             submitted_path is not None
                             and image.path != submitted_path
                         ) or (
-                            submitted_crop_key is not None
+                            isinstance(entry, tuple) and len(entry) > 2
                             and submitted_crop_key != current_crop_key
                         ):
                             del self._thumbnail_futures[row]
                             # Fall through to re-submit below
                         else:
+                            if not future.done():
+                                return self._get_placeholder_icon()
                             qimage, was_cached = future.result()
                             thumbnail = None
                             if qimage and not qimage.isNull():

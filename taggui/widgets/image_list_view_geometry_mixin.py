@@ -845,22 +845,13 @@ class ImageListViewGeometryMixin:
         self._urgent_queue = []
         self._high_queue = []
         self._low_queue = []
-        visited = set()
-
-        # ZONE 1: Urgent (visible items, center-outward)
-        self._urgent_queue.append(mid_visible)
-        visited.add(mid_visible)
-        offset = 1
-        while len(visited) < visible_count:
-            if mid_visible + offset <= max_visible and mid_visible + offset not in visited:
-                self._urgent_queue.append(mid_visible + offset)
-                visited.add(mid_visible + offset)
-            if mid_visible - offset >= min_visible and mid_visible - offset not in visited:
-                self._urgent_queue.append(mid_visible - offset)
-                visited.add(mid_visible - offset)
-            offset += 1
-            if offset > visible_count + 10:
-                break
+        # Masonry's visible indices need not be contiguous: a tall tile can
+        # remain visible beside much later items in the shorter columns.
+        # Prioritize the actual visible set, not an invented interval around it.
+        self._urgent_queue = sorted(
+            set(visible_indices), key=lambda idx: (abs(idx - mid_visible), idx)
+        )
+        visited = set(self._urgent_queue)
 
         # ZONE 2: High (near buffer)
         for i in range(max_visible + 1, min(max_visible + near_buffer_below + 1, total_count)):

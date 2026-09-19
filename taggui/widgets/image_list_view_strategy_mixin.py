@@ -2329,7 +2329,15 @@ class ImageListViewStrategyMixin:
             extended = []
             extended_up = False
             blocked_unenriched_pages = set()
-            for page_num in sorted(new_pages):
+            # Upper extensions must start immediately beside the cached band.
+            # Numeric order tries the farthest upper page first, skips it, and
+            # strands already-loaded pages until another notification arrives.
+            cached_min, cached_max = min(cached_pages), max(cached_pages)
+            extension_order = sorted(
+                new_pages,
+                key=lambda page: (max(cached_min - page, page - cached_max, 0), page),
+            )
+            for page_num in extension_order:
                 page_images = getattr(source_model, '_pages', {}).get(page_num)
                 if page_images and self._page_needs_enrichment(page_images):
                     blocked_unenriched_pages.add(int(page_num))

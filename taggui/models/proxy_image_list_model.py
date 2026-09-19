@@ -44,6 +44,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self._media_type_filter = 'All'
         self._pending_pages_payload: list[int] = []
         self._last_proxy_invalidate_ts = 0.0
+        self._last_page_mapping_signature = None
         self._pages_update_timer = QTimer(self)
         self._pages_update_timer.setSingleShot(True)
         self._pages_update_timer.timeout.connect(self._flush_pages_updated)
@@ -76,8 +77,21 @@ class ProxyImageListModel(QSortFilterProxyModel):
             # Keep proxy/source row mapping in sync to avoid boundary voids.
             # Buffered pages change source rows without Qt insert/remove
             # signals, so paginated mode also requires this deferred remap.
-            self.invalidate()
-            self._last_proxy_invalidate_ts = now
+            signature = None
+            if getattr(source_model, '_paginated_mode', False) and hasattr(source_model, '_pages'):
+                with source_model._page_load_lock:
+                    signature = (
+                        id(source_model),
+                        int(getattr(source_model, '_page_load_generation', 0)),
+                        tuple((page, id(images), len(images))
+                              for page, images in sorted(source_model._pages.items())),
+                    )
+            # Repeated window notifications need a viewport update, but not
+            # another native row remap/selection churn when storage is unchanged.
+            if signature is None or signature != self._last_page_mapping_signature:
+                self.invalidate()
+                self._last_proxy_invalidate_ts = now
+            self._last_page_mapping_signature = signature
         self.pages_updated.emit(list(self._pending_pages_payload))
 
     def get_filtered_aspect_ratios(self) -> list[tuple[int, float]]:
