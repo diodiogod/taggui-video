@@ -109,9 +109,11 @@ class MasonryWindowPlannerService:
                     top_item = min(real_visible, key=lambda x: x["rect"].y())
                     source_idx = top_item["index"]
 
-        if total_items > 0 and scroll_val <= 2:
+        # Qt can temporarily clamp to an edge while changing its range. An
+        # explicit target must survive that clamp, just as it does in loading.
+        if source_idx is None and total_items > 0 and scroll_val <= 2:
             source_idx = 0
-        elif total_items > 0 and scroll_max > 0 and scroll_val >= scroll_max - 2:
+        elif source_idx is None and total_items > 0 and scroll_max > 0 and scroll_val >= scroll_max - 2:
             source_idx = total_items - 1
 
         if source_idx is None and hasattr(self._view, "_current_page"):

@@ -8150,6 +8150,7 @@ class MainWindow(QMainWindow):
         layout_busy = any(
             bool(getattr(view, name, False))
             for name in (
+                '_masonry_calculating',
                 '_masonry_calculation_in_progress',
                 '_masonry_recalc_running',
                 '_layout_update_in_progress',

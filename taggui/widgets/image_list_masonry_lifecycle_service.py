@@ -40,6 +40,7 @@ class MasonryLifecycleService:
             hasattr(self._view, "_last_masonry_signal")
             and self._view._last_masonry_signal not in ["layoutChanged", "user_click"]
             and time_since_last_key < 3000
+            and not self._view._has_pending_explicit_jump_hold()
         ):
             self._view._masonry_recalc_timer.start(1000)
             return
@@ -67,9 +68,12 @@ class MasonryLifecycleService:
             return
 
         source_model = self._source_model()
+        if self._view._masonry_calc_future is None:
+            return
         if self._view._masonry_calc_future and self._view._masonry_calc_future.done():
             try:
                 result = self._view._masonry_calc_future.result()
+                self._view._masonry_calc_future = None
                 self._view._on_masonry_calculation_complete(result)
             except Exception:
                 traceback.print_exc()

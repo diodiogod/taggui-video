@@ -2156,6 +2156,18 @@ class ImageListViewStrategyMixin:
 
         incremental = self._get_masonry_incremental_service()
         loaded_set = set(loaded_pages)
+        if strict_mode and self._has_pending_explicit_jump_hold():
+            # A jump needs a fresh target layout, even if its page number is
+            # cached or its dimensions are not enriched yet. Incremental
+            # scrolling shortcuts must not postpone the destination.
+            self._last_masonry_window_signature = None
+            self._masonry_recalc_timer.start(0)
+            self.viewport().update()
+            return
+        dataset_identity = (id(source_model), int(getattr(source_model, "_page_load_generation", 0)))
+        if getattr(self, "_masonry_cached_dataset_identity", None) != dataset_identity:
+            incremental.invalidate("dataset_changed")
+            self._last_masonry_window_signature = None
         cached_pages = incremental.get_cached_pages()
 
         # If incremental cache is active, check for extensions

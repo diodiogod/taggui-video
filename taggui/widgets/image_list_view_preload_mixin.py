@@ -257,6 +257,20 @@ class ImageListViewPreloadMixin:
             return
 
         self._scrollbar_dragging = True
+        self._masonry_navigation_generation = int(
+            getattr(self, "_masonry_navigation_generation", 0)
+        ) + 1
+        # A previous jump's delayed finalize must not move the thumb during
+        # this gesture. Release will create its own targeted navigation.
+        self._clear_explicit_jump_tracking()
+        host = self._main_window_host()
+        if host is not None and hasattr(host, "_pending_safe_recenter"):
+            host._pending_safe_recenter = None
+        self._strict_jump_target_global = None
+        self._strict_jump_until = 0.0
+        self._resize_anchor_page = None
+        self._resize_anchor_target_global = None
+        self._resize_anchor_until = 0.0
         # Drag-jump must not change selected identity unless user clicks.
         locked = getattr(self, '_selected_global_index', None)
         self._selected_global_lock_value = int(locked) if isinstance(locked, int) and locked >= 0 else None
@@ -288,25 +302,8 @@ class ImageListViewPreloadMixin:
         self._strict_drag_frozen_until = time.time() + 10.0
         # Preserve current fraction when entering strict drag domain.
         ratio = max(0.0, min(1.0, old_pos / old_max))
-        if strict_mode and source_model and hasattr(source_model, '_total_count') and hasattr(source_model, 'PAGE_SIZE'):
-            try:
-                total_items = int(getattr(source_model, '_total_count', 0) or 0)
-                page_size = int(getattr(source_model, 'PAGE_SIZE', 0) or 0)
-                total_pages = max(1, (total_items + page_size - 1) // page_size) if page_size > 0 else 1
-                cur_page = int(getattr(self, '_current_page', 0) or 0)
-                # For tiny datasets (2 pages or fewer), preserve the exact
-                # thumb position. Page-based quantization makes any drag inside
-                # page 0 snap back to the top as soon as the gesture starts.
-                if (
-                    total_items > 0
-                    and page_size > 0
-                    and total_pages > 2
-                    and 0 <= cur_page < total_pages
-                ):
-                    # Item-based fraction for consistency with masonry coordinates.
-                    ratio = max(0.0, min(1.0, (cur_page * page_size) / max(1, total_items)))
-            except Exception:
-                pass
+        # Keep the within-page position for large folders too. Quantizing on
+        # press moves the thumb before the user has started moving it.
         self._strict_drag_live_fraction = ratio
         target_pos = int(round(ratio * baseline_max))
         prev_block = sb.blockSignals(True)
@@ -492,7 +489,7 @@ class ImageListViewPreloadMixin:
                     try:
                         page_size = int(source_model.PAGE_SIZE)
                         total_items_i = int(total_items)
-                        if page_size > 0 and total_items_i > 0 and hasattr(source_model, 'ensure_pages_for_range'):
+                        if strategy != "windowed_strict" and page_size > 0 and total_items_i > 0 and hasattr(source_model, 'ensure_pages_for_range'):
                             target_page = max(0, min(total_pages - 1, int(self._current_page)))
                             try:
                                 buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))

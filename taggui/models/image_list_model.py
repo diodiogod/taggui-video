@@ -2088,6 +2088,11 @@ class ImageListModel(QAbstractListModel):
         })
 
         self.set_page_protection_window(start_page, end_page)
+        # Supersede the old debounced window before it can enqueue work ahead
+        # of this target. Only cancel jobs whose workers have not started.
+        self._page_debouncer.stop()
+        self._pending_page_range = None
+        self.cancel_pending_loads_except({int(target_page)})
         try:
             self._page_load_priority_page = int(target_page)
             self._page_load_priority_until = time.time() + 20.0
@@ -2446,6 +2451,7 @@ class ImageListModel(QAbstractListModel):
         self._page_load_order: list = []  # LRU tracking
         self._loading_pages: set = set()  # Pages currently being loaded
         self._pending_page_results: dict[tuple[int, int], tuple[list[Image], list[str]]] = {}
+        self._page_load_futures = {}
         self._page_load_lock = threading.RLock()
         self._page_load_generation = 0
         self._protected_page_window: tuple[int, int] | None = None
@@ -3055,10 +3061,24 @@ class ImageListModel(QAbstractListModel):
     def _request_page_load(self, page_num: int):
         """Request a page to be loaded in background."""
         with self._page_load_lock:
-            if page_num in self._pages or page_num in self._loading_pages:
-                return  # Already loaded or loading
-            self._loading_pages.add(page_num)
             generation = int(self._page_load_generation)
+            if self._pages.get(page_num) or page_num in self._loading_pages:
+                return  # Already loaded or loading
+            if (generation, int(page_num)) in self._pending_page_results:
+                return  # Worker finished; its UI-thread delivery is pending.
+            if page_num < 0 or page_num * self.PAGE_SIZE >= self._total_count:
+                return
+            if page_num in self._pages:
+                # An empty result is not a ready target window. Allow recovery
+                # after index reconciliation, without retrying on every paint.
+                retry_times = getattr(self, '_empty_page_retry_times', None)
+                if retry_times is None:
+                    retry_times = self._empty_page_retry_times = {}
+                now = time.monotonic()
+                if now < retry_times.get(page_num, 0.0):
+                    return
+                retry_times[page_num] = now + 2.0
+            self._loading_pages.add(page_num)
             load_snapshot = {
                 'db': self._db,
                 'directory_path': self._directory_path,
@@ -3071,19 +3091,30 @@ class ImageListModel(QAbstractListModel):
 
         # Submit background load
         # print(f"[PAGE request] Requesting Page {page_num}")
-        self._page_executor.submit(
-            self._load_page_async,
-            page_num,
-            generation,
-            load_snapshot,
-        )
+        with self._page_load_lock:
+            if generation != self._page_load_generation:
+                return
+            try:
+                load_snapshot['queued_at'] = time.monotonic()
+                load_snapshot['priority'] = page_num == self._page_load_priority_page
+                future = self._page_executor.submit(
+                    self._load_page_async, page_num, generation, load_snapshot,
+                )
+                self._page_load_futures[(generation, int(page_num))] = future
+            except Exception:
+                self._loading_pages.discard(page_num)
+                raise
 
     def _advance_page_load_generation(self) -> int:
         """Invalidate page workers owned by the previous model state."""
         with self._page_load_lock:
+            for future in self._page_load_futures.values():
+                future.cancel()
+            self._page_load_futures.clear()
             self._page_load_generation += 1
             self._loading_pages.clear()
             self._pending_page_results.clear()
+            self._empty_page_retry_times = {}
             return int(self._page_load_generation)
 
     def set_page_protection_window(self, start_page: int, end_page: int):
@@ -3136,15 +3167,19 @@ class ImageListModel(QAbstractListModel):
         self._store_page(page_num, images)
 
     def cancel_pending_loads_except(self, keep_pages: set[int]):
-        """Best-effort load pruning.
-
-        IMPORTANT: Do not mutate `_loading_pages` here.
-        Removing entries races with worker startup and can create infinite
-        re-request loops (page keeps being "triggered" but never stored).
-        """
-        # Intentionally no-op for in-flight pages. ThreadPoolExecutor does not
-        # support safe cancellation once submitted; eviction handles stale pages.
-        return
+        """Cancel obsolete queued jobs without disturbing running workers."""
+        keep_pages = set(keep_pages)
+        if getattr(self, '_initial_page_load_pending', False):
+            keep_pages.add(0)  # Bootstrap completion owns the initial activity signal.
+        with self._page_load_lock:
+            for key, future in list(self._page_load_futures.items()):
+                generation, page_num = key
+                if future.done():
+                    self._page_load_futures.pop(key, None)
+                elif page_num not in keep_pages and future.cancel():
+                    self._page_load_futures.pop(key, None)
+                    if generation == self._page_load_generation:
+                        self._loading_pages.discard(page_num)
 
     def _load_page_async(
         self,
@@ -3153,6 +3188,7 @@ class ImageListModel(QAbstractListModel):
         load_snapshot: dict,
     ):
         """Load a page in background thread."""
+        started_at = time.monotonic()
         try:
             with self._page_load_lock:
                 if (
@@ -3187,6 +3223,10 @@ class ImageListModel(QAbstractListModel):
 
             # Emit signal (will be handled on main thread via signal/slot mechanism)
             self.page_loaded.emit(int(page_num), int(generation))
+            if load_snapshot.get('priority'):
+                queue_ms = (started_at - load_snapshot.get('queued_at', started_at)) * 1000
+                load_ms = (time.monotonic() - started_at) * 1000
+                print(f"[NAV] Page {page_num + 1} ready: queue={queue_ms:.0f}ms load={load_ms:.0f}ms")
             # print(f"[ASYNC_LOAD] Signal emitted for Page {page_num}")
 
         except Exception as e:
@@ -3984,6 +4024,17 @@ class ImageListModel(QAbstractListModel):
         if not self._db:
             return
 
+        priority_page = self._page_load_priority_page
+        if (
+            isinstance(priority_page, int)
+            and time.time() <= self._page_load_priority_until
+            and not self._pages.get(priority_page)
+        ):
+            # Paint and scroll callbacks can request neighbors while a jump is
+            # pending. Let its target arrive before filling the worker queue.
+            self._request_page_load(priority_page)
+            return
+
         start_idx, end_idx = self._pending_page_range
         total_items = int(getattr(self, "_total_count", 0) or 0)
         if total_items <= 0:
@@ -4004,8 +4055,8 @@ class ImageListModel(QAbstractListModel):
             return
 
         # Keep actively requested pages protected from LRU eviction churn.
-        protect_start = max(0, start_page - 1)
-        protect_end = min(last_page, end_page + 1)
+        protect_start = start_page
+        protect_end = end_page
         self.set_page_protection_window(protect_start, protect_end)
         
         # print(f"[PAGINATION] Processing range {start_idx}-{end_idx} (Pages {start_page}-{end_page})")
@@ -4038,7 +4089,7 @@ class ImageListModel(QAbstractListModel):
              should_load = False
              
              with self._page_load_lock:
-                 if page_num not in self._pages:
+                 if not self._pages.get(page_num):
                      if page_num not in self._loading_pages:
                          should_load = True
              
@@ -4118,12 +4169,15 @@ class ImageListModel(QAbstractListModel):
             for warm_page_num in warm_pages:
                 self._request_page_load(int(warm_page_num))
 
-        try:
-            if int(page_num) == int(getattr(self, "_page_load_priority_page", -1) or -1):
-                self._page_load_priority_page = None
-                self._page_load_priority_until = 0.0
-        except Exception:
-            pass
+        priority_page_finished = (
+            int(page_num) == getattr(self, "_page_load_priority_page", None)
+            and bool(self._pages.get(int(page_num)))
+        )
+        if priority_page_finished:
+            self._page_load_priority_page = None
+            self._page_load_priority_until = 0.0
+            if self._pending_page_range:
+                self._page_debouncer.start()
 
         self._log_flow("PAGE", f"Loaded page {page_num}; in-memory pages={len(self._pages)}",
                        throttle_key="page_loaded", every_s=0.2)
@@ -4139,6 +4193,10 @@ class ImageListModel(QAbstractListModel):
 
         # CRITICAL: Only trigger masonry recalc during initial bootstrap
         # After that, pages load in background without triggering UI updates
+        if priority_page_finished:
+            # Show the destination immediately instead of waiting for 300ms
+            # of silence from adjacent page completions.
+            self._emit_pages_updated()
         if not self._bootstrap_complete:
             # Bootstrap phase: trigger layout updates so user sees images appear
             # Use layoutChanged here (not pages_updated) because Qt needs to know about new items

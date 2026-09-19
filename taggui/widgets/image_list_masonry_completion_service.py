@@ -38,6 +38,8 @@ class MasonryCompletionService:
 
             # result is the dict returned by worker
             result_dict = result
+            if v._get_masonry_submission_service().discard_stale_result(result_dict):
+                return
         
             # 1. ANCHORING: Capture current view position before updating data
             anchor_index = -1
@@ -80,6 +82,7 @@ class MasonryCompletionService:
                         reflow_guide_snapshot = None
 
             v._masonry_items = result_dict.get('items', [])
+            v._masonry_applied_request_identity = result_dict.get("request_identity")
             v._masonry_index_map = None
             total_height_chunk = result_dict.get('total_height', 0)
 
@@ -500,6 +503,9 @@ class MasonryCompletionService:
                     v._get_masonry_incremental_service().cache_from_full_result(
                         v._masonry_items, page_size, column_width, spacing, num_columns, avg_height,
                     )
+                    v._masonry_cached_dataset_identity = (
+                        id(source_model), int(getattr(source_model, "_page_load_generation", 0))
+                    )
                 except Exception as e:
                     print(f"[MASONRY-INCR] Cache store failed: {e}")
 
@@ -507,6 +513,8 @@ class MasonryCompletionService:
             from PySide6.QtCore import QTimer
             def apply_and_signal():
                 try:
+                    if v._get_masonry_submission_service().discard_stale_result(result_dict):
+                        return
                     # If a recent user click is protecting the selection, block
                     # selection-model signals during the apply phase.  This
                     # prevents updateGeometries / Qt layout churn from firing

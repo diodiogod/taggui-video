@@ -122,9 +122,9 @@ class ImageListViewCalculationMixin:
                     )
                 if drag_jump_lock_live:
                     self._release_page_lock_page = int(ctx.current_page)
-                    self._release_page_lock_until = max(
-                        float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
-                        time.time() + 8.0,
+                    self._release_page_lock_until = min(
+                        float(self._selected_global_lock_until),
+                        max(float(getattr(self, "_release_page_lock_until", 0.0) or 0.0), time.time() + 8.0),
                     )
                 resize_anchor_live = (
                     getattr(self, '_resize_anchor_page', None) is not None
@@ -189,20 +189,8 @@ class ImageListViewCalculationMixin:
                 if target_ready:
                     pass
                 elif not snapped_to_loaded_page:
-                    if explicit_jump_live:
-                        hold_until = time.time() + 15.0
-                        self._strict_jump_until = max(
-                            float(getattr(self, "_strict_jump_until", 0.0) or 0.0),
-                            hold_until,
-                        )
-                        self._restore_anchor_until = max(
-                            float(getattr(self, "_restore_anchor_until", 0.0) or 0.0),
-                            hold_until,
-                        )
-                        self._release_page_lock_until = max(
-                            float(getattr(self, "_release_page_lock_until", 0.0) or 0.0),
-                            hold_until,
-                        )
+                    # Navigation owns these deadlines. A missing page must not
+                    # keep renewing its own locks indefinitely on every retry.
                     if wait_count > 40:
                         # Keep waiting while resize anchor is active; avoid snapping
                         # to a different loaded page and losing viewport context.
@@ -455,7 +443,11 @@ class ImageListViewCalculationMixin:
         self._masonry_recalc_pending = False
 
         current_time = time.time()
-        if hasattr(self, "_last_masonry_done_time") and self._last_masonry_done_time > 0:
+        if (
+            hasattr(self, "_last_masonry_done_time")
+            and self._last_masonry_done_time > 0
+            and not self._has_pending_explicit_jump_hold()
+        ):
             time_since_done = (current_time - self._last_masonry_done_time) * 1000
             if time_since_done < 500:
                 remaining = int(500 - time_since_done)
@@ -501,6 +493,7 @@ class ImageListViewCalculationMixin:
 
         if ctx.viewport_width <= 0:
             self._masonry_calculating = False
+            self._clear_enrichment_pause(source_model)
             return
 
         try:
@@ -539,6 +532,7 @@ class ImageListViewCalculationMixin:
 
             traceback.print_exc()
             self._masonry_calculating = False
+            self._clear_enrichment_pause(source_model)
             return
 
         # Capture mode generation so completion can ignore stale results

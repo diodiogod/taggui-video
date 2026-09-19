@@ -16,6 +16,43 @@ class MasonrySubmissionService:
     def __init__(self, view):
         self._view = view
 
+    def current_request_identity(self):
+        """UI-thread snapshot of the dataset, navigation, and geometry."""
+        view = self._view
+        model = view.model()
+        source = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        return (
+            id(source),
+            int(getattr(source, "_page_load_generation", 0)),
+            int(getattr(view, "_masonry_navigation_generation", 0)),
+            int(getattr(view, "_masonry_mode_generation", 0)),
+            int(view.viewport().width()),
+            int(view.current_thumbnail_size),
+        )
+
+    @staticmethod
+    def _calculate_identified(identity, *args):
+        result = calculate_masonry_layout(*args)
+        if result is not None:
+            result = dict(result)
+            result["request_identity"] = identity
+        return result
+
+    def discard_stale_result(self, result) -> bool:
+        identity = result.get("request_identity")
+        if identity is None or identity == self.current_request_identity():
+            return False
+        view = self._view
+        model = view.model()
+        source = model.sourceModel() if model and hasattr(model, "sourceModel") else model
+        if source is not None and hasattr(source, "_enrichment_paused"):
+            source._enrichment_paused.clear()
+        view._last_masonry_window_signature = None
+        view._last_masonry_done_time = 0.0
+        if view.use_masonry:
+            view._masonry_recalc_timer.start(0)
+        return True
+
     def prepare_executor(self):
         """Optionally recreate executor (disabled by default for stability)."""
         # Recreating thread pools while queued callbacks/events are active has
@@ -57,7 +94,8 @@ class MasonrySubmissionService:
                 return False
 
             self._view._masonry_calc_future = self._view._masonry_executor.submit(
-                calculate_masonry_layout,
+                self._calculate_identified,
+                self.current_request_identity(),
                 items_data_copy,
                 column_width,
                 spacing,

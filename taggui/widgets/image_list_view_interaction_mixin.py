@@ -378,6 +378,9 @@ class ImageListViewInteractionMixin:
             return
 
         target_item = self._get_masonry_item_for_global_index(int(target_global))
+        identity = self._get_masonry_submission_service().current_request_identity()
+        if getattr(self, "_masonry_applied_request_identity", None) != identity:
+            target_item = None
         if target_item is None:
             attempts = int(getattr(self, "_one_shot_jump_attempts", 0) or 0) + 1
             self._one_shot_jump_attempts = attempts
@@ -385,6 +388,9 @@ class ImageListViewInteractionMixin:
                 if hasattr(source_model, "_request_page_load"):
                     page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
                     source_model._request_page_load(max(0, int(target_global) // max(1, page_size)))
+                    if source_model._pages.get(int(target_global) // max(1, page_size)) and not self._masonry_calculating:
+                        self._last_masonry_window_signature = None
+                        self._masonry_recalc_timer.start(0)
             except Exception:
                 pass
             if attempts <= 300:
@@ -507,6 +513,10 @@ class ImageListViewInteractionMixin:
                 pass
 
         self.viewport().update()
+        started_at = getattr(self, "_one_shot_jump_started_monotonic", None)
+        if started_at is not None:
+            elapsed_ms = (_t.monotonic() - started_at) * 1000
+            print(f"[NAV] Page {target_page + 1} positioned: {elapsed_ms:.0f}ms")
         self._cancel_one_shot_targeted_jump()
 
     def _start_one_shot_targeted_jump(
@@ -554,24 +564,17 @@ class ImageListViewInteractionMixin:
             page_tail = page_start + len(loaded_page) - 1
             target_global = min(int(target_global), int(page_tail))
         prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
-        publish_target_page_now = str(reason or "") in {"index_input", "page_drag"}
         loaded_pages = sorted(getattr(source_model, "_pages", {}).keys()) if hasattr(source_model, "_pages") else []
         nearest_loaded_gap = 0
         if loaded_pages:
             nearest_loaded_gap = min(abs(int(page) - int(target_page)) for page in loaded_pages)
-        target_page_loaded = int(target_page) in set(loaded_pages)
-        loading_pages = set(getattr(source_model, "_loading_pages", set()) or set())
-        target_page_loading = int(target_page) in loading_pages
+        target_page_loaded = bool(loaded_page)
         deep_unloaded_jump = bool(
             (not target_page_loaded)
             and loaded_pages
             and nearest_loaded_gap > 2
         )
-        sync_target_page = bool(
-            not deep_unloaded_jump
-            and not target_page_loading
-            and str(reason or "") != "startup_restore"
-        )
+        self._one_shot_jump_started_monotonic = _t.monotonic()
         self._mark_selection_log_source(str(reason), hold_s=20.0)
         self._selected_global_index = int(target_global)
         self._selected_global_lock_value = int(target_global)
@@ -594,13 +597,13 @@ class ImageListViewInteractionMixin:
             try:
                 prepared_state = source_model.prepare_target_window(
                     int(target_global),
-                    sync_target_page=sync_target_page,
-                    include_buffer=not deep_unloaded_jump,
+                    sync_target_page=False,
+                    include_buffer=target_page_loaded,
                     prefer_forward=prefer_forward,
-                    emit_update=(publish_target_page_now and sync_target_page),
+                    emit_update=False,
                     request_async_window=True,
-                    restart_enrichment=not deep_unloaded_jump,
-                    prune_to_window=deep_unloaded_jump,
+                    restart_enrichment=target_page_loaded,
+                    prune_to_window=False,
                 )
             except Exception:
                 prepared_state = None
@@ -616,8 +619,9 @@ class ImageListViewInteractionMixin:
                 loaded_row = int(source_model.get_loaded_row_for_global_index(int(target_global)))
             except Exception:
                 loaded_row = -1
-        if loaded_row < 0 and not deep_unloaded_jump:
-            return False
+        # A nearby page may already be loading asynchronously (including the
+        # startup page). It still needs the same layout/finalize lifecycle as
+        # a deep jump; returning here strands the anchors without a callback.
 
         try:
             src_idx = source_model.index(loaded_row, 0)
@@ -678,7 +682,11 @@ class ImageListViewInteractionMixin:
         self._one_shot_jump_token = token
         self._one_shot_jump_attempts = 0
         self._last_masonry_window_signature = None
-        self._calculate_masonry_layout()
+        # Return from the input handler before collecting layout data or
+        # touching Qt geometry. Page reads themselves are always asynchronous.
+        self._masonry_recalc_timer.start(0)
+        dispatch_ms = (_t.monotonic() - self._one_shot_jump_started_monotonic) * 1000
+        print(f"[NAV] Page {target_page + 1} requested ({reason}): dispatch={dispatch_ms:.0f}ms")
         QTimer.singleShot(80, lambda token=token: self._run_one_shot_targeted_jump_finalize(token))
         return True
 
@@ -2861,6 +2869,13 @@ class ImageListViewInteractionMixin:
             # page/proxy/layout convergence. Callers must wait for a model-owned
             # loaded index or accept the stable initial selection.
             return False
+        self._masonry_navigation_generation = int(
+            getattr(self, "_masonry_navigation_generation", 0)
+        ) + 1
+        if jump_kind in {"page_drag", "index_input", "page_input", "global_jump"}:
+            host = self._main_window_host()
+            if host is not None and hasattr(host, "_pending_safe_recenter"):
+                host._pending_safe_recenter = None
         strict_paginated_masonry = bool(
             self.use_masonry
             and hasattr(source_model, "_paginated_mode")
@@ -2875,6 +2890,8 @@ class ImageListViewInteractionMixin:
             "startup_restore",
             "page_drag",
             "index_input",
+            "page_input",
+            "global_jump",
         }:
             return self._start_one_shot_targeted_jump(
                 int(target_global),
@@ -2942,7 +2959,7 @@ class ImageListViewInteractionMixin:
                     # The initial page may already be loading in the page
                     # executor. Never duplicate that work on the GUI thread
                     # while applying the asynchronous startup rank lookup.
-                    sync_target_page=not async_restore,
+                    sync_target_page=not strict_paginated_masonry and not async_restore,
                     include_buffer=True,
                     prefer_forward=prefer_forward_window,
                     emit_update=True,
