@@ -5361,7 +5361,7 @@ class ImageListModel(QAbstractListModel):
     def _save_thumbnail_worker(
         self,
         path: Path,
-        mtime: float,
+        mtime: float | None,
         width: int,
         qimage,
         crop=None,
@@ -5379,6 +5379,9 @@ class ImageListModel(QAbstractListModel):
         time.sleep(0.05)  # 50ms delay between saves
 
         try:
+            # Resolve filesystem metadata here, never in paint/preload data().
+            if mtime is None:
+                mtime = path.stat().st_mtime
             from utils.thumbnail_cache import get_thumbnail_cache
             with _thumbnail_save_lock:
                 get_thumbnail_cache().save_thumbnail_qimage(
@@ -5912,7 +5915,7 @@ class ImageListModel(QAbstractListModel):
                             with self._pending_cache_saves_lock:
                                 self._pending_cache_saves.append((
                                     image.path,
-                                    image.path.stat().st_mtime,
+                                    None,
                                     self.thumbnail_generation_width,
                                     save_qimage,
                                     image.crop,
@@ -5921,7 +5924,7 @@ class ImageListModel(QAbstractListModel):
                             self._save_executor.submit(
                                 self._save_thumbnail_worker,
                                 image.path,
-                                image.path.stat().st_mtime,
+                                None,
                                 self.thumbnail_generation_width,
                                 save_qimage,
                                 image.crop,
@@ -5951,7 +5954,7 @@ class ImageListModel(QAbstractListModel):
 
                         # Save to disk cache in background thread if not from cache
                         if not was_cached:
-                            mtime = image.path.stat().st_mtime
+                            mtime = None
                             # Defer during scroll to avoid I/O blocking
                             if self._is_scrolling:
                                 with self._pending_cache_saves_lock:
@@ -6024,7 +6027,7 @@ class ImageListModel(QAbstractListModel):
 
                                 # Save to cache if needed
                                 if not was_cached:
-                                    mtime = image.path.stat().st_mtime
+                                    mtime = None
                                     # Defer during scroll to avoid I/O blocking
                                     if self._is_scrolling:
                                         with self._pending_cache_saves_lock:

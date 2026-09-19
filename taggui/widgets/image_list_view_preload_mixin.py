@@ -673,11 +673,10 @@ class ImageListViewPreloadMixin:
             # Rebuild if scrolled more than 2 screen heights
             needs_rebuild = scroll_distance > (viewport_height * 2)
 
-        # ASYNC QUEUE BUILDING: Don't block main thread with expensive calculation
-        # Defer queue building to next event loop iteration using QTimer
-        if needs_rebuild and not hasattr(self, '_queue_building'):
+        # Defer queue construction to the next event-loop iteration. This still
+        # runs on the UI thread; thumbnail conversion below needs its own budget.
+        if needs_rebuild and not getattr(self, '_queue_building', False):
             self._queue_building = True
-            # Build queue asynchronously (0ms delay = next event loop)
             QTimer.singleShot(0, self._build_queues_async)
             # Continue with old queues (if any) while new ones build
             # This prevents UI freeze - better to show placeholders than freeze
@@ -702,10 +701,12 @@ class ImageListViewPreloadMixin:
             low_batch = 4
 
         # Process queues in priority order
+        deadline = time.perf_counter() + 0.008
+
         def process_queue(queue, batch_size):
             """Load batch_size items from queue, skip already loaded."""
             loaded = 0
-            while queue and loaded < batch_size:
+            while queue and loaded < batch_size and time.perf_counter() < deadline:
                 idx = queue.pop(0)
                 if idx in self._pagination_loaded_items:
                     continue  # Already loaded, skip

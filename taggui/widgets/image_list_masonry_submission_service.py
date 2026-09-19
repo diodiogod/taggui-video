@@ -3,6 +3,7 @@ import traceback
 import os
 from concurrent.futures import ThreadPoolExecutor
 from utils.diagnostic_logging import diagnostic_print
+from widgets.masonry_boundary_layout import calculate_boundary_layout
 
 try:
     from widgets.masonry_worker import calculate_masonry_layout
@@ -31,8 +32,9 @@ class MasonrySubmissionService:
         )
 
     @staticmethod
-    def _calculate_identified(identity, *args):
-        result = calculate_masonry_layout(*args)
+    def _calculate_identified(identity, boundary, *args):
+        result = (calculate_boundary_layout(*args[:4], boundary)
+                  if boundary is not None else calculate_masonry_layout(*args))
         if result is not None:
             result = dict(result)
             result["request_identity"] = identity
@@ -96,6 +98,7 @@ class MasonrySubmissionService:
             self._view._masonry_calc_future = self._view._masonry_executor.submit(
                 self._calculate_identified,
                 self.current_request_identity(),
+                self._view._get_jump_layout_boundary(),
                 items_data_copy,
                 column_width,
                 spacing,

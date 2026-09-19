@@ -9947,6 +9947,8 @@ class MainWindow(QMainWindow):
     def _should_suppress_transient_drag_selection(self, proxy_image_index: QModelIndex) -> bool:
         """Ignore selection churn caused by buffered page remaps during/after drag jumps."""
         view = self.image_list.list_view
+        if getattr(view, '_committing_jump_selection', False):
+            return True
         source_model = self.image_list_model
         paginated = bool(
             hasattr(source_model, '_paginated_mode')

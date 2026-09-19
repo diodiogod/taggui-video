@@ -83,6 +83,9 @@ class MasonryCompletionService:
                         reflow_guide_snapshot = None
 
             v._masonry_items = result_dict.get('items', [])
+            if 'boundary_origin' in result_dict and v._get_jump_layout_boundary() is not None:
+                start, _, average = v._jump_layout_boundary
+                v._jump_layout_boundary = (start, result_dict['boundary_origin'], average)
             v._masonry_applied_request_identity = result_dict.get("request_identity")
             v._masonry_index_map = None
             total_height_chunk = result_dict.get('total_height', 0)

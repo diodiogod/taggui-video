@@ -297,6 +297,8 @@ class SecondaryBrowser(QObject):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_selection_changed(self, current: QModelIndex, previous: QModelIndex):
+        if getattr(self.dock.list_view, '_committing_jump_selection', False):
+            return
         if not current.isValid():
             return
         self._update_index_label(current)

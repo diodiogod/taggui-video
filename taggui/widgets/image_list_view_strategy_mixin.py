@@ -4,6 +4,21 @@ from widgets.image_list_masonry_incremental_service import MasonryIncrementalSer
 from utils.diagnostic_logging import append_text_log, diagnostic_print, should_emit_trace_log
 
 class ImageListViewStrategyMixin:
+    def _get_jump_layout_boundary(self):
+        model = self.model()
+        source = model.sourceModel() if model and hasattr(model, 'sourceModel') else model
+        if not self.use_masonry or not getattr(source, '_paginated_mode', False):
+            return None
+        boundary = getattr(self, '_jump_layout_boundary', None)
+        if boundary is None:
+            return None
+        identity = (id(source), int(getattr(source, '_page_load_generation', 0)),
+                    self.viewport().width(), self.current_thumbnail_size)
+        if identity != getattr(self, '_jump_layout_boundary_identity', None):
+            self._jump_layout_boundary = None
+            return None
+        return boundary
+
     def _get_live_restore_target_page(self, *, last_page: int | None = None) -> int | None:
         """Return the active restore-owned page while its hold window is still live."""
         restore_page = getattr(self, "_restore_target_page", None)
@@ -410,6 +425,10 @@ class ImageListViewStrategyMixin:
 
     def _try_incremental_reflow_changed_pages(self, source_model, changed_pages, *, reason: str = "dimensions_updated") -> bool:
         """Locally ripple masonry from enriched cached pages forward."""
+        if self._get_jump_layout_boundary() is not None:
+            self._last_masonry_window_signature = None
+            self._recalculate_masonry_if_needed(reason)
+            return True
         if source_model is None:
             return False
         if not (hasattr(source_model, '_paginated_mode') and source_model._paginated_mode):
@@ -1441,6 +1460,12 @@ class ImageListViewStrategyMixin:
         domain_max = max(0, int(domain_max))
 
         target_global = max(0, min(total_items - 1, target_global))
+        boundary = self._get_jump_layout_boundary()
+        if boundary is not None and target_global == int(boundary[0]):
+            # A page landing has a real, fixed coordinate. The global ratio
+            # is only an estimate and must never overwrite that coordinate
+            # when geometry/range/enrichment callbacks restore the target.
+            return max(0, min(int(boundary[1]), domain_max))
         if total_items <= 1 or domain_max <= 0:
             return 0
 

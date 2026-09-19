@@ -405,7 +405,7 @@ class ImageListViewInteractionMixin:
             viewport_h = max(1, int(self.viewport().height()))
             item_top = int(target_item.get("y", 0))
             item_center_y = item_top + int(target_item.get("height", 0)) // 2
-            if reason == "page_input":
+            if reason in {"page_input", "page_drag"}:
                 page_size = int(getattr(source_model, "PAGE_SIZE", 1000) or 1000)
                 target_page = max(0, int(target_global) // max(1, page_size))
                 page_start = int(target_page) * max(1, page_size)
@@ -418,8 +418,7 @@ class ImageListViewInteractionMixin:
                             page_top = min(page_top, int(it.get("y", 0)))
                 except Exception:
                     page_top = item_top
-                top_margin = max(12, min(48, viewport_h // 12))
-                target_scroll = max(0, min(page_top - top_margin, int(sb.maximum())))
+                target_scroll = max(0, min(page_top, int(sb.maximum())))
             else:
                 target_scroll = max(
                     0,
@@ -458,9 +457,14 @@ class ImageListViewInteractionMixin:
                         else src_idx
                     )
                     if proxy_idx.isValid():
-                        self.set_current_index_preserving_virtual_selection(
-                            proxy_idx
-                        )
+                        # The explicit commit below owns viewer/editor loading.
+                        # Keep selection signals for the list's bookkeeping,
+                        # but do not load the same media in both paths.
+                        self._committing_jump_selection = True
+                        try:
+                            self.set_current_index_preserving_virtual_selection(proxy_idx)
+                        finally:
+                            self._committing_jump_selection = False
                         selection_owner = getattr(self, "_secondary_browser_owner", None)
                         if selection_owner is not None and hasattr(selection_owner, "commit_thumbnail_click_selection"):
                             selection_owner.commit_thumbnail_click_selection(proxy_idx)
@@ -576,6 +580,20 @@ class ImageListViewInteractionMixin:
             and nearest_loaded_gap > 2
         )
         self._one_shot_jump_started_monotonic = _t.monotonic()
+        metrics = self._get_masonry_column_metrics()
+        average = self._get_strict_virtual_avg_height()
+        boundary_start = target_page * page_size
+        import math
+        self._jump_layout_boundary = (
+            boundary_start,
+            int(math.ceil(boundary_start / max(1, int(metrics['num_columns']))) * average),
+            average,
+        )
+        self._jump_layout_boundary_identity = (
+            id(source_model), int(getattr(source_model, '_page_load_generation', 0)),
+            self.viewport().width(), self.current_thumbnail_size,
+        )
+        self._get_masonry_incremental_service().invalidate('jump_boundary')
         self._mark_selection_log_source(str(reason), hold_s=20.0)
         self._selected_global_index = int(target_global)
         self._selected_global_lock_value = int(target_global)
@@ -635,7 +653,9 @@ class ImageListViewInteractionMixin:
         except Exception:
             proxy_idx = QModelIndex()
 
-        if proxy_idx.isValid():
+        # Commit selection once, after the target geometry is ready. Selecting
+        # here synchronously loads the viewer inside the jump input handler.
+        if reason not in {"startup_restore", "page_drag", "index_input"} and proxy_idx.isValid():
             self.set_current_index_preserving_virtual_selection(proxy_idx)
 
         mw = self._main_window_host()

@@ -156,25 +156,16 @@ class MasonryIncrementalService:
         else:
             new_prefix_h = 0
 
-        # Start column heights at the end of the new prefix
-        column_heights = [new_prefix_h] * num_cols
-
-        items = self._layout_items(items_data, column_heights, col_w, spacing, num_cols)
-        end_heights = list(column_heights)
-
-        # Align the new page to the fixed downstream band.
+        # Build backward from each downstream column's actual top. Forward
+        # packing followed by translation leaves a different column frontier.
         next_cache = self._page_cache[page_num + 1]
         next_start_y = min(item['y'] for item in next_cache['items']) if next_cache['items'] else 0
-        my_max_y = max(end_heights) if end_heights else 0
-
-        # If there's a gap or overlap between this page and the next, move only
-        # the new page and prefix height. Never shift the already-visible band.
-        delta = next_start_y - my_max_y
-        if abs(delta) > 2:
-            for item in items:
-                item['y'] += delta
-            end_heights = [h + delta for h in end_heights]
-            new_prefix_h += delta
+        tops = [min((it['y'] for it in next_cache['items']
+                     if it['x'] // (col_w + spacing) == col), default=next_start_y)
+                for col in range(num_cols)]
+        items = self._layout_items_upward(list(reversed(items_data)), tops, col_w, spacing, num_cols)
+        end_heights = self._compute_end_heights(items, col_w, spacing, num_cols)
+        new_prefix_h = max(0, min((it['y'] for it in items), default=0))
 
         self._page_cache[page_num] = {
             'items': items,
