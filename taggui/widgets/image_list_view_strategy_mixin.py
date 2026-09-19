@@ -14,7 +14,16 @@ class ImageListViewStrategyMixin:
             return None
         identity = (id(source), int(getattr(source, '_page_load_generation', 0)),
                     self.viewport().width(), self.current_thumbnail_size)
-        if identity != getattr(self, '_jump_layout_boundary_identity', None):
+        previous_identity = getattr(self, '_jump_layout_boundary_identity', None)
+        if identity != previous_identity:
+            pending_target = getattr(self, '_one_shot_jump_target_global', None)
+            if (previous_identity is not None and identity[:2] == previous_identity[:2]
+                    and isinstance(pending_target, int) and pending_target >= 0):
+                # Scrollbars/docks can resize the viewport while a jump is
+                # loading. Recalculate with the new columns, but retain the
+                # requested page's straight boundary until it has landed.
+                self._jump_layout_boundary_identity = identity
+                return boundary
             self._jump_layout_boundary = None
             return None
         return boundary
@@ -418,7 +427,7 @@ class ImageListViewStrategyMixin:
             for offset, image in enumerate(page_images):
                 if image is None:
                     continue
-                items_data.append((start_idx + int(offset), image.aspect_ratio))
+                items_data.append((start_idx + int(offset), image.thumbnail_aspect_ratio))
             return items_data
         except Exception:
             return []
@@ -1905,6 +1914,12 @@ class ImageListViewStrategyMixin:
             self._defer_masonry_dimension_refresh(source_model, pages=target_pages, enrichment=True)
             return
 
+        if target_pages:
+            # Scoped repair already queues dimensions/video metadata from its
+            # worker. Drain any pending delivery before reading page geometry;
+            # no DB or filesystem reread is needed for these repairs.
+            source_model._apply_pending_paginated_dimension_updates()
+
         if target_pages and self._try_incremental_reflow_changed_pages(
             source_model,
             target_pages,
@@ -1913,6 +1928,17 @@ class ImageListViewStrategyMixin:
             source_model._start_paginated_enrichment(
                 window_pages=range(ws, we + 1),
                 scope='preload',
+            )
+            return
+
+        if target_pages:
+            # A cold/invalid incremental cache used to fall through to a
+            # synchronous page reload and full UI-thread layout below. Use the
+            # normal async calculation, including its viewport anchoring.
+            self._last_masonry_window_signature = None
+            self._recalculate_masonry_if_needed("enrichment_complete")
+            source_model._start_paginated_enrichment(
+                window_pages=range(ws, we + 1), scope='preload',
             )
             return
 
@@ -2035,7 +2061,7 @@ class ImageListViewStrategyMixin:
                 start_idx = p * page_size
                 for i, img in enumerate(page):
                     if img:
-                        items_data.append((start_idx + i, img.aspect_ratio))
+                        items_data.append((start_idx + i, img.thumbnail_aspect_ratio))
 
             if not items_data:
                 return
@@ -2464,7 +2490,7 @@ class ImageListViewStrategyMixin:
             if not image:
                 continue
             idx = start_idx + i
-            ar = image.aspect_ratio
+            ar = image.thumbnail_aspect_ratio
             items_data.append((idx, ar))
 
         if not items_data:

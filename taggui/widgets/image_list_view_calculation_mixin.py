@@ -42,7 +42,14 @@ class ImageListViewCalculationMixin:
     def _wait_and_retry_masonry(self, source_model, *, delay_ms: int):
         self._masonry_calculating = False
         self._clear_enrichment_pause(source_model)
-        QTimer.singleShot(delay_ms, self._calculate_masonry_layout)
+        self._schedule_masonry_retry(delay_ms)
+
+    def _schedule_masonry_retry(self, delay_ms: int):
+        """Coalesce retries with the view-owned, cancellable layout timer."""
+        timer = self._masonry_recalc_timer
+        delay_ms = max(0, int(delay_ms))
+        if not timer.isActive() or timer.remainingTime() > delay_ms:
+            timer.start(delay_ms)
 
     def _prepare_buffered_window_items(self, ctx: MasonryContext) -> bool:
         source_model = ctx.source_model
@@ -225,6 +232,15 @@ class ImageListViewCalculationMixin:
         elif getattr(self, "_strict_waiting_target_page", None) is not None:
             self._strict_waiting_target_page = None
             self._strict_waiting_window_pages = None
+
+        # A missing target needs a load request, not a snapshot of thousands
+        # of unrelated resident images on each retry. Read geometry only once
+        # the window planner has a page that can actually be laid out.
+        ctx.items_data = self.model().get_filtered_aspect_ratios()
+        if not ctx.items_data:
+            self._masonry_calculating = False
+            self._clear_enrichment_pause(source_model)
+            return False
 
         if hasattr(source_model, "_pages"):
             if ctx.strict_mode and (not ctx.full_layout_mode):
@@ -457,7 +473,7 @@ class ImageListViewCalculationMixin:
                     throttle_key="masonry_grace",
                     every_s=0.5,
                 )
-                QTimer.singleShot(remaining, self._calculate_masonry_layout)
+                self._schedule_masonry_retry(remaining)
                 return
 
         self._get_masonry_submission_service().prepare_executor()
@@ -497,23 +513,16 @@ class ImageListViewCalculationMixin:
             return
 
         try:
-            ctx.items_data = self.model().get_filtered_aspect_ratios()
-            if not ctx.items_data:
-                self._log_flow(
-                    "MASONRY",
-                    "Skipping calc: no items loaded yet",
-                    throttle_key="masonry_no_items",
-                    every_s=1.0,
-                )
-                self._masonry_calculating = False
-                self._clear_enrichment_pause(source_model)
-                return
-
             if source_model and hasattr(source_model, "_paginated_mode") and source_model._paginated_mode:
                 _prep_ok = self._prepare_buffered_window_items(ctx)
                 if not _prep_ok:
                     return
             else:
+                ctx.items_data = self.model().get_filtered_aspect_ratios()
+                if not ctx.items_data:
+                    self._masonry_calculating = False
+                    self._clear_enrichment_pause(source_model)
+                    return
                 self._log_flow("MASONRY", f"Calc start (normal mode): items={len(ctx.items_data)}")
         except Exception as e:
             print(f"[MASONRY] Failed to get aspect ratios: {e}")

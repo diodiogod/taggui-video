@@ -891,8 +891,13 @@ class ImageListViewGeometryMixin:
 
     def _evict_distant_thumbnails(self):
         """Evict thumbnails that are far from current viewport (VRAM management)."""
-        source_model = self.model().sourceModel()
-        if not source_model:
+        model = self.model()
+        source_model = model.sourceModel() if model and hasattr(model, 'sourceModel') else model
+        if not self.use_masonry or source_model is None:
+            self._thumbnail_eviction_sweep = None
+            timer = getattr(self, '_thumbnail_eviction_timer', None)
+            if timer is not None:
+                timer.stop()
             return
 
         # Get current visible range
@@ -904,7 +909,9 @@ class ImageListViewGeometryMixin:
         if not visible_items:
             return
 
-        visible_indices = set(item['index'] for item in visible_items)
+        visible_indices = {item['index'] for item in visible_items if item['index'] >= 0}
+        if not visible_indices:
+            return
         min_visible = min(visible_indices)
         max_visible = max(visible_indices)
 
@@ -936,23 +943,42 @@ class ImageListViewGeometryMixin:
             else:
                 pages_snapshot = list(source_model._pages.items())
 
-            for page_num, page in pages_snapshot:
-                if not page:
-                    continue
-                base_idx = int(page_num) * page_size
-                for offset, image in enumerate(page):
-                    if image is None:
-                        continue
-                    global_idx = base_idx + offset
-                    if global_idx < keep_range_start or global_idx > keep_range_end:
-                        if image.thumbnail or image.thumbnail_qimage:
-                            image.thumbnail = None
-                            image.thumbnail_qimage = None
-                            evicted_count += 1
-                            # Pagination preload tracks global indices.
-                            if hasattr(self, '_pagination_loaded_items'):
-                                self._pagination_loaded_items.discard(global_idx)
+            # Releasing many native pixmaps can stall the UI just as loading
+            # them can. Resume a bounded sweep between input events, checking
+            # the *current* viewport and page identity on every batch.
+            identity = (id(source_model), getattr(source_model, '_page_load_generation', 0))
+            sweep = getattr(self, '_thumbnail_eviction_sweep', None)
+            if sweep is None or sweep[0] != identity:
+                entries = (
+                    (page_num, page, offset, image)
+                    for page_num, page in pages_snapshot
+                    for offset, image in enumerate(page or ())
+                )
+                sweep = self._thumbnail_eviction_sweep = (identity, entries)
+            timer = getattr(self, '_thumbnail_eviction_timer', None)
+            if timer is None:
+                timer = self._thumbnail_eviction_timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._evict_distant_thumbnails)
+            timer.stop()
+            deadline = time.perf_counter() + 0.004
+            for page_num, page, offset, image in sweep[1]:
+                global_idx = int(page_num) * page_size + offset
+                if (image is not None and source_model._pages.get(page_num) is page
+                        and not keep_range_start <= global_idx <= keep_range_end):
+                    if image.thumbnail is not None or image.thumbnail_qimage is not None:
+                        image.thumbnail = None
+                        image.thumbnail_qimage = None
+                        evicted_count += 1
+                        if hasattr(self, '_pagination_loaded_items'):
+                            self._pagination_loaded_items.discard(global_idx)
+                if time.perf_counter() >= deadline:
+                    timer.start(16)
+                    break
+            else:
+                self._thumbnail_eviction_sweep = None
         else:
+            self._thumbnail_eviction_sweep = None
             for i, image in enumerate(source_model.images):
                 if i < keep_range_start or i > keep_range_end:
                     if image.thumbnail or image.thumbnail_qimage:
@@ -1226,6 +1252,17 @@ class ImageListViewGeometryMixin:
             self.scheduleDelayedItemsLayout()
             self.viewport().update()
 
+        # Qt still maintains a native item layout behind custom masonry paint.
+        # Page arrivals otherwise measure every buffered row in one UI turn,
+        # even though only a few dozen tiles are visible. Keep that bookkeeping
+        # incremental so wheel/click events can run between small batches.
+        buffered_masonry = bool(self.use_masonry and paginated_source)
+        self.setLayoutMode(
+            QListView.LayoutMode.Batched if buffered_masonry
+            else QListView.LayoutMode.SinglePass
+        )
+        if buffered_masonry:
+            self.setBatchSize(100)
         self._persist_current_view_mode()
 
     def _virtual_list_is_active(self, source_model=None) -> bool:
@@ -2293,14 +2330,21 @@ class ImageListViewGeometryMixin:
             return -1
 
     def _scroll_current_index_to_center_safe(self):
-        idx = self._normalize_scroll_index(self.currentIndex())
+        try:
+            current = self.currentIndex()
+        except RuntimeError:
+            return  # A queued mode-switch callback outlived the view.
+        idx = self._normalize_scroll_index(current)
         if not idx.isValid():
             return
         self.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def _scroll_selected_global_to_center_safe(self):
         """Center virtual-list viewport on stable selected global index."""
-        model = self.model()
+        try:
+            model = self.model()
+        except RuntimeError:
+            return  # A queued mode-switch callback outlived the view.
         source_model = model.sourceModel() if model and hasattr(model, "sourceModel") else model
         if not self._virtual_list_is_active(source_model):
             self._scroll_current_index_to_center_safe()

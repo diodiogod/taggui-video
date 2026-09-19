@@ -255,11 +255,11 @@ class SignalManager:
         image_list_model.modelReset.connect(self._update_tag_counts)
         image_list_model.modelReset.connect(self._update_delete_button_visibility)
         image_list_model.enrichment_complete.connect(self._update_tag_counts)
-        image_list_model.dataChanged.connect(lambda *args: self._update_tag_counts())
-        image_list_model.dataChanged.connect(
-            image_tags_editor.reload_image_tags_if_changed)
+        image_list_model.dataChanged.connect(self._refresh_tags_for_data_change)
         def refresh_viewer_on_data_change(start: QModelIndex, end: QModelIndex, roles):
             """Reload viewer only for the live current selection to avoid stale-index crashes."""
+            if roles and all(role == Qt.ItemDataRole.DecorationRole for role in roles):
+                return  # Thumbnail readiness does not change the opened media.
             try:
                 target_viewer = self.main_window.get_selection_target_viewer()
                 if target_viewer is None:
@@ -728,6 +728,12 @@ class SignalManager:
         )
         self.main_window.ideogram_caption_editor.load_media(image)
         self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()
+
+    def _refresh_tags_for_data_change(self, start, end, roles):
+        if roles and all(role == Qt.ItemDataRole.DecorationRole for role in roles):
+            return  # A thumbnail repaint cannot change tags or their counts.
+        self._update_tag_counts()
+        self.main_window.image_tags_editor.reload_image_tags_if_changed(start, end)
 
     def _update_tag_counts(self):
         """Update tag counts based on current model mode (paginated (DB) vs normal)."""

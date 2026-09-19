@@ -328,6 +328,14 @@ class MasonryCompletionService:
                     except Exception:
                         bottom_intent = was_at_bottom
                         top_intent = was_at_top
+                    anchor_item = next(
+                        (item for item in v._masonry_items if item['index'] == anchor_index),
+                        None,
+                    ) if anchor_index >= 0 else None
+                    visual_anchor_scroll = (
+                        int(anchor_item['y']) - anchor_offset
+                        if anchor_item is not None else old_val
+                    )
                     _click_scroll_freeze = (
                         time.time()
                         < float(getattr(v, '_user_click_selection_frozen_until', 0.0) or 0.0)
@@ -335,8 +343,9 @@ class MasonryCompletionService:
                     if v._scrollbar_dragging or v._drag_preview_mode:
                         v._restore_strict_drag_domain(sb=sb, source_model=source_model)
                     elif _click_scroll_freeze:
-                        # User recently clicked — update range but keep scroll
-                        # value unchanged so the viewport doesn't jump.
+                        # Keep the visible tile fixed, not its old document
+                        # coordinate: newly loaded upper pages can translate
+                        # the entire boundary layout during the click hold.
                         prev_block = sb.blockSignals(True)
                         sb.setRange(0, stable_max)
                         if bottom_intent:
@@ -348,7 +357,7 @@ class MasonryCompletionService:
                         elif top_intent:
                             sb.setValue(0)
                         else:
-                            sb.setValue(max(0, min(old_val, stable_max)))
+                            sb.setValue(max(0, min(visual_anchor_scroll, stable_max)))
                         sb.blockSignals(prev_block)
                     else:
                         # Block signals so the range change doesn't corrupt
@@ -436,15 +445,7 @@ class MasonryCompletionService:
                                 # Keep the same tile at the same screen offset
                                 # when prefix/window geometry changes. Pixel
                                 # preservation alone moves the visible content.
-                                anchor_item = next(
-                                    (item for item in v._masonry_items if item['index'] == anchor_index),
-                                    None,
-                                ) if anchor_index >= 0 else None
-                                target_val = (
-                                    int(anchor_item['y']) - anchor_offset
-                                    if anchor_item is not None else old_val
-                                )
-                                sb.setValue(max(0, min(target_val, stable_max)))
+                                sb.setValue(max(0, min(visual_anchor_scroll, stable_max)))
                         sb.blockSignals(prev_block)
                 elif release_anchor_active:
                     release_anchor_found = False

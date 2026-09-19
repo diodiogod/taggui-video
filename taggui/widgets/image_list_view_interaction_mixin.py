@@ -540,6 +540,14 @@ class ImageListViewInteractionMixin:
         if target_global < 0 or source_model is None:
             return False
 
+        from utils.diagnostic_logging import get_diagnostic_log_mode
+        if get_diagnostic_log_mode() != "off":
+            from utils.ui_stall_probe import UIStallProbe
+            probe = getattr(self, '_jump_stall_probe', None)
+            if probe is None:
+                probe = self._jump_stall_probe = UIStallProbe(self)
+            probe.start(f"{reason} target={target_global}")
+
         self._cancel_one_shot_targeted_jump()
         self._cancel_exact_jump_settle()
         clear_stabilization = getattr(self, "_clear_post_jump_stabilization", None)
@@ -2391,21 +2399,16 @@ class ImageListViewInteractionMixin:
             int(target_page) + enrich_buffer_pages,
         ) if total_items > 0 else 0
 
-        # Load target page immediately when selection is outside loaded window.
-        try:
-            loaded_pages = getattr(source_model, '_pages', {})
-            if isinstance(loaded_pages, dict) and target_page not in loaded_pages:
-                if hasattr(source_model, '_load_page_sync'):
-                    source_model._load_page_sync(target_page)
-                    if hasattr(source_model, '_emit_pages_updated'):
-                        source_model._emit_pages_updated()
-                    if hasattr(source_model, '_start_paginated_enrichment'):
-                        source_model._start_paginated_enrichment(
-                            window_pages={int(target_page)},
-                            scope='window',
-                        )
-        except Exception:
-            pass
+        # Re-anchoring after the selected page was evicted is an exact-index
+        # navigation too. Use its async lifecycle rather than rereading 1000
+        # files inside the keypress. Repeated keys must not restart that jump.
+        if (self.use_masonry and getattr(source_model, '_paginated_mode', False)
+                and not getattr(source_model, '_pages', {}).get(target_page)):
+            if getattr(self, '_one_shot_jump_target_global', None) != target_global:
+                self._start_one_shot_targeted_jump(
+                    target_global, reason="index_input", source_model=source_model,
+                )
+            return False
 
         loaded_row = -1
         if hasattr(source_model, 'get_loaded_row_for_global_index'):

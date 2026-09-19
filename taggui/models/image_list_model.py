@@ -439,6 +439,16 @@ def fallback_decode_qimage(path: Path) -> tuple[QImage | None, tuple[int, int] |
 
     return None, None, path
 
+def _thumbnail_clip_rect(crop: QRect | None, size: QSize) -> QRect:
+    """Make a private, centered thumbnail crop without editing image state."""
+    clip = QRect(crop) if crop else QRect(QPoint(0, 0), size)
+    max_height = clip.width() * 3
+    if clip.height() > max_height:
+        clip.moveTop(clip.top() + (clip.height() - max_height) // 2)
+        clip.setHeight(max_height)
+    return clip
+
+
 @synchronized_media_file
 def load_thumbnail_data(
     image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool
@@ -502,13 +512,8 @@ def load_thumbnail_data(
                 pil_image.load()
                 original_size = pil_image.size
                 qimage = pil_to_qimage(pil_image)
-            if not crop:
-                crop = QRect(QPoint(0, 0), qimage.size())
-            if crop.height() > crop.width()*3:
-                # keep it reasonable, higher than 3x the width doesn't make sense
-                crop.setTop((crop.height() - crop.width()*3)//2) # center crop
-                crop.setHeight(crop.width()*3)
-
+            crop = _thumbnail_clip_rect(crop, qimage.size())
+            qimage = qimage.copy(crop)
             qimage = qimage.scaledToWidth(
                 thumbnail_width,
                 Qt.TransformationMode.SmoothTransformation)
@@ -517,12 +522,7 @@ def load_thumbnail_data(
             # Rotate the image based on the orientation tag.
             image_reader.setAutoTransform(True)
             original_size = tuple(image_reader.size().toTuple())
-            if not crop:
-                crop = QRect(QPoint(0, 0), image_reader.size())
-            if crop.height() > crop.width()*3:
-                # keep it reasonable, higher than 3x the width doesn't make sense
-                crop.setTop((crop.height() - crop.width()*3)//2) # center crop
-                crop.setHeight(crop.width()*3)
+            crop = _thumbnail_clip_rect(crop, image_reader.size())
             image_reader.setClipRect(crop)
             # Read as QImage (thread-safe)
             qimage = image_reader.read()
@@ -2851,9 +2851,9 @@ class ImageListModel(QAbstractListModel):
                 # Snapshot the page to avoid modifications during iteration
                 try:
                     for offset, image in enumerate(list(page)):
-                        if image and hasattr(image, 'aspect_ratio'):
+                        if image is not None:
                             global_idx = page_start_idx + offset
-                            ar = image.aspect_ratio
+                            ar = image.thumbnail_aspect_ratio
                             if ar < 1/3:
                                 ar = 1/3  # Cap at 3:1 tall to match thumbnail crop
                             items_data.append((global_idx, ar))
@@ -2899,7 +2899,7 @@ class ImageListModel(QAbstractListModel):
             corrupted_count = 0
             for img in images_snapshot:
                 try:
-                    ar = img.aspect_ratio
+                    ar = img.thumbnail_aspect_ratio
                     # Validate aspect ratio
                     if ar is None or ar != ar or ar <= 0:  # None or NaN or invalid
                         corrupted_count += 1
@@ -2957,7 +2957,7 @@ class ImageListModel(QAbstractListModel):
                     page = self._pages[page_num]
                     offset = idx % self.PAGE_SIZE
                     if offset < len(page) and page[offset]:
-                        items_data.append((idx, page[offset].aspect_ratio))
+                        items_data.append((idx, page[offset].thumbnail_aspect_ratio))
                     else:
                         items_data.append((idx, 1.0))  # Fallback for invalid offset
                 else:

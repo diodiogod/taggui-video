@@ -122,9 +122,19 @@ class Image:
 
     @property
     def aspect_ratio(self) -> float:
-        """Get aspect ratio (width/height), cached to avoid recalculation."""
+        """Get the original image's width/height ratio."""
         dimensions = self.valid_dimensions()
         if dimensions:
             width, height = dimensions
             return width / height
         return 1.0  # Default square for images without dimensions
+
+    @property
+    def thumbnail_aspect_ratio(self) -> float:
+        """Geometry shared by full and incremental thumbnail layouts."""
+        if self.crop is not None and self.crop.isValid() and not self.is_video:
+            ratio = self.crop.width() / self.crop.height()
+        else:
+            ratio = self.aspect_ratio
+        # Tall image previews are center-cropped to three times their width.
+        return max(1 / 3, min(100.0, ratio))
