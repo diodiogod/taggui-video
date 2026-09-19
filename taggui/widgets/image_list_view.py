@@ -380,6 +380,7 @@ class ImageListView(
         self.verticalScrollBar().sliderPressed.connect(self._on_scrollbar_pressed)
         self.verticalScrollBar().sliderReleased.connect(self._on_scrollbar_released)
         self.verticalScrollBar().sliderMoved.connect(self._on_scrollbar_slider_moved)
+        self.verticalScrollBar().actionTriggered.connect(self._on_scrollbar_action_triggered)
         self.verticalScrollBar().rangeChanged.connect(self._on_scrollbar_range_changed)
         self.verticalScrollBar().installEventFilter(self)
 

@@ -672,6 +672,19 @@ class ImageListViewScrollMixin:
         if strict_mode and dragging_mode:
             return
 
+        # A loaded page may have no geometry in the current window. Crossing
+        # a page boundary must advance layout even without a page-loaded signal.
+        needs_visible_layout = (
+            self.use_masonry
+            and bool(source_model._pages.get(current_page))
+            and not self._masonry_has_visible_content()
+            and not self._masonry_calculating
+            and not self._masonry_recalc_timer.isActive()
+        )
+        if self.use_masonry and (prev_page != current_page or needs_visible_layout):
+            self._last_masonry_window_signature = None
+            self._masonry_recalc_timer.start(0)
+
         # Load current page + a small local buffer for responsive pagination.
         try:
             buffer_pages = int(settings.value('thumbnail_eviction_pages', 3, type=int))

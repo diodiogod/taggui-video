@@ -55,17 +55,27 @@ class ProxyImageListModel(QSortFilterProxyModel):
         self._pending_pages_payload = list(pages) if pages else []
         source_model = self.sourceModel()
         is_scrolling = bool(getattr(source_model, '_is_scrolling', False))
-        self._pages_update_timer.start(120 if is_scrolling else 40)
+        if not self._pages_update_timer.isActive():
+            self._pages_update_timer.start(120 if is_scrolling else 40)
 
     def _flush_pages_updated(self):
         """Apply throttled proxy remap and forward latest loaded-page payload."""
         source_model = self.sourceModel()
+        if bool(getattr(source_model, '_native_qt_drag_active', False)):
+            self._pages_update_timer.start(50)
+            return
         is_scrolling = bool(getattr(source_model, '_is_scrolling', False))
         now = time.monotonic()
         min_interval = 0.25 if is_scrolling else 0.08
-        paginated = bool(getattr(source_model, '_paginated_mode', False))
-        if not paginated and (now - self._last_proxy_invalidate_ts) >= min_interval:
+        remaining = min_interval - (now - self._last_proxy_invalidate_ts)
+        if remaining > 0:
+            # Throttle by postponing, never by dropping the final remap.
+            self._pages_update_timer.start(max(1, int(remaining * 1000) + 1))
+            return
+        if source_model is not None:
             # Keep proxy/source row mapping in sync to avoid boundary voids.
+            # Buffered pages change source rows without Qt insert/remove
+            # signals, so paginated mode also requires this deferred remap.
             self.invalidate()
             self._last_proxy_invalidate_ts = now
         self.pages_updated.emit(list(self._pending_pages_payload))

@@ -1,4 +1,5 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
+from PySide6.QtWidgets import QAbstractSlider
 from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix
 from utils.sidecar import is_taggui_metadata_dict, legacy_json_sidecar_path
 from utils.settings import DEFAULT_SETTINGS, settings
@@ -2098,6 +2099,11 @@ class ImageListViewInteractionMixin:
         """Handle keyboard events in the image list."""
         # Clear click-selection freeze so keyboard nav propagates normally.
         self._user_click_selection_frozen_until = 0.0
+        if event.key() in (
+            Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
+            Qt.Key.Key_PageUp, Qt.Key.Key_PageDown, Qt.Key.Key_Home, Qt.Key.Key_End,
+        ):
+            self._release_jump_for_user_scroll()
         is_virtual_selection_shortcut = (
             event.key() in (Qt.Key.Key_A, Qt.Key.Key_I)
             and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -3123,6 +3129,51 @@ class ImageListViewInteractionMixin:
         )
 
 
+    def _on_scrollbar_action_triggered(self, action):
+        if action not in (
+            QAbstractSlider.SliderAction.SliderNoAction.value,
+            QAbstractSlider.SliderAction.SliderMove.value,
+        ):
+            self._release_jump_for_user_scroll()
+
+    def _release_jump_for_user_scroll(self):
+        """Hand viewport ownership back to scrolling without changing selection."""
+        if not self.use_masonry:
+            return
+        had_jump = (
+            getattr(self, "_strict_jump_target_global", None) is not None
+            or getattr(self, "_release_page_lock_page", None) is not None
+            or getattr(self, "_restore_target_page", None) is not None
+            or getattr(self, "_post_jump_stabilize_page", None) is not None
+        )
+        self._clear_explicit_jump_tracking()
+        self._strict_jump_target_global = None
+        self._strict_jump_until = 0.0
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
+        self._drag_release_anchor_active = False
+        self._drag_release_anchor_idx = None
+        self._drag_release_anchor_until = 0.0
+        self._restore_target_page = None
+        self._restore_target_global_index = None
+        self._restore_anchor_until = 0.0
+        self._idle_anchor_target_global = None
+        self._idle_anchor_until = 0.0
+        self._resize_anchor_page = None
+        self._resize_anchor_target_global = None
+        self._resize_anchor_until = 0.0
+        self._last_page_check_time = 0.0
+        source = self.model().sourceModel() if self.model() and hasattr(self.model(), "sourceModel") else self.model()
+        if source is not None:
+            source._page_load_priority_page = None
+            source._page_load_priority_until = 0.0
+        host = self._main_window_host()
+        if host is not None and hasattr(host, "_pending_safe_recenter"):
+            host._pending_safe_recenter = None
+        if had_jump:
+            self._masonry_navigation_generation = int(getattr(self, "_masonry_navigation_generation", 0)) + 1
+            self._last_masonry_window_signature = None
+
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
         if event.modifiers() & Qt.ControlModifier:
@@ -3227,6 +3278,7 @@ class ImageListViewInteractionMixin:
 
         # Non-zoom wheel: if user wheels away from a sticky edge, release it.
         if self.use_masonry:
+            self._release_jump_for_user_scroll()
             delta_dir = event.angleDelta().y()
             if delta_dir > 0 and getattr(self, "_stick_to_edge", None) == "bottom":
                 self._stick_to_edge = None

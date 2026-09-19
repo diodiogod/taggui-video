@@ -44,6 +44,10 @@ class ImageListViewStrategyMixin:
             return False
 
     def _clear_post_jump_stabilization(self):
+        stable_page = getattr(self, "_post_jump_stabilize_page", None)
+        if stable_page is not None and getattr(self, "_release_page_lock_page", None) == stable_page:
+            self._release_page_lock_page = None
+            self._release_page_lock_until = 0.0
         self._post_jump_stabilize_until = 0.0
         self._post_jump_stabilize_target_global = None
         self._post_jump_stabilize_page = None
@@ -282,6 +286,12 @@ class ImageListViewStrategyMixin:
         retry_limit: int = 16,
     ) -> bool:
         """Delay strict masonry layout until the cold window gets one real enriched settle."""
+        if not self._masonry_has_visible_content():
+            # Dimensions can refine an existing viewport later; they must not
+            # prevent a newly reached page from getting its initial layout.
+            self._strict_enrich_wait_signature = None
+            self._strict_enrich_wait_count = 0
+            return False
         window_sig = (int(window_start), int(window_end), reason)
         if getattr(self, '_strict_enrich_wait_signature', None) == window_sig:
             self._strict_enrich_wait_count = int(getattr(self, '_strict_enrich_wait_count', 0) or 0) + 1
@@ -745,6 +755,8 @@ class ImageListViewStrategyMixin:
             return False
 
         if prefer_viewport_center:
+            if not self._masonry_has_visible_content():
+                return False
             target_global = self._get_viewport_center_anchor_global()
             if not (isinstance(target_global, int) and target_global >= 0):
                 target_global = self._get_non_restore_reflow_anchor_global(source_model=source_model)
@@ -2070,6 +2082,13 @@ class ImageListViewStrategyMixin:
         QTimer.singleShot(250, silent_refresh)
 
 
+    def _masonry_has_visible_content(self) -> bool:
+        rect = self.viewport().rect().translated(0, int(self.verticalScrollBar().value()))
+        return any(
+            int(item.get("index", -1)) >= 0
+            for item in self._get_masonry_visible_items(rect)
+        )
+
     def _on_pages_updated(self, loaded_pages: list):
         """Handle page load/eviction in buffered mode (safe alternative to layoutChanged).
 
@@ -2171,7 +2190,7 @@ class ImageListViewStrategyMixin:
         cached_pages = incremental.get_cached_pages()
 
         # If incremental cache is active, check for extensions
-        if incremental.is_active and cached_pages:
+        if incremental.is_active and cached_pages and self._masonry_has_visible_content():
             new_pages = loaded_set - cached_pages
             if not new_pages:
                 # No new pages — just a re-emit. Repaint but skip recalc.
