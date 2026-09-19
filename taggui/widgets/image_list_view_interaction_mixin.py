@@ -1248,6 +1248,10 @@ class ImageListViewInteractionMixin:
 
     def mousePressEvent(self, event):
         """Override mouse press to fix selection in masonry mode."""
+        if self.use_masonry and self._has_pending_explicit_jump_hold():
+            self._finish_qt_drag_gesture_tracking()
+            event.accept()
+            return
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else None
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1930,6 +1934,10 @@ class ImageListViewInteractionMixin:
 
     def mouseReleaseEvent(self, event):
         """Override mouse release to prevent Qt from changing selection."""
+        if self.use_masonry and self._has_pending_explicit_jump_hold():
+            self._finish_qt_drag_gesture_tracking()
+            event.accept()
+            return
         should_commit_click_selection = (
             event.button() == Qt.MouseButton.LeftButton
             and bool(getattr(self, "_suppress_selection_commit_until_release", False))
@@ -2097,6 +2105,12 @@ class ImageListViewInteractionMixin:
 
     def keyPressEvent(self, event):
         """Handle keyboard events in the image list."""
+        if self.use_masonry and self._has_pending_explicit_jump_hold() and event.key() in (
+            Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
+            Qt.Key.Key_PageUp, Qt.Key.Key_PageDown, Qt.Key.Key_Home, Qt.Key.Key_End,
+        ):
+            event.accept()
+            return
         # Clear click-selection freeze so keyboard nav propagates normally.
         self._user_click_selection_frozen_until = 0.0
         if event.key() in (
@@ -3140,6 +3154,10 @@ class ImageListViewInteractionMixin:
         """Hand viewport ownership back to scrolling without changing selection."""
         if not self.use_masonry:
             return
+        if self._has_pending_explicit_jump_hold():
+            # Release a completed landing, not a destination still waiting for
+            # data. A new thumb drag explicitly supersedes the pending jump.
+            return
         had_jump = (
             getattr(self, "_strict_jump_target_global", None) is not None
             or getattr(self, "_release_page_lock_page", None) is not None
@@ -3176,6 +3194,9 @@ class ImageListViewInteractionMixin:
 
     def wheelEvent(self, event):
         """Handle Ctrl+scroll for zooming thumbnails."""
+        if self.use_masonry and self._has_pending_explicit_jump_hold():
+            event.accept()
+            return
         if event.modifiers() & Qt.ControlModifier:
             import time
             # Ctrl+wheel can arrive without keyboard focus; keep arrows working after zoom.

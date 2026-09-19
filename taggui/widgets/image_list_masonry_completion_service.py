@@ -51,6 +51,7 @@ class MasonryCompletionService:
             if v._masonry_items:
                 initial_viewport = v.viewport().rect().translated(0, scroll_val)
                 visible_before = v._get_masonry_visible_items(initial_viewport)
+                visible_before = [item for item in visible_before if item['index'] >= 0]
                 if visible_before:
                     visible_before.sort(key=lambda x: x['rect'].y())
                     anchor_index = visible_before[0]['index']
@@ -429,11 +430,18 @@ class MasonryCompletionService:
                             elif top_intent:
                                 sb.setValue(0)
                             else:
-                                # Preserve absolute scroll value (clamped to new range).
-                                # Ratio-preserving caused runaway drift: after zoom the
-                                # domain changes dramatically so ratio * new_max maps
-                                # to 0 or a distant position, corrupting the viewport.
-                                sb.setValue(max(0, min(old_val, stable_max)))
+                                # Keep the same tile at the same screen offset
+                                # when prefix/window geometry changes. Pixel
+                                # preservation alone moves the visible content.
+                                anchor_item = next(
+                                    (item for item in v._masonry_items if item['index'] == anchor_index),
+                                    None,
+                                ) if anchor_index >= 0 else None
+                                target_val = (
+                                    int(anchor_item['y']) - anchor_offset
+                                    if anchor_item is not None else old_val
+                                )
+                                sb.setValue(max(0, min(target_val, stable_max)))
                         sb.blockSignals(prev_block)
                 elif release_anchor_active:
                     release_anchor_found = False

@@ -114,6 +114,18 @@ class ImageListViewPaintSelectionMixin:
 
             self._last_paint_time = current_time
 
+        if self.use_masonry and self._has_pending_explicit_jump_hold():
+            # Cached geometry belongs to the previous destination until the
+            # targeted finalize positions the new layout. Never present it as
+            # clickable content underneath the requested page indicator.
+            self._painted_hit_regions = {}
+            painter = QPainter(self.viewport())
+            painter.fillRect(self.viewport().rect(), self.palette().base())
+            painter.setPen(self.palette().text().color())
+            painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "Loading target window...")
+            painter.end()
+            return
+
         if self.use_masonry and self._masonry_items and self.model():
             # Set flag to prevent layout changes during paint (prevents re-entrancy crash)
             self._painting = True

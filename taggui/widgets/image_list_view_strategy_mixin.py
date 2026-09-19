@@ -499,6 +499,45 @@ class ImageListViewStrategyMixin:
         )
         return True
 
+    def _defer_masonry_dimension_refresh(self, source_model, *, pages=(), enrichment=False):
+        """Coalesce dimension-driven movement until the current scroll settles."""
+        identity = (id(source_model), int(getattr(source_model, '_page_load_generation', 0)))
+        if getattr(self, '_deferred_dimensions_identity', None) != identity:
+            self._deferred_dimension_pages = set()
+            self._deferred_enrichment_complete = False
+        self._deferred_dimensions_identity = identity
+        self._deferred_dimension_pages.update(pages)
+        self._deferred_enrichment_complete |= enrichment
+        if enrichment:
+            self._deferred_enrichment_generation = int(getattr(source_model, '_enrichment_generation', 0))
+        timer = getattr(self, '_dimension_settle_timer', None)
+        if timer is None:
+            timer = self._dimension_settle_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_deferred_masonry_dimensions)
+        timer.start(350)
+
+    def _flush_deferred_masonry_dimensions(self):
+        source = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
+        identity = (id(source), int(getattr(source, '_page_load_generation', 0)))
+        if identity != getattr(self, '_deferred_dimensions_identity', None):
+            self._deferred_dimension_pages = set()
+            self._deferred_enrichment_complete = False
+            return
+        if self._mouse_scrolling or self._scrollbar_dragging or self._masonry_calculating:
+            self._dimension_settle_timer.start(350)
+            return
+        pages = self._deferred_dimension_pages
+        enrichment = self._deferred_enrichment_complete
+        self._deferred_dimension_pages = set()
+        self._deferred_enrichment_complete = False
+        if enrichment and int(getattr(source, '_enrichment_generation', 0)) == getattr(self, '_deferred_enrichment_generation', None):
+            self._on_paginated_enrichment_complete()
+        elif pages:
+            if not self._try_incremental_reflow_changed_pages(source, pages):
+                self._last_masonry_window_signature = None
+                self._recalculate_masonry_if_needed('dimensions_updated')
+
     def _on_dimensions_updated(self):
         """Handle dimension updates with local incremental ripple when possible."""
         source_model = self.model().sourceModel() if self.model() and hasattr(self.model(), 'sourceModel') else self.model()
@@ -507,6 +546,9 @@ class ImageListViewStrategyMixin:
 
         consume_pages = getattr(source_model, 'consume_recent_dimension_update_pages', None)
         changed_pages = consume_pages() if callable(consume_pages) else []
+        if getattr(source_model, '_paginated_mode', False) and (self._mouse_scrolling or self._scrollbar_dragging or self._masonry_calculating):
+            self._defer_masonry_dimension_refresh(source_model, pages=changed_pages)
+            return
         if self._try_incremental_reflow_changed_pages(source_model, changed_pages, reason="dimensions_updated"):
             return
 
@@ -1834,6 +1876,10 @@ class ImageListViewStrategyMixin:
         if actual == 0:
             return
 
+        if self._mouse_scrolling or self._scrollbar_dragging or self._masonry_calculating:
+            self._defer_masonry_dimension_refresh(source_model, pages=target_pages, enrichment=True)
+            return
+
         if target_pages and self._try_incremental_reflow_changed_pages(
             source_model,
             target_pages,
@@ -1912,7 +1958,14 @@ class ImageListViewStrategyMixin:
                 self._check_and_enrich_loaded_pages()
                 return
 
+        refresh_identity = self._get_masonry_submission_service().current_request_identity()
+
         def silent_refresh():
+            if refresh_identity != self._get_masonry_submission_service().current_request_identity():
+                return
+            if self._mouse_scrolling or self._scrollbar_dragging or self._masonry_calculating:
+                self._defer_masonry_dimension_refresh(source_model, pages=target_pages, enrichment=True)
+                return
             if not hasattr(source_model, '_pages'):
                 return
 

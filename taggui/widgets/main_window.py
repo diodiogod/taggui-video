@@ -8178,6 +8178,24 @@ class MainWindow(QMainWindow):
             ):
                 QTimer.singleShot(80, self._try_apply_safe_recenter)
                 return
+            if (
+                view.use_masonry
+                and getattr(source_model, '_paginated_mode', False)
+                and view._use_local_anchor_masonry(source_model)
+            ):
+                # A loaded Qt row is not necessarily in the current masonry
+                # window. scrollTo alone can therefore leave the list at the
+                # top while the viewer and index counter show the saved image.
+                # After the existing model/path readiness checks, hand off to
+                # the same asynchronous layout-and-position lifecycle as jumps.
+                if view.start_targeted_relocation(
+                    target_global, reason='startup_restore', source_model=source_model,
+                ):
+                    self._pending_safe_recenter = None
+                    print(f"[RESTORE] Positioning masonry at saved rank {target_global}")
+                else:
+                    QTimer.singleShot(80, self._try_apply_safe_recenter)
+                return
             selection_model = view.selectionModel()
             if selection_model is None:
                 return

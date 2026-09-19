@@ -5,6 +5,21 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.14] - 2026-09-18
+
+### Added
+
+- Reduce layout movement while scrolling through newly loaded pages
+- Make page jumps prioritize their destination and avoid showing stale tiles
+- Restore the image list to the previously selected image on startup
+
+### Changed
+
+- Improve large-folder masonry navigation
+
+### Fixed
+
+- Fix blank regions after buffered pages load during deep scrolling
 ## [1.6.13] - 2026-09-05
 
 ### Added

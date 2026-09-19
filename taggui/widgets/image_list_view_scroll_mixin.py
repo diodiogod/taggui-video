@@ -682,8 +682,14 @@ class ImageListViewScrollMixin:
             and not self._masonry_recalc_timer.isActive()
         )
         if self.use_masonry and (prev_page != current_page or needs_visible_layout):
-            self._last_masonry_window_signature = None
-            self._masonry_recalc_timer.start(0)
+            if needs_visible_layout:
+                self._last_masonry_window_signature = None
+                self._masonry_recalc_timer.start(0)
+            else:
+                # Crossing into an already laid-out page does not change its
+                # geometry. Reuse the incremental path before rebuilding the
+                # window from a newly estimated prefix spacer.
+                self._on_pages_updated(list(source_model._pages))
 
         # Load current page + a small local buffer for responsive pagination.
         try:
