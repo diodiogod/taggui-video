@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.15] - 2026-09-18
+
+### Added
+
+- Page jumps now land on a stable starting row
+- Scrolling after a jump is smoother and less likely to stall
+- Thumbnail loading yields more readily to input
+
+### Changed
+
+- Improve large-folder masonry navigation
 ## [1.6.14] - 2026-09-18
 
 ### Added
