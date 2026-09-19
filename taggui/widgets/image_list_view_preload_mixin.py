@@ -152,8 +152,9 @@ class ImageListViewPreloadMixin:
 
         # Trigger thumbnail loading (async, non-blocking)
         loaded_now = 0
+        deadline = time.perf_counter() + 0.008
         for item in real_items:
-            if loaded_now >= max_requests:
+            if loaded_now >= max_requests or time.perf_counter() >= deadline:
                 break
             index = self._proxy_index_from_global(item['index'])
             if index.isValid():

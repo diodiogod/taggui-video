@@ -801,11 +801,23 @@ class ImageDelegate(QStyledItemDelegate):
             if (hasattr(parent_view, '_drag_preview_mode') and parent_view._drag_preview_mode):
                 icon_size = parent_view.iconSize()
                 return QSize(icon_size.width() + 6, icon_size.width() + 6)
-            if hasattr(parent_view, 'use_masonry') and parent_view.use_masonry and parent_view._masonry_items:
+            if getattr(parent_view, 'use_masonry', False):
                 # Return the actual masonry size for this item
-                rect = parent_view._get_masonry_item_rect(index.row())
+                global_index = index.row()
+                model = index.model()
+                source = model.sourceModel() if model and hasattr(model, 'sourceModel') else model
+                if source is not None and getattr(source, '_paginated_mode', False):
+                    source_index = model.mapToSource(index) if hasattr(model, 'mapToSource') else index
+                    global_index = source.get_global_index_for_row(source_index.row())
+                rect = parent_view._get_masonry_item_rect(global_index)
                 if rect.isValid():
                     return rect.size()
+                # Native Qt layout also measures buffered rows outside the
+                # current masonry window. Its default sizeHint requests
+                # DecorationRole, accidentally loading thousands of thumbnails.
+                # Geometry is supplied by masonry, so use a cheap estimate here.
+                side = max(1, parent_view.iconSize().width())
+                return QSize(side, side)
             elif parent_view.viewMode() == QListView.ViewMode.IconMode and not virtual_list_mode:
                 # Regular icon mode (not masonry)
                 icon_size = parent_view.iconSize()
