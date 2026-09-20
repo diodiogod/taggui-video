@@ -164,6 +164,11 @@ class MasonryIncrementalService:
                      if it['x'] // (col_w + spacing) == col), default=next_start_y)
                 for col in range(num_cols)]
         items = self._layout_items_upward(list(reversed(items_data)), tops, col_w, spacing, num_cols)
+        if any(item['y'] < 0 for item in items):
+            # The estimated prefix did not leave enough room for this page.
+            # Only a full anchored layout can translate the entire band and
+            # its jump boundary together; negative tiles are unreachable.
+            return None
         end_heights = self._compute_end_heights(items, col_w, spacing, num_cols)
         new_prefix_h = max(0, min((it['y'] for it in items), default=0))
 

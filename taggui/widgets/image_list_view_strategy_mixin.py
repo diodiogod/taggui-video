@@ -2253,6 +2253,10 @@ class ImageListViewStrategyMixin:
 
         # During drag-jump lock, keep current selection identity pinned to the
         # locked global item despite buffered row remaps.
+        # Wake thumbnail preloading when previously missing neighbor pages
+        # arrive, even if the earlier queues were exhausted while they loaded.
+        if not self._idle_preload_timer.isActive():
+            self._idle_preload_timer.start(0)
         try:
             self._enforce_locked_selected_global(source_model)
         except Exception:
@@ -2354,7 +2358,7 @@ class ImageListViewStrategyMixin:
             # Try incremental extend for each new page
             extended = []
             extended_up = False
-            blocked_unenriched_pages = set()
+            extension_failed = False
             # Upper extensions must start immediately beside the cached band.
             # Numeric order tries the farthest upper page first, skips it, and
             # strands already-loaded pages until another notification arrives.
@@ -2364,17 +2368,28 @@ class ImageListViewStrategyMixin:
                 key=lambda page: (max(cached_min - page, page - cached_max, 0), page),
             )
             for page_num in extension_order:
-                page_images = getattr(source_model, '_pages', {}).get(page_num)
-                if page_images and self._page_needs_enrichment(page_images):
-                    blocked_unenriched_pages.add(int(page_num))
-                    continue
+                # Unknown dimensions already have a safe aspect-ratio estimate.
+                # Do not hide a whole resident page behind one unresolved image;
+                # dimension notifications repair geometry with viewport anchoring.
                 if incremental.can_extend_down(page_num):
                     if self._try_incremental_extend(page_num, source_model, direction="down"):
                         extended.append(page_num)
+                    else:
+                        extension_failed = True
                 elif incremental.can_extend_up(page_num):
                     if self._try_incremental_extend(page_num, source_model, direction="up"):
                         extended.append(page_num)
                         extended_up = True
+                    else:
+                        extension_failed = True
+
+            if extension_failed:
+                # A prefix that would extend above y=0 needs one coherent
+                # translation, including the fixed landing boundary. Keep the
+                # current geometry visible until the anchored worker completes.
+                self._last_masonry_window_signature = None
+                self._recalculate_masonry_if_needed("pages_updated")
+                return
 
             if extended:
                 # Purge far pages from cache to respect memory limits
@@ -2405,17 +2420,6 @@ class ImageListViewStrategyMixin:
                         pass
                 self.viewport().update()
                 self._check_and_enrich_loaded_pages()
-                return
-
-            if strict_mode and blocked_unenriched_pages and blocked_unenriched_pages == set(new_pages):
-                self._log_flow(
-                    "PAGES",
-                    f"Deferring incremental layout for unenriched pages {min(blocked_unenriched_pages)}-{max(blocked_unenriched_pages)}",
-                    throttle_key="pages_wait_enriched_extend",
-                    every_s=0.4,
-                )
-                self._check_and_enrich_loaded_pages()
-                self.viewport().update()
                 return
 
             # New pages aren't adjacent — this is a jump or gap. Full recalc.

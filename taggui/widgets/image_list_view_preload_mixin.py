@@ -661,9 +661,24 @@ class ImageListViewPreloadMixin:
             self._pagination_loaded_items = set()
         self._queue_anchor_page = current_page
 
+        # A newly resident upper page may have been absent when the queues
+        # were consumed. Rebuild promptly instead of waiting behind the entire
+        # lower buffer. Generation changes also invalidate requested-item ids.
+        with source_model._page_load_lock:
+            resident_signature = (
+                id(source_model),
+                int(getattr(source_model, '_page_load_generation', 0)),
+                tuple((page, id(images)) for page, images in sorted(source_model._pages.items())),
+            )
+        previous_signature = getattr(self, '_preload_resident_signature', None)
+        resident_changed = previous_signature != resident_signature
+        if resident_changed:
+            self._preload_resident_signature = resident_signature
+            self._pagination_loaded_items.clear()
+
         # Build multi-priority preload queues if empty OR if we scrolled far away
         # Check if current visible area overlaps with what's already queued
-        needs_rebuild = not self._urgent_queue and not self._high_queue and not self._low_queue
+        needs_rebuild = resident_changed or (not self._urgent_queue and not self._high_queue and not self._low_queue)
 
         if not needs_rebuild and hasattr(self, '_last_queue_center'):
             # Check if we scrolled far from last queue build (> 2 screens)

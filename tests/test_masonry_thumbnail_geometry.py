@@ -83,3 +83,105 @@ def test_keyboard_reanchor_queues_one_jump_for_an_evicted_page():
     assert reanchor(view, source, 12005) is False
     assert reanchor(view, source, 12005) is False
     assert calls == [12005]
+
+
+def test_resident_upper_page_is_visible_even_with_unknown_dimensions():
+    target_tile = {"index": 14000, "y": 1000}
+    upper_tile = {"index": 13999, "y": 880}
+    source = SimpleNamespace(
+        _paginated_mode=True, _page_load_generation=1,
+        _pages={13: [Image(Path("unknown.png"), None)], 14: [Image(Path("target.png"), (800, 1200))]},
+    )
+    extensions = []
+    incremental = SimpleNamespace(
+        is_active=True, get_cached_pages=lambda: {14},
+        can_extend_down=lambda page: page == 15,
+        can_extend_up=lambda page: page == 13,
+        purge_far_pages=lambda page: None,
+        assemble_items=lambda: [upper_tile, target_tile],
+    )
+    view = SimpleNamespace(
+        proxy_image_list_model=SimpleNamespace(sourceModel=lambda: source), use_masonry=True,
+        _get_masonry_strategy=lambda source: "windowed_strict",
+        _idle_preload_timer=SimpleNamespace(isActive=lambda: False, start=lambda delay: None),
+        _enforce_locked_selected_global=lambda source: None,
+        _schedule_rebind_current_index_to_selected_global=lambda: None,
+        _get_masonry_incremental_service=lambda: incremental,
+        _has_pending_explicit_jump_hold=lambda: False,
+        _masonry_cached_dataset_identity=(id(source), 1),
+        _masonry_has_visible_content=lambda: True,
+        _get_non_restore_reflow_anchor_global=lambda **kwargs: 14000,
+        _masonry_items=[target_tile], _masonry_index_map={14000: target_tile},
+        _current_page=14,
+        _page_needs_enrichment=lambda images: True,
+        _try_incremental_extend=lambda page, source, **kwargs: extensions.append((page, kwargs["direction"])) or True,
+        viewport=lambda: SimpleNamespace(update=lambda: None),
+        _check_and_enrich_loaded_pages=lambda: None,
+    )
+    ImageListViewStrategyMixin._on_pages_updated(view, [13, 14])
+    assert extensions == [(13, "up")]
+    assert view._masonry_items == [upper_tile, target_tile]
+
+
+def test_thumbnail_preload_alternates_across_landing_line():
+    from widgets.image_list_view_geometry_mixin import ImageListViewGeometryMixin
+
+    source = SimpleNamespace(_paginated_mode=True, PAGE_SIZE=1000, _total_count=27000,
+                             set_visible_indices=lambda indices: None)
+    view = SimpleNamespace(
+        model=lambda: SimpleNamespace(sourceModel=lambda: source),
+        verticalScrollBar=lambda: SimpleNamespace(value=lambda: 1000),
+        viewport=lambda: SimpleNamespace(height=lambda: 800, width=lambda: 600),
+        _get_masonry_visible_items=lambda rect: [{"index": i} for i in range(14000, 14010)],
+        _scroll_direction=None,
+        _idle_preload_timer=SimpleNamespace(stop=lambda: None, start=lambda delay: None),
+    )
+    ImageListViewGeometryMixin._build_queues_async(view)
+    assert view._high_queue[:6] == [13999, 14010, 13998, 14011, 13997, 14012]
+    assert set(view._urgent_queue) == set(range(14000, 14010))
+    # Wheel direction keeps predictive buffer sizes without starving the other edge.
+    view._scroll_direction = "down"
+    ImageListViewGeometryMixin._build_queues_async(view)
+    assert view._high_queue[:4] == [14010, 13999, 14011, 13998]
+
+
+def test_cold_jump_requests_target_then_both_immediate_neighbors():
+    calls = []
+    model = SimpleNamespace(
+        _paginated_mode=True, PAGE_SIZE=1000, _total_count=26871,
+        _page_debouncer=SimpleNamespace(stop=lambda: None),
+        set_page_protection_window=lambda start, end: None,
+        cancel_pending_loads_except=lambda pages: None,
+        _cancel_queued_thumbnails_outside_window=lambda start, end: None,
+        _request_page_load=calls.append,
+        _order_window_pages=ImageListModel._order_window_pages,
+    )
+    # Supply a normal three-page buffer without consulting user settings.
+    model._get_target_window_pages = lambda target, **kwargs: (
+        target // 1000, max(0, target // 1000 - 3), min(26, target // 1000 + 3), 26
+    )
+    for target, expected in ((14000, [14, 13, 15]), (0, [0, 1]), (26870, [26, 25])):
+        calls.clear()
+        ImageListModel.prepare_target_window(
+            model, target, sync_target_page=False, adjacent_only=True,
+            restart_enrichment=False, emit_update=False,
+        )
+        assert calls == expected
+
+
+def test_tall_upper_page_requests_full_layout_without_negative_tiles():
+    service = MasonryIncrementalService(None)
+    target = {"index": 2, "x": 0, "y": 100, "width": 120, "height": 120, "aspect_ratio": 1.0}
+    service.cache_from_full_result([target], 2, 120, 2, 1, 100)
+    before = service.assemble_items()
+    assert service.compute_page_up(0, [(0, 1 / 3), (1, 1 / 3)], 4) is None
+    assert service.get_cached_pages() == {1}
+    assert service.assemble_items() == before
+    assert target["y"] == 100
+
+    # Ordinary upper extension remains incremental and preserves the boundary.
+    target["y"] = 1000
+    service.cache_from_full_result([target], 2, 120, 2, 1, 100)
+    upper = service.compute_page_up(0, [(0, 1 / 3), (1, 1 / 3)], 4)
+    assert upper is not None and all(item["y"] >= 0 for item in upper)
+    assert target["y"] == 1000

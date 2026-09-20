@@ -875,6 +875,18 @@ class ImageListViewGeometryMixin:
                 self._low_queue.append(i)
                 visited.add(i)
 
+        # Expand from both visible edges, rather than draining every lower
+        # thumbnail before starting the upper side. Direction only breaks ties;
+        # the existing buffer sizes still provide predictive look-ahead.
+        def outward_priority(index):
+            below = index > max_visible
+            distance = index - max_visible if below else min_visible - index
+            preferred = below if self._scroll_direction == 'down' else not below
+            return distance, not preferred
+
+        self._high_queue.sort(key=outward_priority)
+        self._low_queue.sort(key=outward_priority)
+
         # Update legacy queue
         self._pagination_preload_queue = self._urgent_queue + self._high_queue + self._low_queue
 

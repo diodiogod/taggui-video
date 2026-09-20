@@ -118,3 +118,98 @@ def test_jxl_thumbnail_applies_crop_without_mutating_it(tmp_path, monkeypatch):
     assert crop == QRect(50, 0, 50, 100)
     assert thumbnail.size().toTuple() == (50, 100)
     assert thumbnail.pixelColor(0, 50) == QColor("blue")
+
+
+def test_paginated_thumbnail_job_survives_prepend_and_checks_crop():
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from utils.image import Image
+
+    calls = []
+    def submit(*args):
+        future = Future()
+        calls.append((args, future))
+        return future
+
+    target = Image(Path("target.png"), (800, 1200))
+    placeholder = object()
+    model = SimpleNamespace(
+        _paginated_mode=True, PAGE_SIZE=1000,
+        _pages={14: [target]}, _page_load_lock=threading.Lock(),
+        _touch_page=lambda page: None, _pause_thumbnail_loading=False,
+        _thumbnail_lock=threading.Lock(), _thumbnail_futures={},
+        _load_executor=SimpleNamespace(submit=submit),
+        _load_thumbnail_async=lambda *args: None,
+        _get_placeholder_icon=lambda: placeholder,
+    )
+    def request(row):
+        index = SimpleNamespace(row=lambda: row, isValid=lambda: True)
+        return ImageListModel.data(model, index, Qt.DecorationRole)
+
+    assert request(0) is placeholder
+    assert calls[0][0][-1] == 14000
+    model._pages[13] = [Image(Path(f"previous-{i}.png"), (100, 100)) for i in range(1000)]
+    assert request(1000) is placeholder
+    assert len(calls) == 1
+
+    # Even a completed old crop must be ignored after editing the image.
+    calls[0][1].set_result((None, True))
+    target.crop = QRect(0, 0, 400, 400)
+    assert request(1000) is placeholder
+    assert len(calls) == 2
+
+
+def test_thumbnail_completion_resolves_global_identity_after_prepend():
+    from types import SimpleNamespace
+    from utils.image import Image
+
+    target = Image(Path("target.png"), None)
+    previous = Image(Path("previous.png"), (100, 100))
+    model = SimpleNamespace(
+        _paginated_mode=True, PAGE_SIZE=1000,
+        get_loaded_row_for_global_index=lambda idx: 1000 if idx == 14000 else -1,
+        get_image_at_row=lambda row: target if row == 1000 else previous,
+        get_global_index_for_row=lambda row: 14000,
+        _recent_dimension_update_pages=set(), _db=None, _save_executor=None,
+        _schedule_dimensions_updated=lambda: None,
+        _pending_thumbnail_updates=set(),
+        _thumbnail_batch_timer=SimpleNamespace(isActive=lambda: False, start=lambda: None),
+    )
+    ImageListModel._notify_thumbnail_ready(model, 14000, 800, 1200, str(target.path))
+    assert target.dimensions == (800, 1200)
+    assert previous.dimensions == (100, 100)
+    assert model._pending_thumbnail_updates == {1000}
+    assert model._recent_dimension_update_pages == {14}
+    # Evicted or reordered completion cannot modify the new occupant.
+    ImageListModel._notify_thumbnail_ready(model, 13000, 1, 2, str(target.path))
+    ImageListModel._notify_thumbnail_ready(model, 14000, 1, 2, "other.png")
+    assert target.dimensions == (800, 1200)
+
+
+def test_restart_thumbnail_preload_cancels_outside_callback_lock(monkeypatch):
+    from types import SimpleNamespace
+    from utils import thumbnail_cache
+
+    # Stop at the cache accessor after cancellation; no Qt timers or disk I/O.
+    class StopAfterCancellation(Exception):
+        pass
+    monkeypatch.setattr(thumbnail_cache, "get_thumbnail_cache",
+                        lambda: (_ for _ in ()).throw(StopAfterCancellation()))
+    tracker = SimpleNamespace(images=[None] * 5001,
+                              _thumbnail_lock=threading.Lock(), _thumbnail_futures={})
+    future = Future()
+    lock_available = []
+    def callback(completed):
+        acquired = tracker._thumbnail_lock.acquire(blocking=False)
+        lock_available.append(acquired)
+        if acquired:
+            tracker._thumbnail_lock.release()
+    future.add_done_callback(callback)
+    tracker._thumbnail_futures[0] = (future, Path("queued.png"))
+    try:
+        ImageListModel._preload_thumbnails_async(tracker)
+    except StopAfterCancellation:
+        pass
+    assert future.cancelled()
+    assert lock_available == [True]
+    assert tracker._thumbnail_futures == {}

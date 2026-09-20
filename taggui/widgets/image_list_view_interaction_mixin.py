@@ -503,7 +503,8 @@ class ImageListViewInteractionMixin:
 
         if hasattr(source_model, "prepare_target_window"):
             try:
-                prefer_forward = reason in {"sort_restore", "startup_restore"}
+                # The boundary anchor supports loading both sides on restore too.
+                prefer_forward = False
                 source_model.prepare_target_window(
                     int(target_global),
                     sync_target_page=False,
@@ -550,6 +551,19 @@ class ImageListViewInteractionMixin:
 
         self._cancel_one_shot_targeted_jump()
         self._cancel_exact_jump_settle()
+        # Explicit navigation supersedes resize/edge ownership of the old
+        # viewport. Otherwise a queued neighbor update can return to that old
+        # window immediately after the new target has correctly landed.
+        self._resize_anchor_page = None
+        self._resize_anchor_target_global = None
+        self._resize_anchor_until = 0.0
+        self._idle_anchor_target_global = None
+        self._idle_anchor_until = 0.0
+        self._pending_edge_snap = None
+        self._pending_edge_snap_until = 0.0
+        self._stick_to_edge = None
+        self._masonry_sticky_until = 0.0
+        self._resize_timer.stop()
         clear_stabilization = getattr(self, "_clear_post_jump_stabilization", None)
         if callable(clear_stabilization):
             clear_stabilization()
@@ -576,7 +590,7 @@ class ImageListViewInteractionMixin:
             page_start = target_page * page_size
             page_tail = page_start + len(loaded_page) - 1
             target_global = min(int(target_global), int(page_tail))
-        prefer_forward = str(reason or "") in {"sort_restore", "startup_restore"}
+        prefer_forward = False
         loaded_pages = sorted(getattr(source_model, "_pages", {}).keys()) if hasattr(source_model, "_pages") else []
         nearest_loaded_gap = 0
         if loaded_pages:
@@ -609,6 +623,9 @@ class ImageListViewInteractionMixin:
         self._selected_global_lock_until = _t.time() + hold_s
         self._current_page = int(target_page)
         self._strict_jump_target_global = int(target_global)
+        # A jump has no wheel direction. Do not inherit the old viewport's
+        # downward preload bias when warming both sides of the new boundary.
+        self._scroll_direction = None
         self._strict_jump_until = _t.time() + hold_s
         self._last_explicit_jump_kind = str(reason)
         self._last_explicit_jump_target_global = int(target_global)
@@ -625,7 +642,8 @@ class ImageListViewInteractionMixin:
                 prepared_state = source_model.prepare_target_window(
                     int(target_global),
                     sync_target_page=False,
-                    include_buffer=target_page_loaded,
+                    include_buffer=True,
+                    adjacent_only=not target_page_loaded,
                     prefer_forward=prefer_forward,
                     emit_update=False,
                     request_async_window=True,
@@ -2616,6 +2634,7 @@ class ImageListViewInteractionMixin:
             # Also clear any pending future for this row
             if hasattr(source_model, '_thumbnail_futures') and hasattr(source_model, '_thumbnail_lock'):
                 with source_model._thumbnail_lock:
+                    source_model._thumbnail_futures.pop(image_via_proxy.path, None)
                     source_model._thumbnail_futures.pop(src_row, None)
                     source_model._thumbnail_futures.pop(proxy_row, None)
 

@@ -1870,9 +1870,9 @@ class ImageListModel(QAbstractListModel):
         available_json_path_strings: set[str] | None = None,
     ) -> Path | None:
         """Return the preferred metadata sidecar path for one media file."""
-        preferred_path = taggui_sidecar_path(media_path)
-        legacy_path = legacy_json_sidecar_path(media_path)
         if available_json_path_strings is not None:
+            preferred_path = taggui_sidecar_path(media_path)
+            legacy_path = legacy_json_sidecar_path(media_path)
             if str(preferred_path) in available_json_path_strings:
                 return preferred_path
             if str(legacy_path) in available_json_path_strings:
@@ -2052,6 +2052,7 @@ class ImageListModel(QAbstractListModel):
         *,
         sync_target_page: bool = True,
         include_buffer: bool = True,
+        adjacent_only: bool = False,
         prefer_forward: bool = False,
         emit_update: bool = True,
         request_async_window: bool = True,
@@ -2087,6 +2088,12 @@ class ImageListModel(QAbstractListModel):
             include_buffer=include_buffer,
             prefer_forward=prefer_forward,
         )
+        if adjacent_only and include_buffer:
+            # Cold jumps start the target first, then just its immediate
+            # neighbors. The second page worker can prepare content above the
+            # landing line while the target loads, without queuing the full band.
+            start_page = max(0, target_page - 1)
+            end_page = min(_last_page, target_page + 1)
 
         state.update({
             'target_global': int(target_global),
@@ -2537,7 +2544,7 @@ class ImageListModel(QAbstractListModel):
         # Reduced to 1 worker to minimize resource usage during idle warming
         # self._cache_warm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cache_warm")
 
-        self._thumbnail_futures = {}  # Maps image index to Future
+        self._thumbnail_futures = {}  # Normal rows or paginated paths -> thumbnail jobs
         self._thumbnail_lock = threading.Lock()  # Protects futures dict
         self._images_lock = threading.RLock()  # Protects images list and image objects from race conditions
 
@@ -3991,8 +3998,8 @@ class ImageListModel(QAbstractListModel):
 
     def _cancel_page_thumbnails(self, page_num: int):
         """Cancel pending thumbnail loading futures for an evicted page."""
-        # Future keys are buffered row numbers, not global indices. Rows move
-        # whenever an earlier page arrives or is evicted; identify work by path.
+        # Paginated jobs use paths so prepending a page cannot invalidate them.
+        # Keep inspecting entries for compatibility with normal row-keyed jobs.
         page_paths = {image.path for image in self._pages.get(page_num, []) if image}
         futures = []
         with self._thumbnail_lock:
@@ -4946,10 +4953,13 @@ class ImageListModel(QAbstractListModel):
 
         # Cancel any existing thumbnail loading
         with self._thumbnail_lock:
-            for entry in self._thumbnail_futures.values():
-                f = entry[0] if isinstance(entry, tuple) else entry
-                f.cancel()
+            pending = list(self._thumbnail_futures.values())
             self._thumbnail_futures.clear()
+        # Future.cancel invokes cleanup callbacks immediately. Those callbacks
+        # take _thumbnail_lock too, so cancelling under it deadlocks the caller.
+        for entry in pending:
+            future = entry[0] if isinstance(entry, tuple) else entry
+            future.cancel()
 
         # Submit images up to preload_limit (or all if None)
         # But skip images that already have thumbnails loaded OR cached on disk
@@ -5619,18 +5629,23 @@ class ImageListModel(QAbstractListModel):
         """Called on main thread when thumbnail QImage is ready (batched to reduce repaints).
         
         Args:
-            idx: Global index of image (OR Local Row in Buffered Mode)
+            idx: Global index of image (resolved to a resident row on delivery)
             width, height: Original dimensions found during load (optional, -1 if unknown)
         """
         # JUST-IN-TIME ENRICHMENT:
         # If we found dimensions during loading and the model doesn't have them (or has None),
         # update them now to fix masonry layout instantly!
         
-        # Use safe accessor for both Normal and Buffered modes
+        # Buffered rows shift as neighboring pages arrive. The worker carries
+        # a global index; resolve it only now, without a DB lookup or page load.
+        if self._paginated_mode:
+            idx = self.get_loaded_row_for_global_index(idx)
+            if idx < 0:
+                return
         image = self.get_image_at_row(idx)
         if path and (image is None or image.path != Path(path)):
-            # The submitted row can now belong to another buffered page. A
-            # stale completion must not persist its dimensions on that image.
+            # A sort/filter/reset can give this global position a different
+            # path. Never persist stale completion dimensions on that image.
             return
         
         if image and width > 0 and height > 0:
@@ -5687,7 +5702,7 @@ class ImageListModel(QAbstractListModel):
             if not self._thumbnail_batch_timer.isActive():
                 self._thumbnail_batch_timer.start()
 
-    def _load_thumbnail_async(self, path: Path, crop, is_video: bool, row: int):
+    def _load_thumbnail_async(self, path: Path, crop, is_video: bool, global_index: int):
         """Load thumbnail in background thread, then notify UI."""
         try:
             qimage, was_cached, original_size, _resolved_path = load_thumbnail_data(
@@ -5704,7 +5719,7 @@ class ImageListModel(QAbstractListModel):
                 self,
                 "_notify_thumbnail_ready",
                 Qt.ConnectionType.QueuedConnection,
-                Q_ARG(int, row),
+                Q_ARG(int, global_index),
                 Q_ARG(int, width),
                 Q_ARG(int, height),
                 Q_ARG(str, str(path)),
@@ -6021,11 +6036,13 @@ class ImageListModel(QAbstractListModel):
 
             # Pagination mode: Async loading with placeholders for smooth scrolling
             # _thumbnail_futures stores the future, path, and crop signature so
-            # stale results cannot replace a thumbnail after a crop edit.
+            # row remaps reuse work, while crop edits reject stale results.
+            job_key = image.path
+            global_index = page_num * self.PAGE_SIZE + page_offset
             with self._thumbnail_lock:
                 # Check if already loading
-                if row in self._thumbnail_futures:
-                    entry = self._thumbnail_futures[row]
+                if job_key in self._thumbnail_futures:
+                    entry = self._thumbnail_futures[job_key]
                     if isinstance(entry, tuple):
                         future = entry[0]
                         submitted_path = entry[1] if len(entry) > 1 else None
@@ -6035,8 +6052,8 @@ class ImageListModel(QAbstractListModel):
                         submitted_path = None
                         submitted_crop_key = None
                     try:
-                        # Path check: if pages were evicted/reloaded, this row
-                        # may now map to a different image.  Discard stale result.
+                        # Keep the path check for legacy entries and reject
+                        # results generated before a crop edit.
                         if (
                             submitted_path is not None
                             and image.path != submitted_path
@@ -6044,7 +6061,7 @@ class ImageListModel(QAbstractListModel):
                             isinstance(entry, tuple) and len(entry) > 2
                             and submitted_crop_key != current_crop_key
                         ):
-                            del self._thumbnail_futures[row]
+                            del self._thumbnail_futures[job_key]
                             # Fall through to re-submit below
                         else:
                             if not future.done():
@@ -6081,23 +6098,23 @@ class ImageListModel(QAbstractListModel):
                                             image.crop,
                                         )
 
-                            del self._thumbnail_futures[row]
+                            del self._thumbnail_futures[job_key]
                             return thumbnail
                     except Exception as e:
                         print(f"[THUMBNAIL ERROR] Failed to load thumbnail for {image.path.name}: {e}")
-                        del self._thumbnail_futures[row]
+                        del self._thumbnail_futures[job_key]
                         return None
 
                 # Not loading yet (or stale entry was discarded) - submit to background thread
-                if row not in self._thumbnail_futures:
+                if job_key not in self._thumbnail_futures:
                     future = self._load_executor.submit(
                         self._load_thumbnail_async,
                         image.path,
                         image.crop,
                         image.is_video,
-                        row
+                        global_index
                     )
-                    self._thumbnail_futures[row] = (
+                    self._thumbnail_futures[job_key] = (
                         future,
                         image.path,
                         current_crop_key,
