@@ -80,8 +80,8 @@ class SecondaryBrowser(QObject):
 
         # Count tags when model changes
         self.image_list_model.modelReset.connect(self._count_tags)
-        self.image_list_model.enrichment_complete.connect(self._count_tags)
-        self.image_list_model.dataChanged.connect(lambda *_: self._count_tags())
+        self.image_list_model.enrichment_tags_updated.connect(self._count_tags)
+        self.image_list_model.dataChanged.connect(self._count_tags_after_data_change)
 
         # ── Inner ImageList dock ─────────────────────────────────────────────
         self.dock: ImageList = ImageList(
@@ -340,10 +340,18 @@ class SecondaryBrowser(QObject):
     @Slot()
     def _count_tags(self):
         try:
-            images = list(self.image_list_model.images or [])
-            self.tag_counter_model.count_tags(images)
+            if self.image_list_model.is_paginated:
+                self.tag_counter_model.set_tags_from_db(self.image_list_model.get_all_tags_stats())
+            else:
+                images = list(self.image_list_model.images or [])
+                self.tag_counter_model.count_tags(images)
         except Exception:
             pass
+
+    def _count_tags_after_data_change(self, start, end, roles):
+        if roles and all(role == Qt.ItemDataRole.DecorationRole for role in roles):
+            return
+        self._count_tags()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Title indicator

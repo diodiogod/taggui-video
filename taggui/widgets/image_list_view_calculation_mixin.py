@@ -233,31 +233,27 @@ class ImageListViewCalculationMixin:
             self._strict_waiting_target_page = None
             self._strict_waiting_window_pages = None
 
-        # A missing target needs a load request, not a snapshot of thousands
-        # of unrelated resident images on each retry. Read geometry only once
-        # the window planner has a page that can actually be laid out.
-        ctx.items_data = self.model().get_filtered_aspect_ratios()
-        if not ctx.items_data:
-            self._masonry_calculating = False
-            self._clear_enrichment_pause(source_model)
-            return False
-
         if hasattr(source_model, "_pages"):
             if ctx.strict_mode and (not ctx.full_layout_mode):
                 loaded_pages_sig = tuple(
                     sorted(
-                        p for p in source_model._pages.keys()
+                        (p, id(source_model._pages[p]), len(source_model._pages[p]))
+                        for p in source_model._pages.keys()
                         if int(ctx.window_start_page) <= int(p) <= int(ctx.window_end_page)
                     )
                 )
             else:
-                loaded_pages_sig = tuple(sorted(source_model._pages.keys()))
+                loaded_pages_sig = tuple(
+                    (p, id(images), len(images))
+                    for p, images in sorted(source_model._pages.items())
+                )
         else:
             loaded_pages_sig = ()
         filter_sql = str(getattr(source_model, "_filter_sql", "") or "")
         filter_bindings = tuple(getattr(source_model, "_filter_bindings", ()) or ())
         proxy_row_count = int(self.model().rowCount()) if self.model() else 0
         window_signature = (
+            int(getattr(source_model, '_page_load_generation', 0)),
             ctx.window_start_page,
             ctx.window_end_page,
             loaded_pages_sig,
@@ -280,6 +276,14 @@ class ImageListViewCalculationMixin:
                 throttle_key="masonry_same_window",
                 every_s=0.8,
             )
+            self._masonry_calculating = False
+            self._clear_enrichment_pause(source_model)
+            return False
+        # Missing targets and unchanged windows need no geometry snapshot.
+        # This walks every resident image, so defer it until a calculation
+        # will actually use the result.
+        ctx.items_data = self.model().get_filtered_aspect_ratios()
+        if not ctx.items_data:
             self._masonry_calculating = False
             self._clear_enrichment_pause(source_model)
             return False

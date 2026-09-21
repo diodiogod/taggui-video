@@ -14,6 +14,39 @@ from widgets.image_list_masonry_incremental_service import MasonryIncrementalSer
 from widgets.image_list_view_interaction_mixin import ImageListViewInteractionMixin
 
 
+def test_unchanged_window_skips_geometry_but_replaced_pages_do_not():
+    from widgets.image_list_view_calculation_mixin import ImageListViewCalculationMixin
+    from widgets.image_list_masonry_context import MasonryContext
+    reads = []
+    images = [Image(Path("one.png"), (800, 1200))]
+    source = SimpleNamespace(PAGE_SIZE=1000, _total_count=1,
+                             _pages={0: images}, _page_load_generation=1)
+    proxy = SimpleNamespace(rowCount=lambda: 1,
+                            get_filtered_aspect_ratios=lambda: reads.append(True) or [])
+    planner = SimpleNamespace(
+        resolve_current_page=lambda **kwargs: 0, get_window_buffer=lambda: 3,
+        compute_window_bounds=lambda **kwargs: dict(max_page=1, full_layout_mode=True,
+            window_start_page=0, window_end_page=0, min_idx=0, max_idx=1),
+    )
+    view = SimpleNamespace(
+        model=lambda: proxy, _get_masonry_window_planner_service=lambda: planner,
+        _use_local_anchor_masonry=lambda source: False,
+        _get_masonry_column_metrics=lambda: dict(avail_width=600, num_columns=4),
+        current_thumbnail_size=120, viewport=lambda: SimpleNamespace(width=lambda: 600),
+        _last_masonry_signal="pages_updated", _log_flow=lambda *args, **kwargs: None,
+        _clear_enrichment_pause=lambda source: None,
+        _last_masonry_window_signature=(1, 0, 0, ((0, id(images), 1),), 1, 1, "", (), 4, 120, 600, True),
+    )
+    ctx = MasonryContext(source, "full_compat", False, 120, 2, 600, 4)
+    prepare = ImageListViewCalculationMixin._prepare_buffered_window_items
+    assert prepare(view, ctx) is False and reads == []
+    source._pages[0] = list(images)
+    assert prepare(view, ctx) is False and reads == [True]
+    source._pages[0] = images
+    source._page_load_generation = 2
+    assert prepare(view, ctx) is False and reads == [True, True]
+
+
 def test_full_and_incremental_layout_agree_on_tall_and_cropped_images():
     images = [
         Image(Path("tall.png"), (100, 1000)),
@@ -151,7 +184,7 @@ def test_cold_jump_requests_target_then_both_immediate_neighbors():
         _paginated_mode=True, PAGE_SIZE=1000, _total_count=26871,
         _page_debouncer=SimpleNamespace(stop=lambda: None),
         set_page_protection_window=lambda start, end: None,
-        cancel_pending_loads_except=lambda pages: None,
+        cancel_pending_loads_except=lambda pages, **kwargs: None,
         _cancel_queued_thumbnails_outside_window=lambda start, end: None,
         _request_page_load=calls.append,
         _order_window_pages=ImageListModel._order_window_pages,

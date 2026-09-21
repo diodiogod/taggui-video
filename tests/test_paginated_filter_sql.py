@@ -187,3 +187,22 @@ def test_database_filter_functions_match_token_and_crop_semantics(tmp_path):
         assert cursor.fetchone()[0] == 1
     finally:
         db.close()
+
+
+def test_filtered_tag_counts_cover_the_full_database_view(tmp_path):
+    db = ImageIndexDB(tmp_path)
+    try:
+        db.save_info('image.png', 100, 100, False, 1.0)
+        db.save_info('video.mp4', 100, 100, True, 2.0)
+        image_id = db.get_image_id('image.png')
+        video_id = db.get_image_id('video.mp4')
+        db.set_tags_for_image(image_id, ['shared', 'still'])
+        db.set_tags_for_image(video_id, ['shared', 'motion'])
+
+        stats = db.get_filtered_tags('is_video = 1')
+        assert {item['tag']: item['count'] for item in stats} == {
+            'shared': 1,
+            'motion': 1,
+        }
+    finally:
+        db.close()

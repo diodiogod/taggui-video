@@ -912,6 +912,24 @@ class ImageListViewGeometryMixin:
                 timer.stop()
             return
 
+        jump_settling = bool(
+            hasattr(self, '_has_pending_explicit_jump_hold')
+            and self._has_pending_explicit_jump_hold()
+        )
+        if self._scrollbar_dragging or self._mouse_scrolling or jump_settling:
+            # Releasing QPixmaps is cleanup, not navigation-critical work. A
+            # sweep already in progress used to compete with wheel/click input
+            # immediately after a jump. Resume it only after interaction and
+            # explicit jump ownership have settled.
+            timer = getattr(self, '_thumbnail_eviction_timer', None)
+            if timer is None:
+                timer = self._thumbnail_eviction_timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._evict_distant_thumbnails)
+            timer.stop()
+            timer.start(250)
+            return
+
         # Get current visible range
         scroll_offset = self.verticalScrollBar().value()
         viewport_height = self.viewport().height()

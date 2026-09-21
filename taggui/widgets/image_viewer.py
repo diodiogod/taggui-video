@@ -3855,10 +3855,21 @@ class ImageViewer(QWidget):
         image_path = getattr(image, 'path', None)
         if image_path is None:
             return
+        proxy_model = getattr(self, 'proxy_image_list_model', None)
+        source_model = getattr(proxy_model, 'sourceModel', lambda: None)()
+        directory_path = getattr(source_model, '_directory_path', None)
 
         def _attempt() -> None:
+            # This timer belongs to the image/browser that scheduled it.
+            # A later selection must not be replaced in restore settings by
+            # an old repair, or have that repair written into its database.
+            if (getattr(self, 'current_media', None) is not image
+                    or getattr(self, 'proxy_image_list_model', None) is not proxy_model
+                    or getattr(proxy_model, 'sourceModel', lambda: None)() is not source_model
+                    or getattr(source_model, '_directory_path', None) != directory_path):
+                return
             current_path = getattr(image, 'path', None)
-            if current_path is None:
+            if current_path is None or current_path != image_path:
                 return
             repaired_path = repair_mismatched_image_extension_path(
                 current_path,
@@ -3866,10 +3877,8 @@ class ImageViewer(QWidget):
             )
             if repaired_path == current_path:
                 return
-            source_model = getattr(self.proxy_image_list_model, 'sourceModel', lambda: None)()
             if source_model is not None:
                 try:
-                    directory_path = getattr(source_model, '_directory_path', None)
                     db = getattr(source_model, '_db', None)
                     if db is not None and directory_path is not None:
                         db.rename_image_path(str(current_path), str(repaired_path), directory_path=directory_path)

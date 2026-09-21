@@ -107,6 +107,15 @@ class TagCounterModel(QAbstractListModel):
                 self.most_common_tags_filtered.update(set(image.tags))
         self.endResetModel()
 
+    def set_filtered_counts_from_db(self, tags_data: list[dict]):
+        """Set current-view counts without replacing full-folder totals."""
+        self.beginResetModel()
+        self.most_common_tags_filtered = Counter({
+            item['tag']: int(item['count'])
+            for item in tags_data
+        })
+        self.endResetModel()
+
     @Slot()
     def set_tags_from_db(self, tags_data: list[dict]):
         """Populate tags from DB query result [{'tag': t, 'count': c}, ...]."""

@@ -40,3 +40,22 @@ def test_compatible_speed_lands_on_requested_output_count():
 
     output_frames = round((169 / 30.0) / speed * 30.0)
     assert output_frames == 124
+
+
+def test_video_badge_reuses_profile_during_repeated_paints(monkeypatch):
+    from types import SimpleNamespace
+    from widgets import image_list_shared
+
+    calls = []
+    profile = VIDEO_TRAINING_PROFILES['wan']
+    monkeypatch.setattr(
+        image_list_shared,
+        'get_video_training_profile',
+        lambda: calls.append(True) or profile,
+    )
+    delegate = SimpleNamespace()
+    image = SimpleNamespace(is_video=True, video_metadata={'frame_count': 81})
+    get_status = image_list_shared.ImageDelegate._get_video_stamp_status
+    get_status(delegate, image)
+    get_status(delegate, image)
+    assert len(calls) == 1

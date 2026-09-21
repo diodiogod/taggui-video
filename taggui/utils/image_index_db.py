@@ -4271,6 +4271,34 @@ class ImageIndexDB:
             print(f'Database tag query error: {e}')
             return []
 
+    def get_filtered_tags(
+        self,
+        filter_sql: str = '',
+        bindings: tuple = (),
+    ) -> List[Dict[str, Any]]:
+        """Get tag counts across every image matching the active DB filter."""
+        if not self.enabled or not self.conn:
+            return []
+
+        try:
+            query = '''
+                SELECT image_tags.tag, COUNT(*) AS count
+                FROM image_tags
+                JOIN images ON images.id = image_tags.image_id
+                WHERE image_tags.tag != '__no_tags__'
+            '''
+            if filter_sql:
+                query += f' AND ({filter_sql})'
+            query += ' GROUP BY image_tags.tag ORDER BY count DESC'
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(query, tuple(bindings or ()))
+                rows = cursor.fetchall()
+            return [{'tag': row[0], 'count': row[1]} for row in rows]
+        except sqlite3.Error as e:
+            print(f'Database filtered tag query error: {e}')
+            return []
+
     def get_all_ideogram_terms(self) -> List[Dict[str, Any]]:
         """Get structured Ideogram caption terms with usage counts."""
         if not self.enabled or not self.conn:

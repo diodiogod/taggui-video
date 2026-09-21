@@ -762,6 +762,13 @@ class ImageListViewPreloadMixin:
             self._eviction_counter = 0
         self._eviction_counter += 1
 
-        if self._eviction_counter >= 10:
+        jump_settling = bool(
+            self.use_masonry
+            and hasattr(self, '_has_pending_explicit_jump_hold')
+            and self._has_pending_explicit_jump_hold()
+        )
+        if self._eviction_counter >= 10 and not (
+            self._scrollbar_dragging or self._mouse_scrolling or jump_settling
+        ):
             self._eviction_counter = 0
             self._evict_distant_thumbnails()

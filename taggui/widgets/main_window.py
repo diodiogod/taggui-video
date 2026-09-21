@@ -9261,7 +9261,10 @@ class MainWindow(QMainWindow):
         label = 'Browser 2' if browser_name == 'secondary' else 'Browser 1'
         action.setText(f'Refresh New Media for {label}')
         model = target.get('model')
-        action.setDisabled(not bool(model is not None and getattr(model, '_paginated_mode', False)))
+        action.setDisabled(
+            bool(self._pending_new_media_refresh_state)
+            or not bool(model is not None and getattr(model, '_paginated_mode', False))
+        )
 
     def _capture_refresh_restore_state(self, target: dict) -> tuple[str, int, str | None]:
         dock = target.get('dock')
@@ -9412,12 +9415,13 @@ class MainWindow(QMainWindow):
         if not directory_path:
             return
 
-        if getattr(model, '_new_media_refresh_running', False):
+        if self._pending_new_media_refresh_state or getattr(model, '_new_media_refresh_running', False):
             self._log_new_media_refresh_message("Refresh New Media Only is already running.")
             return
 
         filter_text, select_index, select_path = self._capture_refresh_restore_state(target)
         self._pending_new_media_refresh_state = {
+            'target': dict(target),
             'browser_name': str(target.get('browser_name') or 'primary'),
             'directory_path': str(directory_path),
             'filter_text': filter_text,
@@ -9433,7 +9437,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _begin_refresh_new_media_only(self):
         pending_state = self._pending_new_media_refresh_state or {}
-        target = self._resolve_refresh_new_media_target()
+        target = pending_state.get('target') or self._resolve_refresh_new_media_target()
         expected_browser = str(pending_state.get('browser_name') or 'primary')
         if not target or str(target.get('browser_name') or 'primary') != expected_browser:
             target = self._resolve_refresh_new_media_target()
@@ -9442,11 +9446,13 @@ class MainWindow(QMainWindow):
         expected_directory = str(pending_state.get('directory_path') or '')
         actual_directory = str(getattr(model, '_directory_path', '') or '')
         if model is None or dock is None or not expected_directory or actual_directory != expected_directory:
+            self._pending_new_media_refresh_state = None
             self._update_refresh_new_media_action_state()
             return
 
         started = model.start_refresh_new_media_only_async()
         if not started:
+            self._pending_new_media_refresh_state = None
             self._update_refresh_new_media_action_state()
             filter_widget = getattr(dock, 'filter_line_edit', None)
             filter_text = str(pending_state.get('filter_text') or (filter_widget.text() if filter_widget is not None else ''))
@@ -9482,10 +9488,9 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._update_refresh_new_media_action_state()
-
         pending_state = self._pending_new_media_refresh_state or {}
         self._pending_new_media_refresh_state = None
+        self._update_refresh_new_media_action_state()
 
         if refresh_stats.get('stale', False):
             self._log_new_media_refresh_message("Ignored stale new-media refresh result.")
@@ -9494,7 +9499,7 @@ class MainWindow(QMainWindow):
         expected_directory = str(pending_state.get('directory_path') or '')
         actual_directory = str(refresh_stats.get('directory_path') or '')
         browser_name = str(pending_state.get('browser_name') or 'primary')
-        target = self._resolve_refresh_new_media_target()
+        target = pending_state.get('target') or self._resolve_refresh_new_media_target()
         if target and str(target.get('browser_name') or 'primary') != browser_name:
             if browser_name == 'secondary':
                 secondary = getattr(self, '_secondary_browser', None)
@@ -9516,11 +9521,18 @@ class MainWindow(QMainWindow):
             self._log_new_media_refresh_message("Ignored new-media refresh result from previous folder.")
             return
 
+        target_model = target.get('model') if target else None
+        live_directory = str(getattr(target_model, '_directory_path', '') or '')
+        if actual_directory and live_directory != actual_directory:
+            self._log_new_media_refresh_message("Ignored new-media refresh result after folder switch.")
+            return
+
         dock = target.get('dock') if target else None
         filter_widget = getattr(dock, 'filter_line_edit', None) if dock is not None else None
-        filter_text = str(pending_state.get('filter_text') or (filter_widget.text() if filter_widget is not None else ''))
-        select_index = int(pending_state.get('select_index', 0) or 0)
-        select_path = pending_state.get('select_path')
+        # Scanning may take seconds. Preserve the selection/filter visible now,
+        # including a filter the user cleared, rather than restoring the state
+        # that happened to be active when the scan started.
+        filter_text, select_index, select_path = self._capture_refresh_restore_state(target or {})
 
         if not refresh_stats.get('supported', False):
             if browser_name == 'secondary':

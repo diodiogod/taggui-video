@@ -846,8 +846,9 @@ class ImageDelegate(QStyledItemDelegate):
         try:
             if not index.model():
                 return
-            # Try to access data to ensure index is truly valid
-            index.data(Qt.ItemDataRole.DisplayRole)
+            # DisplayRole assembles the complete caption. Grid/masonry paint
+            # only needs the icon and badges; native list paint below asks for
+            # its text when needed. Reading text cannot validate a stale row.
         except (RuntimeError, AttributeError):
             return
 
@@ -1087,7 +1088,19 @@ class ImageDelegate(QStyledItemDelegate):
             frame_count = 0
 
         if frame_count > 0:
-            profile = get_video_training_profile()
+            # Painting can call this once per visible video on every frame.
+            # QSettings access is observable in UI-stall samples on Windows,
+            # so retain the value briefly while still picking up settings
+            # changes without requiring a restart.
+            now = time.monotonic()
+            profile = getattr(self, '_video_training_profile_paint_cache', None)
+            if (
+                profile is None
+                or now >= float(getattr(self, '_video_training_profile_paint_cache_until', 0.0) or 0.0)
+            ):
+                profile = get_video_training_profile()
+                self._video_training_profile_paint_cache = profile
+                self._video_training_profile_paint_cache_until = now + 1.0
             is_valid = profile.is_valid_frame_count(frame_count)
             color = QColor(76, 175, 80, 235) if is_valid else QColor(244, 67, 54, 235)
             tooltip = (

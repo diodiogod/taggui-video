@@ -254,7 +254,7 @@ class SignalManager:
         )
         image_list_model.modelReset.connect(self._update_tag_counts)
         image_list_model.modelReset.connect(self._update_delete_button_visibility)
-        image_list_model.enrichment_complete.connect(self._update_tag_counts)
+        image_list_model.enrichment_tags_updated.connect(self._update_tag_counts)
         image_list_model.dataChanged.connect(self._refresh_tags_for_data_change)
         def refresh_viewer_on_data_change(start: QModelIndex, end: QModelIndex, roles):
             """Reload viewer only for the live current selection to avoid stale-index crashes."""
@@ -307,9 +307,7 @@ class SignalManager:
             lambda: image_list.update_image_index_label(
                 image_list.list_view.currentIndex()))
         proxy_image_list_model.filter_changed.connect(
-            lambda: tag_counter_model.count_tags_filtered(
-                proxy_image_list_model.get_list() if
-                len(proxy_image_list_model.filter or [])>0 else None))
+            self._update_filtered_tag_counts)
         # Connect deletion marking signals
         image_list.deletion_marking_changed.connect(self._update_delete_button_visibility)
 
@@ -747,3 +745,17 @@ class SignalManager:
         else:
              # Regular in-memory counting
              tag_counter_model.count_tags(image_list_model.get_all_loaded_images())
+
+    def _update_filtered_tag_counts(self):
+        """Update current-view counts without walking only resident pages."""
+        image_list_model = self.main_window.image_list_model
+        proxy_model = self.main_window.proxy_image_list_model
+        tag_counter_model = self.main_window.tag_counter_model
+        if not (proxy_model.filter or []):
+            tag_counter_model.count_tags_filtered(None)
+        elif image_list_model.is_paginated:
+            tag_counter_model.set_filtered_counts_from_db(
+                image_list_model.get_filtered_tags_stats()
+            )
+        else:
+            tag_counter_model.count_tags_filtered(proxy_model.get_list())

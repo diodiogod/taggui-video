@@ -22,7 +22,7 @@ from PySide6.QtCore import (QAbstractListModel, QItemSelectionModel, QModelIndex
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication, QProgressDialog
 from PIL import Image as pilimage  # Import Pillow's Image class
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 import threading
 
 
@@ -107,6 +107,22 @@ def _thumbnail_crop_key(crop) -> tuple[int, int, int, int] | None:
         return tuple(int(value) for value in crop.getRect())
     except Exception:
         return None
+
+
+def _relative_image_path_key(image, directory: Path) -> str:
+    """Cache lexical path normalization without filesystem access."""
+    identity = (directory, image.path)
+    cached = getattr(image, '_dimension_update_relative_path', None)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    path = image.path if isinstance(image.path, Path) else Path(image.path)
+    try:
+        path = path.relative_to(directory)
+    except ValueError:
+        pass
+    key = str(path).replace('\\', '/').casefold()
+    image._dimension_update_relative_path = (identity, key)
+    return key
 
 
 _extensionless_repair_log_lock = threading.Lock()
@@ -2106,10 +2122,13 @@ class ImageListModel(QAbstractListModel):
 
         self.set_page_protection_window(start_page, end_page)
         # Supersede the old debounced window before it can enqueue work ahead
-        # of this target. Only cancel jobs whose workers have not started.
+        # of this target. Stop obsolete running reads cooperatively, while
+        # retaining running neighbors that can still serve the new window.
         self._page_debouncer.stop()
         self._pending_page_range = None
-        self.cancel_pending_loads_except({int(target_page)})
+        self.cancel_pending_loads_except(
+            {int(target_page)}, running_keep_pages=set(range(start_page, end_page + 1)),
+        )
         self._cancel_queued_thumbnails_outside_window(start_page, end_page)
         try:
             self._page_load_priority_page = int(target_page)
@@ -2345,6 +2364,8 @@ class ImageListModel(QAbstractListModel):
     # DISABLED: Cache warming causes UI blocking
     # cache_warm_progress = Signal(int, int)  # (cached_count, total_count) for background cache warming
     enrichment_complete = Signal()  # Emitted when background enrichment finishes
+    enrichment_tags_updated = Signal()  # Dimension-only repairs do not change tags.
+    paginated_enrichment_finished = Signal(object)  # Identity checked on UI delivery.
     dimensions_updated = Signal()  # Emitted when aspect ratios change (no layout invalidation)
     background_validation_progress = Signal(str, int, int, bool)  # label, current, maximum, done
     background_validation_applied = Signal(dict)  # applied background index refresh metadata
@@ -2468,6 +2489,7 @@ class ImageListModel(QAbstractListModel):
         self._loading_pages: set = set()  # Pages currently being loaded
         self._pending_page_results: dict[tuple[int, int], tuple[list[Image], list[str]]] = {}
         self._page_load_futures = {}
+        self._page_load_cancellations = {}
         self._page_load_lock = threading.RLock()
         self._page_load_generation = 0
         self._protected_page_window: tuple[int, int] | None = None
@@ -2578,7 +2600,7 @@ class ImageListModel(QAbstractListModel):
         self._is_scrolling = False  # Set by view during active scrolling
         self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail, crop)
         self._pending_cache_saves_lock = threading.Lock()
-        self._pending_db_cache_flags = []  # Batch DB updates for thumbnail_cached flag (file_name strings)
+        self._pending_db_cache_flags = []  # (owning DB, relative file name)
         self._pending_db_cache_flags_lock = threading.Lock()
 
         # Timer for deferred DB flush (only when truly idle)
@@ -2611,6 +2633,7 @@ class ImageListModel(QAbstractListModel):
 
         # Connect page_loaded signal to handler (for pagination mode)
         self.page_loaded.connect(self._on_page_loaded_signal)
+        self.paginated_enrichment_finished.connect(self._on_paginated_enrichment_finished)
         self.stale_index_paths_detected.connect(self._on_stale_index_paths_detected)
         self.background_validation_progress.connect(self._on_background_validation_progress)
         self.sidecar_tag_migration_applied.connect(self._on_sidecar_tag_migration_applied)
@@ -2713,12 +2736,14 @@ class ImageListModel(QAbstractListModel):
         self._recent_dimension_update_pages.clear()
         return pages
 
-    def _queue_paginated_dimension_updates(self, updates: list[tuple[str, tuple[int, int], object]]):
+    def _queue_paginated_dimension_updates(self, updates: list[tuple[str, tuple[int, int], object]], *, dataset_identity=None):
         """Queue DB-enriched page dimension updates for main-thread application."""
         if not updates:
             return
+        if dataset_identity is None:
+            dataset_identity = (self._page_load_generation, self._directory_path)
         with self._paginated_dimension_updates_lock:
-            self._pending_paginated_dimension_updates.extend(updates)
+            self._pending_paginated_dimension_updates.append((dataset_identity, list(updates)))
         QMetaObject.invokeMethod(
             self,
             "_apply_pending_paginated_dimension_updates",
@@ -2736,10 +2761,14 @@ class ImageListModel(QAbstractListModel):
             return
 
         update_map = {}
-        for rel_path, dimensions, video_metadata in pending:
-            if not rel_path or not dimensions:
+        current_identity = (self._page_load_generation, self._directory_path)
+        for dataset_identity, updates in pending:
+            if dataset_identity != current_identity:
                 continue
-            update_map[str(rel_path).replace("\\", "/").casefold()] = (dimensions, video_metadata)
+            for rel_path, dimensions, video_metadata in updates:
+                if not rel_path or not dimensions:
+                    continue
+                update_map[str(rel_path).replace("\\", "/").casefold()] = (dimensions, video_metadata)
         if not update_map:
             return
 
@@ -2750,10 +2779,7 @@ class ImageListModel(QAbstractListModel):
                 for image in page_images:
                     if not image:
                         continue
-                    try:
-                        rel_path = str(image.path.relative_to(self._directory_path)).replace("\\", "/").casefold()
-                    except Exception:
-                        rel_path = image.path.name.casefold()
+                    rel_path = _relative_image_path_key(image, self._directory_path)
                     update = update_map.get(rel_path)
                     if not update:
                         continue
@@ -3047,7 +3073,6 @@ class ImageListModel(QAbstractListModel):
                 return str(rel).replace('\\', '/').casefold()
 
             target_norm = _norm_rel(path)
-            target_name = path.name.casefold()
             with self._page_load_lock:
                 row = 0
                 for page_num in sorted(self._pages.keys()):
@@ -3056,20 +3081,12 @@ class ImageListModel(QAbstractListModel):
                         if image_path is None:
                             row += 1
                             continue
-                        image_path_obj = Path(image_path)
-                        if (
-                            _norm_rel(image_path_obj) == target_norm
-                            or image_path_obj.name.casefold() == target_name
-                        ):
+                        if _relative_image_path_key(image, base_dir) == target_norm:
                             return int(row)
                         row += 1
         except Exception:
             pass
         return -1
-
-        # Page not loaded - trigger async load
-        self._request_page_load(page_num)
-        return None
 
     def _touch_page(self, page_num: int):
         """Update LRU order for a page."""
@@ -3079,6 +3096,8 @@ class ImageListModel(QAbstractListModel):
 
     def _request_page_load(self, page_num: int):
         """Request a page to be loaded in background."""
+        if self._shutdown_requested or self._page_executor is None:
+            return
         with self._page_load_lock:
             generation = int(self._page_load_generation)
             if self._pages.get(page_num) or page_num in self._loading_pages:
@@ -3098,7 +3117,10 @@ class ImageListModel(QAbstractListModel):
                     return
                 retry_times[page_num] = now + 2.0
             self._loading_pages.add(page_num)
+            cancel_event = threading.Event()
+            self._page_load_cancellations[(generation, int(page_num))] = cancel_event
             load_snapshot = {
+                'cancel_event': cancel_event,
                 'db': self._db,
                 'directory_path': self._directory_path,
                 'sort_field': self._sort_field,
@@ -3122,11 +3144,25 @@ class ImageListModel(QAbstractListModel):
                 self._page_load_futures[(generation, int(page_num))] = future
             except Exception:
                 self._loading_pages.discard(page_num)
+                self._page_load_cancellations.pop((generation, int(page_num)), None)
                 raise
 
     def _advance_page_load_generation(self) -> int:
         """Invalidate page workers owned by the previous model state."""
+        # A page number means a different set of files after sort/filter/reset.
+        # Neither an in-flight repair nor a cached "nothing to repair" result
+        # can be reused across that change.
+        cancel_event = getattr(self, '_enrichment_cancelled', None)
+        if cancel_event is not None:
+            cancel_event.set()
+        self._enrichment_generation = int(getattr(self, '_enrichment_generation', 0)) + 1
+        self._enrichment_running = False
+        self._enrichment_zero_scope = None
+        self._enrichment_zero_target_pages = None
         with self._page_load_lock:
+            for cancel_event in self._page_load_cancellations.values():
+                cancel_event.set()
+            self._page_load_cancellations.clear()
             for future in self._page_load_futures.values():
                 future.cancel()
             self._page_load_futures.clear()
@@ -3185,19 +3221,28 @@ class ImageListModel(QAbstractListModel):
                 images, _ = self._load_images_from_db(page_num)
         self._store_page(page_num, images)
 
-    def cancel_pending_loads_except(self, keep_pages: set[int]):
-        """Cancel obsolete queued jobs without disturbing running workers."""
+    def cancel_pending_loads_except(self, keep_pages: set[int], *, running_keep_pages=None):
+        """Cancel queued work and cooperatively stop obsolete running page reads."""
         keep_pages = set(keep_pages)
+        running_keep_pages = set(keep_pages if running_keep_pages is None else running_keep_pages)
         if getattr(self, '_initial_page_load_pending', False):
             keep_pages.add(0)  # Bootstrap completion owns the initial activity signal.
+            running_keep_pages.add(0)
         with self._page_load_lock:
             for key, future in list(self._page_load_futures.items()):
                 generation, page_num = key
-                if future.done():
+                cancelled = False
+                if not future.done() and page_num not in keep_pages:
+                    cancelled = future.cancel()
+                    if not cancelled and page_num not in running_keep_pages:
+                        cancel_event = self._page_load_cancellations.get(key)
+                        if cancel_event is not None:
+                            cancel_event.set()
+                            cancelled = True
+                if future.done() or cancelled:
                     self._page_load_futures.pop(key, None)
-                elif page_num not in keep_pages and future.cancel():
-                    self._page_load_futures.pop(key, None)
-                    if generation == self._page_load_generation:
+                    self._page_load_cancellations.pop(key, None)
+                    if cancelled and generation == self._page_load_generation:
                         self._loading_pages.discard(page_num)
 
     def _load_page_async(
@@ -3208,11 +3253,13 @@ class ImageListModel(QAbstractListModel):
     ):
         """Load a page in background thread."""
         started_at = time.monotonic()
+        cancel_event = load_snapshot.get('cancel_event')
         try:
             with self._page_load_lock:
                 if (
                     generation != self._page_load_generation
                     or page_num not in self._loading_pages
+                    or (cancel_event is not None and cancel_event.is_set())
                 ):
                     return
 
@@ -3229,11 +3276,12 @@ class ImageListModel(QAbstractListModel):
                 filter_sql=load_snapshot.get('filter_sql'),
                 filter_bindings=load_snapshot.get('filter_bindings'),
                 random_seed=load_snapshot.get('random_seed'),
+                cancel_event=cancel_event,
             )
             # Never mutate Qt model-visible page state from a worker thread.
             # Transfer the result to the model's UI-thread signal handler.
             with self._page_load_lock:
-                if generation != self._page_load_generation:
+                if generation != self._page_load_generation or (cancel_event is not None and cancel_event.is_set()):
                     return
                 self._pending_page_results[(int(generation), int(page_num))] = (
                     images,
@@ -3248,14 +3296,20 @@ class ImageListModel(QAbstractListModel):
                 print(f"[NAV] Page {page_num + 1} ready: queue={queue_ms:.0f}ms load={load_ms:.0f}ms")
             # print(f"[ASYNC_LOAD] Signal emitted for Page {page_num}")
 
+        except CancelledError:
+            pass  # Superseded navigation; never deliver a partial page.
         except Exception as e:
             print(f"[PAGE] Error loading page {page_num}: {e}")
             import traceback
             traceback.print_exc()
         finally:
             with self._page_load_lock:
-                if generation == self._page_load_generation:
+                key = (int(generation), int(page_num))
+                if generation == self._page_load_generation and (
+                    cancel_event is None or self._page_load_cancellations.get(key) is cancel_event
+                ):
                     self._loading_pages.discard(page_num)
+                    self._page_load_cancellations.pop(key, None)
 
     def _load_images_from_db(
         self,
@@ -3268,6 +3322,7 @@ class ImageListModel(QAbstractListModel):
         filter_sql: str | None = None,
         filter_bindings: tuple | None = None,
         random_seed: int | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[list[Image], list[str]]:
         """Load images from database for a specific page."""
         active_db = db or self._db
@@ -3275,6 +3330,8 @@ class ImageListModel(QAbstractListModel):
         if not active_db or not base_dir:
             return [], []
 
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError()
         rows = active_db.get_page(
             page=page_num,
             page_size=self.PAGE_SIZE,
@@ -3284,7 +3341,7 @@ class ImageListModel(QAbstractListModel):
             bindings=filter_bindings if filter_bindings is not None else self._filter_bindings,
             random_seed=random_seed if random_seed is not None else self._random_seed,
         )
-        return self._images_from_db_rows(rows, active_db, base_dir)
+        return self._images_from_db_rows(rows, active_db, base_dir, cancel_event=cancel_event)
 
     def _load_images_from_db_ids(
         self,
@@ -3306,8 +3363,15 @@ class ImageListModel(QAbstractListModel):
         rows: list[dict],
         active_db: ImageIndexDB,
         base_dir: Path,
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[list[Image], list[str]]:
         """Build Image objects from DB rows for pages and background batches."""
+        def check_cancelled():
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError()
+
+        check_cancelled()
         images = []
         missing_rel_paths: list[str] = []
         sidecar_reaction_updates: list[tuple[float, bool, bool, float | None, int]] = []
@@ -3316,6 +3380,7 @@ class ImageListModel(QAbstractListModel):
         tags_map = active_db.get_tags_for_images(image_ids)
 
         for row in rows:
+            check_cancelled()
             file_path = base_dir / row['file_name']
             img_id = row['id']
             tags = self._filter_internal_db_tags(tags_map.get(img_id, []))
@@ -3342,6 +3407,10 @@ class ImageListModel(QAbstractListModel):
                 caption_needs_review_count=int(row.get('caption_needs_review_count', 0) or 0),
                 caption_excluded_count=int(row.get('caption_excluded_count', 0) or 0),
             )
+            # Page construction runs in the loader worker. Prepare the key
+            # there so applying one repaired dimension on the UI thread does
+            # not rebuild relative paths for every resident image.
+            _relative_image_path_key(image, base_dir)
 
             # Populate metadata
             image.file_size = row.get('file_size')
@@ -3397,6 +3466,7 @@ class ImageListModel(QAbstractListModel):
 
             images.append(image)
 
+        check_cancelled()
         if sidecar_reaction_updates and hasattr(active_db, 'import_sidecar_reactions'):
             try:
                 imported = int(active_db.import_sidecar_reactions(sidecar_reaction_updates) or 0)
@@ -4099,8 +4169,8 @@ class ImageListModel(QAbstractListModel):
         
         # print(f"[PAGINATION] Processing range {start_idx}-{end_idx} (Pages {start_page}-{end_page})")
 
-        # 1. Compatibility hook: keep_pages currently no-ops for in-flight loads
-        # to avoid cancellation races. Keep call for future queue-based pruning.
+        # Keep a small margin around the window to avoid cancellation churn
+        # near page boundaries; stop obsolete reads beyond that margin.
         keep_window = set(range(start_page - 2, end_page + 3))
         self.cancel_pending_loads_except(keep_window)
 
@@ -4520,6 +4590,7 @@ class ImageListModel(QAbstractListModel):
         self._new_media_refresh_running = True
         self._new_media_refresh_generation += 1
         generation = int(self._new_media_refresh_generation)
+        page_generation = int(self._page_load_generation)
         directory_path = Path(self._directory_path)
         filter_sql = str(self._filter_sql or '')
         filter_bindings = tuple(self._filter_bindings or ())
@@ -4559,6 +4630,7 @@ class ImageListModel(QAbstractListModel):
             finally:
                 self._new_media_refresh_running = False
 
+            result['page_generation'] = page_generation
             self.new_media_refresh_finished.emit(result)
 
         self._refresh_executor.submit(worker)
@@ -4596,6 +4668,15 @@ class ImageListModel(QAbstractListModel):
         if self._db is None:
             self._db = ImageIndexDB(self._directory_path)
             self._configure_filter_db(self._db)
+
+        if result.get('page_generation', self._page_load_generation) != self._page_load_generation:
+            # The index changes are valid, but these page objects belong to
+            # the sort/filter captured before the user changed the view.
+            preloaded_pages = {}
+            new_total = int(self._db.count(
+                filter_sql=self._filter_sql, bindings=self._filter_bindings,
+            ) or 0)
+            result['view_changed_during_refresh'] = True
 
         if self._active_load_options is not None:
             refreshed_scope_rel_paths = self._db.get_limited_paths(self._active_load_options)
@@ -4727,7 +4808,14 @@ class ImageListModel(QAbstractListModel):
         if not pages_to_reload and new_total > 0:
             pages_to_reload.add(0)
 
-        preloaded = dict(preloaded_pages or {})
+        # A scan may finish after navigation has evicted its original window.
+        # Reuse prepared rows only for pages still needed by this refresh;
+        # installing the old window schedules unnecessary eviction and repair.
+        preloaded = {
+            int(page_num): images
+            for page_num, images in (preloaded_pages or {}).items()
+            if int(page_num) in pages_to_reload
+        }
         for page_num in sorted(pages_to_reload):
             if int(page_num) in preloaded:
                 continue
@@ -4879,7 +4967,7 @@ class ImageListModel(QAbstractListModel):
 
                         # Signal that enrichment is complete (for cache warming to start)
                         print(f"[ENRICH {timestamp}] Enrichment complete")
-                        self.enrichment_complete.emit()
+                        self._notify_enrichment_complete()
 
                         # Clear timer reference
                         self._final_recalc_timer = None
@@ -5411,6 +5499,8 @@ class ImageListModel(QAbstractListModel):
         """
         if self._shutdown_requested:
             return
+        cache_db = self._db
+        cache_directory = getattr(cache_db, '_directory_path', None)
         import time
 
         # Small delay to prevent disk I/O saturation
@@ -5431,11 +5521,11 @@ class ImageListModel(QAbstractListModel):
                 )
 
             # Queue DB update for deferred batch write (when truly idle)
-            if self._db and self._directory_path:
+            if cache_db and cache_directory:
                 try:
-                    relative_path = str(path.relative_to(self._directory_path))
+                    relative_path = str(path.relative_to(cache_directory))
                     with self._pending_db_cache_flags_lock:
-                        self._pending_db_cache_flags.append(relative_path)
+                        self._pending_db_cache_flags.append((cache_db, relative_path))
                         # REMOVED: Immediate flush every 100 items (caused blocking)
                         # DB updates now deferred to idle time (5+ seconds after scrolling stops)
                 except ValueError:
@@ -5469,26 +5559,32 @@ class ImageListModel(QAbstractListModel):
 
             batch = list(self._pending_db_cache_flags)
             self._pending_db_cache_flags.clear()
+        active_db = self._db
+        batch = list(dict.fromkeys(path for db, path in batch if db is active_db))
+        if active_db is None or not batch:
+            return
 
         # Submit DB flush to background thread (never blocks main thread)
         def db_flush_worker():
             """Worker function that performs DB commit in small chunks."""
             import time
-            if not self._db:
+            if self._db is not active_db:
                 return
             CHUNK = 50
             total = len(batch)
             flushed = 0
             try:
                 for i in range(0, total, CHUNK):
+                    if self._shutdown_requested or self._db is not active_db:
+                        return
                     chunk = batch[i:i + CHUNK]
-                    with self._db._db_lock:
-                        cursor = self._db.conn.cursor()
+                    with active_db._db_lock:
+                        cursor = active_db.conn.cursor()
                         cursor.executemany(
                             'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ?',
                             [(fn,) for fn in chunk]
                         )
-                        self._db.conn.commit()
+                        active_db.conn.commit()
                     flushed += len(chunk)
                     # Yield between chunks so page loads can acquire the lock
                     if i + CHUNK < total:
@@ -5506,6 +5602,8 @@ class ImageListModel(QAbstractListModel):
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
+        self._advance_page_load_generation()
+        self._enrichment_cancelled.set()
 
         # Stop timers that can enqueue additional work while shutting down.
         for timer_name in (
@@ -6162,6 +6260,27 @@ class ImageListModel(QAbstractListModel):
                 return f'{path}\n{dimensions} 🠮 {target}'
             return f'{path}\n{dimensions}'
 
+    def _notify_enrichment_complete(self, *, tags_changed=True):
+        # Capture the kind of completed work at its source. Reading mutable
+        # scope state in a queued listener can observe a newer repair job.
+        if tags_changed:
+            self.enrichment_tags_updated.emit()
+        self.enrichment_complete.emit()
+
+    @Slot(object)
+    def _on_paginated_enrichment_finished(self, result):
+        generation, dataset_identity, tags_changed = result
+        if (dataset_identity != (self._page_load_generation, self._directory_path)
+                or self._shutdown_requested):
+            return
+        if generation != self._enrichment_generation:
+            # A newer repair owns the layout, but committed tag changes from
+            # this same dataset still need their count notification.
+            if tags_changed:
+                self.enrichment_tags_updated.emit()
+            return
+        self._notify_enrichment_complete(tags_changed=tags_changed)
+
     def _start_paginated_enrichment(self, *, window_pages=None, scope='window'):
         """Start background enrichment for paginated mode (using DB placeholders).
 
@@ -6173,6 +6292,8 @@ class ImageListModel(QAbstractListModel):
                    on completion), 'preload' for ahead-of-scroll enrichment
                    (no masonry refresh, no retrigger).
         """
+        if self._shutdown_requested or self._enrichment_executor is None:
+            return
         # Snapshot the window pages for the worker closure
         _window_page_set = set(window_pages) if window_pages is not None else None
         requested_target_pages = (
@@ -6209,8 +6330,8 @@ class ImageListModel(QAbstractListModel):
         # Cancel only when retargeting a different enrichment job.
         if getattr(self, '_enrichment_running', False) and hasattr(self, '_enrichment_cancelled'):
             self._enrichment_cancelled.set()
-            # Non-blocking: worker checks cancel flag every 10 files (~20ms),
-            # so it will notice quickly without blocking the UI thread here.
+            # Non-blocking: the worker checks between files. An individual
+            # filesystem/decoder call can still take longer to return.
             self._enrichment_cancelled = threading.Event()
         elif not hasattr(self, '_enrichment_cancelled') or self._enrichment_cancelled.is_set():
             self._enrichment_cancelled = threading.Event()
@@ -6230,21 +6351,35 @@ class ImageListModel(QAbstractListModel):
             self._enrichment_log_batches = 0
             self._enrichment_log_total = 0
 
-        def enrich_worker():
+        # Keep file reads, DB writes, and queued UI updates tied to the same
+        # dataset even if a folder/sort switch occurs while a file is open.
+        dataset_identity = (self._page_load_generation, self._directory_path)
+        directory_path = self._directory_path
+        sort_snapshot = (self._sort_field, self._sort_dir, self._filter_sql,
+                         tuple(self._filter_bindings or ()), self._random_seed)
+
+        def is_current():
+            return (
+                generation == int(getattr(self, '_enrichment_generation', 0))
+                and not cancel_event.is_set()
+                and dataset_identity == (self._page_load_generation, self._directory_path)
+            )
+
+        def enrich_worker_body():
              from utils.image_index_db import ImageIndexDB
              from utils.image import Image
              import time
              from pathlib import Path
 
-             if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
+             if not is_current():
                  return
 
-             if not self._directory_path:
+             if not directory_path:
                  if generation == int(getattr(self, '_enrichment_generation', 0) or 0):
                      self._enrichment_running = False
                  return
 
-             db_bg = ImageIndexDB(self._directory_path)
+             db_bg = ImageIndexDB(directory_path)
 
              def describe_scope(page_set) -> str:
                  phase = 'window repair' if scope == 'window' else 'preload warmup'
@@ -6269,12 +6404,10 @@ class ImageListModel(QAbstractListModel):
                  pages_sorted = sorted(_window_page_set)
                  center = pages_sorted[len(pages_sorted) // 2]
                  page_size = self.PAGE_SIZE if hasattr(self, 'PAGE_SIZE') else 1000
-                 _sort_field = getattr(self, '_sort_field', 'file_name')
-                 _sort_dir = getattr(self, '_sort_dir', 'ASC')
-                 _filter_sql = getattr(self, '_filter_sql', '')
-                 _filter_bindings = getattr(self, '_filter_bindings', ())
-                 _random_seed = getattr(self, '_random_seed', 1234567)
+                 _sort_field, _sort_dir, _filter_sql, _filter_bindings, _random_seed = sort_snapshot
                  for page_num in sorted(pages_sorted, key=lambda p: abs(p - center)):
+                     if not is_current():
+                         return
                      start_rank = page_num * page_size
                      end_rank = start_rank + page_size
                      page_placeholders = db_bg.get_placeholder_files_in_range(
@@ -6308,7 +6441,7 @@ class ImageListModel(QAbstractListModel):
                              if not image:
                                  continue
                              try:
-                                 rel_path = str(image.path.relative_to(self._directory_path))
+                                 rel_path = str(image.path.relative_to(directory_path))
                              except Exception:
                                  rel_path = image.path.name
                              dims = image.dimensions
@@ -6332,6 +6465,8 @@ class ImageListModel(QAbstractListModel):
              placeholders = placeholders[:max_enrich_per_cycle]
              placeholder_count = len(placeholders)
 
+             if not is_current():
+                 return
              if not placeholders:
                  self._enrichment_zero_scope = scope
                  self._enrichment_zero_target_pages = requested_target_pages
@@ -6371,26 +6506,15 @@ class ImageListModel(QAbstractListModel):
              video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
              
              for i, rel_path in enumerate(placeholders):
-                 if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
+                 if not is_current():
                      db_bg.commit()
-                     return
-
-                 if cancel_event is not None and cancel_event.is_set():
-                     db_bg.commit()
-                     if generation == int(getattr(self, '_enrichment_generation', 0) or 0):
-                         self._enrichment_running = False
-                     diagnostic_print("[ENRICH] Cancelled", detail="verbose")
-                     diagnostic_print(
-                         f"{diagnostic_time_prefix()} [ENRICH] Cancelled {scope_label}",
-                         detail="essential",
-                     )
                      return
 
                  # Yield disk time every 10 files to avoid blocking thumbnail I/O
                  if i > 0 and i % 10 == 0:
                      time.sleep(0.002)
 
-                 full_path = self._directory_path / rel_path
+                 full_path = directory_path / rel_path
                  
                  try:
                       is_video = Path(rel_path).suffix.lower() in video_extensions
@@ -6502,7 +6626,7 @@ class ImageListModel(QAbstractListModel):
                       pass
 
              db_bg.commit()
-             if generation != int(getattr(self, '_enrichment_generation', 0) or 0):
+             if not is_current():
                  return
              if enriched_count > 0:
                  self._enrichment_zero_scope = None
@@ -6518,7 +6642,7 @@ class ImageListModel(QAbstractListModel):
              self._enrichment_running = False
              if paginated_ui_updates:
                  try:
-                     self._queue_paginated_dimension_updates(paginated_ui_updates)
+                     self._queue_paginated_dimension_updates(paginated_ui_updates, dataset_identity=dataset_identity)
                  except Exception:
                      pass
              self._enrichment_log_total += enriched_count
@@ -6544,7 +6668,19 @@ class ImageListModel(QAbstractListModel):
              )
 
              # Signal completion from background thread
-             self.enrichment_complete.emit()
+             self.paginated_enrichment_finished.emit(
+                 (generation, dataset_identity, not scoped_page_repair)
+             )
+
+        def enrich_worker():
+            try:
+                enrich_worker_body()
+            finally:
+                # An obsolete worker must not clear a replacement's running
+                # flag, but cancellation/errors must not strand its own flag.
+                if (generation == self._enrichment_generation
+                        and self._enrichment_cancelled is cancel_event):
+                    self._enrichment_running = False
 
         self._enrichment_executor.submit(enrich_worker)
 
@@ -6675,7 +6811,7 @@ class ImageListModel(QAbstractListModel):
                 f"({tag_updates:,} tag sidecar(s), {ideogram_updates:,} Ideogram sidecar(s))"
             )
             self.background_validation_progress.emit("Applying caption refresh...", 0, 0, False)
-            self.enrichment_complete.emit()
+            self._notify_enrichment_complete()
             self.background_validation_progress.emit("", -1, 0, True)
             return
 
@@ -8239,6 +8375,15 @@ class ImageListModel(QAbstractListModel):
         """Get all tags with counts from DB (paginated mode)."""
         if self._db:
              return self._db.get_all_tags()
+        return []
+
+    def get_filtered_tags_stats(self) -> list[dict]:
+        """Get full-folder tag counts for the current paginated filter."""
+        if self._db:
+            return self._db.get_filtered_tags(
+                filter_sql=self._filter_sql,
+                bindings=self._filter_bindings,
+            )
         return []
 
     def add_to_undo_stack(self, action_name: str,
