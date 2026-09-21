@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.16] - 2026-09-21
+
+### Added
+
+- Make distant page jumps land on the requested item and remain stable
+- Load thumbnails above and below the landing line more evenly
+- Reduce blocking when scrolling or clicking immediately after a jump
+- Prevent blank page boundaries and stale background work after rapid navigation
+- Restore the saved image-list position more reliably after startup
+
+### Changed
+
+- Improve large-folder image list navigation
+- Improve filtered tag counts and background refresh behavior in large folders
 ## [1.6.15] - 2026-09-18
 
 ### Added
