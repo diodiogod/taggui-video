@@ -170,3 +170,25 @@ behavior is unchanged.
    counts cover the entire result, not only visible/resident pages.
 6. Run “Refresh New Media Only” in each browser after changing selection,
    filter, or folder during the scan; confirm stale state is not restored.
+
+## Second follow-up trace (2026-09-21)
+
+The next trace showed a fast page-20 landing (578 ms load, 797 ms positioned)
+and a cold page-11 landing (8.30 s load, 8.64 s positioned). After positioning,
+three avoidable UI paths were sampled: proxy invalidation during wheel input,
+thumbnail preloading consuming completed futures through `DecorationRole`, and
+the hidden Quick Sort panel synchronously recounting its eligible database
+domain.
+
+The proxy now waits until the 200 ms scroll-idle boundary before rebuilding its
+native row mapping. Paginated preloading now submits thumbnail I/O without
+performing offscreen QImage-to-QPixmap conversion; visible painting consumes
+the result. Quick Sort eligibility recounts stop while the panel is hidden and
+defer while a jump or wheel gesture is active. The masonry click fallback also
+uses numeric rectangle bounds instead of allocating one QRect per cached item.
+
+The 8.30-second target-page load is separate: the page worker materializes
+1,000 records, validates file existence, and reads applicable metadata sidecars.
+Removing those checks would change visible-file and sidecar behavior, so this
+pass does not bypass them without a dedicated ownership/deferred-hydration
+design and measurement.

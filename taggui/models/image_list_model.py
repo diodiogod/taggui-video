@@ -5125,6 +5125,47 @@ class ImageListModel(QAbstractListModel):
         )
         self._track_thumbnail_future(idx, image.path, future)
 
+    def queue_paginated_thumbnail_load(self, global_index: int) -> bool:
+        """Submit paginated thumbnail I/O without converting its result on the UI thread."""
+        if not self._paginated_mode or self._pause_thumbnail_loading:
+            return False
+        try:
+            global_index = int(global_index)
+            page_num, page_offset = divmod(global_index, self.PAGE_SIZE)
+        except (TypeError, ValueError):
+            return False
+        with self._page_load_lock:
+            page = self._pages.get(page_num)
+            image = page[page_offset] if page is not None and page_offset < len(page) else None
+        if image is None or image.thumbnail is not None or image.thumbnail_qimage is not None:
+            return bool(image is not None)
+        executor = self._load_executor
+        if self._shutdown_requested or executor is None:
+            return False
+
+        job_key = image.path
+        crop_key = _thumbnail_crop_key(getattr(image, 'crop', None))
+        with self._thumbnail_lock:
+            entry = self._thumbnail_futures.get(job_key)
+            if entry is not None:
+                submitted_path = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else None
+                submitted_crop = entry[2] if isinstance(entry, tuple) and len(entry) > 2 else None
+                if submitted_path == image.path and submitted_crop == crop_key:
+                    return True
+                future = entry[0] if isinstance(entry, tuple) else entry
+                if not future.done() and not future.cancel():
+                    return False
+                self._thumbnail_futures.pop(job_key, None)
+            future = executor.submit(
+                self._load_thumbnail_async,
+                image.path,
+                image.crop,
+                image.is_video,
+                global_index,
+            )
+            self._thumbnail_futures[job_key] = (future, image.path, crop_key)
+        return True
+
     def _track_thumbnail_future(self, idx: int, path: Path, future):
         """Register a thumbnail task before allowing completion cleanup."""
         with self._thumbnail_lock:

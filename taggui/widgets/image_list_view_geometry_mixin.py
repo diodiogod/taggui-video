@@ -2759,8 +2759,15 @@ class ImageListViewGeometryMixin:
                 if not hasattr(self, '_masonry_index_map') or self._masonry_index_map is None:
                     self._rebuild_masonry_index_map()
                 for global_idx, item in self._masonry_index_map.items():
-                    item_rect = QRect(item['x'], item['y'], item['width'], item['height'])
-                    if item_rect.contains(adjusted_point):
+                    # This fallback can inspect thousands of cached items on a
+                    # wheel event. Numeric bounds avoid allocating a QRect for
+                    # every item before finding the one under the cursor.
+                    item_x = int(item['x'])
+                    item_y = int(item['y'])
+                    if (
+                        item_x <= adjusted_point.x() <= item_x + int(item['width'])
+                        and item_y <= adjusted_point.y() <= item_y + int(item['height'])
+                    ):
                         hit_global = int(global_idx)
                         break
 

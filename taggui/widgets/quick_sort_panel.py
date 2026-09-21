@@ -1500,6 +1500,9 @@ class QuickSortPanel(QDockWidget):
         if self._loading_ui:
             return
         self._set_configuration_ready(False)
+        if not self.isVisible():
+            self._count_refresh_timer.stop()
+            return
         if self.controller is None or bool(getattr(self.controller, "active", False)):
             self._count_refresh_timer.stop()
             return
@@ -1524,7 +1527,7 @@ class QuickSortPanel(QDockWidget):
         return None
 
     def _refresh_eligible_count(self):
-        if self._loading_ui or self.controller is None:
+        if self._loading_ui or self.controller is None or not self.isVisible():
             return
         if bool(getattr(self.controller, "active", False)):
             return
@@ -1536,6 +1539,15 @@ class QuickSortPanel(QDockWidget):
         except (QuickSortValidationError, KeyError, RuntimeError):
             self._pending_count_key = None
             self._refresh_summary()
+            return
+        list_view = getattr(context.get("image_list"), "list_view", None)
+        jump_settling = bool(
+            list_view is not None
+            and hasattr(list_view, "_has_pending_explicit_jump_hold")
+            and list_view._has_pending_explicit_jump_hold()
+        )
+        if jump_settling or bool(getattr(context["model"], "_is_scrolling", False)):
+            self._count_refresh_timer.start(500)
             return
         if getattr(context["model"], "_directory_path", None) is None:
             self._pending_count_key = None
@@ -1722,6 +1734,7 @@ class QuickSortPanel(QDockWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._invalidate_eligible_count()
         self._refresh_summary()
 
     def _install_zoom_filter_tree(self, widget: QWidget):

@@ -8,6 +8,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "taggui"))
 from models.image_list_model import ImageListModel
 
 
+def test_paginated_preload_submits_without_consuming_thumbnail_result(tmp_path):
+    submitted = []
+    future = Future()
+    image = SimpleNamespace(
+        path=tmp_path / 'image.png', crop=None, is_video=False,
+        thumbnail=None, thumbnail_qimage=None,
+    )
+    model = SimpleNamespace(
+        _paginated_mode=True, _pause_thumbnail_loading=False,
+        PAGE_SIZE=1000, _pages={4: [image]},
+        _page_load_lock=threading.Lock(), _thumbnail_lock=threading.Lock(),
+        _thumbnail_futures={}, _shutdown_requested=False,
+        _load_executor=SimpleNamespace(
+            submit=lambda *args: submitted.append(args) or future,
+        ),
+        _load_thumbnail_async=lambda *args: None,
+    )
+    queue = ImageListModel.queue_paginated_thumbnail_load
+    assert queue(model, 4000)
+    assert len(submitted) == 1
+    assert queue(model, 4000)
+    assert len(submitted) == 1
+
+
+def test_proxy_page_remap_waits_until_wheel_scrolling_stops():
+    from models.proxy_image_list_model import ProxyImageListModel
+
+    delays, invalidations = [], []
+    source = SimpleNamespace(_native_qt_drag_active=False, _is_scrolling=True)
+    proxy = SimpleNamespace(
+        sourceModel=lambda: source,
+        _pages_update_timer=SimpleNamespace(start=delays.append),
+        _last_proxy_invalidate_ts=0.0,
+        invalidate=lambda: invalidations.append(True),
+    )
+    ProxyImageListModel._flush_pages_updated(proxy)
+    assert delays == [220]
+    assert invalidations == []
+
+
 def test_secondary_browser_counts_paginated_tags_without_thumbnail_recounts():
     from PySide6.QtCore import Qt
     from widgets.secondary_browser import SecondaryBrowser

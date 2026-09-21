@@ -67,6 +67,13 @@ class ProxyImageListModel(QSortFilterProxyModel):
             return
         is_scrolling = bool(getattr(source_model, '_is_scrolling', False))
         now = time.monotonic()
+        if is_scrolling:
+            # invalidate() rebuilds the native proxy mapping for every
+            # resident row and can take hundreds of milliseconds. Pages may
+            # wait briefly while wheel input is active; the final mapping is
+            # still applied after the view's scroll-idle callback.
+            self._pages_update_timer.start(220)
+            return
         min_interval = 0.25 if is_scrolling else 0.08
         remaining = min_interval - (now - self._last_proxy_invalidate_ts)
         if remaining > 0:

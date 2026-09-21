@@ -730,7 +730,17 @@ class ImageListViewPreloadMixin:
                 # model's async thumbnail pipeline and de-duping futures map.
                 proxy_index = self._proxy_index_from_global(idx)
                 if proxy_index.isValid():
-                    _ = proxy_index.data(Qt.ItemDataRole.DecorationRole)
+                    if (
+                        getattr(source_model, '_paginated_mode', False)
+                        and hasattr(source_model, 'queue_paginated_thumbnail_load')
+                    ):
+                        # Only submit background I/O here. Reading DecorationRole
+                        # also consumes completed futures and performs
+                        # QImage->QPixmap conversion on the UI thread, including
+                        # for offscreen high/low-priority items.
+                        source_model.queue_paginated_thumbnail_load(idx)
+                    else:
+                        _ = proxy_index.data(Qt.ItemDataRole.DecorationRole)
                     self._pagination_loaded_items.add(idx)
                     loaded += 1
             return loaded
