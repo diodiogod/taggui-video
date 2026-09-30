@@ -5230,7 +5230,10 @@ class MainWindow(QMainWindow):
         return viewers
 
     def _selection_wall_any_playing(self) -> bool:
-        """True when any masonry-wall video is actively playing."""
+        """Return the wall's global play state, including while seeks settle."""
+        coordinator = getattr(self, '_sync_coordinator', None)
+        if coordinator is not None and getattr(self, '_sync_scope', '') == 'selection_wall':
+            return not coordinator.is_paused()
         for viewer in self._selection_wall_video_viewers():
             try:
                 player = getattr(viewer, 'video_player', None)
@@ -6464,6 +6467,22 @@ class MainWindow(QMainWindow):
         self._sync_scope = 'manual'
         self._sync_viewer_ids.clear()
 
+    def realign_video_playback_from_window(self, source_window: FloatingViewerWindow):
+        """Realign wall playback to the clicked video without restarting the cycle."""
+        target_viewers = self._iter_window_scoped_sync_viewers(source_window)
+        reference_viewer = source_window.viewer
+        if not bool(getattr(reference_viewer, '_is_video_loaded', False)):
+            return
+        if not getattr(reference_viewer.video_player, 'video_path', None):
+            return
+        paused = not self._selection_wall_any_playing()
+        self._pause_viewers_outside_sync_group(target_viewers)
+        self._start_video_sync_for_viewers(
+            target_viewers, scope='selection_wall', reference_viewer=reference_viewer,
+            paused=paused,
+        )
+        self._refresh_selection_wall_speed_overlay()
+
     def _stop_active_sync_coordinator(self):
         """Stop the active sync coordinator and clear its tracked membership."""
         if self._sync_coordinator is not None:
@@ -6495,7 +6514,10 @@ class MainWindow(QMainWindow):
             return
         self._stop_active_sync_coordinator()
 
-    def _start_video_sync_for_viewers(self, viewers: list[ImageViewer], *, scope: str = 'manual') -> list[ImageViewer]:
+    def _start_video_sync_for_viewers(
+        self, viewers: list[ImageViewer], *, scope: str = 'manual',
+        reference_viewer: ImageViewer | None = None, paused: bool = False,
+    ) -> list[ImageViewer]:
         """Start the global sync coordinator for a specific viewer subset."""
         self._stop_active_sync_coordinator()
 
@@ -6520,7 +6542,7 @@ class MainWindow(QMainWindow):
         self._sync_coordinator = VideoSyncCoordinator(loaded_video_viewers, parent=self)
         self._sync_scope = str(scope or 'manual')
         self._sync_viewer_ids = {id(viewer) for viewer in loaded_video_viewers}
-        self._sync_coordinator.start()
+        self._sync_coordinator.start(reference_viewer=reference_viewer, paused=paused)
         return loaded_video_viewers
 
     def _create_floating_viewer_payload(
@@ -6560,6 +6582,9 @@ class MainWindow(QMainWindow):
         window.closing.connect(self._on_floating_viewer_closed)
         window.sync_video_requested.connect(
             lambda current_window=window: self.sync_video_playback_from_window(current_window)
+        )
+        window.realign_video_requested.connect(
+            lambda current_window=window: self.realign_video_playback_from_window(current_window)
         )
         window.close_all_requested.connect(self.close_all_floating_viewers)
         window.compare_drag_started.connect(self._on_compare_drag_window_started)

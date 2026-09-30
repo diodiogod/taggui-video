@@ -458,6 +458,7 @@ class FloatingViewerWindow(QWidget):
     activated = Signal(object)  # Emits hosted viewer
     closing = Signal(object)    # Emits hosted viewer
     sync_video_requested = Signal()
+    realign_video_requested = Signal()
     close_all_requested = Signal()
     compare_drag_started = Signal(object, QPoint)
     compare_drag_moved = Signal(object, QPoint)
@@ -1528,6 +1529,11 @@ class FloatingViewerWindow(QWidget):
             except Exception:
                 exit_compare_action = None
         sync_action = menu.addAction("Sync video")
+        realign_action = None
+        if bool(getattr(self, '_selection_masonry_wall_window', False)):
+            realign_action = menu.addAction("Realign wall from current frame")
+            realign_action.setEnabled(bool(getattr(self.viewer, '_is_video_loaded', False)))
+            realign_action.setToolTip("Realign the wall to this video's current position, keeping the global pause/play state.")
         parent = self.parentWidget()
         arrange_windows = getattr(parent, "arrange_floating_windows_as_masonry", None) if parent is not None else None
         toggle_wall_controls = getattr(parent, "set_selection_masonry_wall_controls_enabled_for_window", None) if parent is not None else None
@@ -1557,6 +1563,8 @@ class FloatingViewerWindow(QWidget):
                     pass
         elif selected is sync_action:
             self.sync_video_requested.emit()
+        elif realign_action is not None and selected is realign_action:
+            self.realign_video_requested.emit()
         elif selected is arrange_action and callable(arrange_windows):
             try:
                 arrange_windows()

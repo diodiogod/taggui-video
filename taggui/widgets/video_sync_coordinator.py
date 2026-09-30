@@ -155,10 +155,15 @@ class _PlayerEntry:
                 pass
 
     def seek_to_start(self):
+        self.seek_to_frame(int(self.start_ms / 1000.0 * self.player.fps))
+
+    def seek_to_frame(self, frame_number: int):
+        """Seek a paused entry, including recovery from VLC's terminal state."""
         player = self.player
+        target_ms = frame_number / player.fps * 1000.0 if player.fps > 0 else 0.0
         try:
             if player.fps > 0:
-                player.seek_to_frame(int(self.start_ms / 1000.0 * player.fps))
+                player.seek_to_frame(frame_number)
         except Exception:
             pass
         if player.vlc_player is not None:
@@ -179,13 +184,13 @@ class _PlayerEntry:
             except Exception:
                 pass
             try:
-                player.vlc_player.set_time(int(max(0.0, self.start_ms)))
+                player.vlc_player.set_time(int(max(0.0, target_ms)))
             except Exception:
                 pass
             try:
-                player._vlc_estimated_position_ms = float(self.start_ms)
+                player._vlc_estimated_position_ms = float(target_ms)
                 player._vlc_end_reached_flag = False
-                player._vlc_last_progress_ms = float(self.start_ms)
+                player._vlc_last_progress_ms = float(target_ms)
                 player._vlc_stall_ticks = 0
             except Exception:
                 pass
@@ -234,11 +239,27 @@ class _PlayerEntry:
         except Exception:
             pass
 
-    def is_ready(self) -> bool:
-        """True when the player is fully paused (not Playing/Buffering in VLC)."""
+    def is_ready(self, target_frame: int | None = None) -> bool:
+        """Check pause state and, for realignment, that the target seek settled."""
         player = self.player
         if bool(getattr(player, 'is_playing', False)):
             return False
+        if target_frame is not None and player.mpv_player is not None:
+            if getattr(player, '_mpv_seek_pending_ms', None) is not None:
+                return False
+            if not player._mpv_ready_for_seeks or not player._mpv_vo_ready:
+                return False
+            try:
+                if player.mpv_player.seeking:
+                    return False
+                position = player.mpv_player.time_pos
+                if position is None:
+                    return False
+                if player.fps > 0:
+                    if abs(float(position) * player.fps - target_frame) > 1.0:
+                        return False
+            except Exception:
+                pass
         if player.vlc_player is not None:
             try:
                 from utils.video.playback_backend import VLC_PYTHON_MODULE
@@ -254,6 +275,20 @@ class _PlayerEntry:
                         return False
             except Exception:
                 pass
+            if target_frame is not None and player.fps > 0:
+                try:
+                    position_ms = player.vlc_player.get_time()
+                    if position_ms < 0 or abs(position_ms * player.fps / 1000.0 - target_frame) > 1.0:
+                        return False
+                except Exception:
+                    pass
+        elif (
+            target_frame is not None and player.mpv_player is None
+            and getattr(player, '_qt_video_source_path', None) is not None
+            and player.fps > 0
+        ):
+            if abs(player.media_player.position() * player.fps / 1000.0 - target_frame) > 1.0:
+                return False
         return True
 
     def show_sync_icon(self):
@@ -314,6 +349,7 @@ class VideoSyncCoordinator(QObject):
         self._warmup_step_ms = 0
         self._paused = False
         self._paused_started_monotonic = 0.0
+        self._barrier_frame_targets: dict[int, int] | None = None
 
         # Barrier poll timer — only active during barrier phase.
         self._poll_timer = QTimer(self)
@@ -333,9 +369,10 @@ class VideoSyncCoordinator(QObject):
     # Public API
     # ------------------------------------------------------------------
 
-    def start(self):
+    def start(self, *, reference_viewer=None, paused: bool = False):
         if not self._entries:
             return
+        self._paused = bool(paused)
         for entry in self._entries:
             try:
                 entry.resolve_bounds()
@@ -343,6 +380,9 @@ class VideoSyncCoordinator(QObject):
                 pass
 
         self._refresh_runtime_expectations()
+        frame_targets = None
+        if reference_viewer is not None:
+            frame_targets = self._resolve_current_frame_targets(reference_viewer)
 
         for entry in self._entries:
             if self._show_sync_icon:
@@ -356,6 +396,13 @@ class VideoSyncCoordinator(QObject):
             except Exception:
                 pass
 
+        if frame_targets is not None:
+            # Wall videos are already loaded. Startup priming would hide the
+            # live frame behind the old thumbnail before the realignment.
+            self._state = self._STATE_BARRIER
+            self._begin_barrier(frame_targets=frame_targets)
+            return
+
         self._state = self._STATE_WARMING
         self._warmup_index = 0
         if len(self._entries) >= _HEAVY_WARMUP_THRESHOLD:
@@ -365,6 +412,36 @@ class VideoSyncCoordinator(QObject):
             self._warmup_batch_size = max(1, len(self._entries))
             self._warmup_step_ms = 0
         self._run_warmup_batch()
+
+    def _resolve_current_frame_targets(self, reference_viewer) -> dict[int, int]:
+        """Align the current cycle to the clicked viewer before warmup can move it."""
+        reference = next(e for e in self._entries if e.viewer is reference_viewer)
+        player = reference.player
+        position_ms = player.get_current_frame_number() / max(1.0, player.fps) * 1000.0
+        if player.is_playing:
+            sampled_position = reference.current_position_ms()
+            if player.mpv_player is not None:
+                try:
+                    native_position = player.mpv_player.time_pos
+                    if native_position is not None:
+                        sampled_position = float(native_position) * 1000.0
+                except Exception:
+                    pass
+            if sampled_position is not None:
+                position_ms = sampled_position
+        reference_speed = max(0.1, abs(float(player.playback_speed or 1.0)))
+        elapsed_ms = max(0.0, position_ms - reference.start_ms) / reference_speed
+        targets = {}
+        for entry in self._entries:
+            speed = max(0.1, abs(float(entry.player.playback_speed or 1.0)))
+            target_ms = entry.start_ms + elapsed_ms * speed
+            frame = int(round(target_ms * entry.player.fps / 1000.0))
+            last_frame = max(0, int(entry.player.get_total_frames()) - 1)
+            if entry.end_frame is not None:
+                last_frame = min(last_frame, entry.end_frame)
+            first_frame = entry.start_frame or 0
+            targets[id(entry.viewer)] = max(first_frame, min(last_frame, frame))
+        return targets
 
     def stop(self):
         self._poll_timer.stop()
@@ -451,17 +528,19 @@ class VideoSyncCoordinator(QObject):
     # Barrier
     # ------------------------------------------------------------------
 
-    def _begin_barrier(self):
+    def _begin_barrier(self, *, frame_targets: dict[int, int] | None = None):
         if self._state == self._STATE_IDLE:
             return
         self._running_timer.stop()
+        self._watchdog_timer.stop()
+        self._barrier_frame_targets = frame_targets
         self._finished_count = 0
         for entry in self._entries:
             entry.finished = False
         for entry in self._entries:
             entry.pause_hard()
         for entry in self._entries:
-            entry.seek_to_start()
+            self._seek_barrier_entry(entry)
         now = time.monotonic()
         self._pause_issued_monotonic = now
         self._barrier_start_monotonic = now
@@ -472,14 +551,25 @@ class VideoSyncCoordinator(QObject):
         if self._state != self._STATE_BARRIER:
             return
         for entry in self._entries:
-            entry.seek_to_start()
+            self._seek_barrier_entry(entry)
             entry.pause_hard()
+
+    def _seek_barrier_entry(self, entry: _PlayerEntry):
+        targets = self._barrier_frame_targets
+        if targets is None:
+            entry.seek_to_start()
+        else:
+            entry.seek_to_frame(targets[id(entry.viewer)])
 
     @Slot()
     def _poll_barrier(self):
         timed_out = (time.monotonic() - self._barrier_start_monotonic) * 1000.0 >= _MAX_BARRIER_MS
         settled = (time.monotonic() - self._pause_issued_monotonic) * 1000.0 >= _MIN_SETTLE_MS
-        all_ready = all(e.is_ready() for e in self._entries)
+        targets = self._barrier_frame_targets
+        all_ready = all(
+            e.is_ready(targets[id(e.viewer)] if targets is not None else None)
+            for e in self._entries
+        )
 
         if (settled and all_ready) or timed_out:
             elapsed = (time.monotonic() - self._barrier_start_monotonic) * 1000.0
@@ -587,6 +677,10 @@ class VideoSyncCoordinator(QObject):
         remaining_ms = max(1, int((self._longest_duration_ms + _STALL_TIMEOUT_MS) - elapsed_ms))
         self._watchdog_timer.start(remaining_ms)
 
+    def is_paused(self) -> bool:
+        """Return the requested global state, including during a seek barrier."""
+        return self._paused
+
     def set_paused(self, paused: bool):
         """Pause or resume the active running cycle without dropping sync membership."""
         paused = bool(paused)
@@ -629,19 +723,35 @@ class VideoSyncCoordinator(QObject):
     # ------------------------------------------------------------------
 
     def _fire_play_all(self):
+        """Finish the seek barrier and honor the requested global playback state."""
+        elapsed_ms = 0.0
+        if self._barrier_frame_targets is not None:
+            elapsed_ms = max(
+                (
+                    max(0.0, self._barrier_frame_targets[id(e.viewer)]
+                        / max(1.0, e.player.fps) * 1000.0 - e.start_ms)
+                    / max(0.1, abs(float(e.player.playback_speed or 1.0)))
+                    for e in self._entries
+                ), default=0.0,
+            )
+        self._barrier_frame_targets = None
         self._state = self._STATE_RUNNING
-        self._paused = False
         self._paused_started_monotonic = 0.0
         self._finished_count = 0
         for entry in self._entries:
             entry.finished = False
         self._refresh_runtime_expectations()
-        self._play_started_monotonic = time.monotonic()
+        self._play_started_monotonic = time.monotonic() - elapsed_ms / 1000.0
+        if self._paused:
+            self._paused_started_monotonic = time.monotonic()
+            self._running_timer.stop()
+            self._watchdog_timer.stop()
+            return
         _sync_log(f"[SYNC] firing play on {len(self._entries)} players")
         for entry in self._entries:
             entry.fire_play()
         self._running_timer.start()
-        watchdog_ms = int(self._longest_duration_ms + _STALL_TIMEOUT_MS)
+        watchdog_ms = max(1, int(self._longest_duration_ms - elapsed_ms + _STALL_TIMEOUT_MS))
         if watchdog_ms > 0:
             self._watchdog_timer.start(watchdog_ms)
         _sync_log(f"[SYNC] watchdog set for {watchdog_ms}ms")

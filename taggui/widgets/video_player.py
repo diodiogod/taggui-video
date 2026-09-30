@@ -2315,6 +2315,11 @@ class VideoPlayerWidget(QWidget):
             self._mpv_play_started_monotonic = time.monotonic()
         if self.mpv_player is None:
             return
+        if not self.is_playing and self._mpv_paused_seek_cover_active:
+            # A previous seek's paint signal/timeout must not reveal the
+            # surface while this newer target is still being coalesced.
+            self._mpv_paused_seek_reveal_generation += 1
+            self._clear_mpv_paused_seek_reveal_handler()
         # Pause MPV immediately on first seek of a scrub gesture to prevent
         # audio/video drift during rapid scrubbing.
         if not self._mpv_seek_timer.isActive() and self.is_playing and self._is_mpv_forward_active():
@@ -3017,6 +3022,11 @@ class VideoPlayerWidget(QWidget):
 
     def pause(self):
         """Pause playback and show exact frame with OpenCV."""
+        if not self.is_playing and self._mpv_paused_seek_cover_active:
+            # Repeated wall frame steps must keep the in-flight seek cover.
+            # Revealing MPV here hides that cover; the following seek then
+            # hides MPV and exposes the stale startup pixmap underneath.
+            return
         was_playing = self.is_playing
         self.is_playing = False
         self._cancel_mpv_reveal()
