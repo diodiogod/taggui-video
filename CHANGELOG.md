@@ -5,6 +5,22 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.17] - 2026-09-29
+
+### Added
+
+- Add Realign wall from current frame to the wall's right-click menu
+- Use the clicked video as the reference without restarting the playback cycle
+- Respect different frame rates, loop markers, playback speeds, and shorter clips
+- Keep paused walls paused and playing walls playing when realigning
+
+### Changed
+
+- Improve masonry wall video controls
+
+### Fixed
+
+- Fix first-frame flashes when rapidly clicking the previous/next frame controls
 ## [1.6.16] - 2026-09-21
 
 ### Added
