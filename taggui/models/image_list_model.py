@@ -23,6 +23,8 @@ from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox, QApplication, QProgressDialog
 from PIL import Image as pilimage  # Import Pillow's Image class
 from concurrent.futures import CancelledError, ThreadPoolExecutor
+from utils.demand_executor import DemandExecutor
+from utils.thumbnail_save_queue import ThumbnailSaveQueue
 import threading
 
 
@@ -2562,7 +2564,7 @@ class ImageListModel(QAbstractListModel):
 
         # Separate ThreadPoolExecutors for loading vs saving (prioritize loads)
         # Load executor: 6 workers for fast thumbnail generation (UI blocking fixed with async queues + paint throttling)
-        self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        self._load_executor = DemandExecutor(max_workers=6, thread_name_prefix="thumb_load")
         self._enrichment_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="page_enrich",
@@ -2598,7 +2600,7 @@ class ImageListModel(QAbstractListModel):
         # self._cache_warm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cache_warm")
 
         self._thumbnail_futures = {}  # Normal rows or paginated paths -> thumbnail jobs
-        self._thumbnail_lock = threading.Lock()  # Protects futures dict
+        self._thumbnail_lock = threading.RLock()  # Future.cancel can invoke cleanup inline.
         self._images_lock = threading.RLock()  # Protects images list and image objects from race conditions
 
         # Batch thumbnail updates to reduce Qt repaint overhead
@@ -2629,8 +2631,10 @@ class ImageListModel(QAbstractListModel):
 
         # Defer cache writes during scrolling to avoid I/O blocking
         self._is_scrolling = False  # Set by view during active scrolling
-        self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail, crop)
+        self._pending_cache_saves = ThumbnailSaveQueue()
         self._pending_cache_saves_lock = threading.Lock()
+        self._cache_flush_lock = threading.Lock()
+        self._cache_flush_scheduled = False
         self._pending_db_cache_flags = []  # (owning DB, relative file name, source mtime)
         self._pending_db_cache_flags_lock = threading.Lock()
 
@@ -3615,8 +3619,9 @@ class ImageListModel(QAbstractListModel):
         self._filter_sql = " AND ".join(parts)
         self._filter_bindings = bindings
 
-    def _set_scope_from_rel_paths(self, rel_paths: list[str] | set[str] | tuple[str, ...] | None):
-        """Restrict the visible model to one explicit set of relative paths."""
+    @staticmethod
+    def _prepare_path_scope(db, rel_paths):
+        """Build the same immutable membership for GUI setup or owned workers."""
         normalized_paths = []
         seen_paths = set()
         for rel_path in list(rel_paths or []):
@@ -3626,20 +3631,23 @@ class ImageListModel(QAbstractListModel):
             seen_paths.add(normalized)
             normalized_paths.append(normalized)
 
-        self._scope_rel_paths = tuple(normalized_paths)
         if not normalized_paths:
-            self._scope_sql = ""
-            self._scope_bindings = ()
+            sql, bindings = '', ()
         else:
             if len(normalized_paths) > 500:
-                scope_id = self._db.register_path_scope(normalized_paths)
-                self._scope_sql = ("EXISTS(SELECT 1 FROM image_scopes s WHERE s.scope_id=? "
-                                   "AND s.file_name=replace(images.file_name, '\\', '/'))")
-                self._scope_bindings = (scope_id,)
+                scope_id = db.register_path_scope(normalized_paths)
+                sql = ("EXISTS(SELECT 1 FROM image_scopes s WHERE s.scope_id=? "
+                       "AND s.file_name=replace(images.file_name, '\\', '/'))")
+                bindings = (scope_id,)
             else:
                 placeholders = ",".join("?" for _ in normalized_paths)
-                self._scope_sql = f"replace(file_name, '\\', '/') IN ({placeholders})"
-                self._scope_bindings = tuple(normalized_paths)
+                sql = f"replace(file_name, '\\', '/') IN ({placeholders})"
+                bindings = tuple(normalized_paths)
+        return tuple(normalized_paths), sql, bindings
+
+    def _set_scope_from_rel_paths(self, rel_paths: list[str] | set[str] | tuple[str, ...] | None):
+        """Restrict the visible model to one explicit set of relative paths."""
+        self._scope_rel_paths, self._scope_sql, self._scope_bindings = ImageListModel._prepare_path_scope(self._db, rel_paths)
         self._rebuild_combined_filter()
 
     def set_media_type_filter(self, media_type: str):
@@ -3682,7 +3690,7 @@ class ImageListModel(QAbstractListModel):
 
     def prepare_ordered_view(self, *, reason='refresh', selected_path=None, previous_query=None,
                              stale_paths=(), previous_text=None, previous_order=None,
-                             restore_selection=True):
+                             restore_selection=True, refresh_scope=False):
         """Prepare count/rank/target records off-thread and accept one owned view."""
         if not self._paginated_mode or not self._db or self._shutdown_requested:
             return
@@ -3696,6 +3704,13 @@ class ImageListModel(QAbstractListModel):
         if pending is not None and pending['previous_order'] is not None:
             previous_order = pending['previous_order']
         generation = self._advance_page_load_generation()
+        protected = self._protected_page_window
+        fallback_page = ((protected[0]+protected[1])//2 if protected is not None
+                         else min(self._pages, default=0))
+        scope_options = self._active_load_options if refresh_scope else None
+        if (scope_options is None and pending is not None
+                and pending.get('scope_options') == self._active_load_options):
+            scope_options = pending.get('scope_options')
         snapshot = dict(db=self._db, directory=self._directory_path, generation=generation,
                         sort_field=self._sort_field, sort_dir=self._sort_dir,
                         filter_sql=self._filter_sql, bindings=tuple(self._filter_bindings),
@@ -3705,7 +3720,12 @@ class ImageListModel(QAbstractListModel):
                         previous_text=previous_text,
                         previous_order=previous_order, restore_selection=restore_selection,
                         stale_paths=tuple(stale_paths),
-                        resident_pages=tuple(sorted(self._pages)) if reason == 'metadata' else (),
+                        resident_pages=tuple(sorted(self._pages)) if reason in ('metadata','refresh') else (),
+                        target_hint=fallback_page*self.PAGE_SIZE if reason != 'filter' else 0,
+                        scope_options=scope_options,
+                        validation_generation=self._path_validation_generation,
+                        media_sql=self._media_type_sql, text_sql=self._text_filter_sql,
+                        text_bindings=tuple(self._text_filter_bindings),
                         tokenizer=getattr(getattr(self,'proxy_image_list_model',None),'tokenizer',None))
         self._view_prepare_owner = snapshot
         self._view_prepare_task.submit(self._prepare_ordered_view_worker, snapshot)
@@ -3720,15 +3740,25 @@ class ImageListModel(QAbstractListModel):
                 raise CancelledError()
             if request['stale_paths']:
                 db.remove_images_by_paths(list(request['stale_paths']))
-            query = dict(sort_field=request['sort_field'], sort_dir=request['sort_dir'],
-                         filter_sql=request['filter_sql'], bindings=request['bindings'],
-                         random_seed=request['random_seed'])
             while True:
                 if cancelled.is_set():
                     raise CancelledError()
                 revision = db._order_revision()
-                total = db.count_or_raise(request['filter_sql'], request['bindings'])
-                target = 0
+                filter_sql, bindings = request['filter_sql'], request['bindings']
+                scope = None
+                if request.get('scope_options') is not None:
+                    scope = ImageListModel._prepare_path_scope(db, db.get_limited_paths(request['scope_options']))
+                    parts = [f'({scope[1]})'] if scope[1] else []
+                    if request['media_sql']:
+                        parts.append(request['media_sql'])
+                    if request['text_sql']:
+                        parts.append(f"({request['text_sql']})")
+                    filter_sql = ' AND '.join(parts)
+                    bindings = tuple(scope[2]) + request['text_bindings']
+                query = dict(sort_field=request['sort_field'], sort_dir=request['sort_dir'],
+                             filter_sql=filter_sql, bindings=bindings, random_seed=request['random_seed'])
+                total = db.count_or_raise(filter_sql, bindings)
+                target = min(request.get('target_hint',0), max(0,total-1))
                 if request['selected_path'] is not None:
                     try:
                         relative = str(request['selected_path'].relative_to(request['directory']))
@@ -3743,7 +3773,7 @@ class ImageListModel(QAbstractListModel):
                     prepared[resident], absent = self._load_images_from_db(
                         resident, db=db, directory_path=request['directory'],
                         sort_field=request['sort_field'], sort_dir=request['sort_dir'],
-                        filter_sql=request['filter_sql'],filter_bindings=request['bindings'],
+                        filter_sql=filter_sql,filter_bindings=bindings,
                         random_seed=request['random_seed'],cancel_event=cancelled)
                     missing.extend(absent)
                     if cancelled.is_set():
@@ -3764,6 +3794,7 @@ class ImageListModel(QAbstractListModel):
                 images = prepared[page]
                 break
             return dict(request=request,total=total,target=target,page=page,images=images,pages=prepared,
+                        refreshed_scope=scope, refreshed_filter=(filter_sql,bindings),
                         missing=missing,prepare_ms=(time.monotonic()-started)*1000)
         finally:
             db.close()
@@ -3786,6 +3817,11 @@ class ImageListModel(QAbstractListModel):
         self._metadata_filter_refresh_in_progress = owner['reason'] == 'metadata'
         self.beginResetModel()
         try:
+            if result.get('refreshed_scope') is not None:
+                self._scope_rel_paths,self._scope_sql,self._scope_bindings = result['refreshed_scope']
+                self._filter_sql,self._filter_bindings = result['refreshed_filter']
+                if owner['validation_generation'] == self._path_validation_generation:
+                    self._path_validation_satisfied_generation = owner['validation_generation']
             self._total_count = result['total']
             with self._page_load_lock:
                 self._pages.clear()
@@ -3804,7 +3840,7 @@ class ImageListModel(QAbstractListModel):
             self._initial_warm_pages = ()
             self.initial_page_load_finished.emit()
             QTimer.singleShot(0,self._finalize_paginated_bootstrap_refresh)
-        if owner['reason'] == 'metadata':
+        if owner['reason'] in ('metadata','refresh') and owner['restore_selection']:
             self._restore_selected_image_paths(owner['selection'])
         if self._total_count:
             center = result['page']
@@ -4826,27 +4862,16 @@ class ImageListModel(QAbstractListModel):
             self._db = ImageIndexDB(self._directory_path)
             self._configure_filter_db(self._db)
 
-        if result.get('page_generation', self._page_load_generation) != self._page_load_generation:
+        changed_view = result.get('page_generation', self._page_load_generation) != self._page_load_generation
+        if changed_view or self._active_load_options is not None:
             # The index changes are valid, but these page objects belong to
             # the sort/filter captured before the user changed the view.
-            preloaded_pages = {}
-            new_total = int(self._db.count(
-                filter_sql=self._filter_sql, bindings=self._filter_bindings,
-            ) or 0)
-            result['view_changed_during_refresh'] = True
-
-        if self._active_load_options is not None:
-            refreshed_scope_rel_paths = self._db.get_limited_paths(self._active_load_options)
-            self._set_scope_from_rel_paths(refreshed_scope_rel_paths)
-            new_total = int(
-                self._db.count(
-                    filter_sql=self._filter_sql,
-                    bindings=self._filter_bindings,
-                ) or 0
-            )
-            preloaded_pages = {}
-            result['limited_scope_count'] = len(refreshed_scope_rel_paths)
-            self._path_validation_satisfied_generation = int(self._path_validation_generation)
+            self.prepare_ordered_view(reason='refresh', refresh_scope=self._active_load_options is not None)
+            result['view_changed_during_refresh'] = changed_view
+            result['model_refresh_pending'] = True
+            result['reloaded_page_count'] = len(pages_to_reload)
+            result['refreshed_model'] = True
+            return result
 
         reloaded_pages = self._reload_paginated_model_after_db_update(
             new_total=new_total,
@@ -5243,7 +5268,8 @@ class ImageListModel(QAbstractListModel):
                 except Exception:
                     pass  # Can't check cache, submit to worker
 
-            future = self._load_executor.submit(
+            future = self._load_executor.submit_priority(
+                10,
                 self._load_thumbnail_worker, idx, image.path, image.crop,
                 self.thumbnail_generation_width, image.is_video
             )
@@ -5277,13 +5303,14 @@ class ImageListModel(QAbstractListModel):
                 return  # Already queued
 
         # Submit async load
-        future = self._load_executor.submit(
+        future = self._load_executor.submit_priority(
+            10,
             self._load_thumbnail_worker, idx, image.path, image.crop,
             self.thumbnail_generation_width, image.is_video
         )
         self._track_thumbnail_future(idx, image.path, future)
 
-    def queue_paginated_thumbnail_load(self, global_index: int) -> bool:
+    def queue_paginated_thumbnail_load(self, global_index: int, *, priority=10) -> bool:
         """Submit paginated thumbnail I/O without converting its result on the UI thread."""
         if not self._paginated_mode or self._pause_thumbnail_loading:
             return False
@@ -5308,19 +5335,24 @@ class ImageListModel(QAbstractListModel):
             if entry is not None:
                 submitted_path = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else None
                 submitted_crop = entry[2] if isinstance(entry, tuple) and len(entry) > 2 else None
-                if submitted_path == image.path and submitted_crop == crop_key:
+                if (submitted_path == image.path and submitted_crop == crop_key
+                        and not entry[0].cancelled()):
+                    if hasattr(executor, 'promote'):
+                        executor.promote(entry[0], priority)
                     return True
                 future = entry[0] if isinstance(entry, tuple) else entry
                 if not future.done() and not future.cancel():
                     return False
                 self._thumbnail_futures.pop(job_key, None)
-            future = executor.submit(
+            submit = getattr(executor, 'submit_priority', None)
+            future = (submit(priority, self._load_thumbnail_async, image.path,
+                             image.crop, image.is_video, global_index) if submit else executor.submit(
                 self._load_thumbnail_async,
                 image.path,
                 image.crop,
                 image.is_video,
                 global_index,
-            )
+            ))
             self._thumbnail_futures[job_key] = (future, image.path, crop_key)
         return True
 
@@ -5612,43 +5644,43 @@ class ImageListModel(QAbstractListModel):
         """
         self._visible_indices_hint = visible_indices
 
-    def _flush_pending_cache_saves(self, force=False):
-        """Submit pending cache saves to background executor (fully async, zero main thread work)."""
-        if self._shutdown_requested or not self._save_executor:
+    def _queue_thumbnail_save(self, path, mtime, width, qimage, crop):
+        """Retain only a bounded, deduplicated set of optional cache hints."""
+        if self._shutdown_requested or self._save_executor is None:
             return
-        # Don't flush if actively scrolling (unless forced on app close)
+        payload = (path, mtime, width, qimage, QRect(crop) if crop is not None else None)
+        self._pending_cache_saves.put((path, width, _thumbnail_crop_key(crop)),
+                                      payload, int(qimage.sizeInBytes()))
+        if not self._is_scrolling:
+            self._flush_pending_cache_saves()
+
+    def _flush_pending_cache_saves(self, force=False):
+        """Drain one image at a time; never move the backlog into executor arguments."""
+        if self._shutdown_requested or not self._save_executor or not len(self._pending_cache_saves):
+            return
         if not force and self._is_scrolling:
-            return  # Wait until truly idle
-
-        # Do EVERYTHING including list access in background thread to avoid ANY main thread blocking
+            return
+        with self._cache_flush_lock:
+            if self._cache_flush_scheduled:
+                return
+            self._cache_flush_scheduled = True
         def background_flush():
-            # Access the list in background thread to avoid main thread lock contention
-            with self._pending_cache_saves_lock:
-                if not self._pending_cache_saves:
-                    return
-
-                count = len(self._pending_cache_saves)
-
-                # Only flush if we have a substantial batch (50+ items) to make it worthwhile
-                # Or force flush (e.g., on app close, or queue too large 300+)
-                if not force and count < 50:
-                    return  # Accumulate more before flushing
-
-                # Swap with a new empty list
-                saves_to_submit = self._pending_cache_saves
-                self._pending_cache_saves = []
-
-            # Print and submit all saves
-            print(f"[CACHE] Flushing {len(saves_to_submit)} pending cache saves")
-
-            for path, mtime, width, qimage, crop in saves_to_submit:
-                self._save_executor.submit(
-                    self._save_thumbnail_worker,
-                    path, mtime, width, qimage, crop
-                )
-
-        # Run the ENTIRE flush (including lock acquisition) in executor
-        self._save_executor.submit(background_flush)
+            try:
+                while not self._shutdown_requested and (force or not self._is_scrolling):
+                    payload = self._pending_cache_saves.pop()
+                    if payload is None:
+                        break
+                    self._save_thumbnail_worker(*payload)
+            finally:
+                with self._cache_flush_lock:
+                    self._cache_flush_scheduled = False
+                # A producer may have arrived between the last pop and this flag.
+                self._flush_pending_cache_saves(force=force)
+        try:
+            self._save_executor.submit(background_flush)
+        except RuntimeError:
+            with self._cache_flush_lock:
+                self._cache_flush_scheduled = False
 
     def _load_thumbnail_worker(self, idx: int, path: Path, crop: QRect, width: int, is_video: bool):
         """Worker function that runs in background thread to load thumbnail data (QImage)."""
@@ -5922,7 +5954,7 @@ class ImageListModel(QAbstractListModel):
 
         # The model remains reusable; a subsequent load repopulates its state.
         self._page_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="page_load")
-        self._load_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb_load")
+        self._load_executor = DemandExecutor(max_workers=6, thread_name_prefix="thumb_load")
         self._enrichment_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="page_enrich",
@@ -6276,24 +6308,8 @@ class ImageListModel(QAbstractListModel):
                     # Pass QImage (thread-safe) instead of QIcon (needs QPixmap = GIL contention)
                     save_qimage = image.thumbnail_qimage
                     if save_qimage and not save_qimage.isNull():
-                        if self._is_scrolling:
-                            with self._pending_cache_saves_lock:
-                                self._pending_cache_saves.append((
-                                    image.path,
-                                    None,
-                                    self.thumbnail_generation_width,
-                                    save_qimage,
-                                    image.crop,
-                                ))
-                        else:
-                            self._save_executor.submit(
-                                self._save_thumbnail_worker,
-                                image.path,
-                                None,
-                                self.thumbnail_generation_width,
-                                save_qimage,
-                                image.crop,
-                            )
+                        self._queue_thumbnail_save(image.path, None,
+                            self.thumbnail_generation_width, save_qimage, image.crop)
 
                 return thumbnail
 
@@ -6319,26 +6335,8 @@ class ImageListModel(QAbstractListModel):
 
                         # Save to disk cache in background thread if not from cache
                         if not was_cached:
-                            mtime = None
-                            # Defer during scroll to avoid I/O blocking
-                            if self._is_scrolling:
-                                with self._pending_cache_saves_lock:
-                                    self._pending_cache_saves.append((
-                                        image.path,
-                                        mtime,
-                                        self.thumbnail_generation_width,
-                                        qimage,
-                                        image.crop,
-                                    ))
-                            else:
-                                self._save_executor.submit(
-                                    self._save_thumbnail_worker,
-                                    image.path,
-                                    mtime,
-                                    self.thumbnail_generation_width,
-                                    qimage,
-                                    image.crop,
-                                )
+                            self._queue_thumbnail_save(image.path, None,
+                                self.thumbnail_generation_width, qimage, image.crop)
 
                         return thumbnail
                 except Exception as e:
@@ -6369,7 +6367,7 @@ class ImageListModel(QAbstractListModel):
                     try:
                         # Keep the path check for legacy entries and reject
                         # results generated before a crop edit.
-                        if (
+                        if future.cancelled() or (
                             submitted_path is not None
                             and image.path != submitted_path
                         ) or (
@@ -6380,6 +6378,8 @@ class ImageListModel(QAbstractListModel):
                             # Fall through to re-submit below
                         else:
                             if not future.done():
+                                if hasattr(self._load_executor, 'promote'):
+                                    self._load_executor.promote(future, 0)
                                 return self._get_placeholder_icon()
                             qimage, was_cached = future.result()
                             thumbnail = None
@@ -6392,26 +6392,8 @@ class ImageListModel(QAbstractListModel):
 
                                 # Save to cache if needed
                                 if not was_cached:
-                                    mtime = None
-                                    # Defer during scroll to avoid I/O blocking
-                                    if self._is_scrolling:
-                                        with self._pending_cache_saves_lock:
-                                            self._pending_cache_saves.append((
-                                                image.path,
-                                                mtime,
-                                                self.thumbnail_generation_width,
-                                                qimage,
-                                                image.crop,
-                                            ))
-                                    else:
-                                        self._save_executor.submit(
-                                            self._save_thumbnail_worker,
-                                            image.path,
-                                            mtime,
-                                            self.thumbnail_generation_width,
-                                            qimage,
-                                            image.crop,
-                                        )
+                                    self._queue_thumbnail_save(image.path, None,
+                                        self.thumbnail_generation_width, qimage, image.crop)
 
                             del self._thumbnail_futures[job_key]
                             return thumbnail
@@ -6422,7 +6404,8 @@ class ImageListModel(QAbstractListModel):
 
                 # Not loading yet (or stale entry was discarded) - submit to background thread
                 if job_key not in self._thumbnail_futures:
-                    future = self._load_executor.submit(
+                    future = self._load_executor.submit_priority(
+                        0,
                         self._load_thumbnail_async,
                         image.path,
                         image.crop,
@@ -7058,19 +7041,7 @@ class ImageListModel(QAbstractListModel):
             )
             preloaded_pages = None
             new_total = None
-            if self._active_load_options is not None:
-                refreshed_scope_rel_paths = self._db.get_limited_paths(
-                    self._active_load_options
-                )
-                self._set_scope_from_rel_paths(refreshed_scope_rel_paths)
-                new_total = int(self._db.count(
-                    filter_sql=self._filter_sql,
-                    bindings=self._filter_bindings,
-                ) or 0)
-                self._path_validation_satisfied_generation = int(
-                    self._path_validation_generation
-                )
-            elif snapshot_matches:
+            if self._active_load_options is None and snapshot_matches:
                 preloaded_pages = {
                     int(page_num): list(images or [])
                     for page_num, images in (result.get('preloaded_pages') or {}).items()
@@ -7078,15 +7049,14 @@ class ImageListModel(QAbstractListModel):
                 if 'new_total' in result:
                     new_total = int(result.get('new_total', 0) or 0)
             if new_total is None:
-                new_total = int(self._db.count(
-                    filter_sql=self._filter_sql,
-                    bindings=self._filter_bindings,
-                ) or 0)
-            reloaded_pages = self._reload_paginated_model_after_db_update(
-                new_total=new_total,
-                touched_paths=added_paths,
-                preloaded_pages=preloaded_pages,
-            )
+                self.prepare_ordered_view(reason='refresh', refresh_scope=self._active_load_options is not None)
+                reloaded_pages = list(self._pages)
+            else:
+                reloaded_pages = self._reload_paginated_model_after_db_update(
+                    new_total=new_total,
+                    touched_paths=added_paths,
+                    preloaded_pages=preloaded_pages,
+                )
             self.background_validation_applied.emit({
                 'directory_path': str(directory_path),
                 'added_count': added_count,

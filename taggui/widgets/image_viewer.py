@@ -33,7 +33,7 @@ from utils.ideogram_caption import (
 )
 from utils.rect import RectPosition
 from utils.latest_task import LatestTask
-from utils.image_decode import decode_image
+from utils.image_decode import decode_image, prepare_compare_images
 from widgets.compare_divider_utils import (
     COMPARE_DIVIDER_COLOR,
     COMPARE_DIVIDER_THICKNESS_PX,
@@ -503,6 +503,11 @@ class ImageViewer(QWidget):
         self._image_decode_task.completed.connect(self._on_image_decoded)
         self._image_decode_owner = None
         self._pending_compare_request = None
+        self._compare_prepare_task = LatestTask(self, name='compare-decode')
+        self._compare_prepare_task.completed.connect(self._on_compare_prepared)
+        self._compare_prepare_owner = None
+        self._compare_requested_indices = None
+        self._compare_decoded_cache = {}
         self.marking_items: list[MarkingItem] = []
         self._recalculating_markings = False
         self.ideogram_overlay_items: list[QGraphicsItem] = []
@@ -1203,14 +1208,11 @@ class ImageViewer(QWidget):
         base_size: QSize,
         incoming_proxy: QModelIndex,
         layer_ordinal: int,
+        prepared_pixmap=None,
+        overlay_offset=None,
     ) -> dict | None:
-        incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
-        if incoming_pixmap.isNull():
+        if prepared_pixmap is None or prepared_pixmap.isNull():
             return None
-        prepared_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
-            base_size,
-            incoming_pixmap,
-        )
 
         clip_item = QGraphicsRectItem()
         clip_item.setPen(Qt.PenStyle.NoPen)
@@ -1283,6 +1285,11 @@ class ImageViewer(QWidget):
         return scaled, QPointF(offset_x, offset_y)
 
     def _refresh_compare_overlay_pixmap(self, *, reset_reveal: bool) -> bool:
+        indices = (self._compare_requested_indices if self._compare_requested_indices is not None
+                   else self._compare_overlay_indices)
+        return self._request_compare_layers(indices, reset_reveal=reset_reveal)
+
+    def _request_compare_layers(self, indices, *, reset_reveal):
         if not self._compare_mode_active:
             return False
         base_item = self.current_image_item
@@ -1292,28 +1299,57 @@ class ImageViewer(QWidget):
         if base_pixmap.isNull():
             return False
 
-        overlay_count = self._compare_overlay_count()
-        if overlay_count <= 0:
+        if not indices:
             return False
-
-        for layer_idx in range(overlay_count):
-            incoming_proxy = self._normalize_any_proxy_index(self._compare_overlay_indices[layer_idx])
+        owners = []
+        for index in indices:
+            incoming_proxy = self._normalize_any_proxy_index(index)
             if not incoming_proxy.isValid():
                 return False
-            incoming_pixmap = self._load_static_pixmap_for_proxy_index(incoming_proxy)
-            if incoming_pixmap.isNull():
+            image = incoming_proxy.data(Qt.ItemDataRole.UserRole)
+            if image is None or image.is_video:
                 return False
-            prepared_pixmap, overlay_offset = self._prepare_compare_overlay_pixmap(
-                base_pixmap.size(),
-                incoming_pixmap,
-            )
-            layer = self._compare_layers[layer_idx]
-            overlay_item = layer.get("overlay_item")
-            if overlay_item is None:
-                return False
-            overlay_item.setPixmap(prepared_pixmap)
-            layer["offset"] = overlay_offset
+            owners.append((QPersistentModelIndex(incoming_proxy), image, image.path))
+        matte = self.view.palette().color(self.view.viewport().backgroundRole())
+        matte.setAlpha(255)
+        request = {'paths': tuple(owner[2] for owner in owners),
+                   'size': base_pixmap.size().toTuple(), 'mode': self.get_compare_fit_mode(),
+                   'matte': matte.rgba(), 'cache': dict(self._compare_decoded_cache)}
+        self._compare_prepare_owner = (self.current_media, base_item, tuple(owners), reset_reveal)
+        self._compare_requested_indices = [owner[0] for owner in owners]
+        self._compare_prepare_task.submit(prepare_compare_images, request)
+        return True
 
+    def _on_compare_prepared(self, token, result, error):
+        owner = self._compare_prepare_owner
+        if owner is None:
+            return
+        base_media, base_item, incoming, reset_reveal = owner
+        self._compare_prepare_owner = None
+        self._compare_requested_indices = None
+        if (self._viewer_model_resetting or not self._compare_mode_active
+                or self.current_media is not base_media or self.current_image_item is not base_item):
+            return
+        for index, image, path in incoming:
+            normalized = self._normalize_any_proxy_index(index)
+            if (not normalized.isValid() or normalized.data(Qt.ItemDataRole.UserRole) is not image
+                    or image.path != path):
+                return
+        if error is not None or result is None:
+            if error is not None:
+                print(f'[COMPARE] Image preparation failed: {error}')
+            if not self._compare_layers:
+                self.exit_compare_mode()
+            return
+        pixels, cache = result
+        self._clear_compare_scene_items()
+        self._compare_overlay_indices = [item[0] for item in incoming]
+        self._compare_decoded_cache = cache
+        self._compare_layers = [self._build_compare_layer(
+            base_size=base_item.pixmap().size(), incoming_proxy=self._normalize_any_proxy_index(incoming[i][0]),
+            layer_ordinal=i, prepared_pixmap=QPixmap.fromImage(image), overlay_offset=QPointF(*offset))
+            for i, (image, offset) in enumerate(pixels)]
+        overlay_count = self._compare_overlay_count()
         if reset_reveal:
             if overlay_count <= 1:
                 self._compare_reveal_progress = 0.0
@@ -1322,7 +1358,6 @@ class ImageViewer(QWidget):
                 self._compare_reveal_progress = 1.0
                 self._compare_reveal_timer.stop()
         self._update_compare_overlay_geometry()
-        return True
 
     def _tick_compare_reveal(self):
         if not self._compare_mode_active:
@@ -1604,6 +1639,10 @@ class ImageViewer(QWidget):
         had_compare = bool(self._compare_mode_active or self._compare_overlay_count() > 0
                            or self._pending_compare_request is not None)
         self._pending_compare_request = None
+        self._compare_prepare_task.cancel()
+        self._compare_prepare_owner = None
+        self._compare_requested_indices = None
+        self._compare_decoded_cache.clear()
         self._compare_reveal_timer.stop()
         self._set_compare_cursor_sync_enabled(False)
         self._set_compare_viewport_update_mode(False)
@@ -1676,7 +1715,6 @@ class ImageViewer(QWidget):
         self._clear_compare_scene_items()
         self._compare_mode_active = True
         self._compare_base_index = QPersistentModelIndex(base_proxy)
-        self._compare_overlay_indices = [QPersistentModelIndex(incoming_proxy)]
         self._compare_last_viewer_pos = None
         if not keep_split_ratio:
             self._compare_split_ratio_x = 0.5
@@ -1684,23 +1722,16 @@ class ImageViewer(QWidget):
         self._compare_reveal_progress = 0.0
         self._compare_divider_item = None
 
-        first_layer = self._build_compare_layer(
-            base_size=base_pixmap.size(),
-            incoming_proxy=incoming_proxy,
-            layer_ordinal=0,
-        )
-        if first_layer is None:
+        if not self._request_compare_layers([incoming_proxy], reset_reveal=True):
             self._compare_mode_active = False
             self._compare_base_index = QPersistentModelIndex()
             self._compare_overlay_indices = []
             return False
-        self._compare_layers = [first_layer]
 
         self._set_compare_viewport_update_mode(True)
         self._update_compare_overlay_geometry()
         self._set_compare_cursor_sync_enabled(True)
         self._set_compare_controls_suppressed(True)
-        self._compare_reveal_timer.start()
         return True
 
     def _set_compare_controls_suppressed(self, suppressed: bool):
@@ -1727,23 +1758,18 @@ class ImageViewer(QWidget):
             return self.enter_compare_mode(base_proxy, incoming_proxy, keep_split_ratio=True)
         if self._is_video_loaded or self.current_image_item is None:
             return False
-        if len(self._compare_overlay_indices) >= 3:
+        indices = list(self._compare_requested_indices if self._compare_requested_indices is not None
+                       else self._compare_overlay_indices)
+        if len(indices) >= 3:
             return self.replace_compare_right(incoming_proxy)
 
         base_pixmap = self.current_image_item.pixmap()
         if base_pixmap.isNull():
             return False
-        layer = self._build_compare_layer(
-            base_size=base_pixmap.size(),
-            incoming_proxy=incoming_proxy,
-            layer_ordinal=len(self._compare_overlay_indices),
-        )
-        if layer is None:
+        indices.append(QPersistentModelIndex(incoming_proxy))
+        if not self._request_compare_layers(indices, reset_reveal=False):
             return False
-
-        self._compare_overlay_indices.append(QPersistentModelIndex(incoming_proxy))
-        self._compare_layers.append(layer)
-        if len(self._compare_overlay_indices) == 2:
+        if len(indices) == 2:
             self._compare_split_ratio_y = 0.5
         self._compare_reveal_timer.stop()
         self._compare_reveal_progress = 1.0
@@ -1757,21 +1783,19 @@ class ImageViewer(QWidget):
         if not self._compare_mode_active:
             base_proxy = self._normalize_proxy_index(self.proxy_image_index)
             return self.enter_compare_mode(base_proxy, incoming_proxy, keep_split_ratio=True)
-        if self._compare_overlay_count() <= 0:
-            return self.add_compare_layer(incoming_proxy)
-        previous_proxy = self._compare_overlay_indices[0]
-        self._compare_overlay_indices[0] = QPersistentModelIndex(incoming_proxy)
-        reset_reveal = self._compare_overlay_count() <= 1
-        if self._refresh_compare_overlay_pixmap(reset_reveal=reset_reveal):
-            return True
-        self._compare_overlay_indices[0] = previous_proxy
-        self._refresh_compare_overlay_pixmap(reset_reveal=False)
-        return False
+        indices = list(self._compare_requested_indices if self._compare_requested_indices is not None
+                       else self._compare_overlay_indices)
+        if not indices:
+            indices = [QPersistentModelIndex(incoming_proxy)]
+        else:
+            indices[0] = QPersistentModelIndex(incoming_proxy)
+        return self._request_compare_layers(indices, reset_reveal=len(indices) <= 1)
 
     def get_compare_image_count(self) -> int:
         if not self._compare_mode_active:
             return 0
-        return 1 + self._compare_overlay_count()
+        return 1 + (len(self._compare_requested_indices) if self._compare_requested_indices is not None
+                    else self._compare_overlay_count())
 
     def get_content_aspect_ratio(self) -> float | None:
         """Return current loaded media ratio from actual rendered pixmap."""
@@ -2405,6 +2429,7 @@ class ImageViewer(QWidget):
     def closeEvent(self, event):
         """Stop all timers before the widget is destroyed to prevent use-after-free crashes."""
         self._image_decode_task.close()
+        self._compare_prepare_task.close()
         try:
             self._controls_hide_timer.stop()
         except Exception:
@@ -3755,6 +3780,10 @@ class ImageViewer(QWidget):
             self._show_error_placeholder(f"Read Error: {e}")
 
     def _cancel_image_decode(self):
+        self._compare_prepare_task.cancel()
+        self._compare_prepare_owner = None
+        self._compare_requested_indices = None
+        self._compare_decoded_cache.clear()
         task = getattr(self, '_image_decode_task', None)
         if task is not None:
             task.cancel()
@@ -3768,6 +3797,7 @@ class ImageViewer(QWidget):
         owner = self._image_decode_owner
         self._cancel_image_decode()
         self._image_decode_task.drain()
+        self._compare_prepare_task.drain()
         return owner
 
     def _on_image_decoded(self, token, decoded, error):

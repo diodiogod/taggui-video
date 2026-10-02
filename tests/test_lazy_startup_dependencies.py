@@ -301,15 +301,23 @@ def test_spell_highlighter_defers_dictionary_until_text_is_checked(monkeypatch):
 
 
 def test_video_utility_exports_do_not_import_editing_suite():
-    from utils import video
-
-    assert "utils.video.frame_editor" not in sys.modules
-    assert "utils.video.video_editor" not in sys.modules
-    assert video.VideoValidator.__name__ == "VideoValidator"
-    assert "utils.video.validator" in sys.modules
-    assert "cv2" not in sys.modules
-    assert "utils.video.ffmpeg_gpu" not in sys.modules
-    assert "utils.video.frame_editor" not in sys.modules
+    # Measure fresh imports; earlier legitimate decoder tests may load cv2.
+    script = """
+import sys
+from utils import video
+assert "utils.video.frame_editor" not in sys.modules
+assert "utils.video.video_editor" not in sys.modules
+assert video.VideoValidator.__name__ == "VideoValidator"
+assert "utils.video.validator" in sys.modules
+assert "cv2" not in sys.modules
+assert "utils.video.ffmpeg_gpu" not in sys.modules
+assert "utils.video.frame_editor" not in sys.modules
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(TAGGUI_ROOT)
+    result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_playback_backend_import_does_not_probe_optional_runtimes():

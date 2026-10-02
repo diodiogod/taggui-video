@@ -138,7 +138,7 @@ def test_paginated_thumbnail_job_survives_prepend_and_checks_crop():
         _pages={14: [target]}, _page_load_lock=threading.Lock(),
         _touch_page=lambda page: None, _pause_thumbnail_loading=False,
         _thumbnail_lock=threading.Lock(), _thumbnail_futures={},
-        _load_executor=SimpleNamespace(submit=submit),
+        _load_executor=SimpleNamespace(submit_priority=lambda priority, *args: submit(*args)),
         _load_thumbnail_async=lambda *args: None,
         _get_placeholder_icon=lambda: placeholder,
     )

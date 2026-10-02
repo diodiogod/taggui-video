@@ -99,4 +99,8 @@ class LatestTask(QObject):
             return
         self._closed = True
         self.cancel()
+        # The running closure keeps its payload until native work finishes.
+        # Closed QObjects receive no completion, so don't retain a second copy
+        # indefinitely (comparison payloads can contain cached pixel buffers).
+        self._active = None
         self._executor.shutdown(wait=False, cancel_futures=True)

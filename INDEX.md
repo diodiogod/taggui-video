@@ -127,6 +127,8 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `marking_model_importer.py`: Isolated PT-to-ONNX import helper with source timestamp preservation.
 - `image_index_db.py`: DB index/cache layer for large datasets.
 - `thumbnail_cache.py`: Thumbnail cache management.
+- `demand_executor.py`, `thumbnail_save_queue.py`: Prioritized thumbnail demand and bounded deferred cache-save buffers.
+- `latest_task.py`, `image_decode.py`: Replaceable worker requests and owned still/comparison image preparation.
 - `image.py`: Image/media utility helpers.
 - `utils.py`: General utility helpers.
 - `video_editor.py`: Legacy video editor bridge module.

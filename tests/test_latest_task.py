@@ -73,6 +73,32 @@ def test_replaced_pending_payload_released_without_waiting_for_running_job():
         APP.processEvents()
 
 
+def test_closed_worker_releases_active_payload_after_native_work_finishes():
+    started, release = threading.Event(), threading.Event()
+    class Payload:
+        pass
+    task = LatestTask()
+    def work(payload, cancelled):
+        started.set()
+        assert release.wait(2)
+    payload = Payload()
+    retained = weakref.ref(payload)
+    try:
+        task.submit(work, payload)
+        del payload
+        assert started.wait(1)
+        task.close()
+        assert retained() is not None  # Running native work still owns it.
+        release.set()
+        task.drain()
+        gc.collect()
+        assert retained() is None  # No GUI completion required after close.
+    finally:
+        release.set()
+        task.drain()
+        task.close()
+
+
 def test_decode_keeps_full_dimensions_and_corrupt_file_is_an_error(tmp_path, monkeypatch):
     from PySide6.QtGui import QImage, QColor
     from models import image_list_model

@@ -295,7 +295,7 @@ def test_limited_validation_refreshes_current_model_without_folder_reload(
     model = ImageListModel(256, ', ')
     directory_path = Path(tmp_path)
     limited_paths = ['new.png', 'existing.png']
-    reload_calls = []
+    reload_calls, preparations = [], []
 
     class FakeDB:
         def get_limited_paths(self, _load_options):
@@ -325,6 +325,7 @@ def test_limited_validation_refreshes_current_model_without_folder_reload(
         '_reload_paginated_model_after_db_update',
         lambda **kwargs: reload_calls.append(kwargs) or [0],
     )
+    monkeypatch.setattr(model, 'prepare_ordered_view', lambda **kwargs: preparations.append(kwargs))
     monkeypatch.setattr(
         model,
         'load_directory',
@@ -336,13 +337,10 @@ def test_limited_validation_refreshes_current_model_without_folder_reload(
     try:
         model._apply_pending_path_validation()
 
-        assert model._scope_rel_paths == tuple(limited_paths)
-        assert reload_calls == [{
-            'new_total': len(limited_paths),
-            'touched_paths': [directory_path / 'new.png'],
-            'preloaded_pages': None,
-        }]
-        assert model._path_validation_satisfied_generation == 7
+        assert model._scope_rel_paths == ()  # Scope changes only with accepted worker rows.
+        assert reload_calls == []
+        assert preparations == [dict(reason='refresh', refresh_scope=True)]
+        assert model._path_validation_satisfied_generation != 7
     finally:
         model._db = None
         model.shutdown_background_workers()

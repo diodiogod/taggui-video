@@ -2,7 +2,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtGui import QImageReader
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QColor, QImage, QImageReader, QPainter
 
 from utils.media_file_lock import get_media_file_lock
 
@@ -42,3 +43,56 @@ def decode_image(path, cancelled):
             if signature != (after.st_mtime_ns, after.st_size):
                 raise OSError('Image changed while it was being read; select it again to reload')
         return DecodedImage(image, path, resolved, signature)
+
+
+def prepare_compare_images(request, cancelled):
+    """Decode/fit immutable comparison pixels without touching a Qt scene."""
+    size = QSize(*request['size'])
+    mode = request['mode']
+    layers, cache, signatures = [], {}, []
+    retained = 0
+    for path in request['paths']:
+        if cancelled.is_set():
+            return None
+        decoded = request['cache'].get(path)
+        if decoded is not None:
+            try:
+                stat = path.stat()
+                if (stat.st_mtime_ns, stat.st_size) != decoded.signature:
+                    decoded = None
+            except OSError:
+                decoded = None
+        if decoded is None:
+            decoded = decode_image(path, cancelled)
+        if decoded is None or cancelled.is_set():
+            return None
+        signatures.append((path, decoded.signature))
+        aspect = (Qt.AspectRatioMode.IgnoreAspectRatio if mode == 'stretch'
+                  else Qt.AspectRatioMode.KeepAspectRatioByExpanding if mode == 'fill'
+                  else Qt.AspectRatioMode.KeepAspectRatio)
+        pixels = decoded.image.scaled(size, aspect, Qt.TransformationMode.SmoothTransformation)
+        offset = ((size.width()-pixels.width())*.5, (size.height()-pixels.height())*.5)
+        if mode == 'preserve':
+            matte = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+            matte.fill(QColor.fromRgba(request['matte']))
+            painter = QPainter(matte)
+            try:
+                painter.drawImage(int(round(offset[0])), int(round(offset[1])), pixels)
+            finally:
+                painter.end()
+            pixels, offset = matte, (0., 0.)
+        elif mode == 'stretch':
+            offset = (0., 0.)
+        cost = decoded.image.sizeInBytes()
+        if retained + cost <= 64 * 1024 * 1024:
+            cache[path] = decoded
+            retained += cost
+        layers.append((pixels, offset))
+    for path, signature in signatures:
+        if cancelled.is_set():
+            return None
+        if signature is not None:
+            current = path.stat()
+            if (current.st_mtime_ns, current.st_size) != signature:
+                raise OSError('Comparison source changed during preparation; select it again')
+    return layers, cache

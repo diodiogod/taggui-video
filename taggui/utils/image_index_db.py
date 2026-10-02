@@ -3264,9 +3264,15 @@ class ImageIndexDB:
                                              separators=(',', ':')).encode()).hexdigest()
         if not self._ensure_connection():
             raise sqlite3.OperationalError('Scope database is unavailable')
+        with self._db_lock:
+            existing = self.conn.execute('SELECT count(*) FROM image_scopes WHERE scope_id=?',
+                                         (identity,)).fetchone()[0]
+            if existing == len(names):
+                return identity  # Identical membership needs no writer ownership.
         with self._db_lock, self.conn:
-            self.conn.executemany('INSERT OR IGNORE INTO image_scopes(scope_id,file_name) VALUES(?,?)',
-                                  ((identity, name) for name in names))
+            execute_insert_batches(self.conn.cursor(),
+                'INSERT OR IGNORE INTO image_scopes(scope_id,file_name) VALUES(?,?)',
+                ((identity, name) for name in names))
         return identity
 
     def _order_cache_key(self, sort_field: str, sort_dir: str, filter_sql: str, bindings: tuple, **kwargs) -> tuple:

@@ -16,15 +16,7 @@ from models.proxy_image_list_model import ProxyImageListModel
 from widgets import image_viewer
 from utils.folder_snapshot import collect_folder_snapshot
 
-APP = QApplication.instance() or QApplication([])
-
-
-def pump(predicate, seconds=4):
-    deadline = time.monotonic()+seconds
-    while not predicate() and time.monotonic() < deadline:
-        APP.processEvents()
-        time.sleep(.002)
-    assert predicate()
+from qt_test_helpers import APP, pump
 
 
 def test_viewer_replaces_slow_selection_and_installs_only_latest_pixels(tmp_path,monkeypatch):
@@ -185,6 +177,18 @@ def test_metadata_refresh_keeps_selection_across_resident_pages(paginated_model)
     assert {index.data(Qt.UserRole).path for index in selection.selectedIndexes()} == expected
 
 
+def test_unselected_refresh_retains_the_protected_distant_window(paginated_model):
+    model, proxy, db = paginated_model
+    model._pages[4], _ = model._load_images_from_db(4)
+    model.set_page_protection_window(3, 5)
+    ready = []
+    model.ordered_view_ready.connect(ready.append)
+    model.prepare_ordered_view(reason='refresh')
+    pump(lambda: len(ready) == 1)
+    assert ready[0]['page'] == 4 and ready[0]['target'] == 8
+    assert model._pages[4][0].path.name == '08.png'
+
+
 def test_stale_repair_repeats_until_target_page_is_complete(paginated_model):
     model,proxy,db = paginated_model
     # More than one missing target page previously survived the single retry.
@@ -279,7 +283,8 @@ def test_comparison_waits_for_base_decode_and_respects_exit(tmp_path,monkeypatch
         if cancel_comparison:
             assert viewer.exit_compare_mode()
         release.set()
-        pump(lambda:viewer.current_image_item is not None and viewer._image_decode_owner is None)
+        pump(lambda:viewer.current_image_item is not None and viewer._image_decode_owner is None
+             and viewer._compare_prepare_owner is None)
         assert viewer.is_compare_mode_active() is not cancel_comparison
         assert len(viewer._compare_layers)==(0 if cancel_comparison else 1)
     finally:

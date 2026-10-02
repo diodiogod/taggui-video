@@ -15,6 +15,7 @@ def main():
             ("APPDATA", "config"), ("LOCALAPPDATA", "local"),
             ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "state"),
             ("USERPROFILE", "home"), ("HOME", "home"),
+            ("YOLO_CONFIG_DIR", "yolo"),
         ):
             path = root / name
             path.mkdir(exist_ok=True)
