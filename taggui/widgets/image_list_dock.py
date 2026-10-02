@@ -507,6 +507,10 @@ class ImageList(QDockWidget):
                  tag_separator: str, image_width: int):
         super().__init__()
         self.proxy_image_list_model = proxy_image_list_model
+        source_model = proxy_image_list_model.sourceModel()
+        if hasattr(source_model, 'ordered_view_ready'):
+            source_model.ordered_view_ready.connect(self._on_ordered_view_ready)
+            source_model.ordered_view_failed.connect(self._on_ordered_view_failed)
         self._background_activity_active = False
         self._background_activity_status = ''
         self._initial_page_activity_active = False
@@ -1538,6 +1542,7 @@ class ImageList(QDockWidget):
 
                 db_sort_field = sort_map.get(sort_by, 'file_name')
                 db_sort_dir = sort_dir
+                previous_order = (source_model._sort_field,source_model._sort_dir,source_model._random_seed)
                 source_model._sort_field = db_sort_field
                 source_model._sort_dir = db_sort_dir
                 
@@ -1551,97 +1556,15 @@ class ImageList(QDockWidget):
                 
                 print(f"[SORT] Buffered mode: changed DB sort to {db_sort_field} {db_sort_dir} (Seed: {getattr(source_model, '_random_seed', 0)})")
 
-                sort_restore_target = None
-                if selected_image is not None and hasattr(source_model, 'resolve_restore_target'):
-                    try:
-                        sort_restore_target = source_model.resolve_restore_target(selected_image.path)
-                    except Exception:
-                        sort_restore_target = None
-                if (
-                    isinstance(sort_restore_target, dict)
-                    and int(sort_restore_target.get('target_global', -1)) >= 0
-                    and hasattr(self.list_view, '_arm_pending_targeted_relocation')
-                ):
-                    try:
-                        self.list_view._arm_pending_targeted_relocation(
-                            int(sort_restore_target['target_global']),
-                            reason='sort_restore',
-                            source_model=source_model,
-                            hold_s=30.0,
-                        )
-                    except Exception:
-                        pass
-
-                # CRITICAL: Inform Qt that the entire model is being reset
-                source_model.beginResetModel()
-                
-                try:
-                    # Clear all pages and reload from DB with new sort
-                    with source_model._page_load_lock:
-                        source_model._pages.clear()
-                        source_model._loading_pages.clear()
-                        source_model._page_load_order.clear()
-                    if hasattr(source_model, '_page_debouncer'):
-                        source_model._page_debouncer.stop()
-                    if hasattr(source_model, '_pending_page_range'):
-                        source_model._pending_page_range = None
-
-                    if (
-                        isinstance(sort_restore_target, dict)
-                        and int(sort_restore_target.get('target_global', -1)) >= 0
-                        and hasattr(source_model, 'prepare_target_window')
-                    ):
-                        source_model.prepare_target_window(
-                            int(sort_restore_target['target_global']),
-                            sync_target_page=True,
-                            include_buffer=False,
-                            prefer_forward=True,
-                            emit_update=False,
-                            request_async_window=False,
-                            restart_enrichment=False,
-                        )
-                    else:
-                        # Reload first 3 pages with new sort order
-                        for page_num in range(3):
-                            source_model._load_page_sync(page_num)
-                finally:
-                    source_model.endResetModel()
-
-                if (
-                    isinstance(sort_restore_target, dict)
-                    and int(sort_restore_target.get('target_global', -1)) >= 0
-                ):
-                    self._sort_restore_target_global = int(sort_restore_target['target_global'])
-                    if hasattr(source_model, '_emit_paginated_layout_refresh'):
-                        source_model._emit_paginated_layout_refresh()
-                    else:
-                        source_model._emit_pages_updated()
-                    if hasattr(source_model, 'prepare_target_window'):
-                        source_model.prepare_target_window(
-                            int(sort_restore_target['target_global']),
-                            sync_target_page=False,
-                            include_buffer=True,
-                            prefer_forward=True,
-                            emit_update=False,
-                            request_async_window=True,
-                            restart_enrichment=False,
-                        )
-                    QTimer.singleShot(0, self._do_scroll_after_sort)
+                self._image_to_scroll_to = selected_image
+                if sort_by == 'Random':
+                    self._remember_random_seed(random_seed_used)
                 else:
-                    try:
-                        delattr(self, '_sort_restore_target_global')
-                    except Exception:
-                        pass
-                    # Trigger layout update - emit pages_updated FIRST so proxy invalidates
-                    source_model._emit_pages_updated()
-                    # source_model.layoutChanged.emit() # Redundant with endResetModel()
-                    
-                    # Restart background enrichment (essential for updating placeholders)
-                    if hasattr(source_model, '_start_paginated_enrichment'):
-                        source_model._start_paginated_enrichment(
-                            window_pages={0},
-                            scope='window',
-                        )
+                    self._update_sort_combo_display()
+                source_model.prepare_ordered_view(
+                    reason='sort', selected_path=selected_image.path if selected_image else None,
+                    previous_order=previous_order,restore_selection=preserve_selection)
+                return
 
             else:
                 # NORMAL MODE: Sort in-memory list
@@ -1740,6 +1663,41 @@ class ImageList(QDockWidget):
             print(f"Sort error: {e}")
             traceback.print_exc()
             self._update_sort_combo_display()
+
+    def _on_ordered_view_failed(self, message):
+        source = self.proxy_image_list_model.sourceModel()
+        sort_names = {'file_name':'Name','mtime':'Modified','ctime':'Created',
+                      'file_size':'Size','file_type':'Type','love_rate_bomb':'Love / Rate / Bomb',
+                      'RANDOM()':'Random'}
+        restored = sort_names.get(source._sort_field,'Default')
+        if source._sort_field == 'file_name' and self._active_sort_by == 'Default':
+            restored = 'Default'
+        self.set_sort_state(restored,source._sort_dir,apply_sort=False,emit_signal=False)
+        self._image_to_scroll_to = None
+        self._sort_restore_target_global = None
+        dialog = QMessageBox(QMessageBox.Warning,'Could not update the image list',
+            f'The previous list is still available.\n\n{message}',QMessageBox.Ok,self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.open()
+
+    def _on_ordered_view_ready(self, result):
+        if result['request']['reason'] != 'sort':
+            return
+        if not result['request']['restore_selection'] or result['request']['selected_path'] is None:
+            self._image_to_scroll_to = None
+            self._sort_restore_target_global = None
+            self.list_view.verticalScrollBar().setValue(0)
+            return
+        source = self.proxy_image_list_model.sourceModel()
+        self._sort_restore_target_global = result['target']
+        self._arm_sort_restore_anchor(source, result['target'])
+        try:
+            self.list_view.layout_ready.disconnect(self._do_scroll_after_sort)
+        except (RuntimeError, TypeError):
+            pass
+        self.list_view.layout_ready.connect(self._do_scroll_after_sort)
+        QTimer.singleShot(0, self._do_scroll_after_sort)
+        QTimer.singleShot(1000, self._do_scroll_after_sort)
 
     @Slot()
     def _arm_sort_restore_anchor(self, source_model, target_global: int):

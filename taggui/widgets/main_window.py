@@ -1809,11 +1809,24 @@ class MainWindow(QMainWindow):
         primary_viewer = getattr(self, 'image_viewer', None)
         if primary_viewer is not None:
             try:
+                primary_viewer._image_decode_task.close()
                 player = getattr(primary_viewer, 'video_player', None)
                 if player is not None:
                     player.cleanup(force_gc=False)
             except Exception as e:
                 print(f"[SHUTDOWN] Primary viewer cleanup warning: {e}")
+
+        for owner, attribute in (
+            (getattr(self,'signal_manager',None), '_tag_count_task'),
+            (getattr(self,'_secondary_browser',None), '_tag_count_task'),
+            (getattr(self,'folder_tree_panel',None), '_tree_task'),
+        ):
+            task = getattr(owner, attribute, None)
+            if task is not None:
+                task.close()
+        secondary_model = getattr(getattr(self,'_secondary_browser',None),'image_list_model',None)
+        if secondary_model is not None:
+            secondary_model.shutdown_background_workers()
 
         # Cancel model executors first (thumbnail/page/cache queues).
         model = getattr(self, 'image_list_model', None)
@@ -1852,6 +1865,9 @@ class MainWindow(QMainWindow):
         if viewer is None:
             return
         try:
+            task = getattr(viewer, '_image_decode_task', None)
+            if task is not None:
+                task.close()
             player = getattr(viewer, 'video_player', None)
             if player is not None:
                 player.cleanup(force_gc=False)

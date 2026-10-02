@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QSize, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from utils.image_index_db import ImageIndexDB
+from utils.latest_task import LatestTask
+from utils.folder_snapshot import collect_folder_snapshot
 
 
 def _absolute(path: Path | str) -> Path:
@@ -223,6 +225,11 @@ class FolderTreePanel(QDockWidget):
         self.root_path: Path | None = None
         self.history = FolderHistory(self)
         self._build_ui()
+        self._tree_task = LatestTask(self, name='folder-tree')
+        self._tree_task.completed.connect(self._accept_tree_snapshot)
+        self._pending_tree_refresh = None
+        self._tree_population_token = 0
+        self.visibilityChanged.connect(self._on_tree_visibility_changed)
 
     def _build_ui(self):
         root = QWidget(self)
@@ -319,80 +326,98 @@ class FolderTreePanel(QDockWidget):
 
     def set_root(self, path: Path | str | None, *, force: bool = False):
         if path is None:
+            self._tree_task.cancel()
+            self._tree_population_token += 1
+            self._pending_tree_refresh = None
             self.root_path = None
             self.tree.clear()
             self._update_actions()
             return
         candidate = _absolute(path)
         if not force and self.root_path is not None and _within(candidate, self.root_path):
+            if self._pending_tree_refresh is not None:
+                self._pending_tree_refresh = candidate
             self.select_path(candidate)
             return
         self.root_path = candidate
         self.refresh(select_path=candidate)
         self.root_changed.emit(str(candidate))
 
+    def _on_tree_visibility_changed(self, visible):
+        if not visible and self.root_path is not None:
+            self._tree_task.cancel()
+            self._tree_population_token += 1
+            self._pending_tree_refresh = self.selected_path() or getattr(self,'_tree_selected',None) or self.root_path
+        if visible and self._pending_tree_refresh is not None:
+            selected = self._pending_tree_refresh
+            self._pending_tree_refresh = None
+            self.refresh(select_path=selected)
+
     def refresh(self, *, select_path: Path | None = None):
         root = self.root_path
-        if root is None or not root.is_dir():
+        self._tree_task.cancel()
+        self._tree_population_token += 1
+        if root is None:
             self.tree.clear()
             self._update_actions()
             return
-        selected = select_path or self.selected_path()
-        expanded = {
-            str(self._item_path(item))
-            for item in self._walk_items()
-            if item.isExpanded() and self._item_path(item) is not None
-        }
-        suffix_provider = getattr(
-            self.main_window, "_supported_external_drop_suffixes", None
-        )
-        media_suffixes = (
-            suffix_provider()
-            if callable(suffix_provider)
-            else {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".mkv"}
-        )
-        self.tree.setUpdatesEnabled(False)
+        selected = select_path or self.selected_path() or root
+        if not self.isVisible():
+            self._pending_tree_refresh = selected
+            self.tree.clear()
+            self._update_actions()
+            return
+        self._pending_tree_refresh = None
+        self._tree_expanded = {str(self._item_path(item)) for item in self._walk_items()
+                               if item.isExpanded()}
+        self._tree_selected = selected
+        provider = getattr(self.main_window,'_supported_external_drop_suffixes',None)
+        suffixes = provider() if callable(provider) else {
+            '.jpg','.jpeg','.png','.webp','.gif','.mp4','.mov','.mkv'}
+        self.tree.setEnabled(False)
+        self._tree_task.submit(collect_folder_snapshot,
+                              (root,frozenset(suffixes),ImageIndexDB.INTERNAL_DIR_NAMES))
+
+    def _accept_tree_snapshot(self, token, rows, error):
+        if error is not None or rows is None:
+            self.tree.setEnabled(True)
+            return
+        if not rows or rows[0][0] != self.root_path:
+            return
+        population = self._tree_population_token
         self.tree.clear()
+        items = []
+        position = 0
 
-        def add_directory(path: Path, parent: QTreeWidgetItem | None) -> tuple[QTreeWidgetItem, int]:
-            item = QTreeWidgetItem([path.name or str(path), "0"])
-            item.setData(0, self.PATH_ROLE, str(path))
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
-            if parent is None:
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-            else:
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
-            if parent is None:
-                self.tree.addTopLevelItem(item)
-            else:
-                parent.addChild(item)
-            children: list[Path] = []
-            total = 0
-            try:
-                for entry in os.scandir(path):
-                    if entry.name in ImageIndexDB.INTERNAL_DIR_NAMES:
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        children.append(Path(entry.path))
-                    elif (
-                        Path(entry.name).suffix.lower() in media_suffixes
-                        and (entry.is_file(follow_symlinks=False) or entry.is_symlink())
-                    ):
-                        total += 1
-            except OSError:
-                item.setDisabled(True)
-            for child in sorted(children, key=lambda value: value.name.casefold()):
-                _child_item, child_total = add_directory(child, item)
-                total += child_total
-            item.setText(1, str(total))
-            item.setToolTip(0, str(path))
-            item.setExpanded(str(path) in expanded or parent is None)
-            return item, total
-
-        add_directory(root, None)
-        self.tree.setUpdatesEnabled(True)
-        self.select_path(selected or root)
-        self._update_actions()
+        def populate():
+            nonlocal position
+            if population != self._tree_population_token:
+                return
+            started = time.monotonic()
+            while position < len(rows):
+                path,parent,count,unavailable = rows[position]
+                item = QTreeWidgetItem([path.name or str(path),str(count)])
+                item.setData(0,self.PATH_ROLE,str(path))
+                flags = item.flags() | Qt.ItemFlag.ItemIsDropEnabled
+                if parent is None:
+                    self.tree.addTopLevelItem(item)
+                    flags &= ~Qt.ItemFlag.ItemIsDragEnabled
+                else:
+                    items[parent].addChild(item)
+                    flags |= Qt.ItemFlag.ItemIsDragEnabled
+                item.setFlags(flags)
+                item.setDisabled(unavailable)
+                item.setToolTip(0,str(path))
+                item.setExpanded(str(path) in self._tree_expanded or parent is None)
+                items.append(item)
+                position += 1
+                if time.monotonic()-started >= .008:
+                    QTimer.singleShot(0,self,populate)
+                    return
+            self.tree.setEnabled(True)
+            self.select_path(self._tree_selected)
+            self._update_actions()
+        populate()
 
     def _walk_items(self):
         stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
@@ -721,6 +746,10 @@ class FolderTreePanel(QDockWidget):
         )
         selected_path = _absolute(selected_path) if selected_path else None
 
+        # New asynchronous readers also own Windows file/SQLite handles.
+        # Release them before the existing model relocation boundary.
+        self._quiesce_auxiliary_readers()
+
         for _name, model, _directory in contexts:
             if model is None:
                 continue
@@ -770,6 +799,40 @@ class FolderTreePanel(QDockWidget):
         self.set_root(destination)
         return True
 
+    def _quiesce_auxiliary_readers(self):
+        self._tree_population_token += 1
+        self._tree_task.drain()
+        main = self.main_window
+        manager = getattr(main, 'signal_manager', None)
+        counter_task = getattr(manager, '_tag_count_task', None)
+        if counter_task is not None:
+            counter_task.drain()
+        secondary = getattr(main, '_secondary_browser', None)
+        for model in (getattr(main,'image_list_model',None), getattr(secondary,'image_list_model',None)):
+            quiesce = getattr(model,'quiesce_ordered_view',None)
+            if callable(quiesce):
+                quiesce()
+        counter_task = getattr(secondary, '_tag_count_task', None)
+        if counter_task is not None:
+            counter_task.drain()
+        provider = getattr(main, '_iter_all_viewers', None)
+        viewers = provider() if callable(provider) else [getattr(main,'image_viewer',None)]
+        self._quiesced_viewer_requests = []
+        for viewer in viewers:
+            quiesce = getattr(viewer, 'quiesce_image_decode', None)
+            if callable(quiesce):
+                owner = quiesce()
+                if owner is not None:
+                    self._quiesced_viewer_requests.append((viewer,owner,viewer._image_decode_task.token))
+
+    def _resume_auxiliary_readers_after_failed_move(self):
+        for viewer,owner,token in getattr(self,'_quiesced_viewer_requests',()):
+            if (viewer._image_decode_task.token == token and viewer.current_media is owner[0]
+                    and viewer._image_decode_owner is None):
+                viewer.load_image(viewer._normalize_proxy_index(viewer.proxy_image_index))
+        self._quiesced_viewer_requests = []
+        self.refresh()
+
     def _active_loaded_root(self) -> Path | None:
         browser_name = self.main_window._active_directory_browser_name()
         if browser_name == "secondary":
@@ -786,6 +849,7 @@ class FolderTreePanel(QDockWidget):
         if not source.is_dir() or destination.exists():
             self._warning("Cannot move folder", "The source is missing or the destination already exists.")
             return False
+        self._quiesce_auxiliary_readers()
         models = [getattr(self.main_window, "image_list_model", None)]
         secondary_browser = getattr(self.main_window, "_secondary_browser", None)
         models.append(getattr(secondary_browser, "image_list_model", None))
@@ -826,12 +890,14 @@ class FolderTreePanel(QDockWidget):
             source.rename(destination)
         except OSError as exc:
             self._warning("Cannot move folder", str(exc))
+            self._resume_auxiliary_readers_after_failed_move()
             return False
         database = ImageIndexDB(self.root_path)
         try:
             if not database.rename_path_prefix(source, destination, directory_path=self.root_path):
                 destination.rename(source)
                 self._warning("Cannot update folder index", "The folder move was rolled back safely.")
+                self._resume_auxiliary_readers_after_failed_move()
                 return False
         finally:
             database.close()

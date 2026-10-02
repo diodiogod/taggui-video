@@ -51,16 +51,27 @@ def test_proxy_page_remap_waits_until_wheel_scrolling_stops():
 def test_secondary_browser_counts_paginated_tags_without_thumbnail_recounts():
     from PySide6.QtCore import Qt
     from widgets.secondary_browser import SecondaryBrowser
-    calls = []
+    calls, requests = [], []
     stats = [{"tag": "example", "count": 1200}]
+    database = object()
     browser = SimpleNamespace(
-        image_list_model=SimpleNamespace(is_paginated=True, get_all_tags_stats=lambda: stats),
-        tag_counter_model=SimpleNamespace(set_tags_from_db=lambda value: calls.append(value)),
+        image_list_model=SimpleNamespace(is_paginated=True, _db=database,
+            _directory_path=Path('isolated'), _page_load_generation=1, _view_prepare_owner=None,
+            _filter_sql='', _filter_bindings=()),
+        proxy_image_list_model=SimpleNamespace(tokenizer=None,filter=[]),
+        _tag_count_task=SimpleNamespace(submit=lambda worker,request: requests.append(request)),
+        tag_counter_model=SimpleNamespace(set_tags_from_db=lambda value: calls.append(value),
+                                         count_tags_filtered=lambda value: None),
     )
     browser._count_tags = lambda: SecondaryBrowser._count_tags(browser)
     SecondaryBrowser._count_tags_after_data_change(browser, None, None, [Qt.DecorationRole])
     assert calls == []
     SecondaryBrowser._count_tags_after_data_change(browser, None, None, [Qt.DisplayRole])
+    assert calls == [] and len(requests) == 1
+    SecondaryBrowser._accept_tag_counts(browser,1,(requests[0],stats,None),None)
+    assert calls == [stats]
+    browser.image_list_model._page_load_generation += 1
+    SecondaryBrowser._accept_tag_counts(browser,1,(requests[0],stats,None),None)
     assert calls == [stats]
 
 
@@ -113,16 +124,16 @@ def test_cache_flag_flush_cannot_write_into_replacement_folder():
         _shutdown_requested=False, _db=old_db,
         _save_executor=SimpleNamespace(submit=callbacks.append),
         _pending_db_cache_flags_lock=threading.Lock(),
-        _pending_db_cache_flags=[(old_db, "same.png")],
+        _pending_db_cache_flags=[(old_db, "same.png", 10)],
     )
     ImageListModel._flush_db_cache_flags(model)
     model._db = new_db
     callbacks.pop()()
     assert writes == []
-    model._pending_db_cache_flags = [(old_db, "wrong.png"), (new_db, "right.png"), (new_db, "right.png")]
+    model._pending_db_cache_flags = [(old_db, "wrong.png", 10), (new_db, "right.png", 10), (new_db, "right.png", 10)]
     ImageListModel._flush_db_cache_flags(model)
     callbacks.pop()()
-    assert writes == [("right.png",)]
+    assert writes == [("right.png", 10)]
 
 
 def test_loaded_path_lookup_does_not_select_same_basename_in_other_folder(tmp_path):

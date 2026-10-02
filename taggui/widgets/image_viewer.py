@@ -32,6 +32,8 @@ from utils.ideogram_caption import (
     ideogram_caption_path,
 )
 from utils.rect import RectPosition
+from utils.latest_task import LatestTask
+from utils.image_decode import decode_image
 from widgets.compare_divider_utils import (
     COMPARE_DIVIDER_COLOR,
     COMPARE_DIVIDER_THICKNESS_PX,
@@ -497,6 +499,10 @@ class ImageViewer(QWidget):
         # removes it from the list.
         self._last_displayed_media = None
         self._viewer_model_resetting = False
+        self._image_decode_task = LatestTask(self, name='viewer-decode')
+        self._image_decode_task.completed.connect(self._on_image_decoded)
+        self._image_decode_owner = None
+        self._pending_compare_request = None
         self.marking_items: list[MarkingItem] = []
         self._recalculating_markings = False
         self.ideogram_overlay_items: list[QGraphicsItem] = []
@@ -1004,7 +1010,7 @@ class ImageViewer(QWidget):
             pass
 
     def is_compare_mode_active(self) -> bool:
-        return bool(self._compare_mode_active)
+        return bool(self._compare_mode_active or self._pending_compare_request is not None)
 
     def get_compare_base_index(self) -> QModelIndex:
         if self._compare_mode_active and self._compare_base_index.isValid():
@@ -1595,7 +1601,9 @@ class ImageViewer(QWidget):
         self.set_compare_split_from_viewer_pos(cursor_viewer_pos)
 
     def exit_compare_mode(self, *, reset_split: bool = False) -> bool:
-        had_compare = bool(self._compare_mode_active or self._compare_overlay_count() > 0)
+        had_compare = bool(self._compare_mode_active or self._compare_overlay_count() > 0
+                           or self._pending_compare_request is not None)
+        self._pending_compare_request = None
         self._compare_reveal_timer.stop()
         self._set_compare_cursor_sync_enabled(False)
         self._set_compare_viewport_update_mode(False)
@@ -1650,6 +1658,12 @@ class ImageViewer(QWidget):
             or current_proxy.column() != base_proxy.column()
         ):
             return False
+        if self._image_decode_owner is not None:
+            # The comparison owns a continuation of this base-image request.
+            # Selection changes, Escape and model resets discard it.
+            self._pending_compare_request = (
+                QPersistentModelIndex(base_proxy),QPersistentModelIndex(incoming_proxy),keep_split_ratio)
+            return True
         if self._is_video_loaded or self.current_image_item is None:
             return False
 
@@ -2258,6 +2272,7 @@ class ImageViewer(QWidget):
 
     @Slot()
     def _on_proxy_model_about_to_reset(self):
+        self._cancel_image_decode()
         if self.current_media is not None:
             self._last_displayed_media = self.current_media
         self._viewer_model_resetting = True
@@ -2342,7 +2357,8 @@ class ImageViewer(QWidget):
         that short window, so editing actions must resolve a fresh selection
         index before touching metadata or the source model.
         """
-        if getattr(self, '_viewer_model_resetting', False):
+        if (getattr(self, '_viewer_model_resetting', False)
+                or getattr(self, '_image_decode_owner', None) is not None):
             return QModelIndex(), None, None
 
         proxy_index = self._normalize_proxy_index(
@@ -2388,6 +2404,7 @@ class ImageViewer(QWidget):
 
     def closeEvent(self, event):
         """Stop all timers before the widget is destroyed to prevent use-after-free crashes."""
+        self._image_decode_task.close()
         try:
             self._controls_hide_timer.stop()
         except Exception:
@@ -3735,9 +3752,69 @@ class ImageViewer(QWidget):
             self._show_error_placeholder(f"Read Error: {e}")
         except Exception as e:
             print(f"[IMAGE_VIEWER] ERROR in load_image: {e}")
-            import traceback
-            traceback.print_exc()
             self._show_error_placeholder(f"Read Error: {e}")
+
+    def _cancel_image_decode(self):
+        task = getattr(self, '_image_decode_task', None)
+        if task is not None:
+            task.cancel()
+        self._image_decode_owner = None
+        self._pending_compare_request = None
+        if hasattr(self, 'view'):
+            self.view.setEnabled(True)
+
+    def quiesce_image_decode(self):
+        """Release the active media handle before a controlled folder rename."""
+        owner = self._image_decode_owner
+        self._cancel_image_decode()
+        self._image_decode_task.drain()
+        return owner
+
+    def _on_image_decoded(self, token, decoded, error):
+        owner = self._image_decode_owner
+        if owner is None:
+            return
+        image, requested_path, proxy, source, directory = owner
+        if (self._viewer_model_resetting or self.current_media is not image
+                or image.path != requested_path or self.proxy_image_list_model is not proxy
+                or proxy.sourceModel() is not source
+                or getattr(source, '_directory_path', None) != directory):
+            self._cancel_image_decode()
+            if (not self._viewer_model_resetting and self.current_media is image
+                    and image.path != requested_path):
+                self.load_image(self._normalize_proxy_index(self.proxy_image_index))
+            return
+        index = self._normalize_proxy_index(self.proxy_image_index)
+        if not index.isValid() or self._safe_get_image(index) is not image:
+            self._cancel_image_decode()
+            return
+        self._image_decode_owner = None
+        self.view.setEnabled(True)
+        if error is not None:
+            self._pending_compare_request = None
+            self._show_error_placeholder(f'Read Error: {error}')
+            return
+        if decoded is None:
+            return
+        try:
+            if decoded.signature is not None:
+                current = requested_path.stat()
+                if (current.st_mtime_ns, current.st_size) != decoded.signature:
+                    self.load_image(index)
+                    return
+            if decoded.resolved_path != requested_path:
+                image.path = decoded.resolved_path
+                self._invalidate_current_thumbnail_after_path_repair(image, stale_path=requested_path)
+                self._persist_repaired_selection_path(image.path)
+            self._load_image_impl(index, True, decoded_image=decoded.image)
+            pending = self._pending_compare_request
+            self._pending_compare_request = None
+            if pending is not None:
+                base,incoming,keep_split = pending
+                self.enter_compare_mode(base,incoming,keep_split_ratio=keep_split)
+        except Exception as exception:
+            self._pending_compare_request = None
+            self._show_error_placeholder(f'Read Error: {exception}')
 
     def _invalidate_current_thumbnail_after_path_repair(self, image, stale_path=None) -> None:
         """Clear stale thumbnail state and request one fresh thumbnail repaint."""
@@ -3906,14 +3983,14 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
-    def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True):
+    def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True, *, decoded_image=None):
         if self._viewer_model_resetting:
             return
         overlay = getattr(self, "_reaction_feedback_overlay", None)
         if overlay is not None:
             overlay.hide_immediately()
         proxy_index = self._normalize_proxy_index(proxy_image_index)
-        if is_complete and self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
+        if is_complete and decoded_image is None and self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
             self._capture_zoom_follow_state_from_current_view()
         if self._compare_mode_active:
             self.exit_compare_mode(reset_split=False)
@@ -3923,7 +4000,7 @@ class ImageViewer(QWidget):
             return
 
         if (
-            self.inhibit_reload_image
+            decoded_image is None and self.inhibit_reload_image
             and self.proxy_image_index.isValid()
             and proxy_index.row() == self.proxy_image_index.row()
             and proxy_index.column() == self.proxy_image_index.column()
@@ -3934,6 +4011,12 @@ class ImageViewer(QWidget):
         if image is None:
             # Page not loaded yet in pagination mode - wait
             return
+        if not is_complete and self._image_decode_owner is not None:
+            # Metadata is read from the live image when its accepted decode
+            # installs. Do not attach new markings to an empty/loading scene.
+            return
+        if is_complete and decoded_image is None:
+            self._cancel_image_decode()
         self.proxy_image_index = QPersistentModelIndex(proxy_index)
         self.current_media = image
         self._last_displayed_media = image
@@ -3962,6 +4045,8 @@ class ImageViewer(QWidget):
             # during a re-entrant crop/metadata refresh.
             self.hud_item = None
             self.view.clear_scene()
+            self.current_image_item = None
+            self.current_video_item = None
             auto_play_after_layout = False
             was_video_loaded = bool(self._is_video_loaded)
 
@@ -4068,41 +4153,20 @@ class ImageViewer(QWidget):
                 except Exception:
                     pass
 
-                # Load static image using QImageReader (like thumbnails for best quality)
-                from PySide6.QtGui import QImageReader
-                image_reader = QImageReader(str(image.path))
-                image_reader.setAutoTransform(True)
-                qimage = image_reader.read()
-
-                if qimage.isNull():
-                    qimage, _fallback_size, fallback_path = fallback_decode_qimage(image.path)
-                    if fallback_path != image.path:
-                        stale_path = image.path
-                        image.path = fallback_path
-                        self._invalidate_current_thumbnail_after_path_repair(image, stale_path=stale_path)
-                        self._persist_repaired_selection_path(image.path)
-                    if qimage is None:
-                        repaired_path = repair_mismatched_image_extension_path(image.path)
-                        if repaired_path != image.path:
-                            stale_path = image.path
-                            image.path = repaired_path
-                            self._invalidate_current_thumbnail_after_path_repair(image, stale_path=stale_path)
-                            self._persist_repaired_selection_path(image.path)
-                            image_reader = QImageReader(str(image.path))
-                            image_reader.setAutoTransform(True)
-                            qimage = image_reader.read()
-
-                        if qimage is None or qimage.isNull():
-                            qimage, _fallback_size, fallback_path = fallback_decode_qimage(image.path)
-                            if fallback_path != image.path:
-                                stale_path = image.path
-                                image.path = fallback_path
-                                self._invalidate_current_thumbnail_after_path_repair(image, stale_path=stale_path)
-                                self._persist_repaired_selection_path(image.path)
-                            if qimage is None:
-                                raise pilimage.UnidentifiedImageError(
-                                    f"cannot identify image file '{image.path}'"
-                                )
+                if decoded_image is None:
+                    self._clear_static_image_render_cache()
+                    source = self.proxy_image_list_model.sourceModel()
+                    self._image_decode_owner = (
+                        image, image.path, self.proxy_image_list_model, source,
+                        getattr(source, '_directory_path', None))
+                    self.view.setEnabled(False)
+                    self.accept_crop_addition.emit(False)
+                    loading = QGraphicsSimpleTextItem('Loading image…')
+                    loading.setBrush(QColor('#aaaaaa'))
+                    self.scene.addItem(loading)
+                    self._image_decode_task.submit(decode_image, image.path)
+                    return
+                qimage = decoded_image
 
                 pixmap = QPixmap.fromImage(qimage)
                 self._static_source_qimage = qimage

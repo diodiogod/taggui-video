@@ -96,14 +96,6 @@ class ImageListViewLayoutMixin:
                         'rect': item_rect
                     })
 
-        # DEBUG: Log when no visible items found at deep scroll
-        if not visible and viewport_top > 50000:
-            # Find Y range of all items
-            if self._masonry_items:
-                min_y = min(item['y'] for item in self._masonry_items)
-                max_y = max(item['y'] + item['height'] for item in self._masonry_items)
-                # print(f"[VISIBLE_DEBUG] viewport={viewport_top}-{viewport_bottom}, items Y range={min_y}-{max_y}, count={len(self._masonry_items)}")
-
         return visible
 
 

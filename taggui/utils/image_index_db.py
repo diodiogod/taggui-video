@@ -16,6 +16,7 @@ from utils.review_marks import (
     normalize_review_state,
 )
 from utils.settings import settings, DEFAULT_SETTINGS
+from utils.sqlite_batches import execute_insert_batches
 from utils.sidecar import preferred_taggui_sidecar_read_path
 from utils.load_options import LimitedLoadOptions
 from utils.ideogram_caption import (
@@ -28,7 +29,7 @@ from utils.caption_annotations import caption_attention_counts, normalize_captio
 
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
-ORDER_CACHE_VERSION = 2  # bump when ordered_image_cache semantics change
+ORDER_CACHE_VERSION = 3  # revision-owned, compact ordered views
 
 
 def _mapping_value(mapping: Any, key: str, default: Any = None) -> Any:
@@ -764,7 +765,6 @@ class ImageIndexDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_caption_review ON images(caption_needs_review_count)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_caption_excluded ON images(caption_excluded_count)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_images_thumbnail_cached ON images(thumbnail_cached)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_ordered_image_cache_image ON ordered_image_cache(cache_key, image_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_tag ON image_tags(tag)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_image_id ON image_tags(image_id)')
 
@@ -944,6 +944,9 @@ class ImageIndexDB:
                     self._create_image_markings_schema(cursor)
                     self._create_ideogram_caption_schema(cursor)
                     self.conn.commit()
+
+                self._create_order_view_schema(self.conn.cursor())
+                self.conn.commit()
 
         except sqlite3.Error as e:
             print(f'Failed to initialize database: {e}')
@@ -1812,7 +1815,7 @@ class ImageIndexDB:
                             else:
                                 insert_rows.append((image_id, '__no_tags__'))
                         if insert_rows:
-                            cursor.executemany(
+                            execute_insert_batches(cursor,
                                 'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
                                 insert_rows,
                             )
@@ -2538,7 +2541,7 @@ class ImageIndexDB:
                             processed_ids,
                         )
                     if pending_rows:
-                        cursor.executemany(
+                        execute_insert_batches(cursor,
                             '''
                             INSERT INTO image_markings
                             (image_id, label, type, confidence, x, y, width, height)
@@ -2588,7 +2591,7 @@ class ImageIndexDB:
             try:
                 before_changes = self.conn.total_changes
                 cursor = self.conn.cursor()
-                cursor.executemany('''
+                execute_insert_batches(cursor, '''
                     INSERT OR IGNORE INTO images
                     (file_name, width, height, aspect_ratio, is_video, video_fps,
                      video_duration, video_frame_count, mtime, rating, indexed_at,
@@ -2686,7 +2689,7 @@ class ImageIndexDB:
             (image_id,),
         )
         if terms:
-            cursor.executemany(
+            execute_insert_batches(cursor,
                 '''
                 INSERT INTO image_ideogram_terms
                     (image_id, kind, label, value, element_index)
@@ -3001,7 +3004,7 @@ class ImageIndexDB:
                         )
                         updated_total += len(deletes)
                     if upserts:
-                        cursor.executemany(
+                        execute_insert_batches(cursor,
                             '''
                             INSERT INTO image_ideogram_captions
                                 (image_id, search_text, sidecar_mtime)
@@ -3061,7 +3064,7 @@ class ImageIndexDB:
             cursor = self.conn.cursor()
             cursor.execute('DELETE FROM image_markings WHERE image_id = ?', (image_id,))
             if normalized_rows:
-                cursor.executemany(
+                execute_insert_batches(cursor,
                     '''
                     INSERT INTO image_markings
                     (image_id, label, type, confidence, x, y, width, height)
@@ -3135,6 +3138,16 @@ class ImageIndexDB:
             print(f'Database count error: {e}')
             return 0
 
+    def count_or_raise(self, filter_sql='', bindings=()):
+        """Owned preparation must distinguish query failure from an empty view."""
+        if not self._ensure_connection():
+            raise sqlite3.OperationalError('Database is unavailable')
+        with self._db_lock:
+            query = 'SELECT COUNT(*) FROM images'
+            if filter_sql:
+                query += f' WHERE {filter_sql}'
+            return int(self.conn.execute(query, self._normalize_bindings(bindings)).fetchone()[0])
+
     @staticmethod
     def _reaction_sort_bucket_expr() -> str:
         return (
@@ -3158,6 +3171,18 @@ class ImageIndexDB:
             "ctime, mtime)"
         )
 
+    def _sort_terms(self, sort_field: str, sort_dir: str, sort_expr=None):
+        """Canonical SQL ordering shared by pages and NULL-safe rank lookup."""
+        if sort_field == 'love_rate_bomb':
+            reverse = sort_dir == 'DESC'
+            return (
+                (self._reaction_sort_bucket_expr(), 'DESC' if reverse else 'ASC'),
+                ('COALESCE(rating, 0)', 'ASC' if reverse else 'DESC'),
+                (self._reaction_sort_time_expr(), 'ASC' if reverse else 'DESC'),
+                ('file_name', sort_dir), ('id', sort_dir),
+            )
+        return ((sort_expr, sort_dir), ('id', sort_dir))
+
     def _resolve_sort_order(self, sort_field: str, sort_dir: str = 'DESC', **kwargs) -> tuple[str, str, Optional[str], str]:
         """Normalize sort parameters and return the SQL ORDER BY clause."""
         valid_sort_fields = {
@@ -3173,16 +3198,8 @@ class ImageIndexDB:
             normalized_dir = 'DESC'
 
         if sort_field == 'love_rate_bomb':
-            if normalized_dir == 'DESC':
-                order_clause = (
-                    f"{self._reaction_sort_bucket_expr()} DESC, "
-                    f"COALESCE(rating, 0) ASC, {self._reaction_sort_time_expr()} ASC, file_name DESC, id DESC"
-                )
-            else:
-                order_clause = (
-                    f"{self._reaction_sort_bucket_expr()} ASC, "
-                    f"COALESCE(rating, 0) DESC, {self._reaction_sort_time_expr()} DESC, file_name ASC, id ASC"
-                )
+            order_clause = ', '.join(f'{expr} {direction}' for expr, direction
+                                     in self._sort_terms(sort_field, normalized_dir))
             return sort_field, normalized_dir, None, order_clause
 
         sort_expr = sort_field
@@ -3194,7 +3211,63 @@ class ImageIndexDB:
         elif sort_field == 'file_size':
             sort_expr = 'COALESCE(file_size, 0)'
 
-        return sort_field, normalized_dir, sort_expr, f'{sort_expr} {normalized_dir}, id {normalized_dir}'
+        order_clause = ', '.join(f'{expr} {direction}' for expr, direction
+                                 in self._sort_terms(sort_field, normalized_dir, sort_expr))
+        return sort_field, normalized_dir, sort_expr, order_clause
+
+    @staticmethod
+    def _create_order_view_schema(cursor):
+        """Track relevant writes across connections; native cache flags are excluded."""
+        cursor.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('order_revision','0')")
+        cursor.execute('''CREATE TABLE IF NOT EXISTS ordered_views (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, cache_key TEXT UNIQUE NOT NULL,
+            canonical_key TEXT NOT NULL, revision INTEGER NOT NULL)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS ordered_view_items (
+            view_id INTEGER NOT NULL, rank INTEGER NOT NULL, image_id INTEGER NOT NULL,
+            PRIMARY KEY(view_id,rank), UNIQUE(view_id,image_id))''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_scopes (
+            scope_id TEXT NOT NULL, file_name TEXT NOT NULL,
+            PRIMARY KEY(scope_id,file_name)) WITHOUT ROWID''')
+        tables = ('images', 'image_tags', 'image_markings',
+                  'image_ideogram_captions', 'image_ideogram_terms')
+        trigger_version = cursor.execute("SELECT value FROM meta WHERE key='order_trigger_version'").fetchone()
+        replace_triggers = trigger_version is None or trigger_version[0] != '2'
+        for table in tables:
+            columns = [row[1] for row in cursor.execute(f'PRAGMA table_info({table})')]
+            relevant = [name for name in columns if name not in
+                        ('thumbnail_cached', 'indexed_at', 'txt_sidecar_mtime')]
+            changed = ' OR '.join(f'OLD.{name} IS NOT NEW.{name}' for name in relevant)
+            for event in ('INSERT', 'DELETE', 'UPDATE'):
+                name = f'order_revision_{table}_{event.lower()}'
+                if replace_triggers:
+                    cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
+                operation = f'UPDATE OF {",".join(relevant)}' if event == 'UPDATE' else event
+                condition = f' WHEN {changed}' if event == 'UPDATE' else ''
+                cursor.execute(f'''CREATE TRIGGER IF NOT EXISTS {name}
+                    AFTER {operation} ON {table}{condition} BEGIN
+                    UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='order_revision'; END''')
+        if replace_triggers:
+            cursor.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('order_trigger_version','2')")
+
+    def _order_revision(self):
+        row = self.conn.execute("SELECT value FROM meta WHERE key='order_revision'").fetchone()
+        return int(row[0]) if row else 0
+
+    def register_path_scope(self, relative_paths):
+        """Publish immutable membership usable by helper DB connections.
+
+        Each SQL query binds one identity, even beyond SQLite's variable limit.
+        Retain membership for in-flight readers; scopes are derived index data.
+        """
+        names = sorted(set(str(path).replace('\\', '/') for path in relative_paths))
+        identity = hashlib.sha256(json.dumps(names, ensure_ascii=True,
+                                             separators=(',', ':')).encode()).hexdigest()
+        if not self._ensure_connection():
+            raise sqlite3.OperationalError('Scope database is unavailable')
+        with self._db_lock, self.conn:
+            self.conn.executemany('INSERT OR IGNORE INTO image_scopes(scope_id,file_name) VALUES(?,?)',
+                                  ((identity, name) for name in names))
+        return identity
 
     def _order_cache_key(self, sort_field: str, sort_dir: str, filter_sql: str, bindings: tuple, **kwargs) -> tuple:
         """Stable cache key for the current ordered view."""
@@ -3206,12 +3279,14 @@ class ImageIndexDB:
             str(filter_sql or ''),
             tuple(self._normalize_bindings(bindings)),
             random_seed,
+            self._order_revision(),
         )
 
     @staticmethod
     def _serialize_order_cache_key(cache_key: tuple) -> str:
         """Serialize cache key for durable DB storage."""
-        return json.dumps(list(cache_key), separators=(',', ':'), ensure_ascii=True)
+        canonical = json.dumps(list(cache_key), separators=(',', ':'), ensure_ascii=True)
+        return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
     def _should_use_order_cache_for_page(self, page: int, page_size: int, sort_field: str) -> bool:
         """Use materialized rank cache for deep pages and random ordering."""
@@ -3230,189 +3305,139 @@ class ImageIndexDB:
             return False
         return str(sort_field) == 'RANDOM()' or start_rank >= 50000
 
-    def _ensure_order_cache(
-        self,
-        *,
-        sort_field: str,
-        sort_dir: str,
-        filter_sql: str = '',
-        bindings: tuple = (),
-        **kwargs,
-    ) -> bool:
-        """Build a temp rank->image_id table for the active ordered view."""
+    def _ensure_order_cache(self, *, sort_field: str, sort_dir: str,
+                            filter_sql: str = '', bindings: tuple = (), **kwargs) -> bool:
+        """Keep compact revision-owned orders, without replacing another reader's view."""
         if not self._ensure_connection():
             return False
-
-        sort_field, sort_dir, _, order_clause = self._resolve_sort_order(
-            sort_field, sort_dir, **kwargs
-        )
-        safe_bindings = self._normalize_bindings(bindings)
-        cache_key = self._order_cache_key(sort_field, sort_dir, filter_sql, safe_bindings, **kwargs)
-        cache_key_text = self._serialize_order_cache_key(cache_key)
-
         try:
             with self._db_lock:
-                if self._order_cache_signature == cache_key:
+                sort_field, sort_dir, _, order = self._resolve_sort_order(sort_field, sort_dir, **kwargs)
+                safe_bindings = self._normalize_bindings(bindings)
+                # Reusing an accepted order is read-only. A background writer
+                # must not make every cached page wait for write ownership.
+                key = self._order_cache_key(sort_field,sort_dir,filter_sql,safe_bindings,**kwargs)
+                text = self._serialize_order_cache_key(key)
+                canonical = json.dumps(list(key),separators=(',', ':'),ensure_ascii=True)
+                existing = self.conn.execute(
+                    'SELECT canonical_key FROM ordered_views WHERE cache_key=?',(text,)).fetchone()
+                if existing is not None and existing[0] == canonical:
+                    self._order_cache_signature = key
                     return True
-
-                cursor = self.conn.cursor()
-                cursor.execute(
-                    'SELECT 1 FROM ordered_image_cache WHERE cache_key = ? LIMIT 1',
-                    (cache_key_text,),
-                )
-                if cursor.fetchone():
-                    self._order_cache_signature = cache_key
-                    return True
-
-                started_at = time.time()
-                cursor.execute('DELETE FROM ordered_image_cache')
-
-                insert_sql = (
-                    'INSERT INTO ordered_image_cache(cache_key, rank, image_id) '
-                    f"SELECT ?, ROW_NUMBER() OVER (ORDER BY {order_clause}) - 1, id "
-                    'FROM images'
-                )
-                if filter_sql:
-                    insert_sql += f' WHERE {filter_sql}'
-                cursor.execute(insert_sql, (cache_key_text,) + safe_bindings)
-                self.conn.commit()
-                self._order_cache_signature = cache_key
-                elapsed_ms = (time.time() - started_at) * 1000.0
-                print(f"[DB] Rebuilt order cache in {elapsed_ms:.0f}ms for sort={sort_field} {sort_dir}")
+                # Acquire SQLite write ownership before reading the revision.
+                # A concurrent metadata writer cannot race the rank-table build.
+                with self.conn:
+                    self.conn.execute("UPDATE meta SET value=value WHERE key='order_revision'")
+                    migration = self.conn.execute("SELECT value FROM meta WHERE key='compact_order_cache'").fetchone()
+                    if migration is None:
+                        # Only derived ranks are discarded. Defer this one-time
+                        # cleanup until a durable order is actually requested.
+                        self.conn.execute('DELETE FROM ordered_image_cache')
+                        self.conn.execute('DROP INDEX IF EXISTS idx_ordered_image_cache_image')
+                        self.conn.execute("INSERT INTO meta(key,value) VALUES('compact_order_cache','1')")
+                    key = self._order_cache_key(sort_field, sort_dir, filter_sql, safe_bindings, **kwargs)
+                    text = self._serialize_order_cache_key(key)
+                    canonical = json.dumps(list(key), separators=(',', ':'), ensure_ascii=True)
+                    existing = self.conn.execute(
+                        'SELECT id,canonical_key FROM ordered_views WHERE cache_key=?', (text,)).fetchone()
+                    if existing is not None and existing[1] == canonical:
+                        self._order_cache_signature = key
+                        return True
+                    if existing is not None:
+                        self.conn.execute('DELETE FROM ordered_view_items WHERE view_id=?', (existing[0],))
+                        self.conn.execute('DELETE FROM ordered_views WHERE id=?', (existing[0],))
+                    started = time.perf_counter()
+                    cursor = self.conn.execute(
+                        'INSERT INTO ordered_views(cache_key,canonical_key,revision) VALUES(?,?,?)',
+                        (text, canonical, key[-1]))
+                    view_id = cursor.lastrowid
+                    query = ('INSERT INTO ordered_view_items(view_id,rank,image_id) '
+                             f'SELECT ?, ROW_NUMBER() OVER (ORDER BY {order})-1,id FROM images')
+                    if filter_sql:
+                        query += f' WHERE {filter_sql}'
+                    self.conn.execute(query, (view_id,) + safe_bindings)
+                    # Four most recent views bound storage. Evicted or revised
+                    # readers fall back to their exact direct query, never an
+                    # incorrect empty page. Empty views have a header too.
+                    self.conn.execute('DELETE FROM ordered_view_items WHERE view_id IN '
+                                      '(SELECT id FROM ordered_views ORDER BY id DESC LIMIT -1 OFFSET 4)')
+                    self.conn.execute('DELETE FROM ordered_views WHERE id IN '
+                                      '(SELECT id FROM ordered_views ORDER BY id DESC LIMIT -1 OFFSET 4)')
+                    self._order_cache_signature = key
+                    print(f'[DB] Rebuilt owned order in {(time.perf_counter()-started)*1000:.0f}ms')
                 return True
-        except sqlite3.Error as e:
-            print(f'Database order cache error: {e}')
+        except sqlite3.Error as error:
             self._order_cache_signature = None
+            print(f'Database order cache error: {error}')
             return False
 
-    def get_rank_of_image(self, rel_path: str, sort_field: str = 'file_name', sort_dir: str = 'ASC', 
+    def get_rank_of_image(self, rel_path: str, sort_field: str = 'file_name', sort_dir: str = 'ASC',
                           filter_sql: str = '', bindings: tuple = (), **kwargs) -> int:
-        """
-        Calculate the 0-indexed rank of an image in the current sort order.
-        Returns -1 if not found. used for restoring selection in paginated mode.
-        """
+        """Return the rank in exactly the same NULL/tie order as get_page."""
         if not self._ensure_connection():
             return -1
-
         try:
-            cursor = self.conn.cursor()
-            safe_bindings = self._normalize_bindings(bindings)
-            sort_field, sort_dir, sort_expr, _ = self._resolve_sort_order(
-                sort_field, sort_dir, **kwargs
-            )
-                
-            # 2. Resolve target row (id + sort value), trying exact and slash-variant paths.
-            target_candidates = [rel_path]
-            alt_path = rel_path.replace('\\', '/')
-            if alt_path != rel_path:
-                target_candidates.append(alt_path)
-            alt_path2 = rel_path.replace('/', '\\')
-            if alt_path2 != rel_path and alt_path2 not in target_candidates:
-                target_candidates.append(alt_path2)
-
-            target_row = None
-            for candidate in target_candidates:
-                if sort_field == 'love_rate_bomb':
-                    if filter_sql:
-                        q = (
-                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
-                            f"FROM images WHERE file_name = ? AND ({filter_sql}) LIMIT 1"
-                        )
-                        cursor.execute(q, (candidate,) + safe_bindings)
+            with self._db_lock:
+                cursor = self.conn.cursor()
+                safe_bindings = self._normalize_bindings(bindings)
+                sort_field, sort_dir, sort_expr, _ = self._resolve_sort_order(
+                    sort_field, sort_dir, **kwargs)
+                terms = self._sort_terms(sort_field, sort_dir, sort_expr)
+                values_sql = ', '.join(expr for expr, _ in terms)
+                suffix = f' AND ({filter_sql})' if filter_sql else ''
+                candidates = list(dict.fromkeys((rel_path, rel_path.replace('\\', '/'),
+                                                rel_path.replace('/', '\\'))))
+                target = None
+                for candidate in candidates:
+                    cursor.execute(f'SELECT {values_sql} FROM images WHERE file_name = ?{suffix} LIMIT 1',
+                                   (candidate,) + safe_bindings)
+                    target = cursor.fetchone()
+                    if target is not None:
+                        break
+                if target is None:
+                    cursor.execute(f'SELECT {values_sql} FROM images WHERE lower(file_name) = lower(?){suffix} LIMIT 1',
+                                   (rel_path,) + safe_bindings)
+                    target = cursor.fetchone()
+                if target is None:
+                    return -1
+                if sort_field == 'RANDOM()':
+                    self._ensure_order_cache(sort_field=sort_field,sort_dir=sort_dir,
+                                             filter_sql=filter_sql,bindings=safe_bindings,**kwargs)
+                key = self._order_cache_key(sort_field,sort_dir,filter_sql,safe_bindings,**kwargs)
+                canonical = json.dumps(list(key),separators=(',', ':'),ensure_ascii=True)
+                cached = cursor.execute('''SELECT c.rank FROM ordered_views v
+                    JOIN ordered_view_items c ON c.view_id=v.id
+                    WHERE v.cache_key=? AND v.canonical_key=? AND c.image_id=?
+                      AND v.revision=(SELECT CAST(value AS INTEGER) FROM meta WHERE key='order_revision')''',
+                    (self._serialize_order_cache_key(key),canonical,target[-1])).fetchone()
+                if cached is not None:
+                    return int(cached[0])
+                clauses, rank_bindings = [], []
+                prefix, prefix_values = [], []
+                for (expr, direction), value in zip(terms, target):
+                    if value is None:
+                        before = f'{expr} IS NOT NULL' if direction == 'DESC' else '0'
+                        before_values = []
+                    elif direction == 'ASC':
+                        before = f'({expr} IS NULL OR {expr} < ?)'
+                        before_values = [value]
                     else:
-                        q = (
-                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
-                            "FROM images WHERE file_name = ? LIMIT 1"
-                        )
-                        cursor.execute(q, (candidate,))
-                else:
-                    if filter_sql:
-                        q = f"SELECT id, {sort_expr} FROM images WHERE file_name = ? AND ({filter_sql}) LIMIT 1"
-                        cursor.execute(q, (candidate,) + safe_bindings)
-                    else:
-                        q = f"SELECT id, {sort_expr} FROM images WHERE file_name = ? LIMIT 1"
-                        cursor.execute(q, (candidate,))
-                target_row = cursor.fetchone()
-                if target_row:
-                    break
-
-            if not target_row:
-                # Case-insensitive fallback for Windows path casing mismatches.
-                if sort_field == 'love_rate_bomb':
-                    if filter_sql:
-                        q = (
-                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
-                            f"FROM images WHERE lower(file_name) = lower(?) AND ({filter_sql}) LIMIT 1"
-                        )
-                        cursor.execute(q, (rel_path,) + safe_bindings)
-                    else:
-                        q = (
-                            f"SELECT id, {self._reaction_sort_bucket_expr()} AS sort_bucket, "
-                            f"COALESCE(rating, 0) AS rating_value, {self._reaction_sort_time_expr()} AS sort_time_value, file_name "
-                            "FROM images WHERE lower(file_name) = lower(?) LIMIT 1"
-                        )
-                        cursor.execute(q, (rel_path,))
-                else:
-                    if filter_sql:
-                        q = (
-                            f"SELECT id, {sort_expr} FROM images "
-                            f"WHERE lower(file_name) = lower(?) AND ({filter_sql}) LIMIT 1"
-                        )
-                        cursor.execute(q, (rel_path,) + safe_bindings)
-                    else:
-                        q = f"SELECT id, {sort_expr} FROM images WHERE lower(file_name) = lower(?) LIMIT 1"
-                        cursor.execute(q, (rel_path,))
-                target_row = cursor.fetchone()
-
-            if not target_row:
-                print(f"[DB] get_rank: Target file not found in DB: {rel_path}")
-                return -1
-
-            target_id = int(target_row[0])
-
-            if sort_field == 'love_rate_bomb':
-                target_bucket = int(target_row[1])
-                target_rating = float(target_row[2] or 0.0)
-                target_sort_time = float(target_row[3] or 0.0)
-                target_file_name = str(target_row[4])
-                before_clause = (
-                    f"(({self._reaction_sort_bucket_expr()} < ?)"
-                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) > ?)"
-                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND {self._reaction_sort_time_expr()} > ?)"
-                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND {self._reaction_sort_time_expr()} = ? AND file_name < ?)"
-                    f" OR ({self._reaction_sort_bucket_expr()} = ? AND COALESCE(rating, 0) = ? AND {self._reaction_sort_time_expr()} = ? AND file_name = ? AND id < ?))"
-                )
-                rank_bindings = (
-                    target_bucket,
-                    target_bucket, target_rating,
-                    target_bucket, target_rating, target_sort_time,
-                    target_bucket, target_rating, target_sort_time, target_file_name,
-                    target_bucket, target_rating, target_sort_time, target_file_name, target_id,
-                )
-            else:
-                target_val = target_row[1]
-                # 3. Deterministic rank count mirroring get_page tie-break: ORDER BY sort_expr, id ASC.
-                if sort_dir == 'ASC':
-                    before_clause = f"(({sort_expr} < ?) OR ({sort_expr} = ? AND id < ?))"
-                else:
-                    before_clause = f"(({sort_expr} > ?) OR ({sort_expr} = ? AND id < ?))"
-                rank_bindings = (target_val, target_val, target_id)
-
-            if filter_sql:
-                where_clause = f"({filter_sql}) AND {before_clause}"
-                query_bindings = safe_bindings + rank_bindings
-            else:
-                where_clause = before_clause
-                query_bindings = rank_bindings
-
-            cursor.execute(f"SELECT COUNT(*) FROM images WHERE {where_clause}", query_bindings)
-            return int(cursor.fetchone()[0])
-            
-        except Exception as e:
-            print(f"[DB] get_rank error: {e}")
+                        before = f'{expr} > ?'
+                        before_values = [value]
+                    clauses.append('(' + ' AND '.join(prefix + [before]) + ')')
+                    rank_bindings.extend(prefix_values + before_values)
+                    # IS compares equal values including NULL without inventing
+                    # a sentinel that could conflict with real sort values.
+                    prefix.append(f'{expr} IS ?')
+                    prefix_values.append(value)
+                where = '(' + ' OR '.join(clauses) + ')'
+                if filter_sql:
+                    where = f'({filter_sql}) AND {where}'
+                cursor.execute(f'SELECT COUNT(*) FROM images WHERE {where}',
+                               safe_bindings + tuple(rank_bindings))
+                return int(cursor.fetchone()[0])
+        except sqlite3.Error as error:
+            print(f'Database rank query error: {error}')
             return -1
 
     def count_cached_thumbnails(self) -> int:
@@ -3443,7 +3468,7 @@ class ImageIndexDB:
             sort_field, sort_dir, **kwargs
         )
 
-        if self._should_use_order_cache_for_page(page, page_size, sort_field):
+        if not kwargs.pop('_direct_order', False) and self._should_use_order_cache_for_page(page, page_size, sort_field):
             if self._ensure_order_cache(
                 sort_field=sort_field,
                 sort_dir=sort_dir,
@@ -3463,9 +3488,10 @@ class ImageIndexDB:
                                    i.love, i.bomb, i.reaction_updated_at,
                                    i.review_rank, i.review_flags, i.review_updated_at,
                                    i.file_size, i.file_type, i.ctime
-                            FROM ordered_image_cache c
+                            FROM ordered_view_items c
+                            JOIN ordered_views v ON v.id = c.view_id
                             JOIN images i ON i.id = c.image_id
-                            WHERE c.cache_key = ? AND c.rank >= ? AND c.rank < ?
+                            WHERE v.cache_key = ? AND v.revision = (SELECT CAST(value AS INTEGER) FROM meta WHERE key='order_revision') AND c.rank >= ? AND c.rank < ?
                             ORDER BY c.rank
                             ''',
                             (self._serialize_order_cache_key(
@@ -3474,7 +3500,8 @@ class ImageIndexDB:
                         )
                         rows = cursor.fetchall()
                         if not rows:
-                            return []
+                            return self.get_page(page, page_size, sort_field, sort_dir,
+                                                 filter_sql, bindings, _direct_order=True, **kwargs)
                         first = rows[0]
                         if isinstance(first, sqlite3.Row):
                             return [dict(row) for row in rows]
@@ -3860,7 +3887,7 @@ class ImageIndexDB:
                 # Insert new tags (deduplicated to prevent UNIQUE constraint errors)
                 if tags:
                     unique_tags = list(dict.fromkeys(tags))  # Preserve order, remove duplicates
-                    cursor.executemany(
+                    execute_insert_batches(cursor,
                         'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
                         [(image_id, tag) for tag in unique_tags]
                     )
@@ -4049,7 +4076,7 @@ class ImageIndexDB:
                         cursor.execute('DELETE FROM image_tags WHERE image_id = ?', (image_id,))
                         if sidecar_tags:
                             unique_tags = list(dict.fromkeys(sidecar_tags))
-                            cursor.executemany(
+                            execute_insert_batches(cursor,
                                 'INSERT INTO image_tags (image_id, tag) VALUES (?, ?)',
                                 [(image_id, tag) for tag in unique_tags]
                             )
@@ -4252,9 +4279,11 @@ class ImageIndexDB:
         except sqlite3.Error as e:
             print(f'Database tag write error: {e}')
 
-    def get_all_tags(self) -> List[Dict[str, Any]]:
+    def get_all_tags(self, *, raise_errors: bool = False) -> List[Dict[str, Any]]:
         """Get all unique tags with their usage counts."""
         if not self.enabled or not self.conn:
+            if raise_errors:
+                raise sqlite3.OperationalError('Tag database is unavailable')
             return []
 
         try:
@@ -4268,6 +4297,8 @@ class ImageIndexDB:
             ''')
             return [{'tag': row[0], 'count': row[1]} for row in cursor.fetchall()]
         except sqlite3.Error as e:
+            if raise_errors:
+                raise
             print(f'Database tag query error: {e}')
             return []
 
@@ -4275,9 +4306,12 @@ class ImageIndexDB:
         self,
         filter_sql: str = '',
         bindings: tuple = (),
+        *, raise_errors: bool = False,
     ) -> List[Dict[str, Any]]:
         """Get tag counts across every image matching the active DB filter."""
         if not self.enabled or not self.conn:
+            if raise_errors:
+                raise sqlite3.OperationalError('Tag database is unavailable')
             return []
 
         try:
@@ -4296,6 +4330,8 @@ class ImageIndexDB:
                 rows = cursor.fetchall()
             return [{'tag': row[0], 'count': row[1]} for row in rows]
         except sqlite3.Error as e:
+            if raise_errors:
+                raise
             print(f'Database filtered tag query error: {e}')
             return []
 
@@ -4392,9 +4428,10 @@ class ImageIndexDB:
                         cursor.execute(
                             '''
                             SELECT i.file_name
-                            FROM ordered_image_cache c
+                            FROM ordered_view_items c
+                            JOIN ordered_views v ON v.id = c.view_id
                             JOIN images i ON i.id = c.image_id
-                            WHERE c.cache_key = ?
+                            WHERE v.cache_key = ? AND v.revision = (SELECT CAST(value AS INTEGER) FROM meta WHERE key='order_revision')
                               AND c.rank >= ?
                               AND c.rank < ?
                               AND (
@@ -4407,7 +4444,9 @@ class ImageIndexDB:
                                 self._order_cache_key(sort_field, sort_dir, filter_sql, bindings, **kwargs)
                              ), safe_start, safe_end),
                         )
-                        return [row[0] for row in cursor.fetchall()]
+                        rows = cursor.fetchall()
+                        if rows:
+                            return [row[0] for row in rows]
                 except sqlite3.Error as e:
                     print(f'Database cached placeholder range query error: {e}')
 
@@ -4981,7 +5020,7 @@ class ImageIndexDB:
             return
         with self._db_lock:
             try:
-                self.conn.execute('DELETE FROM ordered_image_cache')
+                self.conn.execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='order_revision'")
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f'Database order cache invalidation error: {e}')

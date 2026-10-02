@@ -1,3 +1,5 @@
+import os
+
 from PySide6.QtCore import QSettings, Signal
 from PySide6.QtGui import QColor
 
@@ -133,7 +135,11 @@ class Settings(QSettings):
     change = Signal(str, object, name='settingsChanged')
 
     def __init__(self):
-        super().__init__('taggui', 'taggui')
+        isolated_path = os.environ.get('TAGGUI_SETTINGS_PATH')
+        if isolated_path:
+            super().__init__(isolated_path, QSettings.IniFormat)
+        else:
+            super().__init__('taggui', 'taggui')
 
     def setValue(self, key, value):
         super().setValue(key, value)

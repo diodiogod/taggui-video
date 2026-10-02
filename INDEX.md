@@ -18,6 +18,10 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 
 ## Active Docs (`docs/`)
 
+- `docs/PERFORMANCE_RESEARCH_DIARY.md`: Source-linked performance research, experiments and short current findings.
+- `docs/PERFORMANCE_RESEARCH_ASSESSMENT.md`: Ranked research backlog, risks and real-folder profiling plan.
+- `docs/PERFORMANCE_IMPLEMENTATION_LOG.md`: Current implementation scope, measurements, test results and remaining parity checks.
+
 - `docs/DISABLED_FEATURES.md`: Features intentionally disabled/removed.
 - `docs/PLAN1_1M_images_architecture.md`: 1M+ dataset architecture notes.
 - `docs/PLAN2_windowed_strict.md`: Windowed strict masonry implementation plan.

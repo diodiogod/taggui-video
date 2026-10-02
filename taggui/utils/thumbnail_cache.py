@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import threading
 from pathlib import Path
+from PySide6.QtCore import QIODevice, QSaveFile
 from PySide6.QtGui import QIcon, QPixmap
 from utils.settings import settings, DEFAULT_SETTINGS
 
@@ -280,7 +281,7 @@ class ThumbnailCache:
         except Exception as e:
             print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
 
-    def save_thumbnail_qimage(self, file_path: Path, mtime: float, size: int, qimage, crop=None):
+    def save_thumbnail_qimage(self, file_path: Path, mtime: float, size: int, qimage, crop=None) -> bool:
         """Save thumbnail to cache from QImage (thread-safe, no QPixmap needed).
 
         Unlike save_thumbnail(), this method uses only QImage which is safe
@@ -288,19 +289,26 @@ class ThumbnailCache:
         cause GIL contention when used in worker threads.
         """
         if not self.enabled:
-            return
+            return False
         if qimage is None or qimage.isNull():
-            return
+            return False
 
         cache_key = self._get_cache_key(file_path, mtime, size, crop)
         cache_path = self._get_cache_path(cache_key, ensure_parent=True)
 
         try:
-            result = qimage.save(str(cache_path), 'WEBP', quality=85)
-            if not result:
+            output = QSaveFile(str(cache_path))
+            output.setDirectWriteFallback(False)
+            if not output.open(QIODevice.WriteOnly):
+                return False
+            if not qimage.save(output, 'WEBP', quality=85):
+                output.cancelWriting()
                 print(f"[CACHE ERROR] qimage.save() failed for: {file_path.name} -> {cache_path}")
+                return False
+            return output.commit()
         except Exception as e:
             print(f'[CACHE ERROR] Exception saving {file_path.name}: {type(e).__name__}: {e}')
+            return False
 
     def clear_old_cache(self, max_age_days: int = 30):
         """

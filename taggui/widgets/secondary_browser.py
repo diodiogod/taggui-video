@@ -23,6 +23,8 @@ from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.load_options import LimitedLoadOptions
 from utils.settings import settings, DEFAULT_SETTINGS, get_tag_separator
+from utils.latest_task import LatestTask
+from utils.tag_count_loader import prepare_tag_counts
 from widgets.image_list import ImageList
 
 
@@ -77,6 +79,8 @@ class SecondaryBrowser(QObject):
         )
         self.image_list_model.proxy_image_list_model = self.proxy_image_list_model
         self.tag_counter_model = TagCounterModel()
+        self._tag_count_task = LatestTask(self, name='secondary-tag-counts')
+        self._tag_count_task.completed.connect(self._accept_tag_counts)
 
         # Count tags when model changes
         self.image_list_model.modelReset.connect(self._count_tags)
@@ -341,12 +345,36 @@ class SecondaryBrowser(QObject):
     def _count_tags(self):
         try:
             if self.image_list_model.is_paginated:
-                self.tag_counter_model.set_tags_from_db(self.image_list_model.get_all_tags_stats())
+                model = self.image_list_model
+                if not model._db or model._view_prepare_owner is not None:
+                    self._tag_count_task.cancel()
+                    return
+                request = dict(db=model._db, directory=model._directory_path,
+                               generation=model._page_load_generation,
+                               sql=model._filter_sql, bindings=tuple(model._filter_bindings),
+                               tokenizer=self.proxy_image_list_model.tokenizer,
+                               filtered=bool(self.proxy_image_list_model.filter))
+                self._tag_count_task.submit(prepare_tag_counts, request)
             else:
                 images = list(self.image_list_model.images or [])
                 self.tag_counter_model.count_tags(images)
         except Exception:
             pass
+
+    def _accept_tag_counts(self, token, result, error):
+        if error is not None or result is None:
+            return
+        request, all_tags, filtered = result
+        model = self.image_list_model
+        if (request['db'] is not model._db or request['directory'] != model._directory_path
+                or request['generation'] != model._page_load_generation
+                or model._view_prepare_owner is not None):
+            return
+        self.tag_counter_model.set_tags_from_db(all_tags)
+        if filtered is None:
+            self.tag_counter_model.count_tags_filtered(None)
+        else:
+            self.tag_counter_model.set_filtered_counts_from_db(filtered)
 
     def _count_tags_after_data_change(self, start, end, roles):
         if roles and all(role == Qt.ItemDataRole.DecorationRole for role in roles):

@@ -65,6 +65,7 @@ from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
 from utils.text_transform import TextTransformOptions, transform_text
 from utils.thumbnail_cache import get_thumbnail_cache
 from utils.media_file_lock import synchronized_media_file
+from utils.latest_task import LatestTask
 from utils.load_options import LimitedLoadOptions
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
@@ -467,6 +468,31 @@ def _thumbnail_clip_rect(crop: QRect | None, size: QSize) -> QRect:
 
 @synchronized_media_file
 def load_thumbnail_data(
+    image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool
+) -> tuple[QImage | None, bool, tuple[int, int] | None, Path]:
+    """Keep decoded pixels tied to the source version, including deferred saves."""
+    try:
+        source = image_path.stat()
+    except OSError:
+        source = None
+    result = _decode_thumbnail_data(image_path, crop, thumbnail_width, is_video)
+    qimage, cached, dimensions, resolved_path = result
+    if source is not None and not cached and qimage is not None and not qimage.isNull():
+        try:
+            current = image_path.stat()
+            if (source.st_mtime_ns, source.st_size) != (current.st_mtime_ns, current.st_size):
+                return None, False, dimensions, resolved_path
+            # Path repair has separate ownership. Never stamp original pixels
+            # with metadata obtained from a replacement or derived file.
+            if resolved_path == image_path:
+                qimage.setText('taggui_source', json.dumps(
+                    [str(image_path), source.st_mtime_ns, source.st_size, source.st_mtime]))
+        except OSError:
+            return None, False, dimensions, resolved_path
+    return result
+
+
+def _decode_thumbnail_data(
     image_path: Path, crop: QRect, thumbnail_width: int, is_video: bool
 ) -> tuple[QImage | None, bool, tuple[int, int] | None, Path]:
     """
@@ -2357,6 +2383,8 @@ class ImageListModel(QAbstractListModel):
 
     # Signals for pagination
     page_loaded = Signal(int, int)  # page_num, page-load generation
+    ordered_view_ready = Signal(object)
+    ordered_view_failed = Signal(str)
     initial_page_load_started = Signal()
     initial_page_load_finished = Signal()
     total_count_changed = Signal(int)  # Emitted when total image count changes
@@ -2492,6 +2520,9 @@ class ImageListModel(QAbstractListModel):
         self._page_load_cancellations = {}
         self._page_load_lock = threading.RLock()
         self._page_load_generation = 0
+        self._view_prepare_task = LatestTask(self, name='ordered-view')
+        self._view_prepare_task.completed.connect(self._accept_prepared_view)
+        self._view_prepare_owner = None
         self._protected_page_window: tuple[int, int] | None = None
         self._db: ImageIndexDB = None
         self._directory_path: Path = None
@@ -2600,7 +2631,7 @@ class ImageListModel(QAbstractListModel):
         self._is_scrolling = False  # Set by view during active scrolling
         self._pending_cache_saves = []  # Queue of (path, mtime, width, thumbnail, crop)
         self._pending_cache_saves_lock = threading.Lock()
-        self._pending_db_cache_flags = []  # (owning DB, relative file name)
+        self._pending_db_cache_flags = []  # (owning DB, relative file name, source mtime)
         self._pending_db_cache_flags_lock = threading.Lock()
 
         # Timer for deferred DB flush (only when truly idle)
@@ -3096,6 +3127,8 @@ class ImageListModel(QAbstractListModel):
 
     def _request_page_load(self, page_num: int):
         """Request a page to be loaded in background."""
+        if getattr(self, '_view_prepare_owner', None) is not None:
+            return
         if self._shutdown_requested or self._page_executor is None:
             return
         with self._page_load_lock:
@@ -3149,6 +3182,10 @@ class ImageListModel(QAbstractListModel):
 
     def _advance_page_load_generation(self) -> int:
         """Invalidate page workers owned by the previous model state."""
+        task = getattr(self, '_view_prepare_task', None)
+        if task is not None:
+            task.cancel()
+            self._view_prepare_owner = None
         # A page number means a different set of files after sort/filter/reset.
         # Neither an in-flight repair nor a cached "nothing to repair" result
         # can be reused across that change.
@@ -3594,9 +3631,15 @@ class ImageListModel(QAbstractListModel):
             self._scope_sql = ""
             self._scope_bindings = ()
         else:
-            placeholders = ",".join("?" for _ in normalized_paths)
-            self._scope_sql = f"replace(file_name, '\\\\', '/') IN ({placeholders})"
-            self._scope_bindings = tuple(normalized_paths)
+            if len(normalized_paths) > 500:
+                scope_id = self._db.register_path_scope(normalized_paths)
+                self._scope_sql = ("EXISTS(SELECT 1 FROM image_scopes s WHERE s.scope_id=? "
+                                   "AND s.file_name=replace(images.file_name, '\\', '/'))")
+                self._scope_bindings = (scope_id,)
+            else:
+                placeholders = ",".join("?" for _ in normalized_paths)
+                self._scope_sql = f"replace(file_name, '\\', '/') IN ({placeholders})"
+                self._scope_bindings = tuple(normalized_paths)
         self._rebuild_combined_filter()
 
     def set_media_type_filter(self, media_type: str):
@@ -3617,6 +3660,7 @@ class ImageListModel(QAbstractListModel):
         """Apply a filter to the paginated database view."""
         if not self._paginated_mode or not self._db:
             return
+        old_text = (self._text_filter_sql, self._text_filter_bindings)
 
         try:
             text_sql, text_bindings = self._build_filter_sql(filter_struct)
@@ -3634,25 +3678,159 @@ class ImageListModel(QAbstractListModel):
         if (self._filter_sql, self._filter_bindings) == old_combined:
             return
 
-        # Update total count based on combined filter
-        self._advance_page_load_generation()
-        new_total_count = self._db.count(
-            filter_sql=self._filter_sql, bindings=self._filter_bindings)
+        self.prepare_ordered_view(reason='filter', previous_query=old_combined, previous_text=old_text)
 
-        # Use Qt's reset protocol so persistent indices held by the view and
-        # proxy are invalidated before page ownership changes. Emitting
-        # modelReset directly leaves Qt's internal index bookkeeping stale and
-        # can crash inside QListView paint/geometry during a folder switch.
+    def prepare_ordered_view(self, *, reason='refresh', selected_path=None, previous_query=None,
+                             stale_paths=(), previous_text=None, previous_order=None,
+                             restore_selection=True):
+        """Prepare count/rank/target records off-thread and accept one owned view."""
+        if not self._paginated_mode or not self._db or self._shutdown_requested:
+            return
+        selection = self._capture_selected_image_paths()
+        if restore_selection and selected_path is None and reason != 'filter':
+            selected_path = selection[0]
+        pending = self._view_prepare_owner
+        if pending is not None and pending['previous_query'] is not None:
+            previous_query = pending['previous_query']
+            previous_text = pending['previous_text']
+        if pending is not None and pending['previous_order'] is not None:
+            previous_order = pending['previous_order']
+        generation = self._advance_page_load_generation()
+        snapshot = dict(db=self._db, directory=self._directory_path, generation=generation,
+                        sort_field=self._sort_field, sort_dir=self._sort_dir,
+                        filter_sql=self._filter_sql, bindings=tuple(self._filter_bindings),
+                        random_seed=self._random_seed, reason=reason, selection=selection,
+                        selected_path=selected_path,
+                        previous_query=previous_query,
+                        previous_text=previous_text,
+                        previous_order=previous_order, restore_selection=restore_selection,
+                        stale_paths=tuple(stale_paths),
+                        resident_pages=tuple(sorted(self._pages)) if reason == 'metadata' else (),
+                        tokenizer=getattr(getattr(self,'proxy_image_list_model',None),'tokenizer',None))
+        self._view_prepare_owner = snapshot
+        self._view_prepare_task.submit(self._prepare_ordered_view_worker, snapshot)
+
+    def _prepare_ordered_view_worker(self, request, cancelled):
+        started = time.monotonic()
+        db = ImageIndexDB(request['directory'])
+        try:
+            db.configure_filter_tokenizer(request['tokenizer'])
+            db.conn.set_progress_handler(lambda: int(cancelled.is_set()), 1000)
+            if cancelled.is_set():
+                raise CancelledError()
+            if request['stale_paths']:
+                db.remove_images_by_paths(list(request['stale_paths']))
+            query = dict(sort_field=request['sort_field'], sort_dir=request['sort_dir'],
+                         filter_sql=request['filter_sql'], bindings=request['bindings'],
+                         random_seed=request['random_seed'])
+            while True:
+                if cancelled.is_set():
+                    raise CancelledError()
+                revision = db._order_revision()
+                total = db.count_or_raise(request['filter_sql'], request['bindings'])
+                target = 0
+                if request['selected_path'] is not None:
+                    try:
+                        relative = str(request['selected_path'].relative_to(request['directory']))
+                        target = max(0, db.get_rank_of_image(relative, **query))
+                    except ValueError:
+                        pass
+                page = target // self.PAGE_SIZE
+                pages = [page] + [resident for resident in request['resident_pages']
+                                 if resident != page and resident*self.PAGE_SIZE < total]
+                prepared, missing = {}, []
+                for resident in pages:
+                    prepared[resident], absent = self._load_images_from_db(
+                        resident, db=db, directory_path=request['directory'],
+                        sort_field=request['sort_field'], sort_dir=request['sort_dir'],
+                        filter_sql=request['filter_sql'],filter_bindings=request['bindings'],
+                        random_seed=request['random_seed'],cancel_event=cancelled)
+                    missing.extend(absent)
+                    if cancelled.is_set():
+                        raise CancelledError()
+                if missing:
+                    # Retry every affected rank after deletion, including further
+                    # missing pages and retained metadata selections.
+                    db.remove_images_by_paths(missing)
+                    if db._order_revision() == revision:
+                        raise RuntimeError('Missing index entries could not be removed')
+                    continue
+                if db._order_revision() != revision:
+                    continue  # Hydration or another writer changed the order.
+                for resident, records in prepared.items():
+                    expected = max(0, min(self.PAGE_SIZE, total-resident*self.PAGE_SIZE))
+                    if len(records) != expected:
+                        raise RuntimeError('Page preparation failed; the existing view was retained')
+                images = prepared[page]
+                break
+            return dict(request=request,total=total,target=target,page=page,images=images,pages=prepared,
+                        missing=missing,prepare_ms=(time.monotonic()-started)*1000)
+        finally:
+            db.close()
+
+    def _accept_prepared_view(self, token, result, error):
+        owner = self._view_prepare_owner
+        if (owner is None or owner['db'] is not self._db
+                or owner['directory'] != self._directory_path
+                or owner['generation'] != self._page_load_generation):
+            return
+        self._view_prepare_owner = None
+        if error is not None:
+            if not isinstance(error, CancelledError):
+                self._restore_prepared_view_configuration(owner)
+                self.ordered_view_failed.emit(str(error))
+                print(f'[VIEW] Preparation failed; existing view retained: {error}')
+            return
+        if result is None or result['request'] is not owner:
+            return
+        self._metadata_filter_refresh_in_progress = owner['reason'] == 'metadata'
         self.beginResetModel()
         try:
-            self._total_count = int(new_total_count)
-            self._pages.clear()
-            print(f"[FILTER] Applied SQL filter (Count: {self._total_count})")
-            for page_num in range(min(3, (self._total_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)):
-                self._load_page_sync(page_num)
+            self._total_count = result['total']
+            with self._page_load_lock:
+                self._pages.clear()
+                self._page_load_order.clear()
+            for page,images in result['pages'].items():
+                if images:
+                    self._store_page(page,images,generation=owner['generation'])
         finally:
             self.endResetModel()
+            QTimer.singleShot(0,lambda: setattr(self,'_metadata_filter_refresh_in_progress',False))
         self.total_count_changed.emit(self._total_count)
+        self._emit_pages_updated()
+        self.ordered_view_ready.emit(result)
+        if getattr(self, '_initial_page_load_pending', False):
+            self._initial_page_load_pending = False
+            self._initial_warm_pages = ()
+            self.initial_page_load_finished.emit()
+            QTimer.singleShot(0,self._finalize_paginated_bootstrap_refresh)
+        if owner['reason'] == 'metadata':
+            self._restore_selected_image_paths(owner['selection'])
+        if self._total_count:
+            center = result['page']
+            self.set_page_protection_window(max(0,center-1),center+1)
+            # Accepted target first; upper/lower neighbors retain balanced order.
+            for neighbor in (center-1,center+1):
+                if neighbor >= 0:
+                    self._request_page_load(neighbor)
+            self._start_paginated_enrichment(window_pages={center},scope='window')
+        print(f"[VIEW] {owner['reason']} prepared={result['prepare_ms']:.0f}ms target={result['target']}")
+
+    def _restore_prepared_view_configuration(self, owner):
+        if owner['previous_order'] is not None:
+            self._sort_field,self._sort_dir,self._random_seed = owner['previous_order']
+        if owner['previous_query'] is not None:
+            self._filter_sql,self._filter_bindings = owner['previous_query']
+            if owner['previous_text'] is not None:
+                self._text_filter_sql,self._text_filter_bindings = owner['previous_text']
+
+    def quiesce_ordered_view(self):
+        """Cancel preparation and keep the accepted view usable after rename failure."""
+        owner = self._view_prepare_owner
+        self._view_prepare_task.drain()
+        if owner is not None:
+            self._restore_prepared_view_configuration(owner)
+        self._view_prepare_owner = None
 
     def _build_filter_sql(self, filter_node) -> tuple[str, tuple]:
         """Convert filter structure to SQL WHERE clause and bindings."""
@@ -4373,28 +4551,7 @@ class ImageListModel(QAbstractListModel):
         ):
             return
 
-        removed_count, new_total = self._prune_stale_index_paths(rel_paths)
-        if removed_count <= 0:
-            return
-
-        self._advance_page_load_generation()
-        self.beginResetModel()
-        try:
-            with self._page_load_lock:
-                current_pages = sorted(self._pages.keys())
-                self._pages.clear()
-                self._page_load_order.clear()
-
-            if not current_pages:
-                current_pages = [max(0, int(page_num))]
-
-            for loaded_page in current_pages:
-                self._load_page_sync(int(loaded_page))
-        finally:
-            self.endResetModel()
-
-        self.total_count_changed.emit(int(new_total))
-        self._emit_pages_updated()
+        self.prepare_ordered_view(reason='stale', stale_paths=rel_paths)
 
     def _compute_new_media_refresh_result(
         self,
@@ -4816,11 +4973,10 @@ class ImageListModel(QAbstractListModel):
             for page_num, images in (preloaded_pages or {}).items()
             if int(page_num) in pages_to_reload
         }
-        for page_num in sorted(pages_to_reload):
-            if int(page_num) in preloaded:
-                continue
-            page_images, _missing_rel_paths = self._load_images_from_db(int(page_num))
-            preloaded[int(page_num)] = page_images
+        missing_prepared = sorted(pages_to_reload - preloaded.keys())
+        if missing_prepared and not preloaded:
+            self.prepare_ordered_view(reason='refresh')
+            return sorted(pages_to_reload)
 
         self.beginResetModel()
         try:
@@ -4850,6 +5006,8 @@ class ImageListModel(QAbstractListModel):
 
         self.total_count_changed.emit(self._total_count)
         self._emit_paginated_layout_refresh()
+        for page_num in missing_prepared:
+            self._request_page_load(page_num)
         if ordered_pages:
             self._start_paginated_enrichment(
                 window_pages={int(ordered_pages[0])},
@@ -5549,24 +5707,40 @@ class ImageListModel(QAbstractListModel):
 
         try:
             # Resolve filesystem metadata here, never in paint/preload data().
-            if mtime is None:
-                mtime = path.stat().st_mtime
+            current_stat = path.stat()
+            source_text = qimage.text('taggui_source')
+            if source_text:
+                source_path, source_ns, source_size, source_mtime = json.loads(source_text)
+                if (source_path != str(path) or
+                        (source_ns, source_size) != (current_stat.st_mtime_ns, current_stat.st_size)):
+                    return
+                mtime = source_mtime
+            elif mtime is None:
+                # Unowned/legacy pixels cannot safely acquire a new timestamp.
+                return
+            elif mtime != current_stat.st_mtime:
+                return
             from utils.thumbnail_cache import get_thumbnail_cache
             with _thumbnail_save_lock:
-                get_thumbnail_cache().save_thumbnail_qimage(
+                published = get_thumbnail_cache().save_thumbnail_qimage(
                     path,
                     mtime,
                     width,
                     qimage,
                     crop,
                 )
+            if not published:
+                return
+            after_stat = path.stat()
+            if (after_stat.st_mtime_ns, after_stat.st_size) != (current_stat.st_mtime_ns, current_stat.st_size):
+                return  # Publication used the old key; never mark the new source cached.
 
             # Queue DB update for deferred batch write (when truly idle)
             if cache_db and cache_directory:
                 try:
                     relative_path = str(path.relative_to(cache_directory))
                     with self._pending_db_cache_flags_lock:
-                        self._pending_db_cache_flags.append((cache_db, relative_path))
+                        self._pending_db_cache_flags.append((cache_db, relative_path, mtime))
                         # REMOVED: Immediate flush every 100 items (caused blocking)
                         # DB updates now deferred to idle time (5+ seconds after scrolling stops)
                 except ValueError:
@@ -5601,7 +5775,7 @@ class ImageListModel(QAbstractListModel):
             batch = list(self._pending_db_cache_flags)
             self._pending_db_cache_flags.clear()
         active_db = self._db
-        batch = list(dict.fromkeys(path for db, path in batch if db is active_db))
+        batch = list(dict.fromkeys((path,mtime) for db,path,mtime in batch if db is active_db))
         if active_db is None or not batch:
             return
 
@@ -5622,8 +5796,8 @@ class ImageListModel(QAbstractListModel):
                     with active_db._db_lock:
                         cursor = active_db.conn.cursor()
                         cursor.executemany(
-                            'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ?',
-                            [(fn,) for fn in chunk]
+                            'UPDATE images SET thumbnail_cached = 1 WHERE file_name = ? AND mtime = ?',
+                            chunk
                         )
                         active_db.conn.commit()
                     flushed += len(chunk)
@@ -5643,6 +5817,7 @@ class ImageListModel(QAbstractListModel):
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
+        self._view_prepare_task.close()
         self._advance_page_load_generation()
         self._enrichment_cancelled.set()
 
@@ -5695,6 +5870,7 @@ class ImageListModel(QAbstractListModel):
 
     def quiesce_for_directory_relocation(self):
         """Release live filesystem/DB handles before renaming a loaded root."""
+        self.quiesce_ordered_view()
         self.cancel_background_path_validation()
         self._advance_page_load_generation()
         try:
@@ -7230,6 +7406,8 @@ class ImageListModel(QAbstractListModel):
         from PySide6.QtCore import Qt
         from utils.settings import settings, DEFAULT_SETTINGS
 
+        self._view_prepare_task.cancel()
+        self._view_prepare_owner = None
         # DON'T call beginResetModel() here - it clears the view immediately
         # Load all metadata first, THEN reset the model (keeps old images visible during loading)
         error_messages: list[str] = []
@@ -11030,50 +11208,7 @@ class ImageListModel(QAbstractListModel):
         if not self._paginated_mode or not self._db or not self._filter_sql:
             return
 
-        selected_paths = self._capture_selected_image_paths()
-
-        try:
-            new_total_count = int(self._db.count(
-                filter_sql=self._filter_sql,
-                bindings=self._filter_bindings,
-            ))
-        except Exception as exc:
-            print(f'[FILTER] Metadata refresh failed: {exc}')
-            return
-
-        current_pages = sorted(self._pages.keys())
-        last_page = max(
-            0,
-            (new_total_count - 1) // self.PAGE_SIZE,
-        ) if new_total_count else -1
-        old_total_count = int(self._total_count)
-
-        self._advance_page_load_generation()
-        self._metadata_filter_refresh_in_progress = bool(
-            new_total_count > 0 and current_pages
-        )
-        self.beginResetModel()
-        try:
-            self._total_count = new_total_count
-            self._pages.clear()
-            self._page_load_order.clear()
-            for page_num in current_pages:
-                if page_num <= last_page:
-                    self._load_page_sync(page_num)
-        finally:
-            self.endResetModel()
-            # Keep the flag set through the synchronous modelReset handlers so
-            # the masonry view can distinguish this targeted refresh from a
-            # folder switch. Clear it on the next event-loop turn.
-            QTimer.singleShot(
-                0,
-                lambda: setattr(self, '_metadata_filter_refresh_in_progress', False),
-            )
-
-        self._emit_pages_updated()
-        self._restore_selected_image_paths(selected_paths)
-        if old_total_count != new_total_count:
-            self.total_count_changed.emit(new_total_count)
+        self.prepare_ordered_view(reason='metadata')
 
     @Slot(list, object)
     def add_tags(self, tags: list[str], image_indices):

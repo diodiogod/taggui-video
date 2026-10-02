@@ -5,6 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Slot, QModelIndex, QTimer
 from widgets.image_viewer import ImageMarking
 from utils.settings import settings
+from utils.latest_task import LatestTask
+from utils.tag_count_loader import prepare_tag_counts
 
 class SignalManager:
     """Manages signal connections for main window."""
@@ -12,6 +14,8 @@ class SignalManager:
     def __init__(self, main_window):
         """Initialize signal manager."""
         self.main_window = main_window
+        self._tag_count_task = LatestTask(main_window, name='tag-counts')
+        self._tag_count_task.completed.connect(self._accept_tag_counts)
 
     def connect_all_signals(self):
         """Connect all signals for main window components."""
@@ -739,9 +743,7 @@ class SignalManager:
         tag_counter_model = self.main_window.tag_counter_model
         
         if image_list_model.is_paginated:
-             # Use DB stats for efficiency and full coverage
-             stats = image_list_model.get_all_tags_stats()
-             tag_counter_model.set_tags_from_db(stats)
+             self._request_tag_counts()
         else:
              # Regular in-memory counting
              tag_counter_model.count_tags(image_list_model.get_all_loaded_images())
@@ -754,8 +756,37 @@ class SignalManager:
         if not (proxy_model.filter or []):
             tag_counter_model.count_tags_filtered(None)
         elif image_list_model.is_paginated:
-            tag_counter_model.set_filtered_counts_from_db(
-                image_list_model.get_filtered_tags_stats()
-            )
+            self._request_tag_counts()
         else:
             tag_counter_model.count_tags_filtered(proxy_model.get_list())
+
+    def _request_tag_counts(self):
+        model = self.main_window.image_list_model
+        if not model._db or model._view_prepare_owner is not None:
+            self._tag_count_task.cancel()
+            return
+        request = dict(model=model, db=model._db, directory=model._directory_path,
+                       generation=model._page_load_generation,
+                       sql=model._filter_sql, bindings=tuple(model._filter_bindings),
+                       tokenizer=getattr(self.main_window.proxy_image_list_model,'tokenizer',None),
+                       filtered=bool(self.main_window.proxy_image_list_model.filter))
+        self._tag_count_task.submit(self._prepare_tag_counts, request)
+
+    _prepare_tag_counts = staticmethod(prepare_tag_counts)
+
+    def _accept_tag_counts(self, token, result, error):
+        if error is not None or result is None:
+            return
+        request, all_tags, filtered = result
+        model = self.main_window.image_list_model
+        if (request['model'] is not model or request['db'] is not model._db
+                or request['directory'] != model._directory_path
+                or request['generation'] != model._page_load_generation
+                or model._view_prepare_owner is not None):
+            return
+        counts = self.main_window.tag_counter_model
+        counts.set_tags_from_db(all_tags)
+        if filtered is None:
+            counts.count_tags_filtered(None)
+        else:
+            counts.set_filtered_counts_from_db(filtered)
