@@ -54,12 +54,16 @@ class FakeView:
         self._masonry_start_time = 0.0
         self._masonry_poll_counter = 0
         self._qt_drag_active = False
+        self._pending_explicit_jump = False
         self.calculate_calls = 0
         self.complete_calls = []
         self.log_messages = []
 
     def model(self):
         return self._source_model
+
+    def _has_pending_explicit_jump_hold(self):
+        return self._pending_explicit_jump
 
     def _calculate_masonry_layout(self):
         self.calculate_calls += 1
@@ -137,6 +141,19 @@ def test_do_recalculate_masonry_executes_and_clears_rapid_flag(monkeypatch):
     assert view._rapid_input_detected is False
     assert view.calculate_calls == 1
     assert any("buffered pages loaded=2" in msg for _, msg, _ in view.log_messages)
+
+
+def test_explicit_jump_bypasses_typing_cooldown(monkeypatch):
+    view = FakeView(source_model=FakeSourceModel())
+    service = MasonryLifecycleService(view)
+    monkeypatch.setattr(lifecycle_module.time, "time", lambda: 10.0)
+    view._last_filter_keystroke_time = 9.0
+    view._pending_explicit_jump = True
+
+    service.do_recalculate_masonry()
+
+    assert view._masonry_recalc_timer.started == []
+    assert view.calculate_calls == 1
 
 
 def test_check_masonry_completion_done_path_calls_completion_handler():

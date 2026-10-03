@@ -348,6 +348,9 @@ def test_mapping_edits_reuse_count_cache_and_readiness_tracks_recounts(
     readiness = []
     panel.readiness_changed.connect(readiness.append)
     try:
+        window.show()
+        panel.show()
+        APP.processEvents()
         panel.bind_controller(controller)
         panel._count_refresh_timer.stop()
         panel._refresh_eligible_count()
@@ -390,11 +393,12 @@ def test_current_folder_scope_reveals_hidden_subfolder_media(monkeypatch, tmp_pa
     )
     controller = _Controller(window, count=5, all_loaded_count=148)
     try:
+        window.show()
+        panel.show()
+        APP.processEvents()
         panel.bind_controller(controller)
         panel._count_refresh_timer.stop()
         panel._refresh_eligible_count()
-        panel.show()
-        APP.processEvents()
 
         assert not panel.scope_notice.isHidden()
         assert panel.scope_notice_label.text() == (
@@ -410,5 +414,20 @@ def test_current_folder_scope_reveals_hidden_subfolder_media(monkeypatch, tmp_pa
         assert panel.source_combo.currentData() == "all_loaded"
         assert panel.scope_notice.isHidden()
         assert panel.start_button.text() == "Start with 148 media"
+    finally:
+        _dispose(window, panel)
+
+
+def test_hidden_panel_defers_queue_counting(monkeypatch, tmp_path):
+    window, panel, _store = _make_panel(
+        monkeypatch, tmp_path, [_profile("Body parts", "R", "Right Arm")],
+    )
+    controller = _Controller(window)
+    try:
+        panel.bind_controller(controller)
+        panel._refresh_eligible_count()
+        assert not panel.isVisible()
+        assert controller.estimate_calls == 0
+        assert not panel.is_ready
     finally:
         _dispose(window, panel)

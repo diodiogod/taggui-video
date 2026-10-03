@@ -93,13 +93,14 @@ class _Model:
         self.calls.append('redo')
 
 
-def _manager(model, view, effects):
+def _manager(model, view, effects, video_controls=None):
     manager = MenuManager.__new__(MenuManager)
     manager.main_window = SimpleNamespace(
         image_list_model=model,
         image_list=SimpleNamespace(list_view=view),
         _secondary_browser=None,
         marking_effects_controller=effects,
+        get_active_viewer=lambda: SimpleNamespace(video_controls=video_controls),
     )
     manager.update_undo_and_redo_actions = lambda: None
     return manager
@@ -116,6 +117,49 @@ def test_ctrl_z_uses_most_recent_non_video_history_provider():
     assert effects.calls == [('undo', False)]
     assert view.calls == []
     assert model.calls == []
+
+
+class _VideoControls:
+    def __init__(self, undo_timestamp=0, redo_timestamp=0):
+        self._undo_timestamp = undo_timestamp
+        self._redo_timestamp = redo_timestamp
+        self.calls = []
+
+    def can_undo_loop_marker_move(self):
+        return self._undo_timestamp > 0
+
+    def can_redo_loop_marker_move(self):
+        return self._redo_timestamp > 0
+
+    def loop_marker_undo_timestamp(self):
+        return self._undo_timestamp
+
+    def loop_marker_redo_timestamp(self):
+        return self._redo_timestamp
+
+    def undo_loop_marker_move(self):
+        self.calls.append('undo')
+
+    def redo_loop_marker_move(self):
+        self.calls.append('redo')
+
+
+def test_video_marker_undo_participates_in_shared_history():
+    model, view, effects = _Model(100), _View(200), _Effects(300)
+    controls = _VideoControls(undo_timestamp=400)
+    _manager(model, view, effects, controls).undo_active_context()
+    assert controls.calls == ['undo']
+    assert model.calls == view.calls == effects.calls == []
+
+
+def test_video_marker_redo_participates_in_shared_history():
+    model = _Model(redo_timestamp=100)
+    view = _View(redo_timestamp=200)
+    effects = _Effects(redo_timestamp=300)
+    controls = _VideoControls(redo_timestamp=50)
+    _manager(model, view, effects, controls).redo_active_context()
+    assert controls.calls == ['redo']
+    assert model.calls == view.calls == effects.calls == []
 
 
 def test_ctrl_y_uses_oldest_exposed_redo_timestamp():

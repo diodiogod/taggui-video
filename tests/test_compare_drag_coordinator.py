@@ -17,6 +17,7 @@ def test_hold_reaches_ready_after_threshold():
 def test_target_switch_resets_hold_progress():
     coordinator = CompareDragCoordinator(hold_seconds=2.0)
     coordinator.begin_drag("source", now=0.0)
+    coordinator.update_target("target_a", blocked=False, now=0.0)
     state = coordinator.update_target("target_a", blocked=False, now=1.2)
     assert 0.5 < state["progress"] < 1.0
 
@@ -56,6 +57,7 @@ def test_release_before_ready_falls_back():
 def test_release_after_ready_is_handled():
     coordinator = CompareDragCoordinator(hold_seconds=2.0)
     coordinator.begin_drag("source", now=0.0)
+    coordinator.update_target("target", blocked=False, now=0.0)
     coordinator.update_target("target", blocked=False, now=2.0)
     result = coordinator.release_drag(now=2.0)
     assert result["handled"] is True
@@ -96,11 +98,15 @@ def test_large_hover_move_after_ready_restarts_hold_progress():
     assert state["state"] == "ready"
     assert state["progress"] == 1.0
 
-    state = coordinator.update_target("target", blocked=False, hover_pos=(400, 100), now=2.1)
+    # Binary-exact timestamps keep this movement test independent of rounding
+    # a decimal subtraction just below the two-second threshold.
+    state = coordinator.update_target("target", blocked=False, hover_pos=(400, 100), now=2.125)
     assert state["progress"] == 0.0
     assert state["ready"] is False
 
-    state = coordinator.update_target("target", blocked=False, hover_pos=(402, 102), now=4.1)
+    state = coordinator.update_target("target", blocked=False, hover_pos=(402, 102), now=4.0)
+    assert state["ready"] is False
+    state = coordinator.update_target("target", blocked=False, hover_pos=(402, 102), now=4.125)
     assert state["state"] == "ready"
     assert state["progress"] == 1.0
 
@@ -108,6 +114,7 @@ def test_large_hover_move_after_ready_restarts_hold_progress():
 def test_target_hold_override_requires_longer_main_hover():
     coordinator = CompareDragCoordinator(hold_seconds=1.0)
     coordinator.begin_drag("source", now=0.0)
+    coordinator.update_target("main", blocked=False, hold_seconds_override=2.0, now=0.0)
     state = coordinator.update_target(
         "main",
         blocked=False,
@@ -127,3 +134,12 @@ def test_target_hold_override_requires_longer_main_hover():
     assert state["state"] == "ready"
     assert state["ready"] is True
     assert state["progress"] == 1.0
+
+
+def test_hover_timer_starts_on_target_entry_not_drag_start():
+    coordinator = CompareDragCoordinator(hold_seconds=2.0)
+    coordinator.begin_drag("source", now=0.0)
+    state = coordinator.update_target("target", blocked=False, now=10.0)
+    assert state["progress"] == 0.0
+    assert state["ready"] is False
+    assert coordinator.release_drag(now=11.0)["handled"] is False

@@ -1,5 +1,6 @@
 from taggui.widgets import image_list_masonry_submission_service as submission_module
 from taggui.widgets.image_list_masonry_submission_service import MasonrySubmissionService
+from types import SimpleNamespace
 
 
 class FakeExecutor:
@@ -24,9 +25,23 @@ class FakeView:
         self._masonry_calculating = True
         self._masonry_calc_future = None
         self._masonry_calc_count = 0
+        self._source = SimpleNamespace(_page_load_generation=3)
+        self._masonry_navigation_generation = 2
+        self._masonry_mode_generation = 1
+        self.current_thumbnail_size = 128
+
+    def model(self):
+        return self._source
+
+    def viewport(self):
+        return SimpleNamespace(width=lambda: 700)
+
+    def _get_jump_layout_boundary(self):
+        return None
 
 
-def test_prepare_executor_increments_without_recreate():
+def test_prepare_executor_increments_without_recreate(monkeypatch):
+    monkeypatch.setenv("TAGGUI_RECREATE_MASONRY_EXECUTOR", "1")
     view = FakeView(FakeExecutor())
     service = MasonrySubmissionService(view)
 
@@ -37,6 +52,7 @@ def test_prepare_executor_increments_without_recreate():
 
 
 def test_prepare_executor_recreates_every_20(monkeypatch):
+    monkeypatch.setenv("TAGGUI_RECREATE_MASONRY_EXECUTOR", "1")
     old_executor = FakeExecutor()
     view = FakeView(old_executor)
     view._masonry_calc_count = 19
@@ -71,6 +87,29 @@ def test_prepare_executor_recreates_every_20(monkeypatch):
     assert view._masonry_executor is created_executors[0]
     assert thread_starts == [True]
     assert old_executor.shutdown_calls == [True]
+
+
+def test_prepare_executor_keeps_pool_by_default(monkeypatch):
+    monkeypatch.delenv("TAGGUI_RECREATE_MASONRY_EXECUTOR", raising=False)
+    executor = FakeExecutor()
+    view = FakeView(executor)
+    service = MasonrySubmissionService(view)
+    for _ in range(25):
+        service.prepare_executor()
+    assert view._masonry_executor is executor
+    assert executor.shutdown_calls == []
+    assert view._masonry_calc_count == 0
+
+
+def test_diagnostic_rotation_waits_for_running_layout(monkeypatch):
+    monkeypatch.setenv("TAGGUI_RECREATE_MASONRY_EXECUTOR", "1")
+    executor = FakeExecutor()
+    view = FakeView(executor)
+    view._masonry_calc_count = 19
+    view._masonry_calc_future = SimpleNamespace(done=lambda: False)
+    MasonrySubmissionService(view).prepare_executor()
+    assert view._masonry_executor is executor
+    assert executor.shutdown_calls == []
 
 
 def test_submit_layout_job_rejects_invalid_items_data():
@@ -109,10 +148,14 @@ def test_submit_layout_job_success_submits_copy_and_sets_future():
     assert view._masonry_calc_future == "fake-future"
     assert len(executor.submissions) == 1
     submitted_fn, args = executor.submissions[0]
-    assert submitted_fn is submission_module.calculate_masonry_layout
-    assert args[0] == items
-    assert args[0] is not items  # defensive copy
-    assert args[1:] == (128, 2, 5, "abc")
+    assert submitted_fn is MasonrySubmissionService._calculate_identified
+    assert args[0] == service.current_request_identity()
+    assert args[1] is None
+    assert args[2] == items
+    assert args[2] is not items  # defensive copy
+    assert args[3:] == (128, 2, 5, "abc")
+    result = submitted_fn(*args)
+    assert result["request_identity"] == args[0]
 
 
 def test_submit_layout_job_handles_executor_exception():
