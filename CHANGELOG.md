@@ -5,6 +5,24 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.18] - 2026-10-03
+
+### Added
+
+- Speed up repeat visits while keeping old pages and thumbnails evictable.
+- Keep the interface more responsive while opening images, preparing comparisons, filtering, sorting, and updating tag totals.
+- Give visible thumbnails priority and limit memory held by pending image work and cache saves.
+- Prevent large workflow files from causing long cleanup pauses and keep ComfyUI workflow dragging separate from TagGUI metadata.
+
+### Changed
+
+- Improve large-folder browsing and background loading
+- Make distant page jumps faster and scrolling smoother after landing.
+- Improve navigation through tied sort orders, saved-position restoration, and scoped folder refreshes.
+
+### Fixed
+
+- Fix outdated automated test setups and include video file-operation regression checks.
 ## [1.6.17] - 2026-09-29
 
 ### Added
