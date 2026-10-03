@@ -54,6 +54,7 @@ from utils.sidecar import (
     is_taggui_metadata_dict,
     legacy_json_sidecar_path,
     preferred_taggui_sidecar_read_path,
+    read_taggui_metadata,
     taggui_sidecar_path,
 )
 from utils.ideogram_caption import (
@@ -1873,9 +1874,9 @@ class ImageListModel(QAbstractListModel):
 
         meta: dict | None
         try:
-            with json_file_path.open(encoding='UTF-8') as source:
-                loaded = json.load(source)
-                meta = loaded if isinstance(loaded, dict) else None
+            # Foreign legacy workflows are negative cache entries, not retained
+            # object graphs: cyclic GC can otherwise pause every Python thread.
+            meta = read_taggui_metadata(json_file_path)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
             meta = None
 

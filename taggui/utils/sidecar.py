@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import json
 from pathlib import Path
 
 TAGGUI_SIDECAR_SUFFIX = ".taggui.json"
@@ -60,6 +61,24 @@ def preferred_taggui_sidecar_read_path(media_path: Path) -> Path | None:
 def is_taggui_metadata_dict(payload) -> bool:
     """Return whether a decoded JSON object matches TagGUI's metadata schema."""
     return isinstance(payload, dict) and payload.get("version") == 1
+
+
+def read_taggui_metadata(path: Path) -> dict | None:
+    """Read metadata without retaining foreign workflow object graphs.
+
+    Legacy siblings share .json with generators. A first standard-JSON pass
+    reduces each decoded object to its version, discarding its children as
+    parsing proceeds. Only a root compatible with our metadata schema needs
+    a second, complete decode. Dedicated TagGUI sidecars take the direct path.
+    No key ordering, text matching or generator-specific schema is assumed.
+    """
+    text = path.read_text(encoding='UTF-8')
+    if not path.name.endswith(TAGGUI_SIDECAR_SUFFIX):
+        version = json.loads(text, object_hook=lambda obj: obj.get('version'))
+        if version != 1:
+            return None
+    payload = json.loads(text)
+    return payload if is_taggui_metadata_dict(payload) else None
 
 
 def copy_existing_json_sidecars(source_media_path: Path, target_media_path: Path):
