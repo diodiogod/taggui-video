@@ -71,6 +71,7 @@ from utils.thumbnail_cache import get_thumbnail_cache
 from utils.media_file_lock import synchronized_media_file
 from utils.latest_task import LatestTask
 from utils.load_options import LimitedLoadOptions
+from utils.search_text import contains_pattern, tag_pattern, palette_pattern
 from utils.utils import get_confirmation_dialog_reply, pluralize
 import utils.target_dimension as target_dimension
 
@@ -3914,7 +3915,7 @@ class ImageListModel(QAbstractListModel):
         
         if isinstance(filter_node, str):
             # Simple string search: tag OR filename
-            pattern = f"%{filter_node}%"
+            pattern = contains_pattern(filter_node)
             return (
                 "(file_name LIKE ? "
                 "OR EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
@@ -4036,12 +4037,12 @@ class ImageListModel(QAbstractListModel):
                     return f"NOT ({child_sql})", child_bindings
                 
                 if op == 'tag':
-                    if '*' in val or '?' in val:
-                        val = val.replace('*', '%').replace('?', '_')
+                    pattern = tag_pattern(val)
+                    if pattern is not None:
                         return (
                             "EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
                             + real_tag_sql + " AND tag LIKE ?)",
-                            (val,),
+                            (pattern,),
                         )
                     else:
                         return (
@@ -4051,7 +4052,7 @@ class ImageListModel(QAbstractListModel):
                         )
 
                 if op == 'caption':
-                    pattern = f"%{val}%"
+                    pattern = contains_pattern(val)
                     return (
                         "(EXISTS(SELECT 1 FROM image_tags WHERE image_id=images.id AND "
                         + real_tag_sql + " AND tag LIKE ?) "
@@ -4060,7 +4061,7 @@ class ImageListModel(QAbstractListModel):
                     )
 
                 if op == 'ideogram':
-                    pattern = f"%{val}%"
+                    pattern = contains_pattern(val)
                     return (
                         "EXISTS(SELECT 1 FROM image_ideogram_captions "
                         "WHERE image_id=images.id AND search_text LIKE ?)",
@@ -4068,11 +4069,7 @@ class ImageListModel(QAbstractListModel):
                     )
 
                 if op == 'ideogram_color':
-                    color_value = str(val).strip().upper()
-                    if '*' in color_value or '?' in color_value:
-                        color_value = color_value.replace('*', '%').replace('?', '_')
-                    else:
-                        color_value = f"%{color_value}%"
+                    color_value = palette_pattern(val)
                     return (
                         "EXISTS(SELECT 1 FROM image_ideogram_terms "
                         "WHERE image_id=images.id "

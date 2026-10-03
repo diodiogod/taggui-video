@@ -13,7 +13,11 @@ else:
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
-from utils.ideogram_caption import discover_ideogram_search_text
+from utils.ideogram_caption import (
+    IdeogramCaptionError, discover_ideogram_caption, discover_ideogram_search_text,
+    ideogram_caption_chips,
+)
+from utils.search_text import contains_pattern, tag_pattern, palette_pattern, matches_like
 from utils.review_marks import parse_review_flag_token
 import utils.target_dimension as target_dimension
 
@@ -193,17 +197,36 @@ class ProxyImageListModel(QSortFilterProxyModel):
             if tag and str(tag) != '__no_tags__'
         ]
 
+    def _relative_search_path(self, image):
+        directory = getattr(self.sourceModel(), '_directory_path', None)
+        if directory is not None:
+            try:
+                return str(image.path.relative_to(directory))
+            except ValueError:
+                pass
+        return str(image.path)
+
+    @staticmethod
+    def _ideogram_text_matches(image, text, pattern):
+        if not matches_like(text, pattern):
+            return False
+        if text:
+            return True
+        # SQL has no structured-caption row when both sibling files are
+        # absent. An existing invalid/empty sidecar does have an empty row.
+        return (image.path.with_suffix('.ideogram.json').exists()
+                or image.path.with_suffix('.json').exists())
+
     def does_image_match_filter(self, image: Image,
                                 filter_: list | str | None) -> bool:
         if filter_ is None:
             return True
         if isinstance(filter_, str):
-            caption = self.tag_separator.join(self._real_tags(image))
+            pattern = contains_pattern(filter_)
             ideogram_text = discover_ideogram_search_text(image.path)
-            return (fnmatchcase(caption,
-                                f'*{filter_}*')
-                    or fnmatchcase(ideogram_text, f'*{filter_}*')
-                    or fnmatchcase(str(image.path), f'*{filter_}*'))
+            return (any(matches_like(tag, pattern) for tag in self._real_tags(image))
+                    or self._ideogram_text_matches(image, ideogram_text, pattern)
+                    or matches_like(self._relative_search_path(image), pattern))
         if len(filter_) == 1:
             return self.does_image_match_filter(image, filter_[0])
         if len(filter_) == 2:
@@ -211,23 +234,28 @@ class ProxyImageListModel(QSortFilterProxyModel):
             if op == 'not':
                 return not self.does_image_match_filter(image, filter_[1])
             if op == 'tag':
-                return any(fnmatchcase(tag, filter_[1])
+                pattern = tag_pattern(filter_[1])
+                return any((tag == filter_[1] if pattern is None else matches_like(tag, pattern))
                            for tag in self._real_tags(image))
             if op == 'caption':
                 ideogram_text = discover_ideogram_search_text(image.path)
-                caption = f"{self.tag_separator.join(self._real_tags(image))} {ideogram_text}"
-                return fnmatchcase(caption, f'*{filter_[1]}*')
+                pattern = contains_pattern(filter_[1])
+                return (any(matches_like(tag, pattern) for tag in self._real_tags(image))
+                        or self._ideogram_text_matches(image, ideogram_text, pattern))
             if op == 'ideogram':
-                return fnmatchcase(
-                    discover_ideogram_search_text(image.path),
-                    f'*{filter_[1]}*',
-                )
+                text = discover_ideogram_search_text(image.path)
+                return self._ideogram_text_matches(image, text, contains_pattern(filter_[1]))
             if op == 'ideogram_color':
-                needle = str(filter_[1]).strip().upper()
-                return fnmatchcase(
-                    discover_ideogram_search_text(image.path).upper(),
-                    f'*{needle}*',
-                )
+                try:
+                    caption = discover_ideogram_caption(image.path)
+                except IdeogramCaptionError:
+                    return False
+                if caption is None:
+                    return False
+                pattern = palette_pattern(filter_[1])
+                return any(matches_like(chip.text.upper(), pattern)
+                           for chip in ideogram_caption_chips(caption, include_palette=True)
+                           if chip.kind == 'palette')
             if op == 'marking':
                 last_colon_index = filter_[1].rfind(':')
                 if last_colon_index < 0:

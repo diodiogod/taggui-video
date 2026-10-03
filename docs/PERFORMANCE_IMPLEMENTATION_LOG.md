@@ -1,5 +1,11 @@
 # Performance implementation
 
+## Text-predicate consistency — 2026-10-03
+
+`utils/search_text.py` supplies shared pattern construction and a bounded pure-Python matcher of default SQLite LIKE rules. `ProxyImageListModel` now follows existing SQL behavior for exact/wildcard tags, plain text, caption text, structured descriptions and palette fields. Caption searches no longer invent matches across separate tags; plain path searches use the same root-relative domain. Default pagination remains enabled for all folder sizes. SQL query text/semantics remain the baseline, while legacy predicates and live edit/undo membership checks become consistent with it for covered text searches. Name/path/marking glob predicates and numeric semantics were not redesigned.
+
+Regression coverage uses the actual filter-box parser, real isolated indexing, explicit preserved paginated result sets and a SQLite oracle for 1,500 random LIKE patterns plus curated edge cases. First harness errors (outer parse wrapper and unquoted Unicode terms) were corrected to use the application's parser entry point and grammar. Complete suite: **568 passed, four skipped**, 38.81 s, normal GC, no module exclusions. No performance gain is claimed. This batch remains uncommitted. Manual check: ordinary tag/caption/color searches, then edit a marking or undo while a filter is active; explicitly selected nonpaginated mode now uses the same covered text rules.
+
 ## Crop-filter sidecar consolidation — 2026-10-03
 
 After checkpoint `be10db5`, `_read_filter_crop` now uses the existing shared metadata reader instead of fully decoding arbitrary sibling JSON. Valid crop semantics and preferred-file error behavior are preserved; separate filter/count readers reuse bounded foreign-workflow rejection. Four new regressions cover legacy/dedicated normalization, changed metadata, shared negative classification and malformed preferred-file precedence. The related filter/count suite passed 14 tests with isolated settings/cache/home. No wall-clock improvement claimed for this small follow-up. It remains uncommitted; manual crop/target-filter verification can accompany the deferred zoom/Quick Sort check.

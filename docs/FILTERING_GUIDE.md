@@ -347,7 +347,7 @@ tag:'orange "cat"'
 
 ## Wildcards
 
-You can use wildcard matching in text filters:
+`tag:`, `ideogram_color:`, name/path and marking filters support wildcard matching:
 
 - `*` matches any number of characters
 - `?` matches a single character
@@ -357,6 +357,21 @@ Example:
 ```text
 tag:*cat
 ```
+
+The same covered text rules apply in paginated and nonpaginated modes.
+Pagination is enabled by default even for small folders.
+
+Exact `tag:Blue` matching is case sensitive. Wildcard `tag:b*` matching ignores
+ASCII capitalization, so it also matches `Blue`; non-ASCII capitalization remains
+significant. Caption, plain-text and Ideogram description searches also ignore
+ASCII capitalization and retain database `%`/`_` wildcard behavior. In these
+contains searches, `*` and `?` are literal characters rather than tag wildcards.
+Name/path and marking matching retain their case-sensitive glob rules.
+
+`caption:` checks each tag and structured caption text separately. For tags
+`red` and `car`, `caption:"red, car"` does not cross the tag boundary; use
+`tag:red AND tag:car` to find both tags. `ideogram_color:` searches palette fields,
+not color-like strings elsewhere in the structured caption.
 
 ## Combining Filters
 
