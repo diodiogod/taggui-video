@@ -8,6 +8,7 @@ from pathlib import Path
 from utils.sidecar import (
     is_taggui_metadata_dict,
     preferred_taggui_sidecar_read_path,
+    read_taggui_metadata,
     taggui_sidecar_path,
 )
 
@@ -148,8 +149,7 @@ def load_caption_workspace(media_path: Path) -> list[dict] | None:
     if sidecar_path is None:
         return None
     try:
-        with sidecar_path.open(encoding="utf-8") as source:
-            payload = json.load(source)
+        payload = read_taggui_metadata(sidecar_path)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not is_taggui_metadata_dict(payload):

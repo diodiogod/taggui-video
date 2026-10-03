@@ -3739,6 +3739,9 @@ class ImageViewer(QWidget):
     def _show_error_placeholder(self, message: str):
         """Display an error message on the scene."""
         self.hud_item = None
+        self._loading_image_item = None
+        self.current_image_item = None
+        self.current_video_item = None
         self.scene.clear()
         
         # Create standard background size
@@ -4068,6 +4071,21 @@ class ImageViewer(QWidget):
         )
 
         if is_complete:
+            # Keep only non-interactive pixels while a still image decodes.
+            # Reuse this placeholder during rapid replacement selections;
+            # never retain the previous image's editable scene items.
+            retained_frame = None
+            if not image.is_video and decoded_image is None:
+                previous = (self.current_image_item or self.current_video_item
+                            or getattr(self, '_loading_image_item', None))
+                if (previous is not None
+                        and (_shiboken_is_valid is None or _shiboken_is_valid(previous))
+                        and not previous.pixmap().isNull()):
+                    retained_frame = QGraphicsPixmapItem(previous.pixmap())
+                    retained_frame.setOffset(previous.offset())
+                    retained_frame.setTransform(previous.sceneTransform())
+                    retained_frame.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+            self._loading_image_item = None
             self._clear_marking_items_from_scene()
             self.ideogram_overlay_items.clear()
             # QGraphicsScene.clear() owns and deletes the HUD's C++ object.
@@ -4077,6 +4095,9 @@ class ImageViewer(QWidget):
             self.view.clear_scene()
             self.current_image_item = None
             self.current_video_item = None
+            if retained_frame is not None:
+                self.scene.addItem(retained_frame)
+                self._loading_image_item = retained_frame
             auto_play_after_layout = False
             was_video_loaded = bool(self._is_video_loaded)
 
@@ -4191,9 +4212,10 @@ class ImageViewer(QWidget):
                         getattr(source, '_directory_path', None))
                     self.view.setEnabled(False)
                     self.accept_crop_addition.emit(False)
-                    loading = QGraphicsSimpleTextItem('Loading image…')
-                    loading.setBrush(QColor('#aaaaaa'))
-                    self.scene.addItem(loading)
+                    if retained_frame is None:
+                        loading = QGraphicsSimpleTextItem('Loading image…')
+                        loading.setBrush(QColor('#aaaaaa'))
+                        self.scene.addItem(loading)
                     self._image_decode_task.submit(decode_image, image.path)
                     return
                 qimage = decoded_image

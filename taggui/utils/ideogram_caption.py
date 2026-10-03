@@ -11,6 +11,8 @@ import re
 import tempfile
 from typing import Any
 
+from utils.json_sidecar_reader import JSON_OBJECT, read_matching_json_object
+
 
 IDEOGRAM_CAPTION_SUFFIX = ".ideogram.json"
 IDEOGRAM_BBOX_SCALE = 1000
@@ -719,6 +721,10 @@ def export_ideogram_jsonl(
     return len(rows)
 
 
+def _may_be_ideogram_caption(root: dict) -> bool:
+    return root.get('compositional_deconstruction') is JSON_OBJECT
+
+
 def discover_ideogram_caption(media_path: Path) -> IdeogramCaption | None:
     """Load the preferred valid caption beside media, if one exists."""
     preferred_path = ideogram_caption_path(media_path)
@@ -729,7 +735,7 @@ def discover_ideogram_caption(media_path: Path) -> IdeogramCaption | None:
     if not legacy_path.exists():
         return None
     try:
-        payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+        payload = read_matching_json_object(legacy_path, _may_be_ideogram_caption)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not is_ideogram_caption_dict(payload):

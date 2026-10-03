@@ -6,10 +6,11 @@ import shutil
 import json
 from pathlib import Path
 
+from utils.json_sidecar_reader import JSON_OBJECT, read_matching_json_object
+
 TAGGUI_SIDECAR_SUFFIX = ".taggui.json"
 LEGACY_JSON_SIDECAR_SUFFIX = ".json"
 
-_JSON_OBJECT = object()
 _TAGGUI_METADATA_FIELDS = frozenset({
     'crop', 'markings', 'rating', 'love', 'bomb', 'reaction_updated_at',
     'review_rank', 'review_flags', 'review_updated_at', 'caption_workspace',
@@ -77,7 +78,7 @@ def _is_foreign_workflow_structure(payload: dict) -> bool:
     # nodes/state. Preserve legacy mixed documents with actual TagGUI fields.
     state = payload.get('state')
     return (isinstance(payload.get('nodes'), list)
-            and (isinstance(state, dict) or state is _JSON_OBJECT)
+            and (isinstance(state, dict) or state is JSON_OBJECT)
             and not _TAGGUI_METADATA_FIELDS.intersection(payload))
 
 
@@ -90,17 +91,10 @@ def read_taggui_metadata(path: Path) -> dict | None:
     Only compatible metadata needs a second decode; dedicated sidecars take
     the direct path. Key ordering, duplicate keys and escaping remain JSON's.
     """
-    text = path.read_text(encoding='UTF-8')
     if not path.name.endswith(TAGGUI_SIDECAR_SUFFIX):
-        last_object = None
-        def reduce_object(obj):
-            nonlocal last_object
-            last_object = obj
-            return _JSON_OBJECT
-        root = json.loads(text, object_hook=reduce_object)
-        if root is not _JSON_OBJECT or not is_taggui_metadata_dict(last_object):
-            return None
-    payload = json.loads(text)
+        payload = read_matching_json_object(path, is_taggui_metadata_dict)
+    else:
+        payload = json.loads(path.read_text(encoding='UTF-8'))
     return payload if is_taggui_metadata_dict(payload) else None
 
 

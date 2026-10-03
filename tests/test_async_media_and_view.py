@@ -61,6 +61,70 @@ def test_viewer_replaces_slow_selection_and_installs_only_latest_pixels(tmp_path
         APP.processEvents()
 
 
+@pytest.mark.parametrize('fail', [False, True])
+def test_still_switch_retains_inert_pixels_until_latest_result(tmp_path, monkeypatch, fail):
+    source = QStandardItemModel()
+    source._directory_path = tmp_path
+    for i, color in enumerate(('red', 'green', 'blue')):
+        path = tmp_path / f'{i}.png'
+        pixels = QImage(128, 96, QImage.Format_RGB32)
+        pixels.fill(QColor(color))
+        assert pixels.save(str(path))
+        item = QStandardItem()
+        item.setData(Image(path, (128, 96)), Qt.UserRole)
+        source.appendRow(item)
+    proxy = QSortFilterProxyModel()
+    proxy.setSourceModel(source)
+    viewer = image_viewer.ImageViewer(proxy)
+    release, started = threading.Event(), threading.Event()
+    decode = image_viewer.decode_image
+
+    def blocked(path, cancelled):
+        if path.name == '1.png':
+            started.set()
+            assert release.wait(5)
+        if path.name == '2.png' and fail:
+            raise OSError('Synthetic decode failure')
+        return decode(path, cancelled)
+
+    try:
+        viewer.load_image(proxy.index(0, 0))
+        pump(lambda: viewer._image_decode_owner is None)
+        original_transform = viewer.current_image_item.sceneTransform()
+        original_view = viewer.view.transform()
+        monkeypatch.setattr(image_viewer, 'decode_image', blocked)
+        viewer.load_image(proxy.index(1, 0))
+        assert started.wait(1)
+        for row in (1, 2):
+            if row == 2:
+                viewer.load_image(proxy.index(row, 0))
+            APP.processEvents()
+            frame = viewer._loading_image_item
+            assert frame.pixmap().toImage().pixelColor(20, 20) == QColor('red')
+            assert frame.sceneTransform() == original_transform
+            assert viewer.view.transform() == original_view
+            assert viewer.scene.items() == [frame]
+            assert not viewer.view.isEnabled()
+            assert viewer.get_live_image_context()[2] is None
+            assert viewer.current_image_item is None
+        release.set()
+        pump(lambda: viewer._image_decode_owner is None)
+        assert viewer._loading_image_item is None
+        assert viewer.view.isEnabled()
+        if fail:
+            assert viewer.current_image_item is None
+            assert any('Synthetic decode failure' in item.text()
+                       for item in viewer.scene.items() if hasattr(item, 'text'))
+        else:
+            assert viewer._static_source_qimage.pixelColor(20, 20) == QColor('blue')
+            assert viewer.hud_item is not None
+    finally:
+        release.set()
+        viewer._image_decode_task.drain()
+        viewer.close()
+        APP.processEvents()
+
+
 def test_ordered_preparation_supersedes_filter_and_preserves_target_rank(tmp_path,monkeypatch):
     db = ImageIndexDB(tmp_path)
     images=[]
