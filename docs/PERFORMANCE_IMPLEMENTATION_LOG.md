@@ -1,5 +1,9 @@
 # Performance implementation
 
+## Crop-filter sidecar consolidation — 2026-10-03
+
+After checkpoint `be10db5`, `_read_filter_crop` now uses the existing shared metadata reader instead of fully decoding arbitrary sibling JSON. Valid crop semantics and preferred-file error behavior are preserved; separate filter/count readers reuse bounded foreign-workflow rejection. Four new regressions cover legacy/dedicated normalization, changed metadata, shared negative classification and malformed preferred-file precedence. The related filter/count suite passed 14 tests with isolated settings/cache/home. No wall-clock improvement claimed for this small follow-up. It remains uncommitted; manual crop/target-filter verification can accompany the deferred zoom/Quick Sort check.
+
 ## Quick Sort count follow-up — 2026-10-03
 
 **Zoom follow-up:** A different approach succeeded after the worker prototype was rejected. `ImageViewer._get_static_mipmap_pixmap` reuses already premultiplied full-resolution display pixels for compatible 8-bit sources. It preserves the original QImage for precise color sampling and the old path for other formats. Same smooth scaler/cache policy; no new worker or full-image cache. Generated 6000×4000 ARGB32 quarter scaling: handler **52.094 → 3.239 ms**, first Qt timer **52.141 → 3.258 ms**. Forty format/alpha/divisor parity cases plus fallback coverage verify exact displayed pixels and unchanged source; full decode latency is not measured by this probe. Manual check also includes large PNG/WebP fit/zoom/pan, transparent edges, crops/markings and color sampling.

@@ -2,6 +2,7 @@
 
 ## Important findings
 
+- Crop-aware filters now share the workflow-safe sidecar reader.
 - Quick Sort can count a large scope while the interface stays available.
 - Zoom now reuses prepared display pixels instead of repeating an expensive conversion.
 - Browsing feels smoother in live-folder checks.
@@ -15,6 +16,15 @@
 - Small- and large-folder searches still need a compatibility decision.
 
 This diary records research findings and implementation measurements. See [the implementation log](PERFORMANCE_IMPLEMENTATION_LOG.md) for delivery status and operational history. The earlier phases describe the original audit baseline.
+
+## Crop-filter sidecar reader consolidation — 2026-10-03
+
+- **Area/files:** `ImageIndexDB._read_filter_crop`, used by target-size and marking-view SQL predicates; `sidecar.read_taggui_metadata`, `json_sidecar_reader.read_matching_json_object`.
+- **Question:** Does any filter path still fully decode unrelated sibling workflows despite the existing shared classifier? Local source inspection found direct `json.load` in crop lookup. No new internet search was needed; this reuses the previously researched reader and its [Python JSON object-hook contract](https://docs.python.org/3/library/json.html#json.load).
+- **Technique/mapping:** Route crop metadata through the existing dedicated/legacy sidecar reader. Preserve preferred-file precedence, crop normalization and per-connection signature cache. Independent count/filter connections can now reuse the bounded shared negative-signature cache; foreign graphs are not retained as full object trees. Valid legacy mixed documents containing crop metadata remain accepted.
+- **Benefit/confidence/effort/risk:** Less redundant workflow decoding across filter connections; high confidence in eliminated full decoding, small effort, low risk. No new wall-clock speedup claimed. First ambiguous read still parses JSON; negative cache remains bounded, and valid legacy documents still require classification plus full read.
+- **Experiment/result:** Regression tests verify one reduced parse across two fresh crop-reader owners, metadata edits replacing a rejected workflow, negative crop normalization for dedicated and legacy sidecars, and malformed preferred-file precedence. Related filter/count suite: 14 passed. No production data accessed.
+- **Decision:** Implemented. GUI follow-up when convenient: crop/target filters and markings with cropped images; larger startup/video/search changes remain measurements-first.
 
 ## Quick Sort counts and rejected resize prototype — 2026-10-03
 

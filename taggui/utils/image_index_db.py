@@ -20,7 +20,7 @@ from utils.review_marks import (
 )
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.sqlite_batches import execute_insert_batches
-from utils.sidecar import preferred_taggui_sidecar_read_path
+from utils.sidecar import preferred_taggui_sidecar_read_path, read_taggui_metadata
 from utils.load_options import LimitedLoadOptions
 from utils.ideogram_caption import (
     IdeogramCaptionError,
@@ -544,8 +544,7 @@ class ImageIndexDB:
 
             crop = None
             if stat.st_size > 0:
-                with sidecar_path.open(encoding='UTF-8') as source:
-                    meta = json.load(source)
+                meta = read_taggui_metadata(sidecar_path)
                 raw_crop = meta.get('crop') if isinstance(meta, dict) and meta.get('version') == 1 else None
                 if isinstance(raw_crop, (list, tuple)) and len(raw_crop) == 4:
                     x, y, width, height = (int(round(float(value))) for value in raw_crop)
