@@ -373,7 +373,9 @@ class ImageListView(
 
         # Set initial view mode based on size
         self._update_view_mode()
-        scroll_track_style = ImageListScrollBarTrackStyle(QApplication.style())
+        # QProxyStyle owns its base. Passing the shared application object
+        # would reparent it to this view and delete it with the browser.
+        scroll_track_style = ImageListScrollBarTrackStyle(QApplication.style().name())
         scroll_track_style.setParent(self)
         self.verticalScrollBar().setStyle(scroll_track_style)
         # Connect scrollbar events to detect dragging

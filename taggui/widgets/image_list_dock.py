@@ -786,7 +786,7 @@ class ImageList(QDockWidget):
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_combo_text_changed)
         self.sort_combo_box.activated.connect(self._on_sort_combo_activated)
         self._update_sort_combo_display()
-        QTimer.singleShot(0, self._update_sort_label_visibility)
+        QTimer.singleShot(0, self, self._update_sort_label_visibility)
 
     @Slot(str, int, int, bool)
     def _on_background_validation_progress(self, label: str, current: int, maximum: int, done: bool):
@@ -844,7 +844,7 @@ class ImageList(QDockWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._update_sort_label_visibility)
+        QTimer.singleShot(0, self, self._update_sort_label_visibility)
 
     def _update_sort_label_visibility(self):
         if not hasattr(self, 'controls_container') or not hasattr(self, 'sort_label'):
@@ -1654,7 +1654,7 @@ class ImageList(QDockWidget):
                 self.list_view.layout_ready.connect(self._do_scroll_after_sort)
                 
                 # Fallback timer (1s)
-                QTimer.singleShot(1000, self._do_scroll_after_sort)
+                QTimer.singleShot(1000, self, self._do_scroll_after_sort)
             else:
                  self.list_view.verticalScrollBar().setValue(0)
 
@@ -1696,8 +1696,8 @@ class ImageList(QDockWidget):
         except (RuntimeError, TypeError):
             pass
         self.list_view.layout_ready.connect(self._do_scroll_after_sort)
-        QTimer.singleShot(0, self._do_scroll_after_sort)
-        QTimer.singleShot(1000, self._do_scroll_after_sort)
+        QTimer.singleShot(0, self, self._do_scroll_after_sort)
+        QTimer.singleShot(1000, self, self._do_scroll_after_sort)
 
     @Slot()
     def _arm_sort_restore_anchor(self, source_model, target_global: int):

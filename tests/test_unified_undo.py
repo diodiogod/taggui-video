@@ -95,6 +95,9 @@ class _Model:
 
 def _manager(model, view, effects, video_controls=None):
     manager = MenuManager.__new__(MenuManager)
+    # MenuManager now has a Qt lifetime even in these isolated logic tests.
+    from PySide6.QtCore import QObject
+    QObject.__init__(manager)
     manager.main_window = SimpleNamespace(
         image_list_model=model,
         image_list=SimpleNamespace(list_view=view),

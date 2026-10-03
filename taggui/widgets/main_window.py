@@ -594,6 +594,7 @@ class MainWindow(QMainWindow):
         self._folder_panel_resize_total_width = 0
         self._folder_panel_outer_splitter_constraints = None
         self.is_running = True
+        self._main_window_closing = False
         self.post_deletion_index = None  # Track index to focus after deletion
         self._load_session_id = 0  # Increments per load; used to ignore stale callbacks.
         self._restore_in_progress = False
@@ -816,7 +817,7 @@ class MainWindow(QMainWindow):
             self.image_list.dockLocationChanged,
         ):
             dock_signal.connect(
-                lambda *_args: QTimer.singleShot(0, self._sync_left_folder_companion_handle)
+                lambda *_args: QTimer.singleShot(0, self, self._sync_left_folder_companion_handle)
             )
         self.folder_tree_panel.hide()
 
@@ -1099,11 +1100,13 @@ class MainWindow(QMainWindow):
         if self._restore_after_init_scheduled:
             return
         self._restore_after_init_scheduled = True
-        QTimer.singleShot(0, self._restore_after_init)
+        QTimer.singleShot(0, self, self._restore_after_init)
 
     def _restore_after_init(self):
         """Run startup restore with defensive guards to keep startup stable."""
         self._restore_after_init_scheduled = False
+        if self._main_window_closing:
+            return
         try:
             self.restore()
             self._apply_saved_workspace_preset()
@@ -5425,10 +5428,12 @@ class MainWindow(QMainWindow):
             return
         self._remember_instance_as_preferred_target()
         self._refresh_selection_wall_speed_overlay()
-        QTimer.singleShot(0, self._restore_active_browser_context_after_activation)
+        QTimer.singleShot(0, self, self._restore_active_browser_context_after_activation)
 
     def _restore_active_browser_context_after_activation(self):
         """Re-sync the anchored viewer after minimize/restore activation."""
+        if self._main_window_closing:
+            return
         manager = getattr(self, '_context_switch_manager', None)
         if manager is None:
             return
@@ -11123,6 +11128,9 @@ class MainWindow(QMainWindow):
             return False
 
     def _sync_left_folder_companion_handle(self):
+        # visibilityChanged can queue this just before native dock teardown.
+        if self._main_window_closing:
+            return
         images = getattr(self, 'image_list', None)
         folder = getattr(self, 'folder_tree_panel', None)
         if images is None or folder is None:
@@ -11142,7 +11150,7 @@ class MainWindow(QMainWindow):
             self._folder_panel_last_width = max(80, int(folder.width() or 240))
             self._folder_panel_collapsed_from_handle = True
             folder.hide()
-            QTimer.singleShot(0, self._sync_left_folder_companion_handle)
+            QTimer.singleShot(0, self, self._sync_left_folder_companion_handle)
             return
         if not self._folder_panel_collapsed_from_handle:
             return
@@ -11158,7 +11166,7 @@ class MainWindow(QMainWindow):
         )
         self._folder_panel_collapsed_from_handle = False
         folder.raise_()
-        QTimer.singleShot(0, self._sync_left_folder_companion_handle)
+        QTimer.singleShot(0, self, self._sync_left_folder_companion_handle)
 
     def _start_left_folder_companion_resize(self):
         folder = getattr(self, 'folder_tree_panel', None)

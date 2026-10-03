@@ -281,9 +281,11 @@ class VideoPlayerWidget(QWidget):
         self._qt_startup_gate_deadline_monotonic = 0.0
         # QMediaPlayer for smooth playback
         self.media_player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.audio_output.setMuted(True)  # Mute audio by default
-        self.media_player.setAudioOutput(self.audio_output)
+        # External backends own their audio devices. Keep user intent without
+        # opening Qt's audio device until the Qt playback path actually needs it.
+        self.audio_output = None
+        self._audio_muted = True
+        self._audio_volume = 1.0
 
         # Connect media player signals
         self.media_player.positionChanged.connect(self._on_position_changed)
@@ -1494,7 +1496,8 @@ class VideoPlayerWidget(QWidget):
             except Exception as e:
                 print(f"[VIDEO] VLC key-input handoff setup failed: {e}")
 
-            self._set_vlc_muted(bool(self.audio_output.isMuted()) if self.audio_output else True)
+            self._set_vlc_muted(self._audio_muted)
+            self.vlc_player.audio_set_volume(int(round(self._audio_volume * 100.0)))
             self._set_vlc_rate(self.playback_speed)
             self._rebind_vlc_output_target()
             self._vlc_needs_reload = False
@@ -2171,7 +2174,7 @@ class VideoPlayerWidget(QWidget):
                 VideoPlayerWidget._mpv_init_lock = threading.Lock()
 
             speed = max(0.1, float(self.playback_speed))
-            muted = bool(self.audio_output.isMuted()) if self.audio_output else True
+            muted = self._audio_muted
 
             if self.mpv_player is not None:
                 # Reuse existing MPV instance via loadfile replace.
@@ -2209,6 +2212,7 @@ class VideoPlayerWidget(QWidget):
                     pause=True,
                     speed=str(speed),
                     mute='yes' if muted else 'no',
+                    volume=str(self._audio_volume * 100.0),
                     input_default_bindings=False,
                     input_vo_keyboard=False,
                     # Disable all built-in scripts. The custom mpv build already has
@@ -2371,10 +2375,20 @@ class VideoPlayerWidget(QWidget):
             encoded = str(value)
         self._mpv_string_command('set', str(prop_name), encoded)
 
+    def _ensure_qt_audio_output(self):
+        """Apply current audio intent before loading a Qt source, including fallback."""
+        if self.audio_output is None:
+            output = QAudioOutput(self.media_player)
+            output.setMuted(self._audio_muted)
+            output.setVolume(self._audio_volume)
+            self.media_player.setAudioOutput(output)
+            self.audio_output = output
+
     def _load_qt_media_source_for_current_video(self) -> bool:
         video_item = self._get_live_video_item()
         if not self.video_path or video_item is None:
             return False
+        self._ensure_qt_audio_output()
         current_path = str(self.video_path)
         if self._qt_video_source_path == current_path:
             return True
@@ -2922,7 +2936,7 @@ class VideoPlayerWidget(QWidget):
                     self._cancel_vlc_reveal()
                     self._active_forward_backend = PLAYBACK_BACKEND_VLC_EXPERIMENTAL
                     self._set_vlc_rate(self.playback_speed)
-                    self._set_vlc_muted(bool(self.audio_output.isMuted()) if self.audio_output else True)
+                    self._set_vlc_muted(self._audio_muted)
                     self._vlc_end_reached_flag = False
                     self._vlc_has_valid_time_sample = False
                     self._vlc_time_sample_gate_deadline_monotonic = time.monotonic() + 2.0
@@ -3931,6 +3945,7 @@ class VideoPlayerWidget(QWidget):
 
     def set_muted(self, muted: bool):
         """Set audio mute state."""
+        self._audio_muted = bool(muted)
         if self.audio_output:
             self.audio_output.setMuted(muted)
         if self.mpv_player is not None:
@@ -3947,6 +3962,7 @@ class VideoPlayerWidget(QWidget):
             normalized = max(0.0, min(1.0, float(volume)))
         except Exception:
             normalized = 0.0
+        self._audio_volume = normalized
         if self.audio_output:
             try:
                 self.audio_output.setVolume(normalized)

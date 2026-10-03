@@ -765,7 +765,7 @@ class AutoMarkings(QDockWidget):
         self.marking_settings_form.reset_class_labels_button.clicked.connect(
             self._reset_class_labels
         )
-        QTimer.singleShot(0, self._restore_cached_categories_for_saved_model)
+        QTimer.singleShot(0, self, self._restore_cached_categories_for_saved_model)
 
     def minimumSizeHint(self):
         return QSize(150, 80)
@@ -809,7 +809,7 @@ class AutoMarkings(QDockWidget):
         ):
             return
         self._first_interaction_preparation_scheduled = True
-        QTimer.singleShot(0, self._prepare_saved_model_on_first_interaction)
+        QTimer.singleShot(0, self, self._prepare_saved_model_on_first_interaction)
 
     def _prepare_saved_model_on_first_interaction(self):
         self._first_interaction_preparation_scheduled = False

@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 import widgets.quick_sort_panel as quick_sort_panel_module
 from utils.quick_sort import QuickSortMapping, QuickSortProfile
 from widgets.quick_sort_panel import QuickSortPanel
+from qt_test_helpers import dispose_widget
+from shiboken6 import isValid
 
 
 APP = QApplication.instance() or QApplication([])
@@ -146,8 +148,9 @@ def _make_panel(monkeypatch, tmp_path, profiles):
 def _dispose(window, panel):
     panel._save_timer.stop()
     panel._count_refresh_timer.stop()
-    panel.close()
-    window.close()
+    panel._count_task.drain()
+    dispose_widget(window)
+    assert not isValid(panel)
     APP.processEvents()
 
 

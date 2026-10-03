@@ -1,10 +1,36 @@
 # Performance implementation
 
+## Startup restoration regression correction — 2026-10-03
+
+The new closing guard read `_main_window_closing` before its first assignment in closeEvent, interrupting startup restoration. Initialize it to false alongside the constructor's lifecycle state. The native-lifetime test now waits for queued startup delivery and exercises real `restore()` against isolated saved folder/dock state, asserting folder-load dispatch and dock placement as well as workspace restoration. Both normal startup and close-before-startup pass. Previous teardown-only coverage failed to prove restoration ran. Real user settings were not edited; closing an affected build could have persisted the default layout.
+
+## Deferred Qt audio — 2026-10-03
+
+`VideoPlayerWidget` now creates Qt audio only when loading a Qt source, including fallback. Stored mute/volume remain available to MPV/VLC before native setup. Playback intent and reveal scheduling are unchanged. Generated first-use construction samples dropped from 282–354 ms to 3–4 ms; explicit deferred audio creation still costs about 296 ms. This is a component measurement, not end-to-end playback latency. Six audio regression cases and existing playback intent tests pass. Manual check: first video, mute/volume before and after Play, video switching, and Qt fallback. Changes remain uncommitted.
+
+The separate MPV DLL load was measured at 2165 ms in one cold sample versus 32–34 ms in warmer samples. Background loading needs coordinated pending state and owned continuation; it is not implemented.
+
+Full validation initially crashed in Quick Sort test event delivery: its shared fixture cleanup only hid windows. The fixture now drains its count worker and explicitly destroys the native root, asserting child invalidation. Complete suite after that correction: **578 passed, four skipped, 38.26 s**, normal GC and no exclusions. This does not establish audible/native video parity; the manual check above remains required.
+
+## Startup and window-lifetime follow-up — 2026-10-03
+
+After search checkpoint `1cbc935`, first-use profiling found a native lifetime defect: the browser scrollbar proxy took ownership of the shared application style. `ImageListView.__init__` now creates a separate style by name. Explicit native root destruction no longer hits the reproduced access violation. The Windows exit failsafe remains in place; this does not establish all video/backend teardown paths as safe.
+
+Queued startup/sort-label/toolbar-clamp/activation/folder-handle/pipeline-connector work now has a native UI context, so deletion cancels delivery. `MenuManager` is a window-owned QObject with a native Undo/Redo focus slot; the old application-wide lambda could survive its deleted actions. Closing guards reject restore/history work while the native root remains alive. Functions and original failures are documented in the diary. This correction preserves normal delays, sorting, geometry and history semantics.
+
+Ideogram and Pipeline now apply their existing final styling once during construction. Isolated Fusion comparisons against the two checkpoint constructors, five alternating-order warm samples at three zoom sizes, match final CSS and rendered pixels exactly. At 100%, median construction changed **28.860 → 16.758 ms** and **12.799 → 8.119 ms** respectively. Roughly 17 ms less setup in these two panels; no measured end-to-end startup gain is claimed.
+
+Complete isolated suite: **572 passed, four skipped**, 38.35 s, normal GC/no excluded modules. New coverage includes independent style ownership, surviving sibling rendering, unchanged thumb geometry/hit-testing, context-bound callback delivery and actual native window deletion both before and after startup. Three opt-in startup/panel/video probes also pass together; run the startup probe individually when measuring fresh import time because pytest collection preloads other probe imports.
+
+First-video investigation remains separate: the generated paused-player fixture showed about 282–285 ms construction, variable cold optional-runtime loading and about 6 ms warm prepared-preview loading. It does not measure playback visibility. No backend/reveal behavior was changed. The diary records the next native Windows tracing experiment and rejected shortcuts.
+
+Manual check: normal scrollbar appearance and distant dragging; secondary-browser hide/show; opening Ideogram/Pipeline and resizing their controls with Ctrl+wheel; Undo/Redo after changing focus; normal window close. This follow-up remains uncommitted.
+
 ## Text-predicate consistency — 2026-10-03
 
 `utils/search_text.py` supplies shared pattern construction and a bounded pure-Python matcher of default SQLite LIKE rules. `ProxyImageListModel` now follows existing SQL behavior for exact/wildcard tags, plain text, caption text, structured descriptions and palette fields. Caption searches no longer invent matches across separate tags; plain path searches use the same root-relative domain. Default pagination remains enabled for all folder sizes. SQL query text/semantics remain the baseline, while legacy predicates and live edit/undo membership checks become consistent with it for covered text searches. Name/path/marking glob predicates and numeric semantics were not redesigned.
 
-Regression coverage uses the actual filter-box parser, real isolated indexing, explicit preserved paginated result sets and a SQLite oracle for 1,500 random LIKE patterns plus curated edge cases. First harness errors (outer parse wrapper and unquoted Unicode terms) were corrected to use the application's parser entry point and grammar. Complete suite: **568 passed, four skipped**, 38.81 s, normal GC, no module exclusions. No performance gain is claimed. This batch remains uncommitted. Manual check: ordinary tag/caption/color searches, then edit a marking or undo while a filter is active; explicitly selected nonpaginated mode now uses the same covered text rules.
+Regression coverage uses the actual filter-box parser, real isolated indexing, explicit preserved paginated result sets and a SQLite oracle for 1,500 random LIKE patterns plus curated edge cases. First harness errors (outer parse wrapper and unquoted Unicode terms) were corrected to use the application's parser entry point and grammar. Complete suite: **568 passed, four skipped**, 38.81 s, normal GC, no module exclusions. No performance gain is claimed. Checkpoint: `1cbc935`. Manual check: ordinary tag/caption/color searches, then edit a marking or undo while a filter is active; explicitly selected nonpaginated mode now uses the same covered text rules.
 
 ## Crop-filter sidecar consolidation — 2026-10-03
 

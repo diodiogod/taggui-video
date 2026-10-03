@@ -340,11 +340,11 @@ class PipelineStepList(QListWidget):
                 connector.hide()
         if stabilize and not self._connector_stabilize_pending:
             self._connector_stabilize_pending = True
-            QTimer.singleShot(80, self._stabilize_link_connectors)
+            QTimer.singleShot(80, self, self._stabilize_link_connectors)
         if self._connector_refresh_pending:
             return
         self._connector_refresh_pending = True
-        QTimer.singleShot(0, self.refresh_link_connectors)
+        QTimer.singleShot(0, self, self.refresh_link_connectors)
 
     def _stabilize_link_connectors(self):
         self._connector_stabilize_pending = False
@@ -1554,7 +1554,6 @@ class PipelineEditor(QDockWidget):
         run_layout.addWidget(self.log_edit)
         root.addWidget(self.run_panel)
         self.setWidget(container)
-        self._apply_style()
         self._install_ui_zoom_filters()
 
         self.runner.running_changed.connect(self._running_changed)

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence, QPalette
-from PySide6.QtCore import QEvent, QSize, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QObject, QEvent, QSize, QTimer, QUrl, Qt, Signal, Slot
 
 from utils.settings import (
     settings,
@@ -536,11 +536,12 @@ class ToolbarToggleRowWidget(QWidget):
             "}"
         )
 
-class MenuManager:
+class MenuManager(QObject):
     """Manages menu bar creation and setup."""
 
     def __init__(self, main_window):
         """Initialize menu manager."""
+        super().__init__(main_window)
         self.main_window = main_window
         self.undo_action = None
         self.redo_action = None
@@ -592,9 +593,9 @@ class MenuManager:
         self._latest_unified_action_timestamp = 0
         app = QApplication.instance()
         if app is not None:
-            app.focusChanged.connect(
-                lambda *_args: self.update_undo_and_redo_actions()
-            )
+            # A QObject receiver disconnects with its window. A bare lambda
+            # on the application otherwise retains menus after native teardown.
+            app.focusChanged.connect(self.update_undo_and_redo_actions)
 
     def create_menus(self):
         """Create and setup menu bar."""
@@ -1312,8 +1313,12 @@ class MenuManager:
         about_box.exec()
 
 
+    @Slot()
     def update_undo_and_redo_actions(self):
         """Update undo/redo menu action text and enabled state."""
+        if (getattr(self.main_window, '_main_window_closing', False)
+                or self.undo_action is None or self.redo_action is None):
+            return
         undo_candidates = self._unified_history_candidates(is_undo=True)
         newest_timestamp = max(
             (candidate[0] for candidate in undo_candidates),
@@ -1809,7 +1814,7 @@ class MenuManager:
         )
         host.setVisible(reaction_visible)
         if host.isVisible():
-            QTimer.singleShot(0, self.position_menu_bar_right_host)
+            QTimer.singleShot(0, self, self.position_menu_bar_right_host)
 
     def _delete_all_marked(self):
         """Delete all marked images."""

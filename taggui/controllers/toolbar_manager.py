@@ -218,7 +218,7 @@ class ToolbarManager:
                 toolbar.setMinimumWidth(0)
                 toolbar.setMaximumWidth(16777215)
 
-        QTimer.singleShot(0, _clear_width_clamps)
+        QTimer.singleShot(0, self.main_window, _clear_width_clamps)
 
     def _measure_toolbar_content_width(self, toolbar: QToolBar) -> int:
         """Measure a docked toolbar using real child size hints."""

@@ -404,7 +404,8 @@ class IdeogramCaptionEditor(QDockWidget):
         self.root_layout = layout
         self.file_layout = file_row
         self.setWidget(container)
-        self.setStyleSheet(
+        # Install base and zoom rules together once the controls are ready.
+        self._base_style_sheet = (
             """
             QWidget#ideogramCaptionRoot {
                 background: #2b2b2b;
@@ -551,7 +552,6 @@ class IdeogramCaptionEditor(QDockWidget):
             }
             """
         )
-        self._base_style_sheet = self.styleSheet()
 
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setSingleShot(True)
