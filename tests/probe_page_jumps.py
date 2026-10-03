@@ -1,6 +1,7 @@
 """Opt-in Qt jump probe. Default synthetic; explicit source index enables
 read-only sidecar hydration against a database backup. Run through run_isolated.
 TAGGUI_PROBE_BASELINE=1 extracts only the checkpoint's metadata-cache method.
+TAGGUI_PROBE_PARALLEL_PAGES=1 restores the previous window-dispatch method.
 """
 import os
 assert os.environ.get('TAGGUI_SETTINGS_PATH'), 'Use tests/run_isolated.py'
@@ -12,12 +13,12 @@ import sqlite3
 import gc
 import threading
 from collections import Counter
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from pathlib import Path
 
 from qt_test_helpers import APP
-from PySide6.QtCore import QCoreApplication, QEvent, QTimer
-from PySide6.QtGui import QPixmap, QColor, QIcon
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QPoint, QPointF, Qt
+from PySide6.QtGui import QPixmap, QColor, QIcon, QWheelEvent
 from PySide6.QtWidgets import QStyleFactory
 from models.image_list_model import ImageListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -32,7 +33,28 @@ def test_repeated_drag_probe(tmp_path, monkeypatch):
     settings.setValue('diagnostic_log_mode', 'off')
     settings.setValue('image_list_thumbnail_size', 120)
     model = ImageListModel(120, ',')
+    if os.environ.get('TAGGUI_PROBE_ONE_PAGE_WORKER') == '1':
+        model._page_executor.shutdown(wait=True, cancel_futures=True)
+        model._page_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='page_probe')
+    if os.environ.get('TAGGUI_PROBE_PARALLEL_PAGES') == '1':
+        assert os.environ.get('TAGGUI_PROBE_BASELINE') != '1', 'Compare one mechanism at a time'
+        source_text = subprocess.check_output(['git', 'show',
+            '180c520:taggui/models/image_list_model.py'], encoding='utf-8')
+        tree = ast.parse(source_text)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                   and node.name == 'ImageListModel')
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                      and node.name == 'prepare_target_window')
+        namespace = dict(ImageListModel.prepare_target_window.__globals__)
+        exec(compile(ast.Module(body=[method], type_ignores=[]), '<checkpoint>', 'exec'), namespace)
+        prepare = namespace['prepare_target_window'].__get__(model)
+        def prepare_parallel(*args, **kwargs):
+            kwargs.pop('target_first', None)
+            return prepare(*args, **kwargs)
+        monkeypatch.setattr(model, 'prepare_target_window', prepare_parallel)
     if os.environ.get('TAGGUI_PROBE_BASELINE') == '1':
+        model._sidecar_meta_cache = {}
+        model._sidecar_meta_cache_limit = 2048
         source_text = subprocess.check_output(['git', 'show',
             '94c11bb:taggui/models/image_list_model.py'], encoding='utf-8')
         tree = ast.parse(source_text)
@@ -174,6 +196,24 @@ def test_repeated_drag_probe(tmp_path, monkeypatch):
         events(25 if source_index else 2)
         assert view._one_shot_jump_target_global is None
         assert view._get_masonry_item_rect(13000).translated(0, -sb.value()).intersects(view.viewport().rect())
+        def wheel(delta):
+            position = QPointF(100, 100)
+            event = QWheelEvent(position, position, QPoint(), QPoint(0, delta),
+                                Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False)
+            QCoreApplication.sendEvent(view.viewport(), event)
+            events(.02)
+        landed_scroll = sb.value()
+        for _ in range(16):
+            wheel(120)
+        assert sb.value() < landed_scroll
+        upper_scroll = sb.value()
+        for _ in range(32):
+            wheel(-120)
+        assert sb.value() > upper_scroll
+        visible = view._get_masonry_visible_items(
+            view.viewport().rect().translated(0, sb.value()))
+        assert visible and any(item['index'] >= 13000 for item in visible)
+        print('BIDIRECTIONAL_SCROLL', landed_scroll, upper_scroll, sb.value())
         print('MAX_EVENT_MS', max(event_times), 'SCROLL', sb.value(), sb.maximum())
         print('MAX_HEARTBEAT_MS', max(heartbeat_gaps))
         if source_index:

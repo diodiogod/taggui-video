@@ -25,6 +25,7 @@ from PIL import Image as pilimage  # Import Pillow's Image class
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from utils.demand_executor import DemandExecutor
 from utils.thumbnail_save_queue import ThumbnailSaveQueue
+from utils.sidecar_metadata_cache import SidecarMetadataCache
 import threading
 
 
@@ -1886,13 +1887,6 @@ class ImageListModel(QAbstractListModel):
                 int(stat.st_size),
                 meta,
             )
-            if len(self._sidecar_meta_cache) > self._sidecar_meta_cache_limit:
-                try:
-                    oldest_key = next(iter(self._sidecar_meta_cache))
-                except StopIteration:
-                    oldest_key = None
-                if oldest_key is not None:
-                    self._sidecar_meta_cache.pop(oldest_key, None)
 
         return meta
 
@@ -2098,6 +2092,7 @@ class ImageListModel(QAbstractListModel):
         sync_target_page: bool = True,
         include_buffer: bool = True,
         adjacent_only: bool = False,
+        target_first: bool = False,
         prefer_forward: bool = False,
         emit_update: bool = True,
         request_async_window: bool = True,
@@ -2134,9 +2129,8 @@ class ImageListModel(QAbstractListModel):
             prefer_forward=prefer_forward,
         )
         if adjacent_only and include_buffer:
-            # Cold jumps start the target first, then just its immediate
-            # neighbors. The second page worker can prepare content above the
-            # landing line while the target loads, without queuing the full band.
+            # Limit the initial cold window to the immediate neighbors.
+            # target_first can defer those neighbors until the destination lands.
             start_page = max(0, target_page - 1)
             end_page = min(_last_page, target_page + 1)
 
@@ -2149,14 +2143,25 @@ class ImageListModel(QAbstractListModel):
             'total_items': int(total_items),
         })
 
+        cold_target_first = bool(
+            target_first and not sync_target_page and not self._pages.get(target_page)
+        )
+        self._target_page_first = (
+            (int(self._page_load_generation), int(target_page))
+            if cold_target_first else None
+        )
+
         self.set_page_protection_window(start_page, end_page)
         # Supersede the old debounced window before it can enqueue work ahead
-        # of this target. Stop obsolete running reads cooperatively, while
-        # retaining running neighbors that can still serve the new window.
+        # of this target. Stop obsolete reads cooperatively; retain useful
+        # neighbors unless this cold destination owns the available workers.
         self._page_debouncer.stop()
         self._pending_page_range = None
         self.cancel_pending_loads_except(
-            {int(target_page)}, running_keep_pages=set(range(start_page, end_page + 1)),
+            {int(target_page)}, running_keep_pages=(
+                {int(target_page)} if cold_target_first
+                else set(range(start_page, end_page + 1))
+            ),
         )
         self._cancel_queued_thumbnails_outside_window(start_page, end_page)
         try:
@@ -2186,6 +2191,11 @@ class ImageListModel(QAbstractListModel):
             requested_pages = self._order_window_pages(
                 int(start_page), int(end_page), int(target_page), prefer_forward,
             )
+            if cold_target_first:
+                # Metadata parsing is Python-heavy. A parallel neighbor can
+                # delay the destination; the view requests both sides again
+                # after installing its target geometry.
+                requested_pages = [int(target_page)]
             for page_num in requested_pages:
                 if state['loaded_sync'] and page_num == target_page:
                     continue
@@ -2536,9 +2546,8 @@ class ImageListModel(QAbstractListModel):
         self._native_qt_drag_active = False
         self._path_validation_drag_retry_pending = False
         self._background_validation_dialog = None
-        self._sidecar_meta_cache: dict[str, tuple[float, int, dict | None]] = {}
+        self._sidecar_meta_cache = SidecarMetadataCache()
         self._sidecar_meta_cache_lock = threading.Lock()
-        self._sidecar_meta_cache_limit = 2048
         self._paginated_maintenance_lock = threading.Lock()
         self._paginated_maintenance_running = False
         self._new_media_refresh_running = False
@@ -2593,6 +2602,7 @@ class ImageListModel(QAbstractListModel):
         self._pending_page_range = None
         self._page_load_priority_page = None
         self._page_load_priority_until = 0.0
+        self._target_page_first: tuple[int, int] | None = None
         self._metadata_filter_refresh_pending = False
         self._metadata_filter_refresh_in_progress = False
         # DISABLED: Cache warming causes UI blocking
@@ -3138,6 +3148,19 @@ class ImageListModel(QAbstractListModel):
             return
         with self._page_load_lock:
             generation = int(self._page_load_generation)
+            target_first = getattr(self, '_target_page_first', None)
+            if target_first is not None and target_first[0] == generation:
+                target_page = target_first[1]
+                target_pending = (
+                    target_page in self._loading_pages
+                    or (generation, target_page) in self._pending_page_results
+                )
+                bootstrap_page = bool(
+                    page_num == 0 and getattr(self, '_initial_page_load_pending', False)
+                )
+                if (page_num != target_page and target_pending
+                        and not self._pages.get(target_page) and not bootstrap_page):
+                    return
             if self._pages.get(page_num) or page_num in self._loading_pages:
                 return  # Already loaded or loading
             if (generation, int(page_num)) in self._pending_page_results:
@@ -3212,6 +3235,7 @@ class ImageListModel(QAbstractListModel):
             self._loading_pages.clear()
             self._pending_page_results.clear()
             self._empty_page_retry_times = {}
+            self._target_page_first = None
             return int(self._page_load_generation)
 
     def set_page_protection_window(self, start_page: int, end_page: int):
@@ -4470,6 +4494,8 @@ class ImageListModel(QAbstractListModel):
             missing_rel_paths = []
         else:
             return
+        if getattr(self, '_target_page_first', None) == (effective_generation, int(page_num)):
+            self._target_page_first = None
         if missing_rel_paths:
             self.stale_index_paths_detected.emit(
                 missing_rel_paths,

@@ -128,6 +128,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_index_db.py`: DB index/cache layer for large datasets.
 - `thumbnail_cache.py`: Thumbnail cache management.
 - `demand_executor.py`, `thumbnail_save_queue.py`: Prioritized thumbnail demand and bounded deferred cache-save buffers.
+- `sidecar_metadata_cache.py`: Separate bounded metadata and foreign-sidecar signature caches.
 - `latest_task.py`, `image_decode.py`: Replaceable worker requests and owned still/comparison image preparation.
 - `image.py`: Image/media utility helpers.
 - `utils.py`: General utility helpers.

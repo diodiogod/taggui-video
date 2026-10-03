@@ -9,6 +9,14 @@ from pathlib import Path
 TAGGUI_SIDECAR_SUFFIX = ".taggui.json"
 LEGACY_JSON_SIDECAR_SUFFIX = ".json"
 
+_JSON_OBJECT = object()
+_TAGGUI_METADATA_FIELDS = frozenset({
+    'crop', 'markings', 'rating', 'love', 'bomb', 'reaction_updated_at',
+    'review_rank', 'review_flags', 'review_updated_at', 'caption_workspace',
+    'loop_start_frame', 'loop_end_frame', 'viewer_loop_markers',
+    'floating_last_loop_start_frame', 'floating_last_loop_end_frame',
+})
+
 
 def taggui_sidecar_path(media_path: Path) -> Path:
     """Return TagGUI's owned metadata sidecar path for a media file."""
@@ -60,22 +68,37 @@ def preferred_taggui_sidecar_read_path(media_path: Path) -> Path | None:
 
 def is_taggui_metadata_dict(payload) -> bool:
     """Return whether a decoded JSON object matches TagGUI's metadata schema."""
-    return isinstance(payload, dict) and payload.get("version") == 1
+    return (isinstance(payload, dict) and payload.get("version") == 1
+            and not _is_foreign_workflow_structure(payload))
+
+
+def _is_foreign_workflow_structure(payload: dict) -> bool:
+    # ComfyUI's v1 workflow schema shares our version number but has root
+    # nodes/state. Preserve legacy mixed documents with actual TagGUI fields.
+    state = payload.get('state')
+    return (isinstance(payload.get('nodes'), list)
+            and (isinstance(state, dict) or state is _JSON_OBJECT)
+            and not _TAGGUI_METADATA_FIELDS.intersection(payload))
 
 
 def read_taggui_metadata(path: Path) -> dict | None:
     """Read metadata without retaining foreign workflow object graphs.
 
     Legacy siblings share .json with generators. A first standard-JSON pass
-    reduces each decoded object to its version, discarding its children as
-    parsing proceeds. Only a root compatible with our metadata schema needs
-    a second, complete decode. Dedicated TagGUI sidecars take the direct path.
-    No key ordering, text matching or generator-specific schema is assumed.
+    replaces decoded objects with one placeholder, discarding their children.
+    The last reduced object is the root when the parse returns the placeholder.
+    Only compatible metadata needs a second decode; dedicated sidecars take
+    the direct path. Key ordering, duplicate keys and escaping remain JSON's.
     """
     text = path.read_text(encoding='UTF-8')
     if not path.name.endswith(TAGGUI_SIDECAR_SUFFIX):
-        version = json.loads(text, object_hook=lambda obj: obj.get('version'))
-        if version != 1:
+        last_object = None
+        def reduce_object(obj):
+            nonlocal last_object
+            last_object = obj
+            return _JSON_OBJECT
+        root = json.loads(text, object_hook=reduce_object)
+        if root is not _JSON_OBJECT or not is_taggui_metadata_dict(last_object):
             return None
     payload = json.loads(text)
     return payload if is_taggui_metadata_dict(payload) else None

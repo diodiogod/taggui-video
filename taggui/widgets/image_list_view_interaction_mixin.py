@@ -644,6 +644,7 @@ class ImageListViewInteractionMixin:
                     sync_target_page=False,
                     include_buffer=True,
                     adjacent_only=not target_page_loaded,
+                    target_first=not target_page_loaded,
                     prefer_forward=prefer_forward,
                     emit_update=False,
                     request_async_window=True,
