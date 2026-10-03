@@ -1,5 +1,15 @@
 # Performance implementation
 
+## Quick Sort count follow-up — 2026-10-03
+
+**Zoom follow-up:** A different approach succeeded after the worker prototype was rejected. `ImageViewer._get_static_mipmap_pixmap` reuses already premultiplied full-resolution display pixels for compatible 8-bit sources. It preserves the original QImage for precise color sampling and the old path for other formats. Same smooth scaler/cache policy; no new worker or full-image cache. Generated 6000×4000 ARGB32 quarter scaling: handler **52.094 → 3.239 ms**, first Qt timer **52.141 → 3.258 ms**. Forty format/alpha/divisor parity cases plus fallback coverage verify exact displayed pixels and unchanged source; full decode latency is not measured by this probe. Manual check also includes large PNG/WebP fit/zoom/pan, transparent edges, crops/markings and color sampling.
+
+Quick Sort setup now snapshots paginated scope/selection inputs and counts on an owned worker. The worker uses the exact existing index through a read-only connection, registers the same SQL filter functions, supports cancellation and closes before relocation. Latest request/visibility checks prevent stale counts from enabling Start. Failures show a retryable count error instead of an empty scope. Queue execution, nonpaginated behavior and image rendering are unchanged.
+
+Isolated generated 27,000-row count: median first Qt timer 34.956 ms synchronously versus 2.740 ms with the worker; result delivery 34.767 versus 43.304 ms. This improves callback availability, not SQL speed. The proposed image-resize worker failed the same criterion (first timer around 53 ms either way) and was removed. Both opt-in probes remain under `tests/`; detailed conditions and limitations are in the diary. No real settings/cache/media was used.
+
+Manual check: change Quick Sort scopes, selected images and video inclusion rapidly while browsing; check final counts, Start readiness and hide/reopen. Changes are uncommitted; version remains 1.6.18. The count-only final suite passed 480 tests, four skipped. One existing page-priority test raced queued delivery against worker `finally` cleanup; it now waits for cleanup without changing production page loading. Final combined zoom/count suite: **521 passed, four skipped, zero failures**, 32.11 s, isolated settings/cache/home, normal GC and no excluded modules.
+
 Baseline: 45f749d (1.6.17). User authorized implementation of worthwhile research findings on 2026-10-02, then reported smooth browsing and requested an intermediate Git checkpoint. This checkpoint includes the implementation, tests and research documents. No push or application version bump is authorized.
 
 Research findings are inputs, not a list of mandatory speculative changes. Implement correctness prerequisites and complete asynchronous lifecycles first; preserve editing, arbitrary navigation, Windows support and video play intent. Reject ideas already ruled out in the research assessment. Record measurements separately from perceived GUI improvements.

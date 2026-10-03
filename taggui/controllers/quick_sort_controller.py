@@ -698,6 +698,7 @@ class QuickSortController(QObject):
         *,
         model,
         image_list,
+        count_snapshot=False,
     ):
         if profile.source_scope == "selected":
             batch = image_list.get_selected_image_batch()
@@ -711,6 +712,7 @@ class QuickSortController(QObject):
                 selection_paths=tuple(batch.selection_paths),
                 filter_sql=filter_sql,
                 filter_bindings=tuple(batch.filter_bindings),
+                **({'domain_count': 0} if count_snapshot else {}),
             )
 
         if profile.source_scope == "filtered":
@@ -729,7 +731,25 @@ class QuickSortController(QObject):
         return model.create_paginated_image_batch(
             filter_sql=filter_sql,
             filter_bindings=bindings,
+            **({'domain_count': 0} if count_snapshot else {}),
         )
+
+    def prepare_count_request(self, profile, context):
+        """Capture only immutable paginated count inputs on the GUI thread."""
+        model = context['model']
+        if not getattr(model, '_paginated_mode', False):
+            return None
+        batch = self._paginated_batch_for_profile(
+            profile, model=model, image_list=context['image_list'], count_snapshot=True)
+        if batch is None:
+            return {'empty': True}
+        return {
+            'directory': batch.directory_path,
+            'db_path': model._db.db_path,
+            'sql': batch.filter_sql, 'bindings': tuple(batch.filter_bindings),
+            'mode': batch.selection_mode, 'selected': len(set(batch.selection_paths)),
+            'tokenizer': getattr(context['proxy'], 'tokenizer', None),
+        }
 
     def build_queue(
         self,

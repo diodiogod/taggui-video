@@ -947,6 +947,19 @@ class ImageViewer(QWidget):
             fallback = self._static_mipmap_pixmaps.get(1, QPixmap())
             return fallback if fallback is not None else QPixmap()
 
+        # QPixmap already performed the alpha premultiplication needed by Qt's
+        # smooth scaler. Reuse those full-size display pixels instead of doing
+        # that full-image conversion again at every uncached zoom level. Keep
+        # the original QImage for precise color sampling and other source uses.
+        if source.format() in (QImage.Format_ARGB32, QImage.Format_RGBA8888):
+            full = self._static_mipmap_pixmaps.get(1)
+            if full is not None and not full.isNull():
+                display_source = full.toImage()
+                if (display_source.size() == source.size() and display_source.format() in (
+                        QImage.Format_RGB32, QImage.Format_ARGB32_Premultiplied,
+                        QImage.Format_RGBA8888_Premultiplied)):
+                    source = display_source
+
         target_width = max(1, int(round(float(source.width()) / float(divisor))))
         target_height = max(1, int(round(float(source.height()) / float(divisor))))
         scaled = source.scaled(

@@ -1,5 +1,15 @@
 # Remaining performance work: implementation review
 
+## Follow-up disposition — 2026-10-03
+
+**Zoom follow-up implemented:** `_get_static_mipmap_pixmap` now reuses full-size display pixels for compatible 8-bit alpha images, avoiding repeated premultiplication. Original source pixels remain available to color/editing helpers; high-bit-depth and incompatible cases retain their original path. Generated 6000×4000 ARGB32 uncached resize: handler **52.094 → 3.239 ms**, first timer **52.141 → 3.258 ms**, with exact displayed-pixel parity in 40 format/alpha/divisor cases. Impact high for this affected path, confidence high, effort small, risk low with fallback; GUI check required for zoom/fit/pan, transparency and editing overlays. This is a different solution from the rejected worker prototype below.
+
+This update supersedes the Quick Sort and asynchronous mipmap exclusions below. Quick Sort setup counts now use owned background requests, read-only connections, cancellation, stale-result rejection and relocation drainage. Generated 27,000-row testing improved first timer delivery from 34.956 to 2.740 ms, while result delivery increased from 34.767 to 43.304 ms. Benefit: responsiveness, not faster queries. Functions: `QuickSortController.prepare_count_request`, `QuickSortPanel._refresh_eligible_count`/`_accept_eligible_count`, `count_quick_sort_requests`, `ImageIndexDB` read-only connection path. Impact medium for expensive scopes, confidence high for tested paths, effort medium, risk low-to-medium; GUI testing required.
+
+The image-resize worker was implemented experimentally, then removed: first GUI timer delivery remained around 53 ms despite near-immediate submission. It did not establish responsiveness on the installed binding. The subsequent conversion-reuse solution above preserves zoom/quality behavior with less repeated work. Reproducible probes and evidence are in the diary; other scalers/processes remain measurements-first candidates.
+
+Hands-on check: open Quick Sort in the large folder, rapidly change current-folder/all-loaded/filtered/selected scopes and video inclusion, and browse while counts settle. Confirm the final count follows the latest selection, Start waits for a valid count, and hide/reopen works. No file move is needed to test counting.
+
 Reviewed against checkpoint `86d1bfd` and the current implementation on 2026-10-03. The original assessment ranks research opportunities; it is not a list of missing features. This review distinguishes completed work from changes with unresolved tradeoffs. Measurements use generated files/databases and isolated settings; they are not live-folder speed guarantees.
 
 ## Eligible changes implemented in this batch

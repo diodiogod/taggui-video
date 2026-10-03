@@ -5876,6 +5876,8 @@ class ImageListModel(QAbstractListModel):
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
+        for reader in getattr(self, '_auxiliary_count_readers', ()):
+            reader.cancel()
         self._view_prepare_task.close()
         self._advance_page_load_generation()
         self._enrichment_cancelled.set()
@@ -5930,6 +5932,8 @@ class ImageListModel(QAbstractListModel):
     def quiesce_for_directory_relocation(self):
         """Release live filesystem/DB handles before renaming a loaded root."""
         self.quiesce_ordered_view()
+        for reader in getattr(self, '_auxiliary_count_readers', ()):
+            reader.drain()
         self.cancel_background_path_validation()
         self._advance_page_load_generation()
         try:

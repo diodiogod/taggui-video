@@ -80,7 +80,9 @@ def test_replacement_cancels_running_neighbor_before_target(tmp_path, monkeypatc
         assert canceled.wait(3)
         assert 8 not in model._pages
         assert calls == [8, 9]
-        assert not model._page_load_cancellations
+        # Delivery is queued before the worker's finally releases its token.
+        # Seeing the page does not establish completion of worker cleanup.
+        pump(lambda: not model._page_load_cancellations)
     finally:
         close_model(model)
 

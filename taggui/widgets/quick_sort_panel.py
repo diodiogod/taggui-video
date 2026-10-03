@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from weakref import WeakSet
+
+from utils.latest_task import LatestTask
+from utils.quick_sort_count import count_quick_sort_requests
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence
@@ -444,6 +448,10 @@ class QuickSortPanel(QDockWidget):
         self._count_refresh_timer.setSingleShot(True)
         self._count_refresh_timer.setInterval(140)
         self._count_refresh_timer.timeout.connect(self._refresh_eligible_count)
+        self._count_task = LatestTask(self, name='quick-sort-count')
+        self._count_task.completed.connect(self._accept_eligible_count)
+        self._count_owner = None
+        self.visibilityChanged.connect(self._count_visibility_changed)
         self._build_ui()
         self._apply_style()
         self._load_profiles()
@@ -1487,6 +1495,8 @@ class QuickSortPanel(QDockWidget):
                 self._context_signal_connections.append((selection_changed, slot))
 
     def _clear_eligible_count_cache(self):
+        self._count_task.cancel()
+        self._count_owner = None
         self._eligible_count_key = None
         self._eligible_count_value = None
         self._all_loaded_count_value = None
@@ -1554,6 +1564,27 @@ class QuickSortPanel(QDockWidget):
             self._refresh_summary()
             return
         key = self._eligible_count_cache_key(profile, context)
+        prepare = getattr(self.controller, 'prepare_count_request', None)
+        if callable(prepare) and getattr(context['model'], '_paginated_mode', False):
+            if self._count_owner == key:
+                return
+            try:
+                requests = [prepare(profile, context)]
+                if profile.source_scope == 'current_folder' and not profile.include_subfolders:
+                    all_profile = deepcopy(profile)
+                    all_profile.source_scope = 'all_loaded'
+                    requests.append(prepare(all_profile, context))
+            except Exception:
+                self._show_count_error()
+                return
+            model = context['model']
+            if not hasattr(model, '_auxiliary_count_readers'):
+                model._auxiliary_count_readers = WeakSet()
+            model._auxiliary_count_readers.add(self._count_task)
+            self._count_owner = key
+            self._pending_count_key = key
+            self._count_task.submit(count_quick_sort_requests, requests)
+            return
         try:
             count = max(0, int(self.controller.estimate_queue_count(profile, context)))
         except Exception:
@@ -1574,6 +1605,37 @@ class QuickSortPanel(QDockWidget):
         self._all_loaded_count_value = all_loaded_count
         self._pending_count_key = None
         self._refresh_summary()
+
+    def _count_visibility_changed(self, visible):
+        if not visible:
+            self._count_task.cancel()
+            self._count_owner = None
+
+    def _accept_eligible_count(self, token, counts, error):
+        owner, self._count_owner = self._count_owner, None
+        if owner is None or not self.isVisible() or self.controller.active:
+            return
+        try:
+            context = self._active_browser_context()
+            profile = self._profile_from_ui()
+            if self._eligible_count_cache_key(profile, context) != owner:
+                return
+        except (RuntimeError, KeyError, QuickSortValidationError):
+            return
+        self._pending_count_key = None
+        if error is not None or counts is None:
+            self._show_count_error()
+            return
+        self._eligible_count_key = owner
+        self._eligible_count_value = counts[0]
+        self._all_loaded_count_value = max(counts) if len(counts) > 1 else None
+        self._refresh_summary()
+
+    def _show_count_error(self):
+        self._clear_eligible_count_cache()
+        self._set_configuration_ready(False)
+        self._set_validation_state('error', 'COUNT ERROR')
+        self.summary_label.setText('Could not count this scope. Change the scope or reopen Quick Sort to retry.')
 
     def _set_validation_state(self, state: str, text: str):
         self.validation_chip.setText(text)

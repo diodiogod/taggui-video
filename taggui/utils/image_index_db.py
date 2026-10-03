@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import shutil
 import time
@@ -345,7 +346,7 @@ class ImageIndexDB:
                 continue
         return total_size
 
-    def __init__(self, directory_path: Path):
+    def __init__(self, directory_path: Path, *, read_only_path=None):
         """Initialize database for given directory."""
         # Check if caching is enabled
         self.enabled = settings.value('enable_dimension_cache',
@@ -365,6 +366,17 @@ class ImageIndexDB:
         # Re-entrant so write helpers can safely call commit() while locked.
         self._db_lock = threading.RLock()
 
+        self._read_only = read_only_path is not None
+        if self._read_only:
+            self.enabled = True
+            self.db_path = Path(read_only_path)
+            # Counts read the existing index; never initialize or migrate it.
+            self.conn = sqlite3.connect(
+                self.db_path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)
+            self.conn.row_factory = sqlite3.Row
+            self._register_filter_functions()
+            return
+
         if self.enabled:
             self._init_db()
 
@@ -378,6 +390,8 @@ class ImageIndexDB:
                     return True
             except (sqlite3.Error, AttributeError):
                 pass
+            if self._read_only:
+                return False
             
             try:
                 # print(f"[DB] Reconnecting to {self.db_path.name}...")
@@ -427,6 +441,14 @@ class ImageIndexDB:
         self.conn.create_function('TAGGUI_NAME_MATCH', 2, self._sql_name_match)
         self.conn.create_function('TAGGUI_PATH_MATCH', 3, self._sql_path_match)
         self.conn.create_function('TAGGUI_LABEL_MATCH', 2, self._sql_label_match)
+        def regexp(pattern, string):
+            if string is None:
+                return False
+            try:
+                return re.search(pattern, string) is not None
+            except re.error:
+                return False
+        self.conn.create_function('REGEXP', 2, regexp)
 
     def _sql_token_count(self, caption) -> int:
         """Return the same token count used by the in-memory proxy filter."""
@@ -649,16 +671,6 @@ class ImageIndexDB:
                 # Use immediate transactions to reduce lock contention
                 self.conn.isolation_level = 'IMMEDIATE'
 
-                # Register custom regex function for SQLite
-                import re
-                def regexp(pattern, string):
-                    if string is None:
-                        return False
-                    try:
-                        return re.search(pattern, string) is not None
-                    except re.error:
-                        return False
-                self.conn.create_function("REGEXP", 2, regexp)
                 try:
                     self.conn.create_function(
                         "STABLE_RANDOM_KEY",
