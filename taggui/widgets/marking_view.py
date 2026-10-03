@@ -91,10 +91,12 @@ class ImageGraphicsView(QGraphicsView):
                 return item
         return None
 
-    def _marking_regions_at(self, scene_pos):
+    def _marking_regions_at(self, scene_pos, *, scene_items=None):
         regions = []
         seen = set()
-        for scene_item in self.scene().items(scene_pos):
+        if scene_items is None:
+            scene_items = self.scene().items(scene_pos)
+        for scene_item in scene_items:
             current = scene_item
             while current is not None:
                 if isinstance(current, MarkingItem):
@@ -122,8 +124,8 @@ class ImageGraphicsView(QGraphicsView):
                 return item
         return None
 
-    def _preferred_marking_region_at(self, scene_pos):
-        candidates = self._marking_regions_at(scene_pos)
+    def _preferred_marking_region_at(self, scene_pos, *, scene_items=None):
+        candidates = self._marking_regions_at(scene_pos, scene_items=scene_items)
         if not candidates:
             return None
         return min(candidates, key=self._marking_area)
@@ -614,7 +616,6 @@ class ImageGraphicsView(QGraphicsView):
                 self.image_viewer._show_controls_temporarily()
 
         scene_pos = self.mapToScene(event.position().toPoint())
-        items = self.scene().items(scene_pos)
         cursor = None
 
         if self.insertion_mode:
@@ -644,7 +645,11 @@ class ImageGraphicsView(QGraphicsView):
                     self.last_pos = scene_pos.toPoint()
                 event.accept()
                 return
-            preferred_marking_item = self._preferred_marking_region_at(scene_pos)
+            # Insertion/active resize already determines the cursor. Query
+            # only when needed, then reuse the exact Qt hit-test result.
+            items = self.scene().items(scene_pos) if cursor is None else []
+            preferred_marking_item = self._preferred_marking_region_at(
+                scene_pos, scene_items=items) if cursor is None else None
             if cursor is None and preferred_marking_item is not None:
                 handle = preferred_marking_item.handleAt(
                     preferred_marking_item.mapFromScene(scene_pos)

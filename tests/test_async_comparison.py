@@ -4,7 +4,7 @@ import pytest
 from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPixmap, QStandardItem, QStandardItemModel
 
-from qt_test_helpers import APP, pump
+from qt_test_helpers import APP, pump, dispose_widget
 from utils.image import Image
 from widgets import image_viewer
 
@@ -31,7 +31,7 @@ def comparison(tmp_path):
     finally:
         viewer._compare_prepare_task.drain()
         viewer._image_decode_task.drain()
-        viewer.close()
+        dispose_widget(viewer)
         APP.processEvents()
 
 

@@ -7,6 +7,8 @@ import sqlite3
 import shutil
 import time
 import threading
+import sys
+from collections import OrderedDict
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -357,6 +359,7 @@ class ImageIndexDB:
         self.conn = None
         self._order_cache_signature = None
         self._filter_tokenizer = None
+        self._filter_query_state = threading.local()
         self._filter_crop_cache: dict[str, tuple[float, int, tuple[int, int, int, int] | None]] = {}
 
         # Re-entrant so write helpers can safely call commit() while locked.
@@ -431,7 +434,29 @@ class ImageIndexDB:
             tokenizer = self._filter_tokenizer
             if tokenizer is None:
                 return 0
-            return len(tokenizer(str(caption or '')).input_ids) - 2
+            text = str(caption or '')
+            state = self._filter_query_state
+            memo = getattr(state, 'token_counts', None)
+            if memo is not None:
+                cached = memo.get(text)
+                if cached is not None and cached[0] is tokenizer:
+                    memo.move_to_end(text)
+                    return cached[1]
+            count = len(tokenizer(text).input_ids) - 2
+            if memo is not None and len(text) <= 4096:
+                # Tag-index plans revisit captions in nonconsecutive order.
+                # Bound retained text and mapping overhead, and never retain
+                # derived counts past this aggregate statement.
+                cost = sys.getsizeof(text) + 256
+                previous = memo.pop(text, None)
+                if previous is not None:
+                    state.token_bytes -= previous[2]
+                memo[text] = (tokenizer, count, cost)
+                state.token_bytes += cost
+                while len(memo) > 4096 or state.token_bytes > 2 * 1024 * 1024:
+                    _, removed = memo.popitem(last=False)
+                    state.token_bytes -= removed[2]
+            return count
         except Exception:
             return 0
 
@@ -4332,8 +4357,16 @@ class ImageIndexDB:
             query += ' GROUP BY image_tags.tag ORDER BY count DESC'
             with self._db_lock:
                 cursor = self.conn.cursor()
-                cursor.execute(query, tuple(bindings or ()))
-                rows = cursor.fetchall()
+                state = self._filter_query_state
+                previous_counts = getattr(state, 'token_counts', None)
+                previous_bytes = getattr(state, 'token_bytes', 0)
+                state.token_counts, state.token_bytes = OrderedDict(), 0
+                try:
+                    cursor.execute(query, tuple(bindings or ()))
+                    rows = cursor.fetchall()
+                finally:
+                    state.token_counts = previous_counts
+                    state.token_bytes = previous_bytes
             return [{'tag': row[0], 'count': row[1]} for row in rows]
         except sqlite3.Error as e:
             if raise_errors:

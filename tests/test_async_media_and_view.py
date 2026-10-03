@@ -16,7 +16,7 @@ from models.proxy_image_list_model import ProxyImageListModel
 from widgets import image_viewer
 from utils.folder_snapshot import collect_folder_snapshot
 
-from qt_test_helpers import APP, pump
+from qt_test_helpers import APP, pump, dispose_widget
 
 
 def test_viewer_replaces_slow_selection_and_installs_only_latest_pixels(tmp_path,monkeypatch):
@@ -57,7 +57,7 @@ def test_viewer_replaces_slow_selection_and_installs_only_latest_pixels(tmp_path
     finally:
         release.set()
         viewer._image_decode_task.drain()
-        viewer.close()
+        dispose_widget(viewer)
         APP.processEvents()
 
 
@@ -121,7 +121,7 @@ def test_still_switch_retains_inert_pixels_until_latest_result(tmp_path, monkeyp
     finally:
         release.set()
         viewer._image_decode_task.drain()
-        viewer.close()
+        dispose_widget(viewer)
         APP.processEvents()
 
 
@@ -354,5 +354,6 @@ def test_comparison_waits_for_base_decode_and_respects_exit(tmp_path,monkeypatch
     finally:
         release.set()
         viewer._image_decode_task.drain()
-        viewer.close()
+        viewer._compare_prepare_task.drain()
+        dispose_widget(viewer)
         APP.processEvents()
